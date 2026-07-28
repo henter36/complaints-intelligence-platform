@@ -1,0 +1,186 @@
+// Complaint Management System - Prisma Schema
+// نظام إدارة الشكاوى
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ===== Users & Roles =====
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String
+  role      String   @default("viewer") // uploader, reviewer, approver, analyst, region_viewer, dept_viewer, exec_viewer, admin
+  region    String?
+  department String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  importBatches      ImportBatch[]
+  approvals          ImportBatch[]     @relation("ApproverRelations")
+  auditLogs          AuditLog[]
+  complaintEdits     ComplaintHistory[]
+}
+
+// ===== Master Data: Classifications =====
+model Classification {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  description String?
+  color       String   @default("#64748b")
+  keywords    String?  // JSON array of keywords
+  parentId    String?
+  parent      Classification? @relation("ClassificationTree", fields: [parentId], references: [id])
+  children    Classification[] @relation("ClassificationTree")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  complaints  Complaint[]
+}
+
+// ===== Master Data: Regions, Locations, Departments =====
+model Region {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  code      String?
+  createdAt DateTime @default(now())
+  complaints Complaint[]
+  locations  Location[]
+}
+
+model Location {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  regionId  String?
+  region    Region?  @relation(fields: [regionId], references: [id])
+  createdAt DateTime @default(now())
+  complaints Complaint[]
+}
+
+model Department {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  code      String?
+  createdAt DateTime @default(now())
+  complaints Complaint[]
+}
+
+// ===== Import Batches =====
+model ImportBatch {
+  id              String   @id @default(cuid())
+  fileName        String
+  fileSize        Int
+  periodType      String   // daily, weekly, monthly, custom
+  periodStart     DateTime
+  periodEnd       DateTime
+  entity          String?  // region or department covered
+  status          String   @default("pending") // pending, validating, preview, approved, rejected, error
+  totalRecords    Int      @default(0)
+  validRecords    Int      @default(0)
+  newRecords      Int      @default(0)
+  updatedRecords  Int      @default(0)
+  duplicateRecords Int     @default(0)
+  rejectedRecords Int      @default(0)
+  incompleteRecords Int    @default(0)
+  errorReport     String?  // JSON of errors
+  columnMapping   String?  // JSON of column mapping
+  uploadedById    String
+  uploadedBy      User     @relation(fields: [uploadedById], references: [id])
+  approvedById    String?
+  approvedBy      User?    @relation("ApproverRelations", fields: [approvedById], references: [id])
+  approvedAt      DateTime?
+  rejectedAt      DateTime?
+  rejectionReason String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  complaints      Complaint[]
+}
+
+// ===== Complaints =====
+model Complaint {
+  id                  String   @id @default(cuid())
+  complaintNumber     String   @unique // Unique identifier - critical
+  receivedDate        DateTime
+  channel             String   // source/channel
+  regionId            String?
+  region              Region?  @relation(fields: [regionId], references: [id])
+  locationId          String?
+  location            Location? @relation(fields: [locationId], references: [id])
+  departmentId        String?
+  department          Department? @relation(fields: [departmentId], references: [id])
+  classificationId    String?
+  classification      Classification? @relation(fields: [classificationId], references: [id])
+  subClassificationId String?
+  subject             String
+  description         String
+  status              String   @default("open") // open, in_progress, closed, reopened, rejected
+  priority            String   @default("medium") // low, medium, high, critical
+  severity            String   @default("medium") // low, medium, high, critical
+  referralDate        DateTime?
+  firstActionDate     DateTime?
+  processingDate      DateTime?
+  closureDate         DateTime?
+  dueDate             DateTime?
+  resolution          String?
+  delayReason         String?
+  isRepeated          Boolean  @default(false)
+  isValidated         Boolean  @default(false) // هل ثبتت صحة الشكوى
+  beneficiarySatisfaction Int? // 1-5
+  importBatchId       String?
+  importBatch         ImportBatch? @relation(fields: [importBatchId], references: [id])
+  // AI analysis fields
+  aiClassification    String?
+  aiConfidence        Float?
+  aiReasoning         String?
+  aiSentiment         String? // positive, neutral, negative, very_negative
+  aiSeverityScore     Float?
+  aiSummary           String?
+  aiAnalyzedAt        DateTime?
+  isPotentialDuplicate Boolean @default(false)
+  duplicateOfId       String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  history             ComplaintHistory[]
+}
+
+// ===== Complaint Change History =====
+model ComplaintHistory {
+  id          String   @id @default(cuid())
+  complaintId String
+  complaint   Complaint @relation(fields: [complaintId], references: [id])
+  changedById String?
+  changedBy   User?    @relation(fields: [changedById], references: [id])
+  field       String
+  oldValue    String?
+  newValue    String?
+  changeType  String   // create, update, status_change, ai_suggestion
+  createdAt   DateTime @default(now())
+}
+
+// ===== Audit Log =====
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  action    String   // upload, approve, reject, edit, export, classify, ai_analyze
+  entity    String   // complaint, import_batch, classification, report
+  entityId  String?
+  details   String?  // JSON
+  ipAddress String?
+  createdAt DateTime @default(now())
+}
+
+// ===== Report Templates =====
+model ReportTemplate {
+  id          String   @id @default(cuid())
+  name        String
+  type        String   // executive, regional, departmental, themes, time_comparison, data_quality
+  config      String   // JSON of filters and selected indicators
+  createdBy   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
