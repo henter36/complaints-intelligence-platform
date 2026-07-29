@@ -2,91 +2,172 @@ import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { toComplaintListItem } from "@/lib/api-transformers";
+import {
+  addComplaintRequestFilters,
+  buildComplaintWhereFromParams,
+  InvalidComplaintQueryError,
+  isInvalidComplaintQueryError,
+} from "@/server/api/complaint-query";
+
+const DEFAULT_PAGE = 1;
+const DEFAULT_PAGE_SIZE = 20;
+const MAX_PAGE_SIZE = 100;
+const SORT_FIELDS = {
+  receivedDate: "complaintDate",
+  complaintDate: "complaintDate",
+  dueDate: "dueDate",
+  createdAt: "createdAt",
+  priority: "priority",
+  status: "status",
+  severity: "severity",
+  complaintNumber: "externalId",
+} as const satisfies Record<string, keyof Prisma.ComplaintOrderByWithRelationInput>;
+
+type ComplaintSortKey = keyof typeof SORT_FIELDS;
+type ComplaintSortOrder = "asc" | "desc";
+
+function parsePositiveInteger(
+  value: string | null,
+  fallback: number,
+  fieldName: string
+): number {
+  if (value == null || value === "") return fallback;
+  if (!/^\d+$/.test(value)) {
+    throw new InvalidComplaintQueryError(`${fieldName} must be a positive integer`);
+  }
+
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new InvalidComplaintQueryError(`${fieldName} must be a positive integer`);
+  }
+
+  return parsed;
+}
+
+function parsePageSize(value: string | null): number {
+  const pageSize = parsePositiveInteger(value, DEFAULT_PAGE_SIZE, "pageSize");
+  if (pageSize > MAX_PAGE_SIZE) {
+    throw new InvalidComplaintQueryError(`pageSize must not exceed ${MAX_PAGE_SIZE}`);
+  }
+  return pageSize;
+}
+
+function valueOrDefault(value: string | null, defaultValue: string): string {
+  if (value == null || value === "") {
+    return defaultValue;
+  }
+
+  return value;
+}
+
+function parseSortOrder(value: string | null = null): ComplaintSortOrder {
+  const candidate = valueOrDefault(value, "desc");
+  if (candidate === "asc" || candidate === "desc") return candidate;
+  throw new InvalidComplaintQueryError("sortOrder must be asc or desc");
+}
+
+function parseSortBy(value: string | null = null): ComplaintSortKey {
+  const candidate = valueOrDefault(value, "receivedDate");
+  if (Object.hasOwn(SORT_FIELDS, candidate)) {
+    return candidate as ComplaintSortKey;
+  }
+
+  throw new InvalidComplaintQueryError("sortBy is not supported");
+}
+
+function calculateSkip(page: number, pageSize: number): number {
+  const skip = (page - 1) * pageSize;
+  if (!Number.isSafeInteger(skip)) {
+    throw new InvalidComplaintQueryError("Requested page is outside the supported range");
+  }
+  return skip;
+}
 
 export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
-    const page = parseInt(url.searchParams.get("page") || "1");
-    const pageSize = parseInt(url.searchParams.get("pageSize") || "20");
-    const search = url.searchParams.get("search") || "";
-    const regionId = url.searchParams.get("regionId");
-    const departmentId = url.searchParams.get("departmentId");
-    const classificationId = url.searchParams.get("classificationId");
-    const channel = url.searchParams.get("channel");
-    const status = url.searchParams.get("status");
-    const priority = url.searchParams.get("priority");
-    const severity = url.searchParams.get("severity");
-    const from = url.searchParams.get("from");
-    const to = url.searchParams.get("to");
-    const isLate = url.searchParams.get("isLate");
-    const isRepeated = url.searchParams.get("isRepeated");
-    const isValidated = url.searchParams.get("isValidated");
-    const aiAnalyzed = url.searchParams.get("aiAnalyzed");
-    const sortBy = url.searchParams.get("sortBy") || "receivedDate";
-    const sortOrder = (url.searchParams.get("sortOrder") || "desc") as "asc" | "desc";
+    const page = parsePositiveInteger(url.searchParams.get("page"), DEFAULT_PAGE, "page");
+    const pageSize = parsePageSize(url.searchParams.get("pageSize"));
+    const sortBy = parseSortBy(url.searchParams.get("sortBy"));
+    const sortOrder = parseSortOrder(url.searchParams.get("sortOrder"));
+    const skip = calculateSkip(page, pageSize);
 
-    const where: Prisma.ComplaintWhereInput = {};
-    if (search) {
-      where.OR = [
-        { complaintNumber: { contains: search } },
-        { subject: { contains: search } },
-        { description: { contains: search } },
-      ];
-    }
-    if (regionId) where.regionId = regionId;
-    if (departmentId) where.departmentId = departmentId;
-    if (classificationId) where.classificationId = classificationId;
-    if (channel) where.channel = channel;
-    if (status) where.status = status;
-    if (priority) where.priority = priority;
-    if (severity) where.severity = severity;
-    if (isRepeated === "true") where.isRepeated = true;
-    if (isValidated === "true") where.isValidated = true;
-    if (isValidated === "false") where.isValidated = false;
-    if (aiAnalyzed === "true") where.aiAnalyzedAt = { not: null };
-    if (aiAnalyzed === "false") where.aiAnalyzedAt = null;
-    if (from || to) {
-      where.receivedDate = {
-        ...(from ? { gte: new Date(from) } : {}),
-        ...(to ? { lte: new Date(to) } : {}),
-      };
-    }
-
-    const validSortFields = ["receivedDate", "complaintNumber", "status", "priority", "severity"];
-    const sortField = validSortFields.includes(sortBy) ? sortBy : "receivedDate";
+    const where: Prisma.ComplaintWhereInput = addComplaintRequestFilters(
+      buildComplaintWhereFromParams(url.searchParams),
+      url.searchParams
+    );
+    const sortField = SORT_FIELDS[sortBy];
+    const orderBy: Prisma.ComplaintOrderByWithRelationInput[] = [
+      { [sortField]: sortOrder },
+      { id: sortOrder },
+    ];
 
     const [complaints, total] = await Promise.all([
       db.complaint.findMany({
         where,
-        include: {
+        select: {
+          id: true,
+          externalId: true,
+          sourceReference: true,
+          complaintDate: true,
+          receivedAt: true,
+          dueDate: true,
+          closedAt: true,
+          status: true,
+          subject: true,
+          description: true,
           region: true,
-          location: true,
+          facility: true,
           department: true,
-          classification: true,
+          categoryId: true,
+          classificationId: true,
+          priority: true,
+          severity: true,
+          channel: true,
+          resolution: true,
+          firstActionAt: true,
+          processingStartedAt: true,
+          delayReason: true,
+          isRepeated: true,
+          isValidated: true,
+          beneficiarySatisfaction: true,
+          aiClassification: true,
+          aiConfidence: true,
+          aiReasoning: true,
+          aiSentiment: true,
+          aiSeverityScore: true,
+          aiSummary: true,
+          aiAnalyzedAt: true,
+          isPotentialDuplicate: true,
+          classification: { select: { nameAr: true, color: true } },
+          category: { select: { nameAr: true } },
         },
-        orderBy: { [sortField]: sortOrder },
-        skip: (page - 1) * pageSize,
+        orderBy,
+        skip,
         take: pageSize,
       }),
       db.complaint.count({ where }),
     ]);
 
-    // Compute isLate for each
     const now = new Date();
     const enriched = complaints.map(c => toComplaintListItem(c, now));
 
-    const filteredLate = isLate === "true"
-      ? enriched.filter(c => c.isLate)
-      : enriched;
-
+    const totalPages = Math.ceil(total / pageSize);
     return NextResponse.json({
-      data: filteredLate,
-      total: isLate === "true" ? filteredLate.length : total,
+      data: enriched,
+      total,
       page,
       pageSize,
-      totalPages: Math.ceil((isLate === "true" ? filteredLate.length : total) / pageSize),
+      totalPages,
+      hasNextPage: page < totalPages,
     });
   } catch (error) {
+    if (isInvalidComplaintQueryError(error)) {
+      return NextResponse.json(
+        { error: error.code, message: error.message },
+        { status: 400 }
+      );
+    }
     console.error("Complaints API error:", error);
     return NextResponse.json({ error: "Failed to fetch complaints" }, { status: 500 });
   }

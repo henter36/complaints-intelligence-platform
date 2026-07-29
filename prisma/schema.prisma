@@ -1,5 +1,4 @@
-// Complaint Management System - Prisma Schema
-// نظام إدارة الشكاوى
+// Complaints Intelligence Platform - Phase 2 data model
 
 generator client {
   provider = "prisma-client-js"
@@ -10,177 +9,258 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-// ===== Users & Roles =====
-model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String
-  role      String   @default("viewer") // uploader, reviewer, approver, analyst, region_viewer, dept_viewer, exec_viewer, admin
-  region    String?
-  department String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  importBatches      ImportBatch[]
-  approvals          ImportBatch[]     @relation("ApproverRelations")
-  auditLogs          AuditLog[]
-  complaintEdits     ComplaintHistory[]
+enum ComplaintStatus {
+  NEW
+  OPEN
+  IN_PROGRESS
+  AWAITING_RESPONSE
+  RESOLVED
+  CLOSED
+  CANCELLED
 }
 
-// ===== Master Data: Classifications =====
+enum ComplaintPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum ImportBatchStatus {
+  UPLOADED
+  PARSING
+  VALIDATED
+  READY_FOR_CONFIRMATION
+  CONFIRMING
+  CONFIRMED
+  FAILED
+  ROLLED_BACK
+}
+
+enum ImportRowAction {
+  NEW
+  UPDATE
+  DUPLICATE
+  REJECT
+  NO_CHANGE
+}
+
+enum ImportRowValidationStatus {
+  PENDING
+  VALID
+  WARNING
+  INVALID
+}
+
+enum PeriodType {
+  DAILY
+  WEEKLY
+  MONTHLY
+  CUSTOM
+}
+
+model Category {
+  id              String           @id @default(cuid())
+  nameAr          String           @unique
+  nameEn          String?
+  description     String?
+  displayOrder    Int              @default(0)
+  isActive        Boolean          @default(true)
+  isDeleted       Boolean          @default(false)
+  deletedAt       DateTime?
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  classifications Classification[]
+  complaints      Complaint[]
+
+  @@index([isActive, isDeleted])
+  @@index([displayOrder])
+}
+
 model Classification {
-  id          String   @id @default(cuid())
-  name        String   @unique
-  description String?
-  color       String   @default("#64748b")
-  keywords    String?  // JSON array of keywords
-  parentId    String?
-  parent      Classification? @relation("ClassificationTree", fields: [parentId], references: [id])
-  children    Classification[] @relation("ClassificationTree")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
-  complaints  Complaint[]
+  id           String      @id @default(cuid())
+  categoryId   String
+  category     Category    @relation(fields: [categoryId], references: [id])
+  nameAr       String
+  nameEn       String?
+  description  String?
+  color        String      @default("#64748b")
+  keywords     Json?
+  displayOrder Int         @default(0)
+  isActive     Boolean     @default(true)
+  isDeleted    Boolean     @default(false)
+  deletedAt    DateTime?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  complaints   Complaint[]
+
+  @@unique([categoryId, nameAr])
+  @@index([categoryId])
+  @@index([isActive, isDeleted])
+  @@index([displayOrder])
 }
 
-// ===== Master Data: Regions, Locations, Departments =====
-model Region {
-  id        String   @id @default(cuid())
-  name      String   @unique
-  code      String?
-  createdAt DateTime @default(now())
-  complaints Complaint[]
-  locations  Location[]
+model Complaint {
+  id                    String                   @id @default(cuid())
+  externalId            String?                  @unique
+  sourceReference       String?
+  complaintDate         DateTime?
+  receivedAt            DateTime                 @default(now())
+  dueDate               DateTime?
+  closedAt              DateTime?
+  status                ComplaintStatus          @default(NEW)
+  subject               String
+  description           String?
+  complainantName       String?
+  complainantIdentifier String?
+  complainantPhone      String?
+  region                String?
+  facility              String?
+  department            String?
+  categoryId            String?
+  category              Category?                @relation(fields: [categoryId], references: [id])
+  classificationId      String?
+  classification        Classification?          @relation(fields: [classificationId], references: [id])
+  priority              ComplaintPriority        @default(MEDIUM)
+  severity              ComplaintPriority        @default(MEDIUM)
+  channel               String?
+  resolution            String?
+  firstActionAt         DateTime?
+  processingStartedAt   DateTime?
+  delayReason           String?
+  isRepeated            Boolean                  @default(false)
+  isValidated           Boolean                  @default(false)
+  beneficiarySatisfaction Int?
+  aiClassification      String?
+  aiConfidence          Float?
+  aiReasoning           String?
+  aiSentiment           String?
+  aiSeverityScore       Float?
+  aiSummary             String?
+  aiAnalyzedAt          DateTime?
+  isPotentialDuplicate  Boolean                  @default(false)
+  duplicateOfId         String?
+  createdAt             DateTime                 @default(now())
+  updatedAt             DateTime                 @updatedAt
+  version               Int                      @default(1)
+  isDeleted             Boolean                  @default(false)
+  deletedAt             DateTime?
+  importBatchId         String?
+  importBatch           ImportBatch?             @relation(fields: [importBatchId], references: [id])
+  statusHistory         ComplaintStatusHistory[]
+  matchedImportRows     ImportBatchRow[]         @relation("MatchedComplaintRows")
+  createdImportRows     ImportBatchRow[]         @relation("CreatedComplaintRows")
+
+  @@index([sourceReference])
+  @@index([status])
+  @@index([dueDate])
+  @@index([createdAt])
+  @@index([isDeleted])
+  @@index([region])
+  @@index([department])
+  @@index([classificationId])
+  @@index([sourceReference, complaintDate])
 }
 
-model Location {
-  id        String   @id @default(cuid())
-  name      String   @unique
-  regionId  String?
-  region    Region?  @relation(fields: [regionId], references: [id])
-  createdAt DateTime @default(now())
-  complaints Complaint[]
+model ComplaintStatusHistory {
+  id            String           @id @default(cuid())
+  complaintId   String
+  complaint     Complaint        @relation(fields: [complaintId], references: [id], onDelete: Cascade)
+  fromStatus    ComplaintStatus?
+  toStatus      ComplaintStatus
+  changedAt     DateTime         @default(now())
+  changedBy     String           @default("system")
+  reason        String?
+  importBatchId String?
+  importBatch   ImportBatch?     @relation(fields: [importBatchId], references: [id])
+
+  @@index([complaintId])
+  @@index([importBatchId])
 }
 
-model Department {
-  id        String   @id @default(cuid())
-  name      String   @unique
-  code      String?
-  createdAt DateTime @default(now())
-  complaints Complaint[]
-}
-
-// ===== Import Batches =====
 model ImportBatch {
-  id              String   @id @default(cuid())
+  id              String              @id @default(cuid())
   fileName        String
+  originalFileName String
+  fileHash        String
   fileSize        Int
-  periodType      String   // daily, weekly, monthly, custom
+  mimeType        String?
+  periodType      PeriodType
   periodStart     DateTime
   periodEnd       DateTime
-  entity          String?  // region or department covered
-  status          String   @default("pending") // pending, validating, preview, approved, rejected, error
-  totalRecords    Int      @default(0)
-  validRecords    Int      @default(0)
-  newRecords      Int      @default(0)
-  updatedRecords  Int      @default(0)
-  duplicateRecords Int     @default(0)
-  rejectedRecords Int      @default(0)
-  incompleteRecords Int    @default(0)
-  errorReport     String?  // JSON of errors
-  columnMapping   String?  // JSON of column mapping
-  uploadedById    String
-  uploadedBy      User     @relation(fields: [uploadedById], references: [id])
-  approvedById    String?
-  approvedBy      User?    @relation("ApproverRelations", fields: [approvedById], references: [id])
-  approvedAt      DateTime?
-  rejectedAt      DateTime?
-  rejectionReason String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  status          ImportBatchStatus   @default(UPLOADED)
+  totalRows       Int                 @default(0)
+  validRows       Int                 @default(0)
+  invalidRows     Int                 @default(0)
+  newRows         Int                 @default(0)
+  updatedRows     Int                 @default(0)
+  duplicateRows   Int                 @default(0)
+  rejectedRows    Int                 @default(0)
+  uploadedAt      DateTime            @default(now())
+  validatedAt     DateTime?
+  confirmedAt     DateTime?
+  rolledBackAt    DateTime?
+  createdBy       String              @default("single-admin")
+  notes           String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
   complaints      Complaint[]
+  rows            ImportBatchRow[]
+  statusHistory   ComplaintStatusHistory[]
+
+  @@index([fileHash])
+  @@index([status])
+  @@index([createdAt])
 }
 
-// ===== Complaints =====
-model Complaint {
-  id                  String   @id @default(cuid())
-  complaintNumber     String   @unique // Unique identifier - critical
-  receivedDate        DateTime
-  channel             String   // source/channel
-  regionId            String?
-  region              Region?  @relation(fields: [regionId], references: [id])
-  locationId          String?
-  location            Location? @relation(fields: [locationId], references: [id])
-  departmentId        String?
-  department          Department? @relation(fields: [departmentId], references: [id])
-  classificationId    String?
-  classification      Classification? @relation(fields: [classificationId], references: [id])
-  subClassificationId String?
-  subject             String
-  description         String
-  status              String   @default("open") // open, in_progress, closed, reopened, rejected
-  priority            String   @default("medium") // low, medium, high, critical
-  severity            String   @default("medium") // low, medium, high, critical
-  referralDate        DateTime?
-  firstActionDate     DateTime?
-  processingDate      DateTime?
-  closureDate         DateTime?
-  dueDate             DateTime?
-  resolution          String?
-  delayReason         String?
-  isRepeated          Boolean  @default(false)
-  isValidated         Boolean  @default(false) // هل ثبتت صحة الشكوى
-  beneficiarySatisfaction Int? // 1-5
-  importBatchId       String?
-  importBatch         ImportBatch? @relation(fields: [importBatchId], references: [id])
-  // AI analysis fields
-  aiClassification    String?
-  aiConfidence        Float?
-  aiReasoning         String?
-  aiSentiment         String? // positive, neutral, negative, very_negative
-  aiSeverityScore     Float?
-  aiSummary           String?
-  aiAnalyzedAt        DateTime?
-  isPotentialDuplicate Boolean @default(false)
-  duplicateOfId       String?
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
-  history             ComplaintHistory[]
+model ImportBatchRow {
+  id                String                    @id @default(cuid())
+  importBatchId     String
+  importBatch       ImportBatch               @relation(fields: [importBatchId], references: [id], onDelete: Cascade)
+  rowNumber         Int
+  rawData           Json
+  normalizedData    Json?
+  externalId        String?
+  action            ImportRowAction           @default(NEW)
+  validationStatus  ImportRowValidationStatus @default(PENDING)
+  validationErrors  Json?
+  validationWarnings Json?
+  matchedComplaintId String?
+  matchedComplaint  Complaint?                @relation("MatchedComplaintRows", fields: [matchedComplaintId], references: [id])
+  createdComplaintId String?
+  createdComplaint  Complaint?                @relation("CreatedComplaintRows", fields: [createdComplaintId], references: [id])
+  createdAt         DateTime                  @default(now())
+  updatedAt         DateTime                  @updatedAt
+
+  @@unique([importBatchId, rowNumber])
+  @@index([importBatchId])
+  @@index([matchedComplaintId])
+  @@index([createdComplaintId])
+  @@index([externalId])
+  @@index([action])
+  @@index([validationStatus])
 }
 
-// ===== Complaint Change History =====
-model ComplaintHistory {
-  id          String   @id @default(cuid())
-  complaintId String
-  complaint   Complaint @relation(fields: [complaintId], references: [id])
-  changedById String?
-  changedBy   User?    @relation(fields: [changedById], references: [id])
-  field       String
-  oldValue    String?
-  newValue    String?
-  changeType  String   // create, update, status_change, ai_suggestion
-  createdAt   DateTime @default(now())
-}
-
-// ===== Audit Log =====
 model AuditLog {
-  id        String   @id @default(cuid())
-  userId    String?
-  user      User?    @relation(fields: [userId], references: [id])
-  action    String   // upload, approve, reject, edit, export, classify, ai_analyze
-  entity    String   // complaint, import_batch, classification, report
-  entityId  String?
-  details   String?  // JSON
-  ipAddress String?
-  createdAt DateTime @default(now())
+  id         String   @id @default(cuid())
+  action     String
+  entityType String
+  entityId   String?
+  actor      String   @default("system")
+  occurredAt DateTime @default(now())
+  metadata   Json?
+
+  @@index([entityType, entityId])
+  @@index([action])
+  @@index([occurredAt])
 }
 
-// ===== Report Templates =====
 model ReportTemplate {
-  id          String   @id @default(cuid())
-  name        String
-  type        String   // executive, regional, departmental, themes, time_comparison, data_quality
-  config      String   // JSON of filters and selected indicators
-  createdBy   String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id        String   @id @default(cuid())
+  name      String
+  type      String
+  config    Json
+  createdBy String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }

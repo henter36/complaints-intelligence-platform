@@ -1,15 +1,16 @@
 # Complaints Intelligence Platform
 
-Foundation Recovery phase for an Arabic complaints intelligence prototype.
+Arabic complaints intelligence prototype with Phase 2 complaint/import data model foundations.
 
-This repository is not production ready. Phase 1 focuses on making the current codebase buildable, testable, and auditable before expanding the data model, authentication, Excel import, reporting, or AI governance.
+This repository is not production ready. Phase 1 made the codebase buildable and testable. Phase 2 adds a normalized single-user complaint/import schema, migration, seed, and domain services. Authentication, Excel upload, reports, and governed AI remain out of scope.
 
 ## Current Status
 
-- Working: dashboard read APIs, complaints listing, filters, classifications basics, import history, UI navigation, synthetic Prisma seed.
-- Partial: import center UI and approval metadata flow. Full Excel parsing/import is not implemented.
-- Stubbed: AI analysis and AI executive summary endpoints return `501` until governed AI is designed.
-- Missing: enterprise authentication, scoped permissions, transactional approval/rollback, production database architecture, exports, report scheduling.
+- Working: dashboard read APIs, complaints listing, filters, classification/category basics, import history, UI navigation, Phase 2 Prisma migration, synthetic Prisma seed.
+- Working foundation: `Complaint`, `ComplaintStatusHistory`, `ImportBatch`, `ImportBatchRow`, `AuditLog`, duplicate identity service, and import batch transition guards.
+- Partial: import center UI can collect metadata, but full Excel parsing/import is not implemented.
+- Stubbed: import approval and AI approval/execution endpoints return `501` until their later phases.
+- Missing: enterprise authentication, scoped permissions, transactional import confirmation/rollback, production database architecture, exports, report scheduling.
 
 ## Requirements
 
@@ -36,20 +37,21 @@ OPENAI_API_KEY="CHANGE_ME"
 
 ```bash
 npm ci
-npm run db:validate
-npm run db:generate
-npm run db:push
-npm run db:seed
+DATABASE_URL="file:./dev.db" npm run db:validate
+DATABASE_URL="file:./dev.db" npm run db:generate
+DATABASE_URL="file:./dev.db" npx prisma migrate deploy
+DATABASE_URL="file:./dev.db" npm run db:seed
 npm run dev
 ```
 
-`db:push` is retained for local prototype setup only and does not use `--accept-data-loss`. Use migrations for intentional schema changes.
+Use Prisma migrations for schema changes. `db:push` is retained for local experiments only and must not replace migrations.
 
 ## Verification
 
 ```bash
 npx prisma validate
 npx prisma generate
+npx prisma migrate deploy
 npm run typecheck
 npm run lint
 npm test
@@ -67,4 +69,6 @@ npm audit --audit-level=high
 
 - `docs/current-state-assessment.md`
 - `docs/foundation-hardening-report.md`
+- `docs/phase-2-data-model-design.md`
+- `docs/phase-2-completion-report.md`
 - `docs/roadmap.md`
