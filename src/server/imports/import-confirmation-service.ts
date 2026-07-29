@@ -86,6 +86,14 @@ export type ImportRollbackResult = {
 };
 
 type ImportConfirmationClient = Pick<typeof db, "$transaction">;
+type ImportConfirmationTransaction = Prisma.TransactionClient;
+type RollbackSnapshot = Prisma.ImportChangeSnapshotGetPayload<{
+  include: { importBatchRow: true };
+}>;
+type RollbackCounters = {
+  revertedCreates: number;
+  revertedUpdates: number;
+};
 
 export class ImportConfirmationError extends Error {
   constructor(
@@ -649,6 +657,217 @@ function restoreSnapshotData(beforeData: Prisma.JsonValue | null): Prisma.Compla
   };
 }
 
+async function transitionBatchToRollingBack(
+  tx: ImportConfirmationTransaction,
+  batchId: string
+): Promise<void> {
+  const transition = await tx.importBatch.updateMany({
+    where: { id: batchId, status: ImportBatchStatus.CONFIRMED },
+    data: { status: ImportBatchStatus.ROLLING_BACK, rollbackFailureCode: null },
+  });
+  if (transition.count === 1) return;
+
+  const existing = await tx.importBatch.findUnique({ where: { id: batchId }, select: { id: true } });
+  throw existing
+    ? new ImportConfirmationError("IMPORT_BATCH_STATE_CONFLICT", "لا يمكن التراجع عن الدفعة في حالتها الحالية", 409)
+    : new ImportConfirmationError("IMPORT_BATCH_NOT_FOUND", "دفعة الاستيراد غير موجودة", 404);
+}
+
+async function writeRollbackStartedAudit(
+  tx: ImportConfirmationTransaction,
+  batchId: string,
+  actor: string,
+  reason: string
+): Promise<void> {
+  await writeAuditLog(tx, {
+    action: "IMPORT_ROLLBACK_STARTED",
+    entityType: "ImportBatch",
+    entityId: batchId,
+    actor,
+    metadata: { reason },
+  });
+}
+
+function loadRollbackSnapshots(
+  tx: ImportConfirmationTransaction,
+  batchId: string
+): Promise<RollbackSnapshot[]> {
+  return tx.importChangeSnapshot.findMany({
+    where: { importBatchId: batchId },
+    include: { importBatchRow: true },
+    orderBy: { createdAt: "desc" },
+  });
+}
+
+async function loadCurrentRollbackComplaint(
+  tx: ImportConfirmationTransaction,
+  snapshot: RollbackSnapshot
+): Promise<Complaint> {
+  const current = await tx.complaint.findUnique({ where: { id: snapshot.complaintId } });
+  if (!current || current.version !== snapshot.versionAfter) {
+    throw new ImportConfirmationError("ROLLBACK_CONFLICT", "توجد شكاوى تغيرت بعد التأكيد ولا يمكن التراجع جزئيًا", 409);
+  }
+
+  return current;
+}
+
+async function reverseCreatedComplaint(
+  tx: ImportConfirmationTransaction,
+  input: {
+    snapshot: RollbackSnapshot;
+    current: Complaint;
+    batchId: string;
+    rolledBackAt: Date;
+    actor: string;
+  }
+): Promise<void> {
+  const { snapshot, current, batchId, rolledBackAt, actor } = input;
+  const result = await tx.complaint.updateMany({
+    where: { id: current.id, version: snapshot.versionAfter, importBatchId: batchId, isDeleted: false },
+    data: { isDeleted: true, deletedAt: rolledBackAt, version: { increment: 1 } },
+  });
+  if (result.count !== 1) {
+    throw new ImportConfirmationError(
+      "ROLLBACK_CREATE_CONFLICT",
+      "تعذر التراجع عن الشكوى المنشأة بسبب تغيرها أو عدم تطابق دفعة الاستيراد",
+      409,
+      {
+        complaintId: current.id,
+        rowId: snapshot.importBatchRowId,
+        expectedVersion: snapshot.versionAfter,
+      }
+    );
+  }
+
+  await tx.importBatchRow.update({ where: { id: snapshot.importBatchRowId }, data: { rolledBackAt } });
+  await writeAuditLog(tx, {
+    action: "IMPORT_COMPLAINT_CREATION_REVERSED",
+    entityType: "Complaint",
+    entityId: current.id,
+    actor,
+    metadata: { batchId, rowId: snapshot.importBatchRowId },
+  });
+}
+
+async function writeReverseStatusHistory(
+  tx: ImportConfirmationTransaction,
+  input: {
+    current: Complaint;
+    restoredStatus: ComplaintStatus;
+    batchId: string;
+    rolledBackAt: Date;
+    actor: string;
+    reason: string;
+  }
+): Promise<void> {
+  const { current, restoredStatus, batchId, rolledBackAt, actor, reason } = input;
+  if (current.status === restoredStatus) return;
+
+  await tx.complaintStatusHistory.create({
+    data: {
+      complaintId: current.id,
+      fromStatus: current.status,
+      toStatus: restoredStatus,
+      changedAt: rolledBackAt,
+      changedBy: actor,
+      reason,
+      importBatchId: batchId,
+    },
+  });
+}
+
+async function reverseUpdatedComplaint(
+  tx: ImportConfirmationTransaction,
+  input: {
+    snapshot: RollbackSnapshot;
+    current: Complaint;
+    batchId: string;
+    rolledBackAt: Date;
+    actor: string;
+    reason: string;
+  }
+): Promise<void> {
+  const { snapshot, current, batchId, rolledBackAt, actor, reason } = input;
+  const restoreData = restoreSnapshotData(snapshot.beforeData);
+  const result = await tx.complaint.updateMany({
+    where: { id: current.id, version: snapshot.versionAfter, isDeleted: false },
+    data: restoreData,
+  });
+  if (result.count !== 1) {
+    throw new ImportConfirmationError("ROLLBACK_CONFLICT", "تعذر استعادة إحدى الشكاوى بسبب تعارض لاحق", 409);
+  }
+
+  const restoredStatus = (restoreData.status as ComplaintStatus | undefined) ?? current.status;
+  await writeReverseStatusHistory(tx, { current, restoredStatus, batchId, rolledBackAt, actor, reason });
+  await tx.importBatchRow.update({ where: { id: snapshot.importBatchRowId }, data: { rolledBackAt } });
+  await writeAuditLog(tx, {
+    action: "IMPORT_COMPLAINT_UPDATE_REVERSED",
+    entityType: "Complaint",
+    entityId: current.id,
+    actor,
+    metadata: { batchId, rowId: snapshot.importBatchRowId },
+  });
+}
+
+async function reverseRollbackSnapshot(
+  tx: ImportConfirmationTransaction,
+  input: {
+    snapshot: RollbackSnapshot;
+    batchId: string;
+    rolledBackAt: Date;
+    actor: string;
+    reason: string;
+  }
+): Promise<ImportChangeType> {
+  const { snapshot, batchId, rolledBackAt, actor, reason } = input;
+  const current = await loadCurrentRollbackComplaint(tx, snapshot);
+
+  if (snapshot.changeType === ImportChangeType.CREATE) {
+    await reverseCreatedComplaint(tx, { snapshot, current, batchId, rolledBackAt, actor });
+    return ImportChangeType.CREATE;
+  }
+
+  await reverseUpdatedComplaint(tx, { snapshot, current, batchId, rolledBackAt, actor, reason });
+  return ImportChangeType.UPDATE;
+}
+
+function addRollbackCounter(counters: RollbackCounters, changeType: ImportChangeType): void {
+  if (changeType === ImportChangeType.CREATE) {
+    counters.revertedCreates += 1;
+    return;
+  }
+
+  counters.revertedUpdates += 1;
+}
+
+async function finalizeRollbackBatch(
+  tx: ImportConfirmationTransaction,
+  input: {
+    batchId: string;
+    rolledBackAt: Date;
+    reason: string;
+    actor: string;
+    counters: RollbackCounters;
+  }
+): Promise<void> {
+  const { batchId, rolledBackAt, reason, actor, counters } = input;
+  await tx.importBatch.update({
+    where: { id: batchId },
+    data: {
+      status: ImportBatchStatus.ROLLED_BACK,
+      rolledBackAt,
+      rollbackReason: reason,
+    },
+  });
+  await writeAuditLog(tx, {
+    action: "IMPORT_ROLLBACK_COMPLETED",
+    entityType: "ImportBatch",
+    entityId: batchId,
+    actor,
+    metadata: counters,
+  });
+}
+
 export async function rollbackConfirmedImportBatch(
   batchId: string,
   input: { reason: string; actor?: string; client?: ImportConfirmationClient }
@@ -663,124 +882,24 @@ export async function rollbackConfirmedImportBatch(
   const client = input.client ?? db;
 
   return client.$transaction(async (tx) => {
-    const transition = await tx.importBatch.updateMany({
-      where: { id: batchId, status: ImportBatchStatus.CONFIRMED },
-      data: { status: ImportBatchStatus.ROLLING_BACK, rollbackFailureCode: null },
-    });
-    if (transition.count !== 1) {
-      const existing = await tx.importBatch.findUnique({ where: { id: batchId }, select: { id: true } });
-      throw existing
-        ? new ImportConfirmationError("IMPORT_BATCH_STATE_CONFLICT", "لا يمكن التراجع عن الدفعة في حالتها الحالية", 409)
-        : new ImportConfirmationError("IMPORT_BATCH_NOT_FOUND", "دفعة الاستيراد غير موجودة", 404);
-    }
+    await transitionBatchToRollingBack(tx, batchId);
+    await writeRollbackStartedAudit(tx, batchId, actor, reason);
 
-    await writeAuditLog(tx, {
-      action: "IMPORT_ROLLBACK_STARTED",
-      entityType: "ImportBatch",
-      entityId: batchId,
-      actor,
-      metadata: { reason },
-    });
-
-    const snapshots = await tx.importChangeSnapshot.findMany({
-      where: { importBatchId: batchId },
-      include: { importBatchRow: true },
-      orderBy: { createdAt: "desc" },
-    });
-    let revertedCreates = 0;
-    let revertedUpdates = 0;
-
+    const snapshots = await loadRollbackSnapshots(tx, batchId);
+    const counters: RollbackCounters = { revertedCreates: 0, revertedUpdates: 0 };
     for (const snapshot of snapshots) {
-      const current = await tx.complaint.findUnique({ where: { id: snapshot.complaintId } });
-      if (!current || current.version !== snapshot.versionAfter) {
-        throw new ImportConfirmationError("ROLLBACK_CONFLICT", "توجد شكاوى تغيرت بعد التأكيد ولا يمكن التراجع جزئيًا", 409);
-      }
-
-      if (snapshot.changeType === ImportChangeType.CREATE) {
-        const result = await tx.complaint.updateMany({
-          where: { id: current.id, version: snapshot.versionAfter, importBatchId: batchId, isDeleted: false },
-          data: { isDeleted: true, deletedAt: rolledBackAt, version: { increment: 1 } },
-        });
-        if (result.count !== 1) {
-          throw new ImportConfirmationError(
-            "ROLLBACK_CREATE_CONFLICT",
-            "تعذر التراجع عن الشكوى المنشأة بسبب تغيرها أو عدم تطابق دفعة الاستيراد",
-            409,
-            {
-              complaintId: current.id,
-              rowId: snapshot.importBatchRowId,
-              expectedVersion: snapshot.versionAfter,
-            }
-          );
-        }
-
-        await tx.importBatchRow.update({ where: { id: snapshot.importBatchRowId }, data: { rolledBackAt } });
-        await writeAuditLog(tx, {
-          action: "IMPORT_COMPLAINT_CREATION_REVERSED",
-          entityType: "Complaint",
-          entityId: current.id,
-          actor,
-          metadata: { batchId, rowId: snapshot.importBatchRowId },
-        });
-        revertedCreates += 1;
-      } else {
-        const restoreData = restoreSnapshotData(snapshot.beforeData);
-        const result = await tx.complaint.updateMany({
-          where: { id: current.id, version: snapshot.versionAfter, isDeleted: false },
-          data: restoreData,
-        });
-        if (result.count !== 1) {
-          throw new ImportConfirmationError("ROLLBACK_CONFLICT", "تعذر استعادة إحدى الشكاوى بسبب تعارض لاحق", 409);
-        }
-
-        const restoredStatus = (restoreData.status as ComplaintStatus | undefined) ?? current.status;
-        if (current.status !== restoredStatus) {
-          await tx.complaintStatusHistory.create({
-            data: {
-              complaintId: current.id,
-              fromStatus: current.status,
-              toStatus: restoredStatus,
-              changedAt: rolledBackAt,
-              changedBy: actor,
-              reason,
-              importBatchId: batchId,
-            },
-          });
-        }
-        await tx.importBatchRow.update({ where: { id: snapshot.importBatchRowId }, data: { rolledBackAt } });
-        await writeAuditLog(tx, {
-          action: "IMPORT_COMPLAINT_UPDATE_REVERSED",
-          entityType: "Complaint",
-          entityId: current.id,
-          actor,
-          metadata: { batchId, rowId: snapshot.importBatchRowId },
-        });
-        revertedUpdates += 1;
-      }
+      const changeType = await reverseRollbackSnapshot(tx, { snapshot, batchId, rolledBackAt, actor, reason });
+      addRollbackCounter(counters, changeType);
     }
 
-    await tx.importBatch.update({
-      where: { id: batchId },
-      data: {
-        status: ImportBatchStatus.ROLLED_BACK,
-        rolledBackAt,
-        rollbackReason: reason,
-      },
-    });
-    await writeAuditLog(tx, {
-      action: "IMPORT_ROLLBACK_COMPLETED",
-      entityType: "ImportBatch",
-      entityId: batchId,
-      actor,
-      metadata: { revertedCreates, revertedUpdates },
-    });
+    await finalizeRollbackBatch(tx, { batchId, rolledBackAt, reason, actor, counters });
 
     return {
       batchId,
       status: ImportBatchStatus.ROLLED_BACK,
       rolledBackAt: rolledBackAt.toISOString(),
-      revertedCreates,
-      revertedUpdates,
+      revertedCreates: counters.revertedCreates,
+      revertedUpdates: counters.revertedUpdates,
     };
   }, { maxWait: 10_000, timeout: 60_000 });
 }
