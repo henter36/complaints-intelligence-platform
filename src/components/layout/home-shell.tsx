@@ -13,7 +13,7 @@ import { AppSidebar } from "@/components/layout/app-sidebar";
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import type { ScreenId } from "@/app/page";
 
-export function HomeShell({ username }: { username: string }) {
+export function HomeShell({ username }: Readonly<{ username: string }>) {
   const [activeScreen, setActiveScreen] = useState<ScreenId>("dashboard");
 
   return (
@@ -36,7 +36,7 @@ export function HomeShell({ username }: { username: string }) {
               <p>نظام إدارة الشكاوى © 2024 - جميع الحقوق محفوظة</p>
               <p className="flex items-center gap-2">
                 <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-soft-pulse" />
-                النظام يعمل بشكل طبيعي
+                <span>النظام يعمل بشكل طبيعي</span>
               </p>
             </div>
           </footer>

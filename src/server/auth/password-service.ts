@@ -30,7 +30,7 @@ export function validateNewPassword(password: string): void {
     throw new PasswordValidationError("كلمة المرور الجديدة يجب ألا تقل عن 12 حرفًا");
   }
 
-  const hasLetter = /[\p{L}]/u.test(password);
+  const hasLetter = /\p{L}/u.test(password);
   const hasNumber = /\d/.test(password);
 
   if (!hasLetter || !hasNumber) {

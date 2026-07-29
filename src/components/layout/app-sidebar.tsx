@@ -65,7 +65,7 @@ interface AppSidebarProps {
   username: string;
 }
 
-export function AppSidebar({ activeScreen, onNavigate, username }: AppSidebarProps) {
+export function AppSidebar({ activeScreen, onNavigate, username }: Readonly<AppSidebarProps>) {
   const groups = Array.from(new Set(menuItems.map(m => m.group)));
   const router = useRouter();
   const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
