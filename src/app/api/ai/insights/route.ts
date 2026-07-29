@@ -1,6 +1,27 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 
+const DEFAULT_LIMIT = 100;
+const MAX_LIMIT = 200;
+
+function parseLimit(value: string | null): number {
+  if (value == null || value === "") return DEFAULT_LIMIT;
+  if (!/^\d+$/.test(value)) {
+    throw new Error("limit must be a positive integer");
+  }
+
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error("limit must be a positive integer");
+  }
+
+  if (parsed > MAX_LIMIT) {
+    throw new Error(`limit must not exceed ${MAX_LIMIT}`);
+  }
+
+  return parsed;
+}
+
 // GET /api/ai/insights
 // Returns aggregated batch insights computed from complaints that have been
 // analyzed by AI (aiAnalyzedAt != null).
@@ -17,10 +38,7 @@ import { db } from "@/lib/db";
 export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
-    const limit = Math.min(
-      200,
-      parseInt(url.searchParams.get("limit") || "100", 10)
-    );
+    const limit = parseLimit(url.searchParams.get("limit"));
 
     const analyzed = await db.complaint.findMany({
       where: { aiAnalyzedAt: { not: null } },
@@ -217,6 +235,12 @@ export async function GET(req: NextRequest) {
     });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : "خطأ غير معروف";
+    if (msg.startsWith("limit must")) {
+      return NextResponse.json(
+        { error: "INVALID_AI_INSIGHTS_QUERY", message: msg },
+        { status: 400 }
+      );
+    }
     console.error("AI insights route error:", msg);
     return NextResponse.json(
       { error: `فشل تجميع الرؤى: ${msg}` },

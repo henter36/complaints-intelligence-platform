@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { ImportBatchStatus } from "@prisma/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 afterEach(() => {
@@ -6,6 +7,90 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.doUnmock("@/lib/db");
 });
+
+function expectNoComplainantPii(value: unknown): void {
+  const forbiddenKeys = new Set([
+    "complainantName",
+    "complainantIdentifier",
+    "complainantPhone",
+  ]);
+
+  function visit(node: unknown): void {
+    if (Array.isArray(node)) {
+      for (const item of node) visit(item);
+      return;
+    }
+
+    if (node && typeof node === "object") {
+      for (const [key, child] of Object.entries(node)) {
+        expect(forbiddenKeys.has(key)).toBe(false);
+        visit(child);
+      }
+    }
+  }
+
+  visit(value);
+}
+
+function complaintApiRecord(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "cmp_api",
+    externalId: "EXT-API-1",
+    sourceReference: null,
+    complaintDate: new Date("2026-07-01T00:00:00Z"),
+    receivedAt: new Date("2026-07-01T00:00:00Z"),
+    dueDate: null,
+    closedAt: null,
+    status: "OPEN",
+    subject: "شكوى API",
+    description: null,
+    complainantName: "اسم لا يجب أن يظهر",
+    complainantIdentifier: "ID-SECRET",
+    complainantPhone: "0500000000",
+    region: "الرياض",
+    facility: "منشأة",
+    department: "إدارة",
+    categoryId: null,
+    classificationId: null,
+    priority: "MEDIUM",
+    severity: "MEDIUM",
+    channel: "الهاتف",
+    resolution: null,
+    firstActionAt: null,
+    processingStartedAt: null,
+    delayReason: null,
+    isRepeated: false,
+    isValidated: false,
+    beneficiarySatisfaction: null,
+    aiClassification: null,
+    aiConfidence: null,
+    aiReasoning: null,
+    aiSentiment: null,
+    aiSeverityScore: null,
+    aiSummary: null,
+    aiAnalyzedAt: null,
+    isPotentialDuplicate: false,
+    classification: null,
+    category: null,
+    ...overrides,
+  };
+}
+
+async function callComplaintsApi(query = "") {
+  vi.resetModules();
+  const findMany = vi.fn().mockResolvedValue([complaintApiRecord()]);
+  const count = vi.fn().mockResolvedValue(1);
+  vi.doMock("@/lib/db", () => ({
+    db: {
+      complaint: { findMany, count },
+    },
+  }));
+
+  const { GET } = await import("./complaints/route");
+  const response = await GET(new NextRequest(`http://localhost/api/complaints${query}`));
+  const body = await response.json();
+  return { response, body, findMany, count };
+}
 
 describe("Phase 2 API routes", () => {
   it("does not return a fake success for import approval", async () => {
@@ -34,9 +119,9 @@ describe("Phase 2 API routes", () => {
               status: "OPEN",
               subject: "شكوى API",
               description: null,
-              complainantName: null,
-              complainantIdentifier: null,
-              complainantPhone: null,
+              complainantName: "اسم لا يجب أن يظهر",
+              complainantIdentifier: "ID-SECRET",
+              complainantPhone: "0500000000",
               region: "الرياض",
               facility: "منشأة",
               department: "إدارة",
@@ -76,6 +161,68 @@ describe("Phase 2 API routes", () => {
     expect(response.status).toBe(200);
     expect(body.data[0].complaintNumber).toBe("EXT-API-1");
     expect(body.data[0].region).toEqual({ name: "الرياض" });
+    expectNoComplainantPii(body);
+  });
+
+  it("uses default pagination and sorting when page parameters are absent", async () => {
+    const { response, findMany } = await callComplaintsApi();
+
+    expect(response.status).toBe(200);
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
+      orderBy: { complaintDate: "desc" },
+      skip: 0,
+      take: 20,
+    }));
+  });
+
+  it.each([
+    ["?page=1", 0, 20],
+    ["?page=2&pageSize=100", 100, 100],
+    ["?pageSize=100", 0, 100],
+  ])("accepts valid pagination query %s", async (query, expectedSkip, expectedTake) => {
+    const { response, findMany } = await callComplaintsApi(query);
+
+    expect(response.status).toBe(200);
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
+      skip: expectedSkip,
+      take: expectedTake,
+    }));
+  });
+
+  it.each([
+    "?page=0",
+    "?page=-1",
+    "?page=abc",
+    "?page=1.5",
+    "?page=12abc",
+    `?page=${Number.MAX_SAFE_INTEGER + 1}`,
+    "?pageSize=0",
+    "?pageSize=-5",
+    "?pageSize=101",
+    "?sortOrder=ASC",
+    "?sortOrder=random",
+    "?sortBy=complainantPhone",
+  ])("rejects invalid complaints query %s before Prisma", async (query) => {
+    const { response, body, findMany, count } = await callComplaintsApi(query);
+
+    expect(response.status).toBe(400);
+    expect(body.error).toBe("INVALID_COMPLAINT_QUERY");
+    expect(findMany).not.toHaveBeenCalled();
+    expect(count).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["?sortOrder=asc", { complaintDate: "asc" }],
+    ["?sortOrder=desc", { complaintDate: "desc" }],
+    ["?sortBy=dueDate", { dueDate: "desc" }],
+    ["?sortBy=status&sortOrder=asc", { status: "asc" }],
+  ])("accepts supported complaint sorting %s", async (query, expectedOrderBy) => {
+    const { response, findMany } = await callComplaintsApi(query);
+
+    expect(response.status).toBe(200);
+    expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
+      orderBy: expectedOrderBy,
+    }));
   });
 
   it("returns import history without user relations", async () => {
@@ -118,6 +265,69 @@ describe("Phase 2 API routes", () => {
     expect(response.status).toBe(200);
     expect(body[0].status).toBe("approved");
     expect(body[0].uploadedBy.name).toBe("single-admin");
+    expect(body[0].rejectionReason).toBeNull();
+  });
+
+  it("maps import approval and rejection fields by batch status", async () => {
+    vi.resetModules();
+    const statuses = Object.values(ImportBatchStatus);
+    const notesForStatus = (status: ImportBatchStatus): string => {
+      if (status === ImportBatchStatus.ROLLED_BACK) return "";
+      if (status === ImportBatchStatus.PARSING) return "تشغيل عادي";
+      return `ملاحظة ${status}`;
+    };
+    vi.doMock("@/lib/db", () => ({
+      db: {
+        importBatch: {
+          findMany: vi.fn().mockResolvedValue(statuses.map((status) => ({
+            id: `batch_${status}`,
+            fileName: `${status}.csv`,
+            originalFileName: `${status}.csv`,
+            fileSize: 10,
+            periodType: "MONTHLY",
+            periodStart: new Date("2026-07-01T00:00:00Z"),
+            periodEnd: new Date("2026-07-31T00:00:00Z"),
+            status,
+            totalRows: 1,
+            validRows: 1,
+            newRows: 1,
+            updatedRows: 0,
+            duplicateRows: 0,
+            rejectedRows: 0,
+            invalidRows: 0,
+            createdBy: "single-admin",
+            confirmedAt: new Date("2026-07-02T00:00:00Z"),
+            createdAt: new Date("2026-07-01T00:00:00Z"),
+            updatedAt: new Date("2026-07-01T00:00:00Z"),
+            notes: notesForStatus(status),
+          }))),
+        },
+      },
+    }));
+
+    const { GET } = await import("./import/history/route");
+    const response = await GET();
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    for (const item of body) {
+      const status = item.id.replace("batch_", "");
+      if (status === ImportBatchStatus.CONFIRMED) {
+        expect(item.approvedAt).not.toBeNull();
+        expect(item.approvedById).toBe("single-admin");
+      } else {
+        expect(item.approvedAt).toBeNull();
+        expect(item.approvedById).toBeNull();
+      }
+
+      if (status === ImportBatchStatus.FAILED) {
+        expect(item.rejectionReason).toBe(`ملاحظة ${status}`);
+      } else if (status === ImportBatchStatus.ROLLED_BACK) {
+        expect(item.rejectionReason).toBeNull();
+      } else {
+        expect(item.rejectionReason).toBeNull();
+      }
+    }
   });
 
   it("rejects invalid complaint date filters before querying Prisma", async () => {
@@ -138,6 +348,24 @@ describe("Phase 2 API routes", () => {
     expect(body.error).toBe("INVALID_COMPLAINT_QUERY");
     expect(findMany).not.toHaveBeenCalled();
     expect(count).not.toHaveBeenCalled();
+  });
+
+  it("rejects partial AI insights limit values before querying Prisma", async () => {
+    vi.resetModules();
+    const findMany = vi.fn();
+    vi.doMock("@/lib/db", () => ({
+      db: {
+        complaint: { findMany },
+      },
+    }));
+
+    const { GET } = await import("./ai/insights/route");
+    const response = await GET(new NextRequest("http://localhost/api/ai/insights?limit=12abc"));
+    const body = await response.json();
+
+    expect(response.status).toBe(400);
+    expect(body.error).toBe("INVALID_AI_INSIGHTS_QUERY");
+    expect(findMany).not.toHaveBeenCalled();
   });
 
   it("uses Arabic locale sorting and Phase 2 fields in analytics cross tabs", async () => {

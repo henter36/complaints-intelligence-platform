@@ -1,10 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { ComplaintStatus } from "@prisma/client";
+import { ComplaintStatus, type Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { average, isComplaintLate, roundToTenth } from "@/lib/complaint-metrics";
 import {
+  addComplaintRequestFilters,
   buildComplaintWhereFromParams,
   isInvalidComplaintQueryError,
+  parseOptionalDateFilter,
   toLegacyPriority,
 } from "@/server/api/complaint-query";
 import { toLegacyStatus } from "@/server/complaints/status";
@@ -33,12 +35,40 @@ const OPEN_STATUSES = new Set<ComplaintStatus>([
   ComplaintStatus.RESOLVED,
 ]);
 
+function buildTrendDateRange(params: URLSearchParams, now: Date): { gte: Date; lte: Date } | null {
+  const trendDays = 30;
+  const trendStart = new Date(now.getTime() - trendDays * 24 * 60 * 60 * 1000);
+  const requestFrom = parseOptionalDateFilter(params.get("from"), "from");
+  const requestTo = parseOptionalDateFilter(params.get("to"), "to");
+  const gte = requestFrom && requestFrom > trendStart ? requestFrom : trendStart;
+  const lte = requestTo && requestTo < now ? requestTo : now;
+
+  if (gte > lte) return null;
+  return { gte, lte };
+}
+
+function withComplaintDate(
+  where: Prisma.ComplaintWhereInput,
+  complaintDate: { gte: Date; lte: Date }
+): Prisma.ComplaintWhereInput {
+  const { complaintDate: _ignoredComplaintDate, ...nonDateFilters } = where;
+  return {
+    ...nonDateFilters,
+    complaintDate,
+  };
+}
+
 export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
     const from = url.searchParams.get("from");
     const to = url.searchParams.get("to");
-    const where = buildComplaintWhereFromParams(url.searchParams);
+    const now = new Date();
+    const where = addComplaintRequestFilters(
+      buildComplaintWhereFromParams(url.searchParams),
+      url.searchParams,
+      now
+    );
 
     const complaints = await db.complaint.findMany({
       where,
@@ -72,7 +102,6 @@ export async function GET(req: NextRequest) {
     const reopened = 0;
     const rejected = complaints.filter(c => c.status === ComplaintStatus.CANCELLED).length;
 
-    const now = new Date();
     const late = complaints.filter(c => isComplaintLate(c, now)).length;
 
     const repeated = complaints.filter(c => c.isRepeated).length;
@@ -133,17 +162,24 @@ export async function GET(req: NextRequest) {
     const bySeverity = groupBy(complaints, c => toLegacyPriority(c.severity));
 
     const trendDays = 30;
-    const trendStart = new Date(now.getTime() - trendDays * 24 * 60 * 60 * 1000);
-    const trendComplaints = await db.complaint.findMany({
-      where: { isDeleted: false, complaintDate: { gte: trendStart, lte: now } },
-      select: { complaintDate: true, receivedAt: true, status: true },
-    });
+    const trendRange = buildTrendDateRange(url.searchParams, now);
+    const trendComplaints = trendRange
+      ? await db.complaint.findMany({
+        where: withComplaintDate(where, trendRange),
+        select: { complaintDate: true, status: true },
+      })
+      : [];
     const trendData: { date: string; total: number; closed: number }[] = [];
-    for (let i = trendDays - 1; i >= 0; i--) {
+    const trendStartDay = trendRange ? formatLocalDate(trendRange.gte) : null;
+    const trendEndDay = trendRange ? formatLocalDate(trendRange.lte) : null;
+    for (let i = trendRange ? trendDays - 1 : -1; i >= 0; i--) {
       const day = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
       const dayStr = formatLocalDate(day);
+      if (trendStartDay && trendEndDay && (dayStr < trendStartDay || dayStr > trendEndDay)) {
+        continue;
+      }
       const dayComplaints = trendComplaints.filter(c =>
-        formatLocalDate(c.complaintDate ?? c.receivedAt) === dayStr
+        c.complaintDate ? formatLocalDate(c.complaintDate) === dayStr : false
       );
       trendData.push({
         date: dayStr,

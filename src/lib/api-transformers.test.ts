@@ -41,4 +41,17 @@ describe("api transformers", () => {
 
     expect(item.classification).toBeNull();
   });
+
+  it("does not copy complainant PII from wider records", () => {
+    const item = toComplaintListItem({
+      ...baseComplaint,
+      complainantName: "اسم لا يجب أن يظهر",
+      complainantIdentifier: "ID-SECRET",
+      complainantPhone: "0500000000",
+    } as typeof baseComplaint & Record<string, unknown>);
+
+    expect(item).not.toHaveProperty("complainantName");
+    expect(item).not.toHaveProperty("complainantIdentifier");
+    expect(item).not.toHaveProperty("complainantPhone");
+  });
 });

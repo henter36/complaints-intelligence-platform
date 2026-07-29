@@ -3,46 +3,89 @@ import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { toComplaintListItem } from "@/lib/api-transformers";
 import {
+  addComplaintRequestFilters,
   buildComplaintWhereFromParams,
+  InvalidComplaintQueryError,
   isInvalidComplaintQueryError,
 } from "@/server/api/complaint-query";
+
+const DEFAULT_PAGE = 1;
+const DEFAULT_PAGE_SIZE = 20;
+const MAX_PAGE_SIZE = 100;
+const SORT_FIELDS = {
+  receivedDate: "complaintDate",
+  complaintDate: "complaintDate",
+  dueDate: "dueDate",
+  createdAt: "createdAt",
+  priority: "priority",
+  status: "status",
+  severity: "severity",
+  complaintNumber: "externalId",
+} as const satisfies Record<string, keyof Prisma.ComplaintOrderByWithRelationInput>;
+
+type ComplaintSortKey = keyof typeof SORT_FIELDS;
+type ComplaintSortOrder = "asc" | "desc";
+
+function parsePositiveInteger(
+  value: string | null,
+  fallback: number,
+  fieldName: string
+): number {
+  if (value == null || value === "") return fallback;
+  if (!/^\d+$/.test(value)) {
+    throw new InvalidComplaintQueryError(`${fieldName} must be a positive integer`);
+  }
+
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new InvalidComplaintQueryError(`${fieldName} must be a positive integer`);
+  }
+
+  return parsed;
+}
+
+function parsePageSize(value: string | null): number {
+  const pageSize = parsePositiveInteger(value, DEFAULT_PAGE_SIZE, "pageSize");
+  if (pageSize > MAX_PAGE_SIZE) {
+    throw new InvalidComplaintQueryError(`pageSize must not exceed ${MAX_PAGE_SIZE}`);
+  }
+  return pageSize;
+}
+
+function parseSortOrder(value: string | null): ComplaintSortOrder {
+  if (value == null || value === "") return "desc";
+  if (value === "asc" || value === "desc") return value;
+  throw new InvalidComplaintQueryError("sortOrder must be asc or desc");
+}
+
+function parseSortBy(value: string | null): ComplaintSortKey {
+  const candidate = value || "receivedDate";
+  if (candidate in SORT_FIELDS) return candidate as ComplaintSortKey;
+  throw new InvalidComplaintQueryError("sortBy is not supported");
+}
+
+function calculateSkip(page: number, pageSize: number): number {
+  const skip = (page - 1) * pageSize;
+  if (!Number.isSafeInteger(skip)) {
+    throw new InvalidComplaintQueryError("Requested page is outside the supported range");
+  }
+  return skip;
+}
 
 export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
-    const page = parseInt(url.searchParams.get("page") || "1");
-    const pageSize = parseInt(url.searchParams.get("pageSize") || "20");
-    const search = url.searchParams.get("search") || "";
-    const isLate = url.searchParams.get("isLate");
-    const isRepeated = url.searchParams.get("isRepeated");
-    const isValidated = url.searchParams.get("isValidated");
-    const aiAnalyzed = url.searchParams.get("aiAnalyzed");
-    const sortBy = url.searchParams.get("sortBy") || "receivedDate";
-    const sortOrder = (url.searchParams.get("sortOrder") || "desc") as "asc" | "desc";
+    const page = parsePositiveInteger(url.searchParams.get("page"), DEFAULT_PAGE, "page");
+    const pageSize = parsePageSize(url.searchParams.get("pageSize"));
+    const sortBy = parseSortBy(url.searchParams.get("sortBy"));
+    const sortOrder = parseSortOrder(url.searchParams.get("sortOrder"));
+    const skip = calculateSkip(page, pageSize);
 
-    const where: Prisma.ComplaintWhereInput = buildComplaintWhereFromParams(url.searchParams);
-    if (search) {
-      where.OR = [
-        { externalId: { contains: search } },
-        { sourceReference: { contains: search } },
-        { subject: { contains: search } },
-        { description: { contains: search } },
-      ];
-    }
-    if (isRepeated === "true") where.isRepeated = true;
-    if (isValidated === "true") where.isValidated = true;
-    if (isValidated === "false") where.isValidated = false;
-    if (aiAnalyzed === "true") where.aiAnalyzedAt = { not: null };
-    if (aiAnalyzed === "false") where.aiAnalyzedAt = null;
-
-    const sortMap: Record<string, keyof Prisma.ComplaintOrderByWithRelationInput> = {
-      receivedDate: "complaintDate",
-      complaintNumber: "externalId",
-      status: "status",
-      priority: "priority",
-      severity: "severity",
-    };
-    const sortField = sortMap[sortBy] ?? "complaintDate";
+    const where: Prisma.ComplaintWhereInput = addComplaintRequestFilters(
+      buildComplaintWhereFromParams(url.searchParams),
+      url.searchParams
+    );
+    const sortField = SORT_FIELDS[sortBy];
 
     const [complaints, total] = await Promise.all([
       db.complaint.findMany({
@@ -58,9 +101,6 @@ export async function GET(req: NextRequest) {
           status: true,
           subject: true,
           description: true,
-          complainantName: true,
-          complainantIdentifier: true,
-          complainantPhone: true,
           region: true,
           facility: true,
           department: true,
@@ -88,7 +128,7 @@ export async function GET(req: NextRequest) {
           category: { select: { nameAr: true } },
         },
         orderBy: { [sortField]: sortOrder },
-        skip: (page - 1) * pageSize,
+        skip,
         take: pageSize,
       }),
       db.complaint.count({ where }),
@@ -96,14 +136,13 @@ export async function GET(req: NextRequest) {
 
     const now = new Date();
     const enriched = complaints.map(c => toComplaintListItem(c, now));
-    const filteredLate = isLate === "true" ? enriched.filter(c => c.isLate) : enriched;
 
     return NextResponse.json({
-      data: filteredLate,
-      total: isLate === "true" ? filteredLate.length : total,
+      data: enriched,
+      total,
       page,
       pageSize,
-      totalPages: Math.ceil((isLate === "true" ? filteredLate.length : total) / pageSize),
+      totalPages: Math.ceil(total / pageSize),
     });
   } catch (error) {
     if (isInvalidComplaintQueryError(error)) {

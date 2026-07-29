@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { ImportBatchStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 
 function toLegacyPeriodType(periodType: string): string {
@@ -18,6 +19,10 @@ function toLegacyBatchStatus(status: string): string {
     default:
       return status.toLowerCase();
   }
+}
+
+export function isRejectedOrFailedImportStatus(status: ImportBatchStatus): boolean {
+  return status === ImportBatchStatus.FAILED || status === ImportBatchStatus.ROLLED_BACK;
 }
 
 export async function GET() {
@@ -48,34 +53,42 @@ export async function GET() {
       orderBy: { createdAt: "desc" },
     });
 
-    return NextResponse.json(batches.map(batch => ({
-      id: batch.id,
-      fileName: batch.originalFileName || batch.fileName,
-      fileSize: batch.fileSize,
-      periodType: toLegacyPeriodType(batch.periodType),
-      periodStart: batch.periodStart,
-      periodEnd: batch.periodEnd,
-      entity: null,
-      status: toLegacyBatchStatus(batch.status),
-      totalRecords: batch.totalRows,
-      validRecords: batch.validRows,
-      newRecords: batch.newRows,
-      updatedRecords: batch.updatedRows,
-      duplicateRecords: batch.duplicateRows,
-      rejectedRecords: batch.rejectedRows,
-      incompleteRecords: batch.invalidRows,
-      errorReport: null,
-      columnMapping: null,
-      uploadedById: batch.createdBy,
-      uploadedBy: { name: batch.createdBy, email: "" },
-      approvedById: batch.confirmedAt ? batch.createdBy : null,
-      approvedBy: batch.confirmedAt ? { name: batch.createdBy, email: "" } : null,
-      approvedAt: batch.confirmedAt,
-      rejectedAt: null,
-      rejectionReason: batch.notes,
-      createdAt: batch.createdAt,
-      updatedAt: batch.updatedAt,
-    })));
+    return NextResponse.json(batches.map(batch => {
+      const isConfirmed = batch.status === ImportBatchStatus.CONFIRMED;
+      const rejectionReason = isRejectedOrFailedImportStatus(batch.status)
+        ? batch.notes?.trim() || null
+        : null;
+
+      return {
+        id: batch.id,
+        fileName: batch.originalFileName || batch.fileName,
+        fileSize: batch.fileSize,
+        periodType: toLegacyPeriodType(batch.periodType),
+        periodStart: batch.periodStart,
+        periodEnd: batch.periodEnd,
+        entity: null,
+        status: toLegacyBatchStatus(batch.status),
+        totalRecords: batch.totalRows,
+        validRecords: batch.validRows,
+        newRecords: batch.newRows,
+        updatedRecords: batch.updatedRows,
+        duplicateRecords: batch.duplicateRows,
+        rejectedRecords: batch.rejectedRows,
+        incompleteRecords: batch.invalidRows,
+        errorReport: null,
+        columnMapping: null,
+        uploadedById: batch.createdBy,
+        uploadedBy: { name: batch.createdBy, email: "" },
+        // Legacy compatibility: approved fields represent confirmed import batches.
+        approvedById: isConfirmed ? batch.createdBy : null,
+        approvedBy: isConfirmed ? { name: batch.createdBy, email: "" } : null,
+        approvedAt: isConfirmed ? batch.confirmedAt : null,
+        rejectedAt: null,
+        rejectionReason,
+        createdAt: batch.createdAt,
+        updatedAt: batch.updatedAt,
+      };
+    }));
   } catch (error) {
     console.error("Import history error:", error);
     return NextResponse.json({ error: "Failed to fetch import history" }, { status: 500 });

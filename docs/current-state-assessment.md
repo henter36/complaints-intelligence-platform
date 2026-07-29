@@ -24,6 +24,13 @@
 - `POST /api/ai/summary` returns `501 AI_NOT_CONFIGURED`.
 - `POST /api/ai/approve` returns `501 AI_NOT_CONFIGURED`.
 - `POST /api/import/approve` returns `501 NOT_IMPLEMENTED`.
+
+## Public API Data Exposure
+
+- Authentication and authorization are not implemented yet.
+- Because list/search endpoints are currently public shape APIs, complaint list responses do not return complainant name, identifier, or phone fields.
+- Complaint list pagination is validated, `pageSize` is capped at 100, and sorting uses an explicit allowlist rather than user-provided Prisma field names.
+- Any screen that needs complainant PII should remain unsupported until the appropriate authentication and authorization model exists.
 - Upload endpoint for full Excel ingestion is not present.
 - Authentication, authorization, and scoped data access are not implemented.
 - Transactional import confirmation and rollback execution are not implemented.

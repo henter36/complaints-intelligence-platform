@@ -1,5 +1,13 @@
-import { ComplaintPriority, type Prisma } from "@prisma/client";
+import { ComplaintPriority, ComplaintStatus, type Prisma } from "@prisma/client";
 import { parseComplaintStatus } from "@/server/complaints/status";
+
+const OPEN_LATE_STATUSES: ComplaintStatus[] = [
+  ComplaintStatus.NEW,
+  ComplaintStatus.OPEN,
+  ComplaintStatus.IN_PROGRESS,
+  ComplaintStatus.AWAITING_RESPONSE,
+  ComplaintStatus.RESOLVED,
+];
 
 export class InvalidComplaintQueryError extends Error {
   readonly code = "INVALID_COMPLAINT_QUERY";
@@ -63,6 +71,54 @@ export function buildComplaintWhereFromParams(params: URLSearchParams): Prisma.C
   if (status) where.status = status;
   if (priority) where.priority = priority;
   if (severity) where.severity = severity;
+  return where;
+}
+
+export function addComplaintRequestFilters(
+  where: Prisma.ComplaintWhereInput,
+  params: URLSearchParams,
+  now = new Date()
+): Prisma.ComplaintWhereInput {
+  const search = params.get("search")?.trim() ?? "";
+  const isLate = params.get("isLate");
+  const isRepeated = params.get("isRepeated");
+  const isValidated = params.get("isValidated");
+  const aiAnalyzed = params.get("aiAnalyzed");
+
+  if (search) {
+    const searchFilter: Prisma.ComplaintWhereInput = {
+      OR: [
+      { externalId: { contains: search } },
+      { sourceReference: { contains: search } },
+      { subject: { contains: search } },
+      { description: { contains: search } },
+      ],
+    };
+    where.AND = [...(Array.isArray(where.AND) ? where.AND : []), searchFilter];
+  }
+  if (isRepeated === "true") where.isRepeated = true;
+  if (isRepeated === "false") where.isRepeated = false;
+  if (isValidated === "true") where.isValidated = true;
+  if (isValidated === "false") where.isValidated = false;
+  if (aiAnalyzed === "true") where.aiAnalyzedAt = { not: null };
+  if (aiAnalyzed === "false") where.aiAnalyzedAt = null;
+  if (isLate === "true") {
+    where.dueDate = { lt: now };
+    where.status = { in: OPEN_LATE_STATUSES };
+  }
+  if (isLate === "false") {
+    where.AND = [
+      ...(Array.isArray(where.AND) ? where.AND : []),
+      {
+        OR: [
+          { dueDate: null },
+          { dueDate: { gte: now } },
+          { status: { notIn: OPEN_LATE_STATUSES } },
+        ],
+      },
+    ];
+  }
+
   return where;
 }
 
