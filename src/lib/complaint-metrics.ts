@@ -1,19 +1,24 @@
 export type ComplaintTiming = {
   status: string;
   dueDate: Date | null;
-  closureDate: Date | null;
+  closedAt?: Date | null;
+  closureDate?: Date | null;
 };
+
+const CLOSED_STATUSES = new Set(["CLOSED", "closed"]);
+const CANCELLED_STATUSES = new Set(["CANCELLED", "cancelled", "rejected"]);
 
 export function isComplaintLate(complaint: ComplaintTiming, now = new Date()): boolean {
   if (!complaint.dueDate) {
     return false;
   }
 
-  if (complaint.status === "closed") {
-    return complaint.closureDate ? complaint.closureDate > complaint.dueDate : false;
+  const closedAt = complaint.closedAt ?? complaint.closureDate ?? null;
+  if (CLOSED_STATUSES.has(complaint.status)) {
+    return closedAt ? closedAt > complaint.dueDate : false;
   }
 
-  return complaint.status !== "rejected" && now > complaint.dueDate;
+  return !CANCELLED_STATUSES.has(complaint.status) && now > complaint.dueDate;
 }
 
 export function average(values: number[]): number {

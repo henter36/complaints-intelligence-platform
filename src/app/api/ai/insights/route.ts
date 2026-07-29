@@ -24,10 +24,17 @@ export async function GET(req: NextRequest) {
 
     const analyzed = await db.complaint.findMany({
       where: { aiAnalyzedAt: { not: null } },
-      include: {
+      select: {
+        id: true,
+        externalId: true,
+        sourceReference: true,
+        subject: true,
         region: true,
-        department: true,
-        classification: true,
+        aiClassification: true,
+        aiSentiment: true,
+        aiSeverityScore: true,
+        aiSummary: true,
+        aiAnalyzedAt: true,
       },
       take: limit,
       orderBy: { aiAnalyzedAt: "desc" },
@@ -151,12 +158,12 @@ export async function GET(req: NextRequest) {
       .filter((c) => (c.aiSeverityScore ?? 0) >= 70)
       .map((c) => ({
         id: c.id,
-        complaintNumber: c.complaintNumber,
+        complaintNumber: c.externalId ?? c.sourceReference ?? c.id,
         subject: c.subject,
         aiClassification: c.aiClassification,
         aiSeverityScore: c.aiSeverityScore,
         aiSentiment: c.aiSentiment,
-        region: c.region?.name,
+        region: c.region,
       }))
       .sort((a, b) => (b.aiSeverityScore ?? 0) - (a.aiSeverityScore ?? 0))
       .slice(0, 10);
@@ -186,7 +193,7 @@ export async function GET(req: NextRequest) {
         count: group.length,
         complaints: group.map((c) => ({
           id: c.id,
-          complaintNumber: c.complaintNumber,
+          complaintNumber: c.externalId ?? c.sourceReference ?? c.id,
           subject: c.subject,
           aiClassification: c.aiClassification,
         })),

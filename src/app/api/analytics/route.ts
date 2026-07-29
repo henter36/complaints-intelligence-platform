@@ -1,52 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import type { Prisma } from "@prisma/client";
+import { ComplaintStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { average, isComplaintLate, roundToTenth } from "@/lib/complaint-metrics";
+import { buildComplaintWhereFromParams, toLegacyPriority } from "@/server/api/complaint-query";
 
-// Build where clause from filter params
-function buildWhere(req: NextRequest): {
-  where: Prisma.ComplaintWhereInput;
-  from: string | null;
-  to: string | null;
-} {
-  const url = new URL(req.url);
-  const from = url.searchParams.get("from");
-  const to = url.searchParams.get("to");
-  const regionId = url.searchParams.get("regionId");
-  const departmentId = url.searchParams.get("departmentId");
-  const classificationId = url.searchParams.get("classificationId");
-  const channel = url.searchParams.get("channel");
-  const status = url.searchParams.get("status");
-  const priority = url.searchParams.get("priority");
-  const severity = url.searchParams.get("severity");
-
-  const where: Prisma.ComplaintWhereInput = {};
-  if (from && to) {
-    where.receivedDate = { gte: new Date(from), lte: new Date(to) };
-  } else if (from) {
-    where.receivedDate = { gte: new Date(from) };
-  } else if (to) {
-    where.receivedDate = { lte: new Date(to) };
-  }
-  if (regionId) where.regionId = regionId;
-  if (departmentId) where.departmentId = departmentId;
-  if (classificationId) where.classificationId = classificationId;
-  if (channel) where.channel = channel;
-  if (status) where.status = status;
-  if (priority) where.priority = priority;
-  if (severity) where.severity = severity;
-  return { where, from, to };
-}
-
-// Compute previous-period date range of equal length
 function getPreviousRange(from?: string | null, to?: string | null) {
   if (!from || !to) return null;
   const start = new Date(from);
   const end = new Date(to);
   const diff = end.getTime() - start.getTime();
-  const prevStart = new Date(start.getTime() - diff - 1);
-  const prevEnd = new Date(start.getTime() - 1);
-  return { gte: prevStart, lte: prevEnd };
+  return { gte: new Date(start.getTime() - diff - 1), lte: new Date(start.getTime() - 1) };
 }
 
 function groupByCount<T>(arr: T[], fn: (item: T) => string) {
@@ -62,37 +25,43 @@ function groupByCount<T>(arr: T[], fn: (item: T) => string) {
 
 export async function GET(req: NextRequest) {
   try {
-    const { where, from, to } = buildWhere(req);
+    const url = new URL(req.url);
+    const where = buildComplaintWhereFromParams(url.searchParams);
+    const from = url.searchParams.get("from");
+    const to = url.searchParams.get("to");
 
-    // Fetch current-period complaints with relations
     const complaints = await db.complaint.findMany({
       where,
-      include: {
+      select: {
+        status: true,
+        priority: true,
+        complaintDate: true,
+        receivedAt: true,
+        dueDate: true,
+        closedAt: true,
+        processingStartedAt: true,
+        delayReason: true,
+        subject: true,
+        channel: true,
         region: true,
         department: true,
-        classification: true,
+        classification: { select: { nameAr: true } },
       },
     });
 
     const now = new Date();
-
-    // ----- Cross-tabulation: classification × region -----
     const classifications = Array.from(
-      new Set(complaints.map(c => c.classification?.name || "غير مصنف"))
+      new Set(complaints.map(c => c.classification?.nameAr || "غير مصنف"))
     ).sort();
-    const regions = Array.from(
-      new Set(complaints.map(c => c.region?.name || "غير محدد"))
-    ).sort();
-    const departments = Array.from(
-      new Set(complaints.map(c => c.department?.name || "غير محدد"))
-    ).sort();
+    const regions = Array.from(new Set(complaints.map(c => c.region || "غير محدد"))).sort();
+    const departments = Array.from(new Set(complaints.map(c => c.department || "غير محدد"))).sort();
 
     const classificationByRegion = classifications.map(cls => {
       const row: Record<string, number | string> = { classification: cls };
       for (const r of regions) {
         row[r] = complaints.filter(
-          c => (c.classification?.name || "غير مصنف") === cls &&
-               (c.region?.name || "غير محدد") === r
+          c => (c.classification?.nameAr || "غير مصنف") === cls &&
+               (c.region || "غير محدد") === r
         ).length;
       }
       return row;
@@ -102,22 +71,20 @@ export async function GET(req: NextRequest) {
       const row: Record<string, number | string> = { classification: cls };
       for (const d of departments) {
         row[d] = complaints.filter(
-          c => (c.classification?.name || "غير مصنف") === cls &&
-               (c.department?.name || "غير محدد") === d
+          c => (c.classification?.nameAr || "غير مصنف") === cls &&
+               (c.department || "غير محدد") === d
         ).length;
       }
       return row;
     });
 
-    // ----- Channel effectiveness -----
-    const channels = Array.from(new Set(complaints.map(c => c.channel)));
+    const channels = Array.from(new Set(complaints.map(c => c.channel || "غير محدد")));
     const channelEffectiveness = channels.map(ch => {
-      const items = complaints.filter(c => c.channel === ch);
-      const closed = items.filter(c => c.status === "closed");
+      const items = complaints.filter(c => (c.channel || "غير محدد") === ch);
+      const closed = items.filter(c => c.status === ComplaintStatus.CLOSED);
       const procTimes = items
-        .filter(c => c.firstActionDate && c.closureDate)
-        .map(c => (c.closureDate!.getTime() - c.firstActionDate!.getTime()) / (1000 * 60 * 60));
-      const avgProc = average(procTimes);
+        .filter(c => c.processingStartedAt && c.closedAt)
+        .map(c => (c.closedAt!.getTime() - c.processingStartedAt!.getTime()) / (1000 * 60 * 60));
       const late = items.filter(c => isComplaintLate(c, now)).length;
       return {
         channel: ch,
@@ -125,32 +92,24 @@ export async function GET(req: NextRequest) {
         closed: closed.length,
         closureRate: items.length > 0 ? roundToTenth((closed.length / items.length) * 100) : 0,
         lateRate: items.length > 0 ? roundToTenth((late / items.length) * 100) : 0,
-        avgProcessingHours: roundToTenth(avgProc),
+        avgProcessingHours: roundToTenth(average(procTimes)),
       };
     }).sort((a, b) => b.total - a.total);
 
-    // ----- Delay reasons -----
     const delayReasons = groupByCount(
       complaints.filter(c => c.delayReason),
       c => c.delayReason!
-    ).map(item => ({ name: item.name, count: item.count }));
+    );
 
-    // ----- Recurring subjects (top subjects) -----
-    const recurringSubjects = groupByCount(
-      complaints,
-      c => c.subject
-    ).slice(0, 10).map(item => ({ name: item.name, count: item.count }));
-
-    // ----- Recurring classifications (themes) -----
+    const recurringSubjects = groupByCount(complaints, c => c.subject).slice(0, 10);
     const recurringClassifications = groupByCount(
       complaints,
-      c => c.classification?.name || "غير مصنف"
-    ).slice(0, 10).map(item => ({ name: item.name, count: item.count }));
+      c => c.classification?.nameAr || "غير مصنف"
+    ).slice(0, 10);
 
-    // ----- Anomaly detection: regions/departments with unusual spikes -----
-    const byRegion = groupByCount(complaints, c => c.region?.name || "غير محدد");
-    const byDepartment = groupByCount(complaints, c => c.department?.name || "غير محدد");
-    const byClassification = groupByCount(complaints, c => c.classification?.name || "غير مصنف");
+    const byRegion = groupByCount(complaints, c => c.region || "غير محدد");
+    const byDepartment = groupByCount(complaints, c => c.department || "غير محدد");
+    const byClassification = groupByCount(complaints, c => c.classification?.nameAr || "غير مصنف");
 
     function computeAnomalies(items: { name: string; count: number }[]) {
       if (items.length === 0) return [];
@@ -168,10 +127,6 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    const regionAnomalies = computeAnomalies(byRegion);
-    const departmentAnomalies = computeAnomalies(byDepartment);
-
-    // ----- Previous-period distributions for comparison -----
     let previousDistributions: {
       byRegion: { name: string; count: number }[];
       byDepartment: { name: string; count: number }[];
@@ -182,25 +137,29 @@ export async function GET(req: NextRequest) {
     const prevRange = getPreviousRange(from, to);
     if (prevRange) {
       const prevComplaints = await db.complaint.findMany({
-        where: { ...where, receivedDate: prevRange },
-        include: { region: true, department: true, classification: true },
+        where: { ...where, complaintDate: prevRange },
+        select: {
+          region: true,
+          department: true,
+          channel: true,
+          classification: { select: { nameAr: true } },
+        },
       });
       previousDistributions = {
-        byRegion: groupByCount(prevComplaints, c => c.region?.name || "غير محدد"),
-        byDepartment: groupByCount(prevComplaints, c => c.department?.name || "غير محدد"),
-        byClassification: groupByCount(prevComplaints, c => c.classification?.name || "غير مصنف"),
-        byChannel: groupByCount(prevComplaints, c => c.channel),
+        byRegion: groupByCount(prevComplaints, c => c.region || "غير محدد"),
+        byDepartment: groupByCount(prevComplaints, c => c.department || "غير محدد"),
+        byClassification: groupByCount(prevComplaints, c => c.classification?.nameAr || "غير مصنف"),
+        byChannel: groupByCount(prevComplaints, c => c.channel || "غير محدد"),
       };
     }
 
-    // ----- Priority / severity breakdown per region (for pattern tab) -----
     const regionPriorityBreakdown = regions.map(r => {
-      const items = complaints.filter(c => (c.region?.name || "غير محدد") === r);
+      const items = complaints.filter(c => (c.region || "غير محدد") === r);
       const row: Record<string, number | string> = { region: r, total: items.length };
-      row["حرجة"] = items.filter(c => c.priority === "critical").length;
-      row["عالية"] = items.filter(c => c.priority === "high").length;
-      row["متوسطة"] = items.filter(c => c.priority === "medium").length;
-      row["منخفضة"] = items.filter(c => c.priority === "low").length;
+      row["حرجة"] = items.filter(c => toLegacyPriority(c.priority) === "critical").length;
+      row["عالية"] = items.filter(c => toLegacyPriority(c.priority) === "high").length;
+      row["متوسطة"] = items.filter(c => toLegacyPriority(c.priority) === "medium").length;
+      row["منخفضة"] = items.filter(c => toLegacyPriority(c.priority) === "low").length;
       return row;
     });
 
@@ -217,12 +176,9 @@ export async function GET(req: NextRequest) {
       recurringSubjects,
       recurringClassifications,
       anomalies: {
-        regions: regionAnomalies,
-        departments: departmentAnomalies,
-        classifications: byClassification.map(i => ({
-          name: i.name,
-          count: i.count,
-        })),
+        regions: computeAnomalies(byRegion),
+        departments: computeAnomalies(byDepartment),
+        classifications: byClassification,
       },
       previousDistributions,
       regionPriorityBreakdown,
