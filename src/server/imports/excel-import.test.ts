@@ -457,6 +457,7 @@ describe("secure xlsx import parsing", () => {
       validationErrors: null,
       validationWarnings: null,
       matchedComplaintId: null,
+      matchedComplaintVersion: null,
     }));
 
     await persistPreviewRows("batch_1", rows, {

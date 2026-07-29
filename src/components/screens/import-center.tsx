@@ -104,6 +104,8 @@ interface UploadResult {
   errors: ImportError[];
   preview: ImportPreviewRow[];
   canApprove: boolean;
+  confirmedAt?: string;
+  confirmationStatus?: string;
 }
 
 export function mappingContainsComplaintNumber(
@@ -118,6 +120,96 @@ export function normalizeUploadResultPayload(json: UploadResult): UploadResult {
     hasComplaintNumber: mappingContainsComplaintNumber(json.columnMapping),
     unmappedColumns: json.unmappedColumns ?? [],
   };
+}
+
+function confirmationTitle(result: UploadResult): string {
+  return result.confirmationStatus === "CONFIRMED"
+    ? "تم تأكيد الدفعة"
+    : "الدفعة جاهزة للتأكيد";
+}
+
+function confirmationDescription(result: UploadResult): string {
+  if (result.confirmationStatus !== "CONFIRMED") {
+    return "تم حفظ المعاينة وحالة الدفعة هي READY_FOR_CONFIRMATION. يمكنك تأكيد الاستيراد الآن.";
+  }
+
+  const confirmedAtText = result.confirmedAt
+    ? ` في ${formatDate(result.confirmedAt)}`
+    : "";
+
+  return `تم تطبيق التغييرات بنجاح${confirmedAtText}.`;
+}
+
+function ImportReadyAlert({ result }: Readonly<{ result: UploadResult }>) {
+  if (result.errors.length > 0) {
+    return (
+      <Alert className="border-amber-200 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-900/50 text-amber-900 dark:text-amber-200">
+        <AlertTriangle className="h-4 w-4 text-amber-600" />
+        <AlertTitle>توجد أخطاء تحتاج معالجة</AlertTitle>
+        <AlertDescription className="text-amber-800 dark:text-amber-300">
+          يوجد {formatNumber(result.errors.length)} صفًا يحتوي أخطاء أو تحذيرات. لم يتم إنشاء أو تحديث أي شكوى.
+        </AlertDescription>
+      </Alert>
+    );
+  }
+
+  return (
+    <Alert className="border-emerald-200 bg-emerald-50 dark:bg-emerald-950/30 dark:border-emerald-900/50 text-emerald-900 dark:text-emerald-200">
+      <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+      <AlertTitle>{confirmationTitle(result)}</AlertTitle>
+      <AlertDescription className="text-emerald-800 dark:text-emerald-300">
+        {confirmationDescription(result)}
+      </AlertDescription>
+    </Alert>
+  );
+}
+
+function ImportActionFooter({
+  result,
+  confirming,
+  onReset,
+  onConfirm,
+}: Readonly<{
+  result: UploadResult;
+  confirming: boolean;
+  onReset: () => void;
+  onConfirm: () => void;
+}>) {
+  const confirmed = result.confirmationStatus === "CONFIRMED";
+  const title = confirmed ? "تم تأكيد الدفعة" : "الدفعة محفوظة للمعاينة";
+  const disabled = !result.canApprove || confirming || confirmed;
+
+  return (
+    <Card className="border-emerald-100 dark:border-emerald-900/40 bg-emerald-50/50 dark:bg-emerald-950/20">
+      <CardContent className="p-4 flex flex-col sm:flex-row items-center justify-between gap-3">
+        <div className="flex items-center gap-2 text-sm">
+          <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+          <span className="font-medium">{title}</span>
+          <span className="text-muted-foreground hidden sm:inline">
+            • {formatNumber(result.validRecords)} صف صالح
+          </span>
+        </div>
+        <div className="flex items-center gap-2 w-full sm:w-auto">
+          <Button
+            variant="outline"
+            className="flex-1 sm:flex-none"
+            onClick={onReset}
+          >
+            <ClipboardX className="h-4 w-4" />
+            رفع ملف آخر
+          </Button>
+          <Button
+            className="flex-1 sm:flex-none"
+            disabled={disabled}
+            onClick={onConfirm}
+          >
+            {confirming ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+            {confirmed ? "تم التأكيد" : "تأكيد الاستيراد"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 // Workflow stages
@@ -289,6 +381,7 @@ export function ImportCenter() {
   // Submission/approval state
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [confirming, setConfirming] = useState(false);
   const [result, setResult] = useState<UploadResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -392,7 +485,7 @@ export function ImportCenter() {
       setUploadProgress(100);
       toast({
         title: "تمت معالجة الملف بنجاح",
-        description: `تم تحليل ${formatNumber(json.totalRecords)} سجل وأصبحت الدفعة جاهزة للتأكيد في الجولة التالية`,
+        description: `تم تحليل ${formatNumber(json.totalRecords)} سجل وأصبحت الدفعة جاهزة للتأكيد`,
       });
     } catch (err: any) {
       setError(err.message || "حدث خطأ غير متوقع");
@@ -418,6 +511,48 @@ export function ImportCenter() {
   const downloadErrorReport = () => {
     if (!result) return;
     window.location.href = `/api/import/${result.batchId}/errors`;
+  };
+
+  const confirmImport = async () => {
+    if (!result) return;
+    if (!result.canApprove || result.rejectedRecords > 0 || result.incompleteRecords > 0) {
+      toast({
+        variant: "destructive",
+        title: "لا يمكن تأكيد الدفعة",
+        description: "يجب معالجة الصفوف المرفوضة أو غير الصالحة قبل التأكيد",
+      });
+      return;
+    }
+
+    setConfirming(true);
+    try {
+      const response = await fetch(`/api/import/${result.batchId}/confirm`, {
+        method: "POST",
+      });
+      const json = await response.json();
+      if (!response.ok) {
+        throw new Error(json.error?.message || "تعذر تأكيد الدفعة");
+      }
+
+      setResult({
+        ...result,
+        canApprove: false,
+        confirmationStatus: json.status,
+        confirmedAt: json.confirmedAt,
+      });
+      toast({
+        title: "تم تأكيد الاستيراد",
+        description: `تم إنشاء ${formatNumber(json.created)} وتحديث ${formatNumber(json.updated)} شكوى`,
+      });
+    } catch (err: any) {
+      toast({
+        variant: "destructive",
+        title: "فشل تأكيد الاستيراد",
+        description: err.message || "حدث خطأ غير متوقع",
+      });
+    } finally {
+      setConfirming(false);
+    }
   };
 
   const downloadCsvTemplate = () => {
@@ -782,24 +917,7 @@ export function ImportCenter() {
                   })}
                 </div>
 
-                {/* Ready status banner */}
-                {result.errors.length > 0 ? (
-                  <Alert className="border-amber-200 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-900/50 text-amber-900 dark:text-amber-200">
-                    <AlertTriangle className="h-4 w-4 text-amber-600" />
-                    <AlertTitle>توجد أخطاء تحتاج معالجة</AlertTitle>
-                    <AlertDescription className="text-amber-800 dark:text-amber-300">
-                      يوجد {formatNumber(result.errors.length)} صفًا يحتوي أخطاء أو تحذيرات. لم يتم إنشاء أو تحديث أي شكوى.
-                    </AlertDescription>
-                  </Alert>
-                ) : (
-                  <Alert className="border-emerald-200 bg-emerald-50 dark:bg-emerald-950/30 dark:border-emerald-900/50 text-emerald-900 dark:text-emerald-200">
-                    <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                    <AlertTitle>الدفعة جاهزة للتأكيد</AlertTitle>
-                    <AlertDescription className="text-emerald-800 dark:text-emerald-300">
-                      تم حفظ المعاينة وحالة الدفعة هي READY_FOR_CONFIRMATION. تنفيذ التأكيد سيتم في الجولة التالية.
-                    </AlertDescription>
-                  </Alert>
-                )}
+                <ImportReadyAlert result={result} />
 
                 {/* Detailed tabs */}
                 <Card>
@@ -1083,37 +1201,12 @@ export function ImportCenter() {
                   </CardContent>
                 </Card>
 
-                {/* Action footer */}
-                <Card className="border-emerald-100 dark:border-emerald-900/40 bg-emerald-50/50 dark:bg-emerald-950/20">
-                  <CardContent className="p-4 flex flex-col sm:flex-row items-center justify-between gap-3">
-                    <div className="flex items-center gap-2 text-sm">
-                      <CheckCircle2 className="h-5 w-5 text-emerald-600" />
-                      <span className="font-medium">
-                        الدفعة محفوظة للمعاينة
-                      </span>
-                      <span className="text-muted-foreground hidden sm:inline">
-                        • {formatNumber(result.validRecords)} صف صالح، ولا توجد تغييرات مطبقة على الشكاوى
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2 w-full sm:w-auto">
-                      <Button
-                        variant="outline"
-                        className="flex-1 sm:flex-none"
-                        onClick={resetForm}
-                      >
-                        <ClipboardX className="h-4 w-4" />
-                        رفع ملف آخر
-                      </Button>
-                      <Button
-                        className="flex-1 sm:flex-none"
-                        disabled
-                      >
-                        <CheckCircle2 className="h-4 w-4" />
-                        التأكيد في الجولة التالية
-                      </Button>
-                    </div>
-                  </CardContent>
-                </Card>
+                <ImportActionFooter
+                  result={result}
+                  confirming={confirming}
+                  onReset={resetForm}
+                  onConfirm={confirmImport}
+                />
               </>
             )}
           </div>

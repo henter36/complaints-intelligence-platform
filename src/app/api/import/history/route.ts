@@ -15,6 +15,8 @@ function toLegacyBatchStatus(status: string): string {
       return "approved";
     case "FAILED":
       return "error";
+    case "ROLLING_BACK":
+      return "rolling_back";
     case "ROLLED_BACK":
       return "rejected";
     default:
@@ -51,8 +53,14 @@ export async function GET(req: NextRequest) {
         selectedSheet: true,
         columnMapping: true,
         failureCode: true,
+        confirmationFailureCode: true,
+        rollbackFailureCode: true,
+        rollbackReason: true,
+        appliedCreatedRows: true,
+        appliedUpdatedRows: true,
         createdBy: true,
         confirmedAt: true,
+        rolledBackAt: true,
         createdAt: true,
         updatedAt: true,
         notes: true,
@@ -86,6 +94,10 @@ export async function GET(req: NextRequest) {
         noChangeRecords: batch.noChangeRows,
         selectedSheet: batch.selectedSheet,
         failureCode: batch.failureCode,
+        confirmationFailureCode: batch.confirmationFailureCode,
+        rollbackFailureCode: batch.rollbackFailureCode,
+        appliedCreatedRows: batch.appliedCreatedRows,
+        appliedUpdatedRows: batch.appliedUpdatedRows,
         errorReport: null,
         columnMapping: batch.columnMapping,
         uploadedById: batch.createdBy,
@@ -94,8 +106,9 @@ export async function GET(req: NextRequest) {
         approvedById: isConfirmed ? batch.createdBy : null,
         approvedBy: isConfirmed ? { name: batch.createdBy, email: "" } : null,
         approvedAt: isConfirmed ? batch.confirmedAt : null,
-        rejectedAt: null,
+        rejectedAt: batch.status === ImportBatchStatus.ROLLED_BACK ? batch.rolledBackAt : null,
         rejectionReason,
+        rollbackReason: batch.rollbackReason,
         createdAt: batch.createdAt,
         updatedAt: batch.updatedAt,
       };

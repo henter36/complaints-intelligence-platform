@@ -11,11 +11,12 @@
 - Phase 2 domain services exist for complaint status history, duplicate identity, import batch transitions, row counters, and audit logging.
 - Phase 3 single-user secure mode protects operational pages and APIs with one administrator credential, database-backed sessions, logout, password change, rate limiting, and security headers.
 - Phase 4 import upload reads `.xlsx` files, validates OOXML/ZIP safety, stores private upload files, maps complaint columns, normalizes and validates rows, detects duplicates, persists `ImportBatchRow` preview data, and generates CSV error reports.
+- Phase 5 import confirmation applies eligible preview batches transactionally, writes snapshots/status history/audit logs, and supports atomic rollback.
 - TypeScript, ESLint, Vitest, and production build run successfully after Phase 1 changes.
 
 ## Partially Working
 
-- Import Center now runs the Phase 4 upload and validation workflow, but import confirmation is not implemented.
+- Import Center now runs upload, validation, preview, and confirmation. Import Log supports rollback for confirmed batches.
 - Reports Center is UI-oriented and not backed by production export/scheduling workflows.
 - Classification management currently supports reading and creating categories/classifications. Update/delete operations, enterprise governance, and versioning are not implemented.
 - AI Insights can aggregate previously stored AI fields, but there is no governed model execution.
@@ -25,7 +26,7 @@
 - `POST /api/ai/analyze` returns `501 AI_NOT_CONFIGURED`.
 - `POST /api/ai/summary` returns `501 AI_NOT_CONFIGURED`.
 - `POST /api/ai/approve` returns `501 AI_NOT_CONFIGURED`.
-- `POST /api/import/approve` returns `501 NOT_IMPLEMENTED`.
+- Import confirmation is implemented through `POST /api/import/{batchId}/confirm`; `POST /api/import/approve` remains as a compatibility wrapper requiring `batchId`.
 
 ## Security And API Data Exposure
 
@@ -36,7 +37,7 @@
 - Any screen that needs complainant PII should remain constrained to authenticated detail workflows in a later phase.
 - Import upload/list/detail/error-report APIs are authenticated. Preview lists mask complainant identifier, phone, and name.
 - Scoped data access is not implemented.
-- Transactional import confirmation and rollback execution are not implemented.
+- Transactional import confirmation and rollback are implemented for the current single-user workflow. Snapshots are not exposed through public APIs.
 
 ## Missing
 
@@ -44,7 +45,6 @@
 - Complete complaint domain model review.
 - Enterprise identity provider integration.
 - Role and scope enforcement.
-- Transactional import confirmation and rollback.
 - Exportable PDF/Excel reports and scheduled delivery.
 - Governed AI provider abstraction, prompt/version audit, and human approval flow.
 
@@ -78,7 +78,9 @@
 - `POST /api/import/{batchId}/mapping`
 - `POST /api/import/{batchId}/reprocess`
 - `GET /api/import/{batchId}/errors`
-- `POST /api/import/approve`
+- `POST /api/import/{batchId}/confirm`
+- `POST /api/import/{batchId}/rollback`
+- `POST /api/import/approve` (compatibility wrapper that requires `batchId` in the request body and delegates confirmation to `/api/import/{batchId}/confirm`)
 - `POST /api/ai/analyze` (disabled)
 - `POST /api/ai/summary` (disabled)
 - `GET /api/ai/insights`
@@ -94,13 +96,12 @@
 
 ## Realistic Completion
 
-Foundation readiness is approximately 70%. The app now has a reliable build/test baseline, a normalized complaint/import data model, single-user authentication, and a real Excel validation preview pipeline, but confirmation/report/AI workflows remain incomplete.
+Foundation readiness is approximately 78%. The app now has a reliable build/test baseline, a normalized complaint/import data model, single-user authentication, a real Excel validation preview pipeline, and transactional confirmation/rollback. Report and governed AI workflows remain incomplete.
 
 ## Technical Debt
 
 - Replace SQLite with the selected production database and migrations.
 - Split API aggregation logic into tested services.
-- Add transactional confirmation and rollback for validated import batches.
 - Remove or gate UI actions for unimplemented workflows.
 - Add scoped authorization only if the product moves beyond single-user operation.
 - Address remaining dev dependency audit exception when compatible releases are available.

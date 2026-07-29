@@ -143,6 +143,12 @@ const STATUS_META: Record<
       "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 border-purple-200 dark:border-purple-800",
     icon: Loader2,
   },
+  rolling_back: {
+    label: "جار التراجع",
+    className:
+      "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300 border-amber-200 dark:border-amber-800",
+    icon: Loader2,
+  },
   error: {
     label: "خطأ",
     className:
@@ -499,15 +505,33 @@ export function ImportLog() {
   const confirmRollback = async () => {
     if (!rollbackBatch) return;
     setRollingBack(true);
-    // Stub rollback - would call POST /api/import/rollback
-    await new Promise((r) => setTimeout(r, 900));
-    toast({
-      title: "تم التراجع عن الاستيراد",
-      description: `تم إلغاء الدفعة "${rollbackBatch.fileName}" بنجاح (تجريبي). سيتم أرشفة السجلات المرتبطة.`,
-    });
-    setRollbackDialogOpen(false);
-    setRollingBack(false);
-    setRollbackBatch(null);
+    try {
+      const response = await fetch(`/api/import/${rollbackBatch.id}/rollback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: "تراجع يدوي من سجل الاستيراد" }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error?.message || "تعذر التراجع عن الدفعة");
+      }
+
+      toast({
+        title: "تم التراجع عن الاستيراد",
+        description: `تم التراجع عن الدفعة "${rollbackBatch.fileName}" بنجاح.`,
+      });
+      setRollbackDialogOpen(false);
+      setRollbackBatch(null);
+      void fetchBatches();
+    } catch (error: any) {
+      toast({
+        variant: "destructive",
+        title: "فشل التراجع",
+        description: error.message || "حدث خطأ غير متوقع",
+      });
+    } finally {
+      setRollingBack(false);
+    }
   };
 
   return (
