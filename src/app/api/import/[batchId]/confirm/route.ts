@@ -1,9 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
-import {
-  confirmReadyImportBatch,
-  toImportConfirmationErrorResponse,
-} from "@/server/imports/import-confirmation-service";
+import { requireAdminApiSession } from "@/server/auth/auth-guard";
+import { confirmReadyImportBatch } from "@/server/imports/import-confirmation-service";
+import { toImportRouteErrorResponse } from "../../route-error-responses";
 
 type RouteContext = {
   params: Promise<{ batchId: string }>;
@@ -17,17 +15,10 @@ export async function POST(request: NextRequest, context: RouteContext) {
 
     return NextResponse.json(result);
   } catch (error) {
-    const authResponse = mapAuthError(error);
-    if (authResponse) return authResponse;
-
-    const importResponse = toImportConfirmationErrorResponse(error);
-    if (importResponse) {
-      return NextResponse.json(importResponse.body, { status: importResponse.status });
-    }
-
-    return NextResponse.json(
-      { error: { code: "IMPORT_CONFIRMATION_FAILED", message: "تعذر تأكيد دفعة الاستيراد" } },
-      { status: 500 }
-    );
+    return toImportRouteErrorResponse(error, {
+      fallback: {
+        error: { code: "IMPORT_CONFIRMATION_FAILED", message: "تعذر تأكيد دفعة الاستيراد" },
+      },
+    });
   }
 }
