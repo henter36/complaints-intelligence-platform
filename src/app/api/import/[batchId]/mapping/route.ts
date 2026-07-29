@@ -3,7 +3,7 @@ import { ImportBatchStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 import { writeAuditLog } from "@/server/audit/audit-log-service";
-import { COMPLAINT_IMPORT_FIELDS, validateColumnMapping, type ColumnMapping } from "@/server/imports/complaint-column-schema";
+import { parseColumnMapping, validateColumnMapping } from "@/server/imports/complaint-column-schema";
 import { toImportErrorResponse } from "@/server/imports/import-errors";
 
 type RouteContext = {
@@ -17,18 +17,12 @@ const MAPPING_EDITABLE_STATUSES = new Set<ImportBatchStatus>([
   ImportBatchStatus.FAILED,
 ]);
 
-function parseMapping(value: unknown): ColumnMapping {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new TypeError("mapping must be an object");
+function parseMapping(value: unknown) {
+  const mapping = parseColumnMapping(value);
+  if (!mapping) {
+    throw new TypeError("mapping must be a non-empty object");
   }
 
-  const mapping: ColumnMapping = {};
-  for (const [header, field] of Object.entries(value)) {
-    if (typeof field !== "string" || !COMPLAINT_IMPORT_FIELDS.includes(field as never)) {
-      throw new TypeError("mapping contains unsupported fields");
-    }
-    mapping[header] = field as ColumnMapping[string];
-  }
   validateColumnMapping(mapping);
   return mapping;
 }

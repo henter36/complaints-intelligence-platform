@@ -23,6 +23,7 @@ import { ImportValidationError } from "./import-errors";
 import { calculateRowCounters } from "./import-batch-service";
 import {
   matchComplaintColumns,
+  parseColumnMapping,
   validateColumnMapping,
   type ColumnMapping,
 } from "./complaint-column-schema";
@@ -432,10 +433,30 @@ type ProcessedWorkbook = {
   counters: ReturnType<typeof calculateRowCounters>;
 };
 
-async function processWorkbookPreview(buffer: Buffer, mapping?: ColumnMapping | null): Promise<ProcessedWorkbook> {
+export function resolveEffectiveColumnMapping(input: {
+  headers: readonly string[];
+  callerMapping?: unknown;
+  storedMapping?: unknown;
+}): ColumnMapping {
+  const callerMapping = parseColumnMapping(input.callerMapping);
+  const storedMapping = parseColumnMapping(input.storedMapping);
+  const columnMapping = callerMapping ?? storedMapping ?? matchComplaintColumns([...input.headers]);
+
+  validateColumnMapping(columnMapping, input.headers);
+  return columnMapping;
+}
+
+async function processWorkbookPreview(
+  buffer: Buffer,
+  callerMapping?: unknown,
+  storedMapping?: unknown
+): Promise<ProcessedWorkbook> {
   const workbook = await parseXlsxWorkbook(buffer);
-  const columnMapping = mapping ?? matchComplaintColumns(workbook.headers);
-  validateColumnMapping(columnMapping);
+  const columnMapping = resolveEffectiveColumnMapping({
+    headers: workbook.headers,
+    callerMapping,
+    storedMapping,
+  });
 
   const taxonomy = {
     categories: await db.category.findMany({ where: { isActive: true, isDeleted: false } }),
@@ -712,7 +733,7 @@ export async function processUploadedImportFile(input: UploadInput): Promise<Imp
   }
 }
 
-export async function reprocessImportBatch(batchId: string, mapping?: ColumnMapping): Promise<ImportUploadResult> {
+export async function reprocessImportBatch(batchId: string, mapping?: unknown): Promise<ImportUploadResult> {
   const batch = await db.importBatch.findUnique({ where: { id: batchId } });
   if (!batch) {
     throw new ImportValidationError("IMPORT_BATCH_NOT_FOUND", "دفعة الاستيراد غير موجودة", 404);
@@ -740,7 +761,7 @@ export async function reprocessImportBatch(batchId: string, mapping?: ColumnMapp
 
   let processed: ProcessedWorkbook;
   try {
-    processed = await processWorkbookPreview(buffer, mapping ?? (batch.columnMapping as ColumnMapping | null));
+    processed = await processWorkbookPreview(buffer, mapping, batch.columnMapping);
     await persistPreviewRows(batchId, processed.processedRows);
     await finalizeReadyImportBatch({
       batchId,

@@ -1,6 +1,11 @@
 import JSZip from "jszip";
 import { describe, expect, it, vi } from "vitest";
-import { matchComplaintColumns, normalizeColumnHeader, validateColumnMapping } from "./complaint-column-schema";
+import {
+  matchComplaintColumns,
+  normalizeColumnHeader,
+  parseColumnMapping,
+  validateColumnMapping,
+} from "./complaint-column-schema";
 import { getRequiredUncompressedSize, validateXlsxZip } from "./file-storage";
 import { buildImportErrorCsv, toSafeMessage } from "./error-report";
 import { normalizeDateCell, normalizeExcelSerialDate, normalizeImportRow, normalizeTextCell } from "./normalization";
@@ -11,6 +16,7 @@ import {
   hasMeaningfulChange,
   normalizedCandidateIdentityKeys,
   persistPreviewRows,
+  resolveEffectiveColumnMapping,
   type ProcessedImportRow,
 } from "./excel-import-service";
 import {
@@ -70,6 +76,17 @@ ${row.map((value, columnIndex) => {
   }
 
   return zip.generateAsync({ type: "nodebuffer" });
+}
+
+function expectImportMappingError(callback: () => unknown, code: string): void {
+  try {
+    callback();
+  } catch (error) {
+    expect(error).toMatchObject({ code });
+    return;
+  }
+
+  throw new Error("Expected import mapping error");
 }
 
 describe("secure xlsx import parsing", () => {
@@ -141,6 +158,123 @@ describe("secure xlsx import parsing", () => {
     const mapping = matchComplaintColumns(["رقم الشكوى", "الموضوع"]);
 
     expect(() => validateColumnMapping(mapping)).toThrow(/تاريخ/);
+  });
+
+  it("parses a valid caller column mapping at runtime", () => {
+    const mapping = parseColumnMapping({
+      "رقم الشكوى": "externalId",
+      "تاريخ الشكوى": "complaintDate",
+      "الموضوع": "subject",
+    });
+
+    expect(mapping).toEqual({
+      "رقم الشكوى": "externalId",
+      "تاريخ الشكوى": "complaintDate",
+      "الموضوع": "subject",
+    });
+    expect(() => validateColumnMapping(mapping!, ["رقم الشكوى", "تاريخ الشكوى", "الموضوع"])).not.toThrow();
+  });
+
+  it("treats empty caller and stored mappings as absent so headers can be auto-matched", () => {
+    expect(parseColumnMapping({})).toBeUndefined();
+    expect(parseColumnMapping({ "   ": "externalId" })).toBeUndefined();
+
+    const mapping = matchComplaintColumns(["رقم الشكوى", "تاريخ الشكوى", "الموضوع"]);
+
+    expect(mapping).toMatchObject({
+      "رقم الشكوى": "externalId",
+      "تاريخ الشكوى": "complaintDate",
+      "الموضوع": "subject",
+    });
+    expect(() => validateColumnMapping(mapping, ["رقم الشكوى", "تاريخ الشكوى", "الموضوع"])).not.toThrow();
+  });
+
+  it.each([
+    ["unknown field", { "رقم الشكوى": "unknownField" }],
+    ["array mapping", []],
+    ["string mapping", "externalId"],
+    ["dangerous proto key", JSON.parse("{\"__proto__\":\"externalId\"}")],
+    ["dangerous constructor key", { constructor: "externalId" }],
+  ])("rejects invalid column mapping payloads: %s", (_label, payload) => {
+    expectImportMappingError(() => parseColumnMapping(payload), "IMPORT_INVALID_COLUMN_MAPPING");
+  });
+
+  it("rejects empty headers when mixed with valid mapping entries", () => {
+    expectImportMappingError(() => parseColumnMapping({
+      " ": "externalId",
+      "تاريخ الشكوى": "complaintDate",
+    }), "IMPORT_INVALID_COLUMN_MAPPING");
+  });
+
+  it("rejects mappings that point to missing headers or duplicate target fields", () => {
+    expectImportMappingError(() => validateColumnMapping({
+      "رقم الشكوى": "externalId",
+      "تاريخ الشكوى": "complaintDate",
+      "الموضوع": "subject",
+    }, ["رقم الشكوى", "الموضوع"]), "IMPORT_INVALID_COLUMN_MAPPING");
+
+    expectImportMappingError(() => validateColumnMapping({
+      "رقم الشكوى": "externalId",
+      "معرف الشكوى": "externalId",
+      "تاريخ الشكوى": "complaintDate",
+      "الموضوع": "subject",
+    }), "DUPLICATE_IMPORT_COLUMN");
+  });
+
+  it("resolves caller mapping before stored mapping and auto matching", () => {
+    const headers = ["رقم الشكوى", "الرقم المرجعي", "تاريخ الشكوى", "الموضوع"];
+    const mapping = resolveEffectiveColumnMapping({
+      headers,
+      callerMapping: {
+        "الرقم المرجعي": "sourceReference",
+        "تاريخ الشكوى": "complaintDate",
+        "الموضوع": "subject",
+      },
+      storedMapping: {
+        "رقم الشكوى": "externalId",
+        "تاريخ الشكوى": "complaintDate",
+        "الموضوع": "subject",
+      },
+    });
+
+    expect(mapping).toMatchObject({
+      "الرقم المرجعي": "sourceReference",
+      "تاريخ الشكوى": "complaintDate",
+      "الموضوع": "subject",
+    });
+    expect(mapping).not.toHaveProperty("رقم الشكوى");
+  });
+
+  it("falls back from empty caller mapping to stored mapping", () => {
+    const mapping = resolveEffectiveColumnMapping({
+      headers: ["رقم الشكوى", "تاريخ الشكوى", "الموضوع"],
+      callerMapping: {},
+      storedMapping: {
+        "رقم الشكوى": "externalId",
+        "تاريخ الشكوى": "complaintDate",
+        "الموضوع": "subject",
+      },
+    });
+
+    expect(mapping).toMatchObject({
+      "رقم الشكوى": "externalId",
+      "تاريخ الشكوى": "complaintDate",
+      "الموضوع": "subject",
+    });
+  });
+
+  it("falls back from empty caller and stored mappings to workbook header matching", () => {
+    const mapping = resolveEffectiveColumnMapping({
+      headers: ["رقم الشكوى", "تاريخ الشكوى", "الموضوع"],
+      callerMapping: {},
+      storedMapping: {},
+    });
+
+    expect(mapping).toMatchObject({
+      "رقم الشكوى": "externalId",
+      "تاريخ الشكوى": "complaintDate",
+      "الموضوع": "subject",
+    });
   });
 
   it("normalizes every repeated Arabic header character", () => {

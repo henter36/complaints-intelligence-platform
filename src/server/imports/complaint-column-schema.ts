@@ -26,6 +26,9 @@ export const COMPLAINT_IMPORT_FIELDS = [
 export type ComplaintImportField = (typeof COMPLAINT_IMPORT_FIELDS)[number];
 export type ColumnMapping = Record<string, ComplaintImportField>;
 
+const COMPLAINT_IMPORT_FIELD_SET = new Set<ComplaintImportField>(COMPLAINT_IMPORT_FIELDS);
+const DANGEROUS_MAPPING_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
 const FIELD_LABELS: Record<ComplaintImportField, string> = {
   externalId: "رقم الشكوى",
   sourceReference: "الرقم المرجعي",
@@ -93,7 +96,7 @@ for (const field of COMPLAINT_IMPORT_FIELDS) {
 }
 
 export function matchComplaintColumns(headers: string[]): ColumnMapping {
-  const mapping: ColumnMapping = {};
+  const mapping = Object.create(null) as ColumnMapping;
   const usedFields = new Map<ComplaintImportField, string>();
 
   for (const header of headers) {
@@ -119,8 +122,142 @@ export function matchComplaintColumns(headers: string[]): ColumnMapping {
   return mapping;
 }
 
-export function validateColumnMapping(mapping: ColumnMapping): void {
-  const fields = new Set(Object.values(mapping));
+export function isComplaintImportField(value: unknown): value is ComplaintImportField {
+  return typeof value === "string" && COMPLAINT_IMPORT_FIELD_SET.has(value as ComplaintImportField);
+}
+
+function assertSafeMappingHeader(header: string): void {
+  if (DANGEROUS_MAPPING_KEYS.has(header)) {
+    throw new ImportValidationError(
+      "IMPORT_INVALID_COLUMN_MAPPING",
+      `عنوان العمود غير مسموح: ${header}`,
+      422,
+      { header }
+    );
+  }
+}
+
+export function parseColumnMapping(value: unknown): ColumnMapping | undefined {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new ImportValidationError(
+      "IMPORT_INVALID_COLUMN_MAPPING",
+      "مطابقة الأعمدة غير صالحة",
+      422
+    );
+  }
+
+  const entries = Object.entries(value);
+  if (entries.length === 0) {
+    return undefined;
+  }
+
+  const mapping = Object.create(null) as ColumnMapping;
+  let emptyHeaderCount = 0;
+
+  for (const [header, field] of entries) {
+    const normalizedHeader = header.trim();
+
+    if (!normalizedHeader) {
+      emptyHeaderCount += 1;
+      continue;
+    }
+
+    assertSafeMappingHeader(normalizedHeader);
+
+    if (Object.hasOwn(mapping, normalizedHeader)) {
+      throw new ImportValidationError(
+        "IMPORT_INVALID_COLUMN_MAPPING",
+        `تكرر عنوان العمود بعد التنظيف: ${normalizedHeader}`,
+        422,
+        { header: normalizedHeader }
+      );
+    }
+
+    if (!isComplaintImportField(field)) {
+      throw new ImportValidationError(
+        "IMPORT_INVALID_COLUMN_MAPPING",
+        `حقل الربط غير مدعوم للعمود: ${normalizedHeader}`,
+        422,
+        {
+          header: normalizedHeader,
+          field,
+        }
+      );
+    }
+
+    mapping[normalizedHeader] = field;
+  }
+
+  const hasMapping = Object.keys(mapping).length > 0;
+  if (!hasMapping && emptyHeaderCount > 0) {
+    return undefined;
+  }
+
+  if (hasMapping && emptyHeaderCount > 0) {
+    throw new ImportValidationError(
+      "IMPORT_INVALID_COLUMN_MAPPING",
+      "يحتوي ربط الأعمدة على عنوان عمود فارغ",
+      422
+    );
+  }
+
+  return hasMapping ? mapping : undefined;
+}
+
+export function validateColumnMapping(mapping: ColumnMapping, workbookHeaders?: readonly string[]): void {
+  const usedFields = new Map<ComplaintImportField, string>();
+  const workbookHeaderSet = workbookHeaders
+    ? new Set(workbookHeaders.map((header) => header.trim()))
+    : null;
+
+  for (const [header, field] of Object.entries(mapping)) {
+    const normalizedHeader = header.trim();
+
+    if (!normalizedHeader) {
+      throw new ImportValidationError(
+        "IMPORT_INVALID_COLUMN_MAPPING",
+        "يحتوي ربط الأعمدة على عنوان عمود فارغ",
+        422
+      );
+    }
+
+    assertSafeMappingHeader(normalizedHeader);
+
+    if (!isComplaintImportField(field)) {
+      throw new ImportValidationError(
+        "IMPORT_INVALID_COLUMN_MAPPING",
+        `حقل الربط غير مدعوم للعمود: ${normalizedHeader}`,
+        422,
+        { header: normalizedHeader, field }
+      );
+    }
+
+    if (workbookHeaderSet && !workbookHeaderSet.has(normalizedHeader)) {
+      throw new ImportValidationError(
+        "IMPORT_INVALID_COLUMN_MAPPING",
+        `يشير ربط الأعمدة إلى عمود غير موجود: ${normalizedHeader}`,
+        422,
+        { header: normalizedHeader }
+      );
+    }
+
+    const previousHeader = usedFields.get(field);
+    if (previousHeader) {
+      throw new ImportValidationError(
+        "DUPLICATE_IMPORT_COLUMN",
+        `تكرر ربط الحقل ${FIELD_LABELS[field]} بين ${previousHeader} و${header}`,
+        422
+      );
+    }
+
+    usedFields.set(field, normalizedHeader);
+  }
+
+  const fields = new Set(usedFields.keys());
   const hasIdentity = fields.has("externalId") || fields.has("sourceReference");
   const hasDate = fields.has("complaintDate") || fields.has("receivedAt");
   const hasText = fields.has("subject") || fields.has("description");
