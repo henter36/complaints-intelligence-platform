@@ -1,32 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
-import { z } from "zod";
 import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 import {
   confirmReadyImportBatch,
   toImportConfirmationErrorResponse,
 } from "@/server/imports/import-confirmation-service";
 
-const approveSchema = z.object({
-  batchId: z.string().min(1),
-});
+type RouteContext = {
+  params: Promise<{ batchId: string }>;
+};
 
-export async function POST(req: NextRequest) {
+export async function POST(request: NextRequest, context: RouteContext) {
   try {
-    const session = await requireAdminApiSession(req);
-    const body = approveSchema.parse(await req.json().catch(() => ({})));
-    const result = await confirmReadyImportBatch(body.batchId, { actor: session.username });
+    const session = await requireAdminApiSession(request);
+    const { batchId } = await context.params;
+    const result = await confirmReadyImportBatch(batchId, { actor: session.username });
 
     return NextResponse.json(result);
   } catch (error) {
     const authResponse = mapAuthError(error);
     if (authResponse) return authResponse;
-
-    if (error instanceof z.ZodError) {
-      return NextResponse.json(
-        { error: { code: "IMPORT_BATCH_ID_REQUIRED", message: "معرف دفعة الاستيراد مطلوب" } },
-        { status: 422 }
-      );
-    }
 
     const importResponse = toImportConfirmationErrorResponse(error);
     if (importResponse) {

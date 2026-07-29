@@ -65,6 +65,7 @@ export type ProcessedImportRow = {
   validationErrors: Prisma.InputJsonValue | null;
   validationWarnings: Prisma.InputJsonValue | null;
   matchedComplaintId: string | null;
+  matchedComplaintVersion: number | null;
 };
 
 type ComplaintIndexEntry =
@@ -88,7 +89,7 @@ export type ImportUploadResult = {
   columnMapping: ColumnMapping;
   errors: Array<{ row: number; errors: RowMessage[]; warnings: RowMessage[] }>;
   preview: Array<Record<string, unknown>>;
-  canApprove: false;
+  canApprove: boolean;
 };
 
 function parsePeriodType(value?: string | null): PeriodType {
@@ -284,6 +285,7 @@ type RowClassificationContext = {
 type RowClassification = {
   action: ImportRowAction;
   matchedComplaintId: string | null;
+  matchedComplaintVersion: number | null;
 };
 
 function duplicateRowError(firstRow: number): RowMessage {
@@ -345,7 +347,7 @@ function classifyMatchedComplaint(
   const firstMatchedRow = context.seenMatchedComplaints.get(complaint.id);
   if (firstMatchedRow) {
     errors.push(duplicateTargetError(firstMatchedRow));
-    return { action: ImportRowAction.DUPLICATE, matchedComplaintId: null };
+    return { action: ImportRowAction.DUPLICATE, matchedComplaintId: null, matchedComplaintVersion: null };
   }
 
   context.seenMatchedComplaints.set(complaint.id, rowNumber);
@@ -355,6 +357,7 @@ function classifyMatchedComplaint(
       ? ImportRowAction.UPDATE
       : ImportRowAction.NO_CHANGE,
     matchedComplaintId: complaint.id,
+    matchedComplaintVersion: complaint.version,
   };
 }
 
@@ -366,17 +369,17 @@ function classifyValidImportRow(
 ): RowClassification {
   const identity = normalizedCandidateIdentityKeys(normalized)[0];
   if (isDuplicateImportIdentity(identity, rowNumber, context, errors)) {
-    return { action: ImportRowAction.DUPLICATE, matchedComplaintId: null };
+    return { action: ImportRowAction.DUPLICATE, matchedComplaintId: null, matchedComplaintVersion: null };
   }
 
   const existing = findExistingComplaintEntry(normalized, context.existingByIdentity);
   if (!existing) {
-    return { action: ImportRowAction.NEW, matchedComplaintId: null };
+    return { action: ImportRowAction.NEW, matchedComplaintId: null, matchedComplaintVersion: null };
   }
 
   if (existing.kind === "ambiguous") {
     errors.push(ambiguousIdentityError());
-    return { action: ImportRowAction.DUPLICATE, matchedComplaintId: null };
+    return { action: ImportRowAction.DUPLICATE, matchedComplaintId: null, matchedComplaintVersion: null };
   }
 
   return classifyMatchedComplaint(existing.complaint, normalized, rowNumber, context, errors);
@@ -399,6 +402,7 @@ function buildProcessedImportRow(input: {
     validationErrors: input.errors.length ? toJsonValue(input.errors) : null,
     validationWarnings: input.warnings.length ? toJsonValue(input.warnings) : null,
     matchedComplaintId: input.classification.matchedComplaintId,
+    matchedComplaintVersion: input.classification.matchedComplaintVersion,
   };
 }
 
@@ -420,7 +424,11 @@ function classifyRows(input: {
     const normalized = normalizedResult.row;
     const classification = errors.length === 0
       ? classifyValidImportRow(normalized, rawRow.rowNumber, context, errors)
-      : { action: ImportRowAction.REJECT, matchedComplaintId: null };
+      : {
+          action: ImportRowAction.REJECT,
+          matchedComplaintId: null,
+          matchedComplaintVersion: null,
+        };
 
     return buildProcessedImportRow({ rawRow, normalized, errors, warnings, classification });
   });
@@ -515,6 +523,7 @@ export async function persistPreviewRows(
         validationErrors: row.validationErrors ?? undefined,
         validationWarnings: row.validationWarnings ?? undefined,
         matchedComplaintId: row.matchedComplaintId,
+        matchedComplaintVersion: row.matchedComplaintVersion,
       })),
     });
   }
@@ -639,7 +648,7 @@ function toImportUploadResult(
         department: normalized?.department ?? null,
       };
     }),
-    canApprove: false,
+    canApprove: processed.counters.invalidRows === 0 && processed.counters.rejectedRows === 0,
   };
 }
 

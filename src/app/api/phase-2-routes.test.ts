@@ -103,8 +103,40 @@ describe("Phase 2 API routes", () => {
     const response = await POST(new NextRequest("http://localhost/api/import/approve", { method: "POST" }));
     const body = await response.json();
 
-    expect(response.status).toBe(501);
-    expect(body.error).toBe("NOT_IMPLEMENTED");
+    expect(response.status).toBe(422);
+    expect(body.error.code).toBe("IMPORT_BATCH_ID_REQUIRED");
+  });
+
+  it("confirms an import batch through the phase 5 confirmation route", async () => {
+    vi.resetModules();
+    vi.doMock("@/server/auth/auth-guard", () => ({
+      requireAdminApiSession: vi.fn().mockResolvedValue({ id: "session_test", username: "admin" }),
+      mapAuthError: vi.fn().mockReturnValue(null),
+    }));
+    const confirmReadyImportBatch = vi.fn().mockResolvedValue({
+      batchId: "batch_confirm",
+      status: "CONFIRMED",
+      confirmedAt: "2026-07-29T00:00:00.000Z",
+      created: 1,
+      updated: 1,
+      unchanged: 0,
+      duplicates: 0,
+    });
+    vi.doMock("@/server/imports/import-confirmation-service", () => ({
+      confirmReadyImportBatch,
+      toImportConfirmationErrorResponse: vi.fn().mockReturnValue(null),
+    }));
+
+    const { POST } = await import("./import/[batchId]/confirm/route");
+    const response = await POST(
+      new NextRequest("http://localhost/api/import/batch_confirm/confirm", { method: "POST" }),
+      { params: Promise.resolve({ batchId: "batch_confirm" }) }
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.status).toBe("CONFIRMED");
+    expect(confirmReadyImportBatch).toHaveBeenCalledWith("batch_confirm", { actor: "admin" });
   });
 
   it("returns complaints list from the new schema shape", async () => {

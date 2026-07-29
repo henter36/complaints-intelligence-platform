@@ -34,6 +34,7 @@ enum ImportBatchStatus {
   CONFIRMING
   CONFIRMED
   FAILED
+  ROLLING_BACK
   ROLLED_BACK
 }
 
@@ -50,6 +51,11 @@ enum ImportRowValidationStatus {
   VALID
   WARNING
   INVALID
+}
+
+enum ImportChangeType {
+  CREATE
+  UPDATE
 }
 
 enum PeriodType {
@@ -210,11 +216,17 @@ model ImportBatch {
   storageKey      String?
   selectedSheet   String?
   columnMapping   Json?
+  confirmationFailureCode String?
+  rollbackFailureCode String?
+  rollbackReason  String?
+  appliedCreatedRows Int                 @default(0)
+  appliedUpdatedRows Int                 @default(0)
   createdAt       DateTime            @default(now())
   updatedAt       DateTime            @updatedAt
   complaints      Complaint[]
   rows            ImportBatchRow[]
   statusHistory   ComplaintStatusHistory[]
+  changeSnapshots ImportChangeSnapshot[]
 
   @@index([fileHash])
   @@index([status])
@@ -236,10 +248,14 @@ model ImportBatchRow {
   validationWarnings Json?
   matchedComplaintId String?
   matchedComplaint  Complaint?                @relation("MatchedComplaintRows", fields: [matchedComplaintId], references: [id])
+  matchedComplaintVersion Int?
   createdComplaintId String?
   createdComplaint  Complaint?                @relation("CreatedComplaintRows", fields: [createdComplaintId], references: [id])
+  appliedAt         DateTime?
+  rolledBackAt      DateTime?
   createdAt         DateTime                  @default(now())
   updatedAt         DateTime                  @updatedAt
+  changeSnapshots   ImportChangeSnapshot[]
 
   @@unique([importBatchId, rowNumber])
   @@index([importBatchId])
@@ -248,6 +264,27 @@ model ImportBatchRow {
   @@index([externalId])
   @@index([action])
   @@index([validationStatus])
+  @@index([appliedAt])
+}
+
+model ImportChangeSnapshot {
+  id               String           @id @default(cuid())
+  importBatchId    String
+  importBatch      ImportBatch      @relation(fields: [importBatchId], references: [id], onDelete: Cascade)
+  importBatchRowId String
+  importBatchRow   ImportBatchRow   @relation(fields: [importBatchRowId], references: [id], onDelete: Cascade)
+  complaintId      String
+  changeType       ImportChangeType
+  beforeData       Json?
+  afterData        Json
+  versionBefore    Int?
+  versionAfter     Int
+  createdAt        DateTime         @default(now())
+
+  @@unique([importBatchRowId])
+  @@index([importBatchId])
+  @@index([complaintId])
+  @@index([changeType])
 }
 
 model AuditLog {

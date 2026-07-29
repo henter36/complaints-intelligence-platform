@@ -104,6 +104,8 @@ interface UploadResult {
   errors: ImportError[];
   preview: ImportPreviewRow[];
   canApprove: boolean;
+  confirmedAt?: string;
+  confirmationStatus?: string;
 }
 
 export function mappingContainsComplaintNumber(
@@ -289,6 +291,7 @@ export function ImportCenter() {
   // Submission/approval state
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [confirming, setConfirming] = useState(false);
   const [result, setResult] = useState<UploadResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -392,7 +395,7 @@ export function ImportCenter() {
       setUploadProgress(100);
       toast({
         title: "تمت معالجة الملف بنجاح",
-        description: `تم تحليل ${formatNumber(json.totalRecords)} سجل وأصبحت الدفعة جاهزة للتأكيد في الجولة التالية`,
+        description: `تم تحليل ${formatNumber(json.totalRecords)} سجل وأصبحت الدفعة جاهزة للتأكيد`,
       });
     } catch (err: any) {
       setError(err.message || "حدث خطأ غير متوقع");
@@ -418,6 +421,48 @@ export function ImportCenter() {
   const downloadErrorReport = () => {
     if (!result) return;
     window.location.href = `/api/import/${result.batchId}/errors`;
+  };
+
+  const confirmImport = async () => {
+    if (!result) return;
+    if (!result.canApprove || result.rejectedRecords > 0 || result.incompleteRecords > 0) {
+      toast({
+        variant: "destructive",
+        title: "لا يمكن تأكيد الدفعة",
+        description: "يجب معالجة الصفوف المرفوضة أو غير الصالحة قبل التأكيد",
+      });
+      return;
+    }
+
+    setConfirming(true);
+    try {
+      const response = await fetch(`/api/import/${result.batchId}/confirm`, {
+        method: "POST",
+      });
+      const json = await response.json();
+      if (!response.ok) {
+        throw new Error(json.error?.message || "تعذر تأكيد الدفعة");
+      }
+
+      setResult({
+        ...result,
+        canApprove: false,
+        confirmationStatus: json.status,
+        confirmedAt: json.confirmedAt,
+      });
+      toast({
+        title: "تم تأكيد الاستيراد",
+        description: `تم إنشاء ${formatNumber(json.created)} وتحديث ${formatNumber(json.updated)} شكوى`,
+      });
+    } catch (err: any) {
+      toast({
+        variant: "destructive",
+        title: "فشل تأكيد الاستيراد",
+        description: err.message || "حدث خطأ غير متوقع",
+      });
+    } finally {
+      setConfirming(false);
+    }
   };
 
   const downloadCsvTemplate = () => {
@@ -794,9 +839,13 @@ export function ImportCenter() {
                 ) : (
                   <Alert className="border-emerald-200 bg-emerald-50 dark:bg-emerald-950/30 dark:border-emerald-900/50 text-emerald-900 dark:text-emerald-200">
                     <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                    <AlertTitle>الدفعة جاهزة للتأكيد</AlertTitle>
+                    <AlertTitle>
+                      {result.confirmationStatus === "CONFIRMED" ? "تم تأكيد الدفعة" : "الدفعة جاهزة للتأكيد"}
+                    </AlertTitle>
                     <AlertDescription className="text-emerald-800 dark:text-emerald-300">
-                      تم حفظ المعاينة وحالة الدفعة هي READY_FOR_CONFIRMATION. تنفيذ التأكيد سيتم في الجولة التالية.
+                      {result.confirmationStatus === "CONFIRMED"
+                        ? `تم تطبيق التغييرات بنجاح${result.confirmedAt ? ` في ${formatDate(result.confirmedAt)}` : ""}.`
+                        : "تم حفظ المعاينة وحالة الدفعة هي READY_FOR_CONFIRMATION. يمكنك تأكيد الاستيراد الآن."}
                     </AlertDescription>
                   </Alert>
                 )}
@@ -1089,10 +1138,10 @@ export function ImportCenter() {
                     <div className="flex items-center gap-2 text-sm">
                       <CheckCircle2 className="h-5 w-5 text-emerald-600" />
                       <span className="font-medium">
-                        الدفعة محفوظة للمعاينة
+                        {result.confirmationStatus === "CONFIRMED" ? "تم تأكيد الدفعة" : "الدفعة محفوظة للمعاينة"}
                       </span>
                       <span className="text-muted-foreground hidden sm:inline">
-                        • {formatNumber(result.validRecords)} صف صالح، ولا توجد تغييرات مطبقة على الشكاوى
+                        • {formatNumber(result.validRecords)} صف صالح
                       </span>
                     </div>
                     <div className="flex items-center gap-2 w-full sm:w-auto">
@@ -1106,10 +1155,11 @@ export function ImportCenter() {
                       </Button>
                       <Button
                         className="flex-1 sm:flex-none"
-                        disabled
+                        disabled={!result.canApprove || confirming || result.confirmationStatus === "CONFIRMED"}
+                        onClick={confirmImport}
                       >
-                        <CheckCircle2 className="h-4 w-4" />
-                        التأكيد في الجولة التالية
+                        {confirming ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                        {result.confirmationStatus === "CONFIRMED" ? "تم التأكيد" : "تأكيد الاستيراد"}
                       </Button>
                     </div>
                   </CardContent>

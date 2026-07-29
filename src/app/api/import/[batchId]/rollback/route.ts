@@ -2,19 +2,27 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 import {
-  confirmReadyImportBatch,
+  rollbackConfirmedImportBatch,
   toImportConfirmationErrorResponse,
 } from "@/server/imports/import-confirmation-service";
 
-const approveSchema = z.object({
-  batchId: z.string().min(1),
+type RouteContext = {
+  params: Promise<{ batchId: string }>;
+};
+
+const rollbackSchema = z.object({
+  reason: z.string().trim().min(3).max(500),
 });
 
-export async function POST(req: NextRequest) {
+export async function POST(request: NextRequest, context: RouteContext) {
   try {
-    const session = await requireAdminApiSession(req);
-    const body = approveSchema.parse(await req.json().catch(() => ({})));
-    const result = await confirmReadyImportBatch(body.batchId, { actor: session.username });
+    const session = await requireAdminApiSession(request);
+    const { batchId } = await context.params;
+    const body = rollbackSchema.parse(await request.json().catch(() => ({})));
+    const result = await rollbackConfirmedImportBatch(batchId, {
+      reason: body.reason,
+      actor: session.username,
+    });
 
     return NextResponse.json(result);
   } catch (error) {
@@ -23,7 +31,7 @@ export async function POST(req: NextRequest) {
 
     if (error instanceof z.ZodError) {
       return NextResponse.json(
-        { error: { code: "IMPORT_BATCH_ID_REQUIRED", message: "معرف دفعة الاستيراد مطلوب" } },
+        { error: { code: "ROLLBACK_REASON_REQUIRED", message: "سبب التراجع مطلوب" } },
         { status: 422 }
       );
     }
@@ -34,7 +42,7 @@ export async function POST(req: NextRequest) {
     }
 
     return NextResponse.json(
-      { error: { code: "IMPORT_CONFIRMATION_FAILED", message: "تعذر تأكيد دفعة الاستيراد" } },
+      { error: { code: "IMPORT_ROLLBACK_FAILED", message: "تعذر التراجع عن دفعة الاستيراد" } },
       { status: 500 }
     );
   }

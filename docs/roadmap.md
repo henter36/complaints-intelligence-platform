@@ -16,7 +16,7 @@ Add one administrator credential, login, logout, password change, secure cookies
 
 Build the real `.xlsx` import validation pipeline: upload, parse, validate, map columns, detect duplicates, preview, store rows, and produce error reports. The phase intentionally stops before confirmation.
 
-## 5. Transactional Confirmation and Rollback
+## 5. Transactional Confirmation and Rollback - Completed
 
 Apply validated import batches transactionally, record every change, support rollback, and keep audit/status history consistent.
 
