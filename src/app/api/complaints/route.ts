@@ -68,7 +68,7 @@ function parseSortOrder(value: string | null = null): ComplaintSortOrder {
 
 function parseSortBy(value: string | null = null): ComplaintSortKey {
   const candidate = valueOrDefault(value, "receivedDate");
-  if (Object.prototype.hasOwnProperty.call(SORT_FIELDS, candidate)) {
+  if (Object.hasOwn(SORT_FIELDS, candidate)) {
     return candidate as ComplaintSortKey;
   }
 
