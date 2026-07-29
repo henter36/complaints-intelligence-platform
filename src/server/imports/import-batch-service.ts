@@ -27,6 +27,8 @@ export function calculateRowCounters(rows: Array<{
     updatedRows: rows.filter((row) => row.action === ImportRowAction.UPDATE).length,
     duplicateRows: rows.filter((row) => row.action === ImportRowAction.DUPLICATE).length,
     rejectedRows: rows.filter((row) => row.action === ImportRowAction.REJECT).length,
+    warningRows: rows.filter((row) => row.validationStatus === ImportRowValidationStatus.WARNING).length,
+    noChangeRows: rows.filter((row) => row.action === ImportRowAction.NO_CHANGE).length,
   };
 }
 

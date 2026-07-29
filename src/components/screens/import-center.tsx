@@ -52,7 +52,6 @@ import {
   Loader2,
   Database,
   CalendarDays,
-  Building2,
   Layers,
   ClipboardCheck,
   ClipboardX,
@@ -65,8 +64,9 @@ export type PeriodType = "daily" | "weekly" | "monthly" | "custom";
 
 interface ImportError {
   row: number;
-  complaintNumber: string;
-  errors: string[];
+  complaintNumber?: string;
+  errors: Array<{ message: string }>;
+  warnings: Array<{ message: string }>;
 }
 
 interface ImportPreviewRow {
@@ -95,6 +95,9 @@ interface UploadResult {
   duplicateRecords: number;
   rejectedRecords: number;
   incompleteRecords: number;
+  warningRecords: number;
+  noChangeRecords: number;
+  selectedSheet: string | null;
   hasComplaintNumber: boolean;
   unmappedColumns: string[];
   columnMapping: Record<string, string>;
@@ -103,14 +106,27 @@ interface UploadResult {
   canApprove: boolean;
 }
 
+export function mappingContainsComplaintNumber(
+  mapping: Record<string, string> | undefined
+): boolean {
+  return Object.values(mapping ?? {}).includes("externalId");
+}
+
+export function normalizeUploadResultPayload(json: UploadResult): UploadResult {
+  return {
+    ...json,
+    hasComplaintNumber: mappingContainsComplaintNumber(json.columnMapping),
+    unmappedColumns: json.unmappedColumns ?? [],
+  };
+}
+
 // Workflow stages
 const STAGES = [
   { key: "upload", label: "رفع الملف", icon: Upload },
   { key: "validate", label: "التحقق", icon: ClipboardCheck },
   { key: "preview", label: "المعاينة", icon: FileSpreadsheet },
   { key: "errors", label: "معالجة الأخطاء", icon: AlertTriangle },
-  { key: "approve", label: "الاعتماد", icon: CheckCircle2 },
-  { key: "indicators", label: "تحديث المؤشرات", icon: Database },
+  { key: "approve", label: "جاهز للتأكيد", icon: CheckCircle2 },
 ] as const;
 
 type StageKey = (typeof STAGES)[number]["key"];
@@ -268,15 +284,12 @@ export function ImportCenter() {
   const [periodType, setPeriodType] = useState<PeriodType>("daily");
   const [periodStart, setPeriodStart] = useState<string>(initialPeriod.start);
   const [periodEnd, setPeriodEnd] = useState<string>(initialPeriod.end);
-  const [entity, setEntity] = useState<string>("");
   const [dragOver, setDragOver] = useState(false);
 
   // Submission/approval state
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [result, setResult] = useState<UploadResult | null>(null);
-  const [approving, setApproving] = useState(false);
-  const [approved, setApproved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const handlePeriodTypeChange = (value: PeriodType) => {
@@ -290,44 +303,38 @@ export function ImportCenter() {
 
   // Compute current stage
   const currentStage: StageKey = useMemo(() => {
-    if (approved) return "indicators";
-    if (approving) return "approve";
     if (result) {
       if (result.errors.length > 0) return "errors";
       return "approve";
     }
     if (uploading) return "validate";
     return "upload";
-  }, [uploading, result, approving, approved]);
+  }, [uploading, result]);
 
   const stageIndex = STAGES.findIndex((s) => s.key === currentStage);
 
   // Handlers
   const handleFileSelect = useCallback((f: File | null) => {
     if (!f) return;
-    const isExcel =
-      f.name.endsWith(".xlsx") ||
-      f.name.endsWith(".xls") ||
-      f.name.endsWith(".csv");
+    const isExcel = f.name.toLowerCase().endsWith(".xlsx");
     if (!isExcel) {
       toast({
         variant: "destructive",
         title: "نوع ملف غير مدعوم",
-        description: "الرجاء اختيار ملف Excel أو CSV بصيغة .xlsx أو .xls أو .csv",
+        description: "الرجاء اختيار ملف Excel بصيغة .xlsx فقط",
       });
       return;
     }
-    if (f.size > 20 * 1024 * 1024) {
+    if (f.size > 10 * 1024 * 1024) {
       toast({
         variant: "destructive",
         title: "حجم الملف كبير",
-        description: "الحد الأقصى لحجم الملف هو 20 ميجابايت",
+        description: "الحد الأقصى لحجم الملف هو 10 ميجابايت",
       });
       return;
     }
     setFile(f);
     setResult(null);
-    setApproved(false);
     setError(null);
   }, [toast]);
 
@@ -360,7 +367,6 @@ export function ImportCenter() {
     setUploadProgress(0);
     setError(null);
     setResult(null);
-    setApproved(false);
 
     // simulate progress while uploading
     const timer = setInterval(() => {
@@ -373,7 +379,6 @@ export function ImportCenter() {
       fd.append("periodType", periodType);
       fd.append("periodStart", periodStart);
       fd.append("periodEnd", periodEnd);
-      fd.append("entity", entity);
 
       const res = await fetch("/api/import/upload", {
         method: "POST",
@@ -381,13 +386,13 @@ export function ImportCenter() {
       });
       const json = await res.json();
       if (!res.ok) {
-        throw new Error(json.error || "فشل في رفع الملف");
+        throw new Error(json.error?.message || "فشل في رفع الملف");
       }
-      setResult(json);
+      setResult(normalizeUploadResultPayload(json));
       setUploadProgress(100);
       toast({
         title: "تمت معالجة الملف بنجاح",
-        description: `تم تحليل ${formatNumber(json.totalRecords)} سجل — راجع النتائج قبل الاعتماد`,
+        description: `تم تحليل ${formatNumber(json.totalRecords)} سجل وأصبحت الدفعة جاهزة للتأكيد في الجولة التالية`,
       });
     } catch (err: any) {
       setError(err.message || "حدث خطأ غير متوقع");
@@ -402,47 +407,9 @@ export function ImportCenter() {
     }
   };
 
-  const handleApprove = async (action: "approve" | "reject") => {
-    if (!result) return;
-    setApproving(true);
-    try {
-      const res = await fetch("/api/import/approve", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ batchId: result.batchId, action }),
-      });
-      const json = await res.json();
-      if (!res.ok) {
-        throw new Error(json.error || "فشل في الاعتماد");
-      }
-      if (action === "approve") {
-        setApproved(true);
-        toast({
-          title: "تم اعتماد الملف بنجاح",
-          description: "تم تحديث المؤشرات وقاعدة البيانات",
-        });
-      } else {
-        toast({
-          title: "تم رفض الملف",
-          description: "لم يتم تطبيق أي تغييرات على قاعدة البيانات",
-        });
-        resetForm();
-      }
-    } catch (err: any) {
-      toast({
-        variant: "destructive",
-        title: "فشل العملية",
-        description: err.message || "حدث خطأ غير متوقع",
-      });
-    } finally {
-      setApproving(false);
-    }
-  };
-
   const resetForm = () => {
     setFile(null);
     setResult(null);
-    setApproved(false);
     setError(null);
     setUploadProgress(0);
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -450,37 +417,7 @@ export function ImportCenter() {
 
   const downloadErrorReport = () => {
     if (!result) return;
-    const payload = {
-      batchId: result.batchId,
-      fileName: result.fileName,
-      generatedAt: new Date().toISOString(),
-      summary: {
-        total: result.totalRecords,
-        valid: result.validRecords,
-        new: result.newRecords,
-        updated: result.updatedRecords,
-        duplicate: result.duplicateRecords,
-        rejected: result.rejectedRecords,
-        incomplete: result.incompleteRecords,
-      },
-      unmappedColumns: result.unmappedColumns,
-      errors: result.errors,
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], {
-      type: "application/json;charset=utf-8",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `تقرير-أخطاء-${result.fileName}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    toast({
-      title: "تم تنزيل التقرير",
-      description: "تم حفظ ملف تقرير الأخطاء بصيغة JSON",
-    });
+    window.location.href = `/api/import/${result.batchId}/errors`;
   };
 
   const downloadCsvTemplate = () => {
@@ -508,7 +445,7 @@ export function ImportCenter() {
     <div className="space-y-6">
       <PageHeader
         title="مركز الاستيراد"
-        description="رفع وتحقق واعتماد ملفات الشكاوى وتحديث مؤشرات النظام"
+        description="رفع ملفات الشكاوى والتحقق منها ومعاينة نتائجها قبل التأكيد"
         icon={<Upload className="h-6 w-6" />}
         actions={
           <>
@@ -586,35 +523,8 @@ export function ImportCenter() {
         </CardContent>
       </Card>
 
-      {/* Success state */}
-      {approved && result && (
-        <Card className="border-emerald-200 dark:border-emerald-900/50 bg-gradient-to-br from-emerald-50 to-teal-50 dark:from-emerald-950/40 dark:to-teal-950/40">
-          <CardContent className="p-8 text-center">
-            <div className="flex justify-center mb-4">
-              <div className="flex h-20 w-20 items-center justify-center rounded-full bg-emerald-500 text-white shadow-lg shadow-emerald-500/30">
-                <CheckCircle2 className="h-12 w-12" />
-              </div>
-            </div>
-            <h2 className="text-2xl font-bold text-emerald-900 dark:text-emerald-100 mb-2">
-              تم اعتماد الملف وتحديث المؤشرات بنجاح
-            </h2>
-            <p className="text-emerald-700 dark:text-emerald-300 mb-6">
-              تمت إضافة {formatNumber(result.newRecords)} شكوى جديدة وتحديث{" "}
-              {formatNumber(result.updatedRecords)} شكوى قائمة من إجمالي{" "}
-              {formatNumber(result.totalRecords)} سجل
-            </p>
-            <div className="flex flex-wrap items-center justify-center gap-3">
-              <Button onClick={resetForm}>
-                <Upload className="h-4 w-4" />
-                استيراد ملف آخر
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
       {/* Main content */}
-      {!approved && (
+      {(
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Left: Upload form */}
           <div className="lg:col-span-1 space-y-6">
@@ -631,7 +541,7 @@ export function ImportCenter() {
               <CardContent className="space-y-4">
                 {/* File upload area */}
                 <div className="space-y-2">
-                  <Label>ملف الشكاوى (Excel / CSV)</Label>
+                  <Label>ملف الشكاوى (Excel)</Label>
                   <div
                     onDragOver={(e) => {
                       e.preventDefault();
@@ -652,7 +562,7 @@ export function ImportCenter() {
                     <input
                       ref={fileInputRef}
                       type="file"
-                      accept=".xlsx,.xls,.csv"
+                      accept=".xlsx"
                       className="sr-only"
                       onChange={(e) =>
                         handleFileSelect(e.target.files?.[0] || null)
@@ -692,7 +602,7 @@ export function ImportCenter() {
                           اسحب الملف هنا أو اضغط للاختيار
                         </div>
                         <div className="text-xs text-muted-foreground">
-                          الصيغ المدعومة: XLSX, XLS, CSV (الحد الأقصى 20MB)
+                          الصيغة المدعومة: XLSX (الحد الأقصى 10MB)
                         </div>
                       </div>
                     )}
@@ -743,19 +653,6 @@ export function ImportCenter() {
                   </div>
                 </div>
 
-                {/* Entity */}
-                <div className="space-y-2">
-                  <Label className="flex items-center gap-1.5">
-                    <Building2 className="h-4 w-4 text-muted-foreground" />
-                    الكيان المشمول
-                  </Label>
-                  <Input
-                    placeholder="المنطقة أو الإدارة (اختياري)"
-                    value={entity}
-                    onChange={(e) => setEntity(e.target.value)}
-                  />
-                </div>
-
                 <Button
                   className="w-full"
                   size="lg"
@@ -797,10 +694,10 @@ export function ImportCenter() {
                 </div>
                 <ul className="text-xs text-muted-foreground space-y-1.5 list-disc pr-4">
                   <li>يجب أن يحتوي الملف على عمود &quot;رقم الشكوى&quot;</li>
-                  <li>الحقول الإلزامية: رقم الشكوى، تاريخ الورود، الموضوع</li>
-                  <li>لا يمكن الاعتماد عند وجود أخطاء حرجة</li>
-                  <li>تتم مطابقة الشكاوى الموجودة برقم الشكوى</li>
-                  <li>يتم تجاهل الصفوف ذات الأرقام المكررة داخل الملف</li>
+                  <li>الحد الأدنى: معرف أو رقم مرجعي، تاريخ، موضوع أو وصف</li>
+                  <li>لا يتم إنشاء أو تحديث الشكاوى في هذه الجولة</li>
+                  <li>تتم مطابقة الشكاوى الموجودة بسياسة الهوية المركزية</li>
+                  <li>تسجل الصفوف المكررة داخل الملف ولا تُحذف</li>
                 </ul>
               </CardContent>
             </Card>
@@ -885,27 +782,21 @@ export function ImportCenter() {
                   })}
                 </div>
 
-                {/* Approval status banner */}
-                {!result.canApprove && (
+                {/* Ready status banner */}
+                {result.errors.length > 0 ? (
                   <Alert className="border-amber-200 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-900/50 text-amber-900 dark:text-amber-200">
                     <AlertTriangle className="h-4 w-4 text-amber-600" />
-                    <AlertTitle>لا يمكن اعتماد الملف</AlertTitle>
+                    <AlertTitle>توجد أخطاء تحتاج معالجة</AlertTitle>
                     <AlertDescription className="text-amber-800 dark:text-amber-300">
-                      {result.errors.length > 0
-                        ? `يوجد ${formatNumber(
-                            result.errors.length
-                          )} خطأ يجب معالجتها قبل الاعتماد.`
-                        : "لا يمكن الاعتماد بسبب نقص في التعيينات الإلزامية."}
+                      يوجد {formatNumber(result.errors.length)} صفًا يحتوي أخطاء أو تحذيرات. لم يتم إنشاء أو تحديث أي شكوى.
                     </AlertDescription>
                   </Alert>
-                )}
-                {result.canApprove && (
+                ) : (
                   <Alert className="border-emerald-200 bg-emerald-50 dark:bg-emerald-950/30 dark:border-emerald-900/50 text-emerald-900 dark:text-emerald-200">
                     <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                    <AlertTitle>الملف جاهز للاعتماد</AlertTitle>
+                    <AlertTitle>الدفعة جاهزة للتأكيد</AlertTitle>
                     <AlertDescription className="text-emerald-800 dark:text-emerald-300">
-                      تم اجتياز جميع فحوصات التحقق بنجاح. يمكنك مراجعة البيانات ثم
-                      اعتماد الملف لتحديث المؤشرات.
+                      تم حفظ المعاينة وحالة الدفعة هي READY_FOR_CONFIRMATION. تنفيذ التأكيد سيتم في الجولة التالية.
                     </AlertDescription>
                   </Alert>
                 )}
@@ -1169,7 +1060,7 @@ export function ImportCenter() {
                                               className="bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/30 dark:text-rose-300 dark:border-rose-900 text-[11px] font-normal"
                                             >
                                               <XCircle className="h-3 w-3" />
-                                              {msg}
+                                              {msg.message}
                                             </Badge>
                                           </li>
                                         ))}
@@ -1196,51 +1087,29 @@ export function ImportCenter() {
                 <Card className="border-emerald-100 dark:border-emerald-900/40 bg-emerald-50/50 dark:bg-emerald-950/20">
                   <CardContent className="p-4 flex flex-col sm:flex-row items-center justify-between gap-3">
                     <div className="flex items-center gap-2 text-sm">
-                      {result.canApprove ? (
-                        <>
-                          <CheckCircle2 className="h-5 w-5 text-emerald-600" />
-                          <span className="font-medium">
-                            الملف جاهز للاعتماد
-                          </span>
-                          <span className="text-muted-foreground hidden sm:inline">
-                            • {formatNumber(result.validRecords)} سجل صالح سيتم
-                            إضافته/تحديثه
-                          </span>
-                        </>
-                      ) : (
-                        <>
-                          <AlertTriangle className="h-5 w-5 text-amber-600" />
-                          <span className="font-medium">
-                            تعذّر الاعتماد — توجد أخطاء حرجة
-                          </span>
-                          <span className="text-muted-foreground hidden sm:inline">
-                            • عالج {formatNumber(result.errors.length)} خطأ ثم
-                            أعد رفع الملف
-                          </span>
-                        </>
-                      )}
+                      <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+                      <span className="font-medium">
+                        الدفعة محفوظة للمعاينة
+                      </span>
+                      <span className="text-muted-foreground hidden sm:inline">
+                        • {formatNumber(result.validRecords)} صف صالح، ولا توجد تغييرات مطبقة على الشكاوى
+                      </span>
                     </div>
                     <div className="flex items-center gap-2 w-full sm:w-auto">
                       <Button
                         variant="outline"
                         className="flex-1 sm:flex-none"
-                        onClick={() => handleApprove("reject")}
-                        disabled={approving}
+                        onClick={resetForm}
                       >
                         <ClipboardX className="h-4 w-4" />
-                        رفض الملف
+                        رفع ملف آخر
                       </Button>
                       <Button
                         className="flex-1 sm:flex-none"
-                        onClick={() => handleApprove("approve")}
-                        disabled={!result.canApprove || approving}
+                        disabled
                       >
-                        {approving ? (
-                          <Loader2 className="h-4 w-4 animate-spin" />
-                        ) : (
-                          <CheckCircle2 className="h-4 w-4" />
-                        )}
-                        اعتماد وتحديث المؤشرات
+                        <CheckCircle2 className="h-4 w-4" />
+                        التأكيد في الجولة التالية
                       </Button>
                     </div>
                   </CardContent>
