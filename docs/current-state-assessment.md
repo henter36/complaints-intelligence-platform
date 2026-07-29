@@ -78,7 +78,9 @@
 - `POST /api/import/{batchId}/mapping`
 - `POST /api/import/{batchId}/reprocess`
 - `GET /api/import/{batchId}/errors`
-- `POST /api/import/approve`
+- `POST /api/import/{batchId}/confirm`
+- `POST /api/import/{batchId}/rollback`
+- `POST /api/import/approve` (compatibility wrapper that requires `batchId` in the request body and delegates confirmation to `/api/import/{batchId}/confirm`)
 - `POST /api/ai/analyze` (disabled)
 - `POST /api/ai/summary` (disabled)
 - `GET /api/ai/insights`

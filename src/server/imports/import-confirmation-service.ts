@@ -153,6 +153,43 @@ function parseText(value: unknown): string | null | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.hasOwn(value, key);
+}
+
+function snapshotInvalid(field: string, message: string): ImportConfirmationError {
+  return new ImportConfirmationError(
+    "ROLLBACK_SNAPSHOT_INVALID",
+    message,
+    409,
+    { field }
+  );
+}
+
+function restoreOptionalTextField(data: Record<string, unknown>, key: string): string | null | undefined {
+  if (!hasOwn(data, key)) return undefined;
+
+  const value = parseText(data[key]);
+  if (value === undefined) {
+    throw snapshotInvalid(key, `قيمة ${key} في لقطة التراجع غير صالحة`);
+  }
+
+  return value;
+}
+
+function restoreRequiredTextField(data: Record<string, unknown>, key: string): string {
+  if (!hasOwn(data, key)) {
+    throw snapshotInvalid(key, `الحقل ${key} مفقود من لقطة التراجع`);
+  }
+
+  const value = parseText(data[key]);
+  if (typeof value !== "string") {
+    throw snapshotInvalid(key, `قيمة ${key} في لقطة التراجع غير صالحة`);
+  }
+
+  return value;
+}
+
 function parseNormalizedRow(row: ConfirmationRow): NormalizedConfirmationRow {
   if (!row.normalizedData || typeof row.normalizedData !== "object" || Array.isArray(row.normalizedData)) {
     throw new ImportConfirmationError(
@@ -534,8 +571,54 @@ export async function confirmReadyImportBatch(
   }, { maxWait: 10_000, timeout: 60_000 });
 }
 
-function restoreDate(value: unknown): Date | null | undefined {
-  return parseDate(value);
+function restoreOptionalDateField(data: Record<string, unknown>, key: string): Date | null | undefined {
+  if (!hasOwn(data, key)) return undefined;
+
+  const value = parseDate(data[key]);
+  if (value === undefined) {
+    throw snapshotInvalid(key, `قيمة ${key} في لقطة التراجع غير صالحة`);
+  }
+
+  return value;
+}
+
+function restoreRequiredDateField(data: Record<string, unknown>, key: string): Date {
+  if (!hasOwn(data, key)) {
+    throw snapshotInvalid(key, `الحقل ${key} مفقود من لقطة التراجع`);
+  }
+
+  const value = parseDate(data[key]);
+  if (!(value instanceof Date)) {
+    throw snapshotInvalid(key, `قيمة ${key} في لقطة التراجع غير صالحة`);
+  }
+
+  return value;
+}
+
+function restoreRequiredStatusField(data: Record<string, unknown>, key: string): ComplaintStatus {
+  if (!hasOwn(data, key)) {
+    throw snapshotInvalid(key, `الحقل ${key} مفقود من لقطة التراجع`);
+  }
+
+  const status = parseStatus(data[key]);
+  if (!status) {
+    throw snapshotInvalid(key, `قيمة ${key} في لقطة التراجع غير صالحة`);
+  }
+
+  return status;
+}
+
+function restoreRequiredPriorityField(data: Record<string, unknown>, key: string): ComplaintPriority {
+  if (!hasOwn(data, key)) {
+    throw snapshotInvalid(key, `الحقل ${key} مفقود من لقطة التراجع`);
+  }
+
+  const priority = parsePriority(data[key]);
+  if (!priority) {
+    throw snapshotInvalid(key, `قيمة ${key} في لقطة التراجع غير صالحة`);
+  }
+
+  return priority;
 }
 
 function restoreSnapshotData(beforeData: Prisma.JsonValue | null): Prisma.ComplaintUncheckedUpdateManyInput {
@@ -545,23 +628,23 @@ function restoreSnapshotData(beforeData: Prisma.JsonValue | null): Prisma.Compla
 
   const data = beforeData as Record<string, unknown>;
   return {
-    sourceReference: parseText(data.sourceReference),
-    complaintDate: restoreDate(data.complaintDate),
-    receivedAt: restoreDate(data.receivedAt) ?? undefined,
-    dueDate: restoreDate(data.dueDate),
-    closedAt: restoreDate(data.closedAt),
-    status: parseStatus(data.status),
-    subject: parseText(data.subject) ?? undefined,
-    description: parseText(data.description),
-    region: parseText(data.region),
-    facility: parseText(data.facility),
-    department: parseText(data.department),
-    categoryId: parseText(data.categoryId),
-    classificationId: parseText(data.classificationId),
-    priority: parsePriority(data.priority),
-    severity: parsePriority(data.severity),
-    channel: parseText(data.channel),
-    resolution: parseText(data.resolution),
+    sourceReference: restoreOptionalTextField(data, "sourceReference"),
+    complaintDate: restoreOptionalDateField(data, "complaintDate"),
+    receivedAt: restoreRequiredDateField(data, "receivedAt"),
+    dueDate: restoreOptionalDateField(data, "dueDate"),
+    closedAt: restoreOptionalDateField(data, "closedAt"),
+    status: restoreRequiredStatusField(data, "status"),
+    subject: restoreRequiredTextField(data, "subject"),
+    description: restoreOptionalTextField(data, "description"),
+    region: restoreOptionalTextField(data, "region"),
+    facility: restoreOptionalTextField(data, "facility"),
+    department: restoreOptionalTextField(data, "department"),
+    categoryId: restoreOptionalTextField(data, "categoryId"),
+    classificationId: restoreOptionalTextField(data, "classificationId"),
+    priority: restoreRequiredPriorityField(data, "priority"),
+    severity: restoreRequiredPriorityField(data, "severity"),
+    channel: restoreOptionalTextField(data, "channel"),
+    resolution: restoreOptionalTextField(data, "resolution"),
     version: { increment: 1 },
   };
 }
@@ -614,10 +697,23 @@ export async function rollbackConfirmedImportBatch(
       }
 
       if (snapshot.changeType === ImportChangeType.CREATE) {
-        await tx.complaint.updateMany({
-          where: { id: current.id, version: snapshot.versionAfter, importBatchId: batchId },
+        const result = await tx.complaint.updateMany({
+          where: { id: current.id, version: snapshot.versionAfter, importBatchId: batchId, isDeleted: false },
           data: { isDeleted: true, deletedAt: rolledBackAt, version: { increment: 1 } },
         });
+        if (result.count !== 1) {
+          throw new ImportConfirmationError(
+            "ROLLBACK_CREATE_CONFLICT",
+            "تعذر التراجع عن الشكوى المنشأة بسبب تغيرها أو عدم تطابق دفعة الاستيراد",
+            409,
+            {
+              complaintId: current.id,
+              rowId: snapshot.importBatchRowId,
+              expectedVersion: snapshot.versionAfter,
+            }
+          );
+        }
+
         await tx.importBatchRow.update({ where: { id: snapshot.importBatchRowId }, data: { rolledBackAt } });
         await writeAuditLog(tx, {
           action: "IMPORT_COMPLAINT_CREATION_REVERSED",
