@@ -4,7 +4,6 @@ import {
   ImportBatchStatus,
   ImportChangeType,
   ImportRowAction,
-  ImportRowValidationStatus,
   type Complaint,
   type ImportBatchRow,
   type Prisma,
@@ -348,6 +347,41 @@ async function applyNewRow(
   });
 }
 
+function assignIfDefined<T extends keyof Prisma.ComplaintUncheckedUpdateManyInput>(
+  data: Prisma.ComplaintUncheckedUpdateManyInput,
+  field: T,
+  value: Prisma.ComplaintUncheckedUpdateManyInput[T] | undefined
+): void {
+  if (value !== undefined) {
+    data[field] = value;
+  }
+}
+
+function assignImportUpdateFields(
+  data: Prisma.ComplaintUncheckedUpdateManyInput,
+  current: Complaint,
+  normalized: NormalizedConfirmationRow,
+  taxonomy: { categoryId?: string | null; classificationId?: string | null }
+): void {
+  assignIfDefined(data, "sourceReference", normalized.sourceReference);
+  assignIfDefined(data, "complaintDate", normalized.complaintDate);
+  assignIfDefined(data, "receivedAt", normalized.receivedAt === null ? current.receivedAt : normalized.receivedAt);
+  assignIfDefined(data, "dueDate", normalized.dueDate);
+  assignIfDefined(data, "closedAt", normalized.closedAt);
+  assignIfDefined(data, "status", normalized.status === null ? current.status : normalized.status);
+  assignIfDefined(data, "subject", normalized.subject || undefined);
+  assignIfDefined(data, "description", normalized.description);
+  assignIfDefined(data, "region", normalized.region);
+  assignIfDefined(data, "facility", normalized.facility);
+  assignIfDefined(data, "department", normalized.department);
+  assignIfDefined(data, "categoryId", taxonomy.categoryId);
+  assignIfDefined(data, "classificationId", taxonomy.classificationId);
+  assignIfDefined(data, "priority", normalized.priority === null ? current.priority : normalized.priority);
+  assignIfDefined(data, "severity", normalized.priority === null ? current.severity : normalized.priority);
+  assignIfDefined(data, "channel", normalized.channel);
+  assignIfDefined(data, "resolution", normalized.resolution);
+}
+
 function buildUpdateData(
   current: Complaint,
   normalized: NormalizedConfirmationRow,
@@ -357,25 +391,7 @@ function buildUpdateData(
     version: { increment: 1 },
   };
 
-  if (normalized.sourceReference !== undefined) data.sourceReference = normalized.sourceReference;
-  if (normalized.complaintDate !== undefined) data.complaintDate = normalized.complaintDate;
-  if (normalized.receivedAt !== undefined) data.receivedAt = normalized.receivedAt ?? current.receivedAt;
-  if (normalized.dueDate !== undefined) data.dueDate = normalized.dueDate;
-  if (normalized.closedAt !== undefined) data.closedAt = normalized.closedAt;
-  if (normalized.status !== undefined) data.status = normalized.status ?? current.status;
-  if (normalized.subject !== undefined && normalized.subject) data.subject = normalized.subject;
-  if (normalized.description !== undefined) data.description = normalized.description;
-  if (normalized.region !== undefined) data.region = normalized.region;
-  if (normalized.facility !== undefined) data.facility = normalized.facility;
-  if (normalized.department !== undefined) data.department = normalized.department;
-  if (taxonomy.categoryId !== undefined) data.categoryId = taxonomy.categoryId;
-  if (taxonomy.classificationId !== undefined) data.classificationId = taxonomy.classificationId;
-  if (normalized.priority !== undefined) {
-    data.priority = normalized.priority ?? current.priority;
-    data.severity = normalized.priority ?? current.severity;
-  }
-  if (normalized.channel !== undefined) data.channel = normalized.channel;
-  if (normalized.resolution !== undefined) data.resolution = normalized.resolution;
+  assignImportUpdateFields(data, current, normalized, taxonomy);
 
   assertClosedAtMatchesStatus((data.status as ComplaintStatus | undefined) ?? current.status, (data.closedAt as Date | null | undefined) ?? current.closedAt);
   return data;
