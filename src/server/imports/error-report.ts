@@ -8,22 +8,42 @@ type ErrorReportRow = {
   validationWarnings: unknown;
 };
 
+export function toSafeMessage(value: unknown): string {
+  if (typeof value === "string") return value;
+
+  if (
+    typeof value === "number" ||
+    typeof value === "boolean" ||
+    typeof value === "bigint"
+  ) {
+    return String(value);
+  }
+
+  if (value instanceof Error) return value.message;
+
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    "message" in value &&
+    typeof value.message === "string"
+  ) {
+    return value.message;
+  }
+
+  return "";
+}
+
 function toMessages(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
-  return value.map((item) => {
-    if (item && typeof item === "object" && "message" in item) {
-      return String((item as { message?: unknown }).message ?? "");
-    }
-    return String(item);
-  }).filter(Boolean);
+  return value.map(toSafeMessage).filter(Boolean);
 }
 
 function escapeCsv(value: unknown): string {
-  let text = String(value ?? "");
+  let text = toSafeMessage(value);
   if (/^[=+\-@]/.test(text.trim())) {
     text = `'${text}`;
   }
-  return `"${text.replace(/"/g, '""')}"`;
+  return `"${text.replaceAll("\"", "\"\"")}"`;
 }
 
 export function buildImportErrorCsv(rows: ErrorReportRow[]): string {

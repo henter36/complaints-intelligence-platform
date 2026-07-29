@@ -18,14 +18,19 @@ export function toImportErrorResponse(error: unknown): {
     return null;
   }
 
+  const responseError: { code: string; message: string } & Record<string, unknown> = {
+    code: error.code,
+    message: error.message,
+  };
+
+  if (error.details) {
+    Object.assign(responseError, error.details);
+  }
+
   return {
     status: error.status,
     body: {
-      error: {
-        code: error.code,
-        message: error.message,
-        ...(error.details ?? {}),
-      },
+      error: responseError,
     },
   };
 }

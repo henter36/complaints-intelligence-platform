@@ -8,7 +8,11 @@ import {
 } from "@prisma/client";
 import { db } from "@/lib/db";
 import { writeAuditLog, AUDIT_ACTOR_SINGLE_ADMIN } from "@/server/audit/audit-log-service";
-import { resolveComplaintIdentity, type ComplaintIdentityMatch } from "@/server/complaints/identity-service";
+import {
+  buildComplaintFingerprint,
+  resolveComplaintIdentity,
+  type ComplaintIdentityMatch,
+} from "@/server/complaints/identity-service";
 import {
   assertSupportedExcelUpload,
   deleteStoredImportFile,
@@ -27,6 +31,14 @@ import { validateNormalizedComplaintRow } from "./row-validation";
 import { parseXlsxWorkbook } from "./xlsx-parser";
 
 const WRITE_CHUNK_SIZE = 500;
+export const DUPLICATE_BLOCKING_IMPORT_STATUSES = [
+  ImportBatchStatus.UPLOADED,
+  ImportBatchStatus.PARSING,
+  ImportBatchStatus.VALIDATED,
+  ImportBatchStatus.READY_FOR_CONFIRMATION,
+  ImportBatchStatus.CONFIRMING,
+  ImportBatchStatus.CONFIRMED,
+] as const;
 const REPROCESSABLE_STATUSES = new Set<ImportBatchStatus>([
   ImportBatchStatus.UPLOADED,
   ImportBatchStatus.VALIDATED,
@@ -54,6 +66,10 @@ type ProcessedImportRow = {
   matchedComplaintId: string | null;
 };
 
+type ComplaintIndexEntry =
+  | { kind: "match"; complaint: Complaint }
+  | { kind: "ambiguous"; complaintIds: string[] };
+
 export type ImportUploadResult = {
   batchId: string;
   fileName: string;
@@ -76,7 +92,9 @@ export type ImportUploadResult = {
 
 function parsePeriodType(value?: string | null): PeriodType {
   const normalized = (value ?? "monthly").toUpperCase();
-  if (normalized in PeriodType) return PeriodType[normalized as keyof typeof PeriodType];
+  if (Object.prototype.hasOwnProperty.call(PeriodType, normalized)) {
+    return PeriodType[normalized as keyof typeof PeriodType];
+  }
   throw new ImportValidationError("INVALID_IMPORT_PERIOD", "نوع الفترة غير مدعوم", 400);
 }
 
@@ -96,40 +114,90 @@ function toJsonValue(value: unknown): Prisma.InputJsonValue {
   })) as Prisma.InputJsonValue;
 }
 
-function toDateKey(date?: Date | null): string {
-  if (!date) return "";
-  return date.toISOString().slice(0, 10);
+function toOptionalDateKey(value: Date | string | null | undefined): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return date.toISOString();
 }
 
 function identityKey(identity: ComplaintIdentityMatch): string {
   return `${identity.strategy}:${identity.value}`;
 }
 
-function complaintIdentityKey(complaint: Pick<Complaint, "externalId" | "sourceReference" | "complaintDate" | "region" | "facility" | "department" | "subject">): string {
-  return identityKey(resolveComplaintIdentity({
-    externalId: complaint.externalId,
-    sourceReference: complaint.sourceReference,
+function safeIdentityKey(input: {
+  externalId?: string | null;
+  sourceReference?: string | null;
+  complaintDate?: Date | string | null;
+  region?: string | null;
+  facility?: string | null;
+  department?: string | null;
+  subject?: string | null;
+}): string {
+  return identityKey(resolveComplaintIdentity(input));
+}
+
+export function complaintCandidateIdentityKeys(complaint: Pick<Complaint, "externalId" | "sourceReference" | "complaintDate" | "region" | "facility" | "department" | "subject">): string[] {
+  const keys: string[] = [];
+
+  if (complaint.externalId) {
+    keys.push(safeIdentityKey({ externalId: complaint.externalId }));
+  }
+
+  if (complaint.sourceReference && complaint.complaintDate) {
+    keys.push(safeIdentityKey({
+      sourceReference: complaint.sourceReference,
+      complaintDate: complaint.complaintDate,
+    }));
+  }
+
+  keys.push(safeIdentityKey({
     complaintDate: complaint.complaintDate,
     region: complaint.region,
     facility: complaint.facility,
     department: complaint.department,
     subject: complaint.subject,
   }));
+  keys.push(`fingerprint:${buildComplaintFingerprint({
+    complaintDate: complaint.complaintDate,
+    region: complaint.region,
+    facility: complaint.facility,
+    department: complaint.department,
+    subject: complaint.subject,
+  })}`);
+
+  return [...new Set(keys)];
 }
 
-function normalizedIdentityKey(row: NormalizedComplaintRow): string {
-  return identityKey(resolveComplaintIdentity({
-    externalId: row.externalId,
-    sourceReference: row.sourceReference,
-    complaintDate: row.complaintDate ?? row.receivedAt,
+export function normalizedCandidateIdentityKeys(row: NormalizedComplaintRow): string[] {
+  const complaintDate = row.complaintDate ?? row.receivedAt;
+  const keys: string[] = [];
+
+  if (row.externalId) keys.push(safeIdentityKey({ externalId: row.externalId }));
+  if (row.sourceReference && complaintDate) {
+    keys.push(safeIdentityKey({ sourceReference: row.sourceReference, complaintDate }));
+  }
+
+  keys.push(safeIdentityKey({
+    complaintDate,
     region: row.region,
     facility: row.facility,
     department: row.department,
     subject: row.subject,
   }));
+  keys.push(`fingerprint:${buildComplaintFingerprint({
+    complaintDate,
+    region: row.region,
+    facility: row.facility,
+    department: row.department,
+    subject: row.subject,
+  })}`);
+
+  return [...new Set(keys)];
 }
 
-function hasMeaningfulChange(row: NormalizedComplaintRow, complaint: Complaint): boolean {
+export function hasMeaningfulChange(row: NormalizedComplaintRow, complaint: Complaint): boolean {
   const comparisons: Array<[unknown, unknown]> = [
     [row.subject, complaint.subject],
     [row.description, complaint.description],
@@ -140,20 +208,62 @@ function hasMeaningfulChange(row: NormalizedComplaintRow, complaint: Complaint):
     [row.department, complaint.department],
     [row.channel, complaint.channel],
     [row.resolution, complaint.resolution],
-    [toDateKey(row.complaintDate), toDateKey(complaint.complaintDate)],
-    [toDateKey(row.receivedAt), toDateKey(complaint.receivedAt)],
-    [toDateKey(row.dueDate), toDateKey(complaint.dueDate)],
-    [toDateKey(row.closedAt), toDateKey(complaint.closedAt)],
+    [toOptionalDateKey(row.complaintDate), toOptionalDateKey(complaint.complaintDate)],
+    [toOptionalDateKey(row.receivedAt), toOptionalDateKey(complaint.receivedAt)],
+    [toOptionalDateKey(row.dueDate), toOptionalDateKey(complaint.dueDate)],
+    [toOptionalDateKey(row.closedAt), toOptionalDateKey(complaint.closedAt)],
   ];
 
   return comparisons.some(([left, right]) => left !== undefined && left !== right);
 }
 
-async function findExistingComplaints(rows: NormalizedComplaintRow[]): Promise<Map<string, Complaint>> {
+function resolveValidationStatus(
+  errors: RowMessage[],
+  warnings: RowMessage[]
+): ImportRowValidationStatus {
+  if (errors.length > 0) return ImportRowValidationStatus.INVALID;
+  if (warnings.length > 0) return ImportRowValidationStatus.WARNING;
+  return ImportRowValidationStatus.VALID;
+}
+
+function addComplaintIndexEntry(
+  index: Map<string, ComplaintIndexEntry>,
+  key: string,
+  complaint: Complaint
+): void {
+  const current = index.get(key);
+  if (!current) {
+    index.set(key, { kind: "match", complaint });
+    return;
+  }
+
+  if (current.kind === "match" && current.complaint.id !== complaint.id) {
+    index.set(key, { kind: "ambiguous", complaintIds: [current.complaint.id, complaint.id] });
+    return;
+  }
+
+  if (current.kind === "ambiguous" && !current.complaintIds.includes(complaint.id)) {
+    current.complaintIds.push(complaint.id);
+  }
+}
+
+async function findExistingComplaints(rows: NormalizedComplaintRow[]): Promise<Map<string, ComplaintIndexEntry>> {
   const externalIds = rows.map((row) => row.externalId).filter((value): value is string => Boolean(value));
   const sourceReferences = rows.map((row) => row.sourceReference).filter((value): value is string => Boolean(value));
+  const fingerprintCandidateFilters = rows
+    .filter((row) => !row.externalId && !row.sourceReference && row.subject)
+    .map((row) => ({
+      subject: row.subject,
+      ...(row.region ? { region: row.region } : {}),
+      ...(row.facility ? { facility: row.facility } : {}),
+      ...(row.department ? { department: row.department } : {}),
+    }));
 
-  if (externalIds.length === 0 && sourceReferences.length === 0) {
+  if (
+    externalIds.length === 0 &&
+    sourceReferences.length === 0 &&
+    fingerprintCandidateFilters.length === 0
+  ) {
     return new Map();
   }
 
@@ -163,13 +273,16 @@ async function findExistingComplaints(rows: NormalizedComplaintRow[]): Promise<M
       OR: [
         ...(externalIds.length ? [{ externalId: { in: externalIds } }] : []),
         ...(sourceReferences.length ? [{ sourceReference: { in: sourceReferences } }] : []),
+        ...fingerprintCandidateFilters,
       ],
     },
   });
 
-  const result = new Map<string, Complaint>();
+  const result = new Map<string, ComplaintIndexEntry>();
   for (const complaint of complaints) {
-    result.set(complaintIdentityKey(complaint), complaint);
+    for (const key of complaintCandidateIdentityKeys(complaint)) {
+      addComplaintIndexEntry(result, key, complaint);
+    }
   }
 
   return result;
@@ -178,7 +291,7 @@ async function findExistingComplaints(rows: NormalizedComplaintRow[]): Promise<M
 function classifyRows(input: {
   rawRows: RawImportRow[];
   normalizedRows: Array<{ row: NormalizedComplaintRow; errors: RowMessage[]; warnings: RowMessage[] }>;
-  existingByIdentity: Map<string, Complaint>;
+  existingByIdentity: Map<string, ComplaintIndexEntry>;
 }): ProcessedImportRow[] {
   const seenImportIdentities = new Map<string, number>();
   const seenMatchedComplaints = new Map<string, number>();
@@ -190,10 +303,9 @@ function classifyRows(input: {
     const normalized = normalizedResult.row;
     let action: ImportRowAction = ImportRowAction.REJECT;
     let matchedComplaintId: string | null = null;
-    let identity: string | null = null;
 
     if (errors.length === 0) {
-      identity = normalizedIdentityKey(normalized);
+      const identity = normalizedCandidateIdentityKeys(normalized)[0];
       const firstRow = seenImportIdentities.get(identity);
       if (firstRow) {
         action = ImportRowAction.DUPLICATE;
@@ -202,11 +314,20 @@ function classifyRows(input: {
           code: "DUPLICATE_ROW_IN_FILE",
           message: `الصف يكرر صفًا سابقًا في الملف: ${firstRow}`,
         });
-      } else {
-        seenImportIdentities.set(identity, rawRow.rowNumber);
-        const existing = input.existingByIdentity.get(identity);
-        if (existing) {
-          const firstMatchedRow = seenMatchedComplaints.get(existing.id);
+        } else {
+          seenImportIdentities.set(identity, rawRow.rowNumber);
+        const existing = normalizedCandidateIdentityKeys(normalized)
+          .map((key) => input.existingByIdentity.get(key))
+          .find(Boolean);
+        if (existing?.kind === "ambiguous") {
+          action = ImportRowAction.DUPLICATE;
+          errors.push({
+            field: "externalId",
+            code: "AMBIGUOUS_COMPLAINT_IDENTITY",
+            message: "هوية الصف تطابق أكثر من شكوى قائمة",
+          });
+        } else if (existing?.kind === "match") {
+          const firstMatchedRow = seenMatchedComplaints.get(existing.complaint.id);
           if (firstMatchedRow) {
             action = ImportRowAction.DUPLICATE;
             errors.push({
@@ -215,9 +336,9 @@ function classifyRows(input: {
               message: `يوجد صف آخر يستهدف الشكوى نفسها: ${firstMatchedRow}`,
             });
           } else {
-            seenMatchedComplaints.set(existing.id, rawRow.rowNumber);
-            matchedComplaintId = existing.id;
-            action = hasMeaningfulChange(normalized, existing)
+            seenMatchedComplaints.set(existing.complaint.id, rawRow.rowNumber);
+            matchedComplaintId = existing.complaint.id;
+            action = hasMeaningfulChange(normalized, existing.complaint)
               ? ImportRowAction.UPDATE
               : ImportRowAction.NO_CHANGE;
           }
@@ -231,11 +352,7 @@ function classifyRows(input: {
       action = ImportRowAction.REJECT;
     }
 
-    const validationStatus = errors.length > 0
-      ? ImportRowValidationStatus.INVALID
-      : warnings.length > 0
-        ? ImportRowValidationStatus.WARNING
-        : ImportRowValidationStatus.VALID;
+    const validationStatus = resolveValidationStatus(errors, warnings);
 
     return {
       rowNumber: rawRow.rowNumber,
@@ -301,14 +418,13 @@ async function processWorkbookPreview(buffer: Buffer, mapping?: ColumnMapping | 
 }
 
 async function persistPreviewRows(
-  tx: Prisma.TransactionClient,
   batchId: string,
   processedRows: ProcessedImportRow[]
 ): Promise<void> {
-  await tx.importBatchRow.deleteMany({ where: { importBatchId: batchId } });
+  await db.importBatchRow.deleteMany({ where: { importBatchId: batchId } });
   for (let index = 0; index < processedRows.length; index += WRITE_CHUNK_SIZE) {
     const chunk = processedRows.slice(index, index + WRITE_CHUNK_SIZE);
-    await tx.importBatchRow.createMany({
+    await db.importBatchRow.createMany({
       data: chunk.map((row) => ({
         importBatchId: batchId,
         rowNumber: row.rowNumber,
@@ -323,6 +439,80 @@ async function persistPreviewRows(
       })),
     });
   }
+}
+
+async function cleanupPreviewRows(batchId: string): Promise<void> {
+  await db.importBatchRow.deleteMany({ where: { importBatchId: batchId } });
+}
+
+async function markImportBatchFailed(
+  batchId: string,
+  actor: string,
+  error: unknown
+): Promise<void> {
+  await db.importBatch.update({
+    where: { id: batchId },
+    data: {
+      status: ImportBatchStatus.FAILED,
+      failureCode: error instanceof ImportValidationError ? error.code : "IMPORT_PROCESSING_FAILED",
+      notes: error instanceof Error ? error.message : "فشلت معالجة ملف الاستيراد",
+      processingCompletedAt: new Date(),
+    },
+  });
+  await writeAuditLog(db, {
+    action: "IMPORT_PARSING_FAILED",
+    entityType: "ImportBatch",
+    entityId: batchId,
+    actor,
+  });
+}
+
+async function finalizeReadyImportBatch(input: {
+  batchId: string;
+  actor: string;
+  processed: ProcessedWorkbook;
+  includeValidatedTransition: boolean;
+  auditAction: "IMPORT_REPROCESSED" | "IMPORT_VALIDATION_COMPLETED";
+}): Promise<void> {
+  await db.$transaction(async (tx) => {
+    if (input.includeValidatedTransition) {
+      await tx.importBatch.update({
+        where: { id: input.batchId },
+        data: {
+          ...input.processed.counters,
+          status: ImportBatchStatus.VALIDATED,
+          validatedAt: new Date(),
+          selectedSheet: input.processed.selectedSheet,
+          columnMapping: toJsonValue(input.processed.columnMapping),
+        },
+      });
+    }
+
+    await tx.importBatch.update({
+      where: { id: input.batchId },
+      data: {
+        ...input.processed.counters,
+        status: ImportBatchStatus.READY_FOR_CONFIRMATION,
+        validatedAt: new Date(),
+        processingCompletedAt: new Date(),
+        selectedSheet: input.processed.selectedSheet,
+        columnMapping: toJsonValue(input.processed.columnMapping),
+      },
+    });
+    await writeAuditLog(tx, {
+      action: input.auditAction,
+      entityType: "ImportBatch",
+      entityId: input.batchId,
+      actor: input.actor,
+      metadata: toJsonValue(input.processed.counters),
+    });
+    await writeAuditLog(tx, {
+      action: "IMPORT_READY_FOR_CONFIRMATION",
+      entityType: "ImportBatch",
+      entityId: input.batchId,
+      actor: input.actor,
+    });
+  });
 }
 
 function toImportUploadResult(
@@ -387,35 +577,37 @@ export async function processUploadedImportFile(input: UploadInput): Promise<Imp
   let batchId: string | null = null;
 
   try {
-    const duplicateBatch = await db.importBatch.findFirst({
-      where: {
-        fileHash: storedFile.fileHash,
-        status: { in: [ImportBatchStatus.CONFIRMED, ImportBatchStatus.READY_FOR_CONFIRMATION] },
-      },
-      select: { id: true },
-    });
-
-    if (duplicateBatch) {
-      throw new ImportValidationError("DUPLICATE_IMPORT_FILE", "سبق رفع هذا الملف", 409, {
-        existingBatchId: duplicateBatch.id,
-      });
-    }
-
     const now = new Date();
-    const batch = await db.importBatch.create({
-      data: {
-        fileName: storedFile.fileName,
-        originalFileName: input.file.name,
-        fileHash: storedFile.fileHash,
-        fileSize: storedFile.fileSize,
-        mimeType: input.file.type || null,
-        periodType: parsePeriodType(input.periodType),
-        periodStart: parseDate(input.periodStart, now),
-        periodEnd: parseDate(input.periodEnd, now),
-        status: ImportBatchStatus.UPLOADED,
-        createdBy: actor,
-        storageKey: storedFile.storageKey,
-      },
+    const batch = await db.$transaction(async (tx) => {
+      const duplicateBatch = await tx.importBatch.findFirst({
+        where: {
+          fileHash: storedFile.fileHash,
+          status: { in: [...DUPLICATE_BLOCKING_IMPORT_STATUSES] },
+        },
+        select: { id: true },
+      });
+
+      if (duplicateBatch) {
+        throw new ImportValidationError("DUPLICATE_IMPORT_FILE", "سبق رفع هذا الملف", 409, {
+          existingBatchId: duplicateBatch.id,
+        });
+      }
+
+      return tx.importBatch.create({
+        data: {
+          fileName: storedFile.fileName,
+          originalFileName: input.file.name,
+          fileHash: storedFile.fileHash,
+          fileSize: storedFile.fileSize,
+          mimeType: input.file.type || null,
+          periodType: parsePeriodType(input.periodType),
+          periodStart: parseDate(input.periodStart, now),
+          periodEnd: parseDate(input.periodEnd, now),
+          status: ImportBatchStatus.UPLOADED,
+          createdBy: actor,
+          storageKey: storedFile.storageKey,
+        },
+      });
     });
     batchId = batch.id;
 
@@ -439,59 +631,21 @@ export async function processUploadedImportFile(input: UploadInput): Promise<Imp
     });
 
     const processed = await processWorkbookPreview(buffer);
+    await persistPreviewRows(batch.id, processed.processedRows);
 
-    await db.$transaction(async (tx) => {
-      await persistPreviewRows(tx, batch.id, processed.processedRows);
-      await tx.importBatch.update({
-        where: { id: batch.id },
-        data: {
-          ...processed.counters,
-          status: ImportBatchStatus.VALIDATED,
-          validatedAt: new Date(),
-          selectedSheet: processed.selectedSheet,
-          columnMapping: toJsonValue(processed.columnMapping),
-        },
-      });
-      await tx.importBatch.update({
-        where: { id: batch.id },
-        data: {
-          status: ImportBatchStatus.READY_FOR_CONFIRMATION,
-          processingCompletedAt: new Date(),
-        },
-      });
-      await writeAuditLog(tx, {
-        action: "IMPORT_VALIDATION_COMPLETED",
-        entityType: "ImportBatch",
-        entityId: batch.id,
-        actor,
-        metadata: toJsonValue(processed.counters),
-      });
-      await writeAuditLog(tx, {
-        action: "IMPORT_READY_FOR_CONFIRMATION",
-        entityType: "ImportBatch",
-        entityId: batch.id,
-        actor,
-      });
+    await finalizeReadyImportBatch({
+      batchId: batch.id,
+      actor,
+      processed,
+      includeValidatedTransition: true,
+      auditAction: "IMPORT_VALIDATION_COMPLETED",
     });
 
     return toImportUploadResult(batch.id, input.file.name, processed);
   } catch (error) {
     if (batchId) {
-      await db.importBatch.update({
-        where: { id: batchId },
-        data: {
-          status: ImportBatchStatus.FAILED,
-          failureCode: error instanceof ImportValidationError ? error.code : "IMPORT_PROCESSING_FAILED",
-          notes: error instanceof Error ? error.message : "فشلت معالجة ملف الاستيراد",
-          processingCompletedAt: new Date(),
-        },
-      });
-      await writeAuditLog(db, {
-        action: "IMPORT_PARSING_FAILED",
-        entityType: "ImportBatch",
-        entityId: batchId,
-        actor,
-      });
+      await cleanupPreviewRows(batchId);
+      await markImportBatchFailed(batchId, actor, error);
     } else {
       await deleteStoredImportFile(storedFile.storageKey);
     }
@@ -514,7 +668,6 @@ export async function reprocessImportBatch(batchId: string, mapping?: ColumnMapp
 
   const buffer = await readStoredImportFile(batch.storageKey);
   const actor = AUDIT_ACTOR_SINGLE_ADMIN;
-  const processed = await processWorkbookPreview(buffer, mapping ?? (batch.columnMapping as ColumnMapping | null));
 
   await db.importBatch.update({
     where: { id: batchId },
@@ -527,27 +680,22 @@ export async function reprocessImportBatch(batchId: string, mapping?: ColumnMapp
     },
   });
 
-  await db.$transaction(async (tx) => {
-    await persistPreviewRows(tx, batchId, processed.processedRows);
-    await tx.importBatch.update({
-      where: { id: batchId },
-      data: {
-        ...processed.counters,
-        status: ImportBatchStatus.READY_FOR_CONFIRMATION,
-        validatedAt: new Date(),
-        processingCompletedAt: new Date(),
-        selectedSheet: processed.selectedSheet,
-        columnMapping: toJsonValue(processed.columnMapping),
-      },
-    });
-    await writeAuditLog(tx, {
-      action: "IMPORT_REPROCESSED",
-      entityType: "ImportBatch",
-      entityId: batchId,
+  let processed: ProcessedWorkbook;
+  try {
+    processed = await processWorkbookPreview(buffer, mapping ?? (batch.columnMapping as ColumnMapping | null));
+    await persistPreviewRows(batchId, processed.processedRows);
+    await finalizeReadyImportBatch({
+      batchId,
       actor,
-      metadata: toJsonValue(processed.counters),
+      processed,
+      includeValidatedTransition: false,
+      auditAction: "IMPORT_REPROCESSED",
     });
-  });
+  } catch (error) {
+    await cleanupPreviewRows(batchId);
+    await markImportBatchFailed(batchId, actor, error);
+    throw error;
+  }
 
   return toImportUploadResult(batchId, batch.originalFileName, processed);
 }

@@ -106,6 +106,20 @@ interface UploadResult {
   canApprove: boolean;
 }
 
+export function mappingContainsComplaintNumber(
+  mapping: Record<string, string> | undefined
+): boolean {
+  return Object.values(mapping ?? {}).includes("externalId");
+}
+
+export function normalizeUploadResultPayload(json: UploadResult): UploadResult {
+  return {
+    ...json,
+    hasComplaintNumber: mappingContainsComplaintNumber(json.columnMapping),
+    unmappedColumns: json.unmappedColumns ?? [],
+  };
+}
+
 // Workflow stages
 const STAGES = [
   { key: "upload", label: "رفع الملف", icon: Upload },
@@ -374,11 +388,7 @@ export function ImportCenter() {
       if (!res.ok) {
         throw new Error(json.error?.message || "فشل في رفع الملف");
       }
-      setResult({
-        ...json,
-        hasComplaintNumber: Boolean(json.columnMapping?.["رقم الشكوى"]),
-        unmappedColumns: [],
-      });
+      setResult(normalizeUploadResultPayload(json));
       setUploadProgress(100);
       toast({
         title: "تمت معالجة الملف بنجاح",

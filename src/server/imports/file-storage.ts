@@ -30,6 +30,20 @@ type ZipEntryWithSizes = JSZip.JSZipObject & {
   };
 };
 
+export function getRequiredUncompressedSize(entry: ZipEntryWithSizes): number {
+  const size = entry._data?.uncompressedSize;
+
+  if (typeof size !== "number" || !Number.isFinite(size) || size < 0) {
+    throw new ImportValidationError(
+      "IMPORT_ZIP_SIZE_UNKNOWN",
+      "تعذر التحقق من حجم ملف Excel بأمان",
+      422
+    );
+  }
+
+  return size;
+}
+
 export function getImportLimits() {
   return {
     maxFileSizeBytes: env.importMaxFileSizeMb * 1024 * 1024,
@@ -100,11 +114,15 @@ export async function validateXlsxZip(buffer: Buffer): Promise<JSZip> {
       throw new ImportValidationError("IMPORT_ZIP_SLIP_DETECTED", "ملف Excel يحتوي مسارًا داخليًا غير آمن", 422);
     }
 
+    if (entry.dir) {
+      continue;
+    }
+
     if (entry.name === "xl/vbaProject.bin" || entry.name.startsWith("xl/externalLinks/")) {
       throw new ImportValidationError("IMPORT_XLSX_ACTIVE_CONTENT", "ملف Excel يحتوي محتوى نشطًا أو روابط خارجية غير مسموحة", 422);
     }
 
-    uncompressedSize += entry._data?.uncompressedSize ?? 0;
+    uncompressedSize += getRequiredUncompressedSize(entry);
   }
 
   const uncompressedLimit = Math.min(

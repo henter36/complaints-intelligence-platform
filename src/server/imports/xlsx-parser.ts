@@ -22,6 +22,12 @@ type CellValue = {
   formula: boolean;
 };
 
+type ParsedWorksheet = {
+  worksheet?: { sheetData?: { row?: Array<Record<string, unknown>> | Record<string, unknown> } };
+};
+
+type WorksheetCache = Map<string, ParsedWorksheet>;
+
 const parser = new XMLParser({
   ignoreAttributes: false,
   attributeNamePrefix: "",
@@ -105,11 +111,25 @@ function extractText(value: unknown): string {
   return "";
 }
 
+function cellValueToText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (
+    typeof value === "number" ||
+    typeof value === "boolean" ||
+    typeof value === "bigint"
+  ) {
+    return String(value);
+  }
+  return "";
+}
+
 function columnIndex(cellReference: string): number {
   const letters = /^[A-Z]+/i.exec(cellReference)?.[0] ?? "";
   let index = 0;
   for (const letter of letters.toUpperCase()) {
-    index = index * 26 + letter.charCodeAt(0) - 64;
+    const codePoint = letter.codePointAt(0);
+    if (codePoint === undefined) return -1;
+    index = index * 26 + codePoint - 64;
   }
   return index - 1;
 }
@@ -133,34 +153,49 @@ function readCellValue(cell: Record<string, unknown>, sharedStrings: string[]): 
   }
 
   if (type === "str") {
-    return { formula, value: String(rawValue) };
+    return { formula, value: cellValueToText(rawValue) };
   }
 
   const numericValue = Number(rawValue);
+  const textValue = cellValueToText(rawValue);
   return {
     formula,
-    value: Number.isFinite(numericValue) && String(rawValue).trim() !== "" ? numericValue : String(rawValue),
+    value: Number.isFinite(numericValue) && textValue.trim() !== "" ? numericValue : textValue,
   };
 }
 
-async function readSheetRows(zip: JSZip, sheet: SheetDescriptor, sharedStrings: string[]): Promise<Array<Record<number, CellValue>>> {
-  const worksheet = await parseXml<{
-    worksheet?: { sheetData?: { row?: Array<Record<string, unknown>> | Record<string, unknown> } };
-  }>(zip, sheet.path);
+async function readParsedWorksheet(
+  zip: JSZip,
+  sheet: SheetDescriptor,
+  cache: WorksheetCache
+): Promise<ParsedWorksheet> {
+  const cached = cache.get(sheet.path);
+  if (cached) return cached;
 
+  const worksheet = await parseXml<ParsedWorksheet>(zip, sheet.path);
+  cache.set(sheet.path, worksheet);
+  return worksheet;
+}
+
+function readSheetRowsFromWorksheet(
+  worksheet: ParsedWorksheet,
+  sharedStrings: string[],
+  enforceLimits: boolean
+): Array<Record<number, CellValue>> {
   const limits = getImportLimits();
   const rows = toArray(worksheet.worksheet?.sheetData?.row);
-  if (rows.length - 1 > limits.maxRows) {
+  if (enforceLimits && rows.length - 1 > limits.maxRows) {
     throw new ImportValidationError("IMPORT_TOO_MANY_ROWS", "عدد الصفوف يتجاوز الحد المسموح", 422);
   }
 
   return rows.map((row) => {
     const cells: Record<number, CellValue> = {};
     for (const cell of toArray(row.c as Record<string, unknown> | Record<string, unknown>[] | undefined)) {
-      const index = columnIndex(String(cell.r ?? ""));
-      if (index >= limits.maxColumns) {
+      const index = columnIndex(cellValueToText(cell.r));
+      if (enforceLimits && index >= limits.maxColumns) {
         throw new ImportValidationError("IMPORT_TOO_MANY_COLUMNS", "عدد الأعمدة يتجاوز الحد المسموح", 422);
       }
+      if (index < 0) continue;
       cells[index] = readCellValue(cell, sharedStrings);
     }
     return cells;
@@ -168,10 +203,25 @@ async function readSheetRows(zip: JSZip, sheet: SheetDescriptor, sharedStrings: 
 }
 
 function rowHasData(row: Record<number, CellValue>): boolean {
-  return Object.values(row).some((cell) => String(cell.value ?? "").trim() !== "");
+  return Object.values(row).some((cell) => cellValueToText(cell.value).trim() !== "");
 }
 
-async function chooseSheet(zip: JSZip, sheets: SheetDescriptor[]): Promise<SheetDescriptor> {
+async function probeSheet(
+  zip: JSZip,
+  sheet: SheetDescriptor,
+  sharedStrings: string[],
+  cache: WorksheetCache
+): Promise<boolean> {
+  const worksheet = await readParsedWorksheet(zip, sheet, cache);
+  return readSheetRowsFromWorksheet(worksheet, sharedStrings, false).some(rowHasData);
+}
+
+async function chooseSheet(
+  zip: JSZip,
+  sheets: SheetDescriptor[],
+  sharedStrings: string[],
+  cache: WorksheetCache
+): Promise<SheetDescriptor> {
   const visibleSheets = sheets.filter((sheet) => sheet.visible);
   if (visibleSheets.length === 0) {
     throw new ImportValidationError("IMPORT_NO_VISIBLE_SHEETS", "لا توجد ورقة ظاهرة قابلة للقراءة", 422);
@@ -180,11 +230,9 @@ async function chooseSheet(zip: JSZip, sheets: SheetDescriptor[]): Promise<Sheet
   const namedSheet = visibleSheets.find((sheet) => sheet.name === "الشكاوى" || sheet.name === "Complaints");
   if (namedSheet) return namedSheet;
 
-  const sharedStrings = await readSharedStrings(zip);
   const candidates: SheetDescriptor[] = [];
   for (const sheet of visibleSheets) {
-    const rows = await readSheetRows(zip, sheet, sharedStrings);
-    if (rows.some(rowHasData)) candidates.push(sheet);
+    if (await probeSheet(zip, sheet, sharedStrings, cache)) candidates.push(sheet);
   }
 
   if (candidates.length === 1) return candidates[0];
@@ -198,14 +246,16 @@ async function chooseSheet(zip: JSZip, sheets: SheetDescriptor[]): Promise<Sheet
 export async function parseXlsxWorkbook(buffer: Buffer): Promise<ParsedWorkbook> {
   const zip = await validateXlsxZip(buffer);
   const sheets = await readSheets(zip);
+  const worksheetCache: WorksheetCache = new Map();
   const limits = getImportLimits();
   if (sheets.length > limits.maxSheets) {
     throw new ImportValidationError("IMPORT_TOO_MANY_SHEETS", "عدد أوراق Excel يتجاوز الحد المسموح", 422);
   }
 
   const sharedStrings = await readSharedStrings(zip);
-  const selectedSheet = await chooseSheet(zip, sheets);
-  const sheetRows = await readSheetRows(zip, selectedSheet, sharedStrings);
+  const selectedSheet = await chooseSheet(zip, sheets, sharedStrings, worksheetCache);
+  const selectedWorksheet = await readParsedWorksheet(zip, selectedSheet, worksheetCache);
+  const sheetRows = readSheetRowsFromWorksheet(selectedWorksheet, sharedStrings, true);
   const nonEmptyRows = sheetRows.filter(rowHasData);
   const headerRow = nonEmptyRows[0];
 
@@ -214,7 +264,7 @@ export async function parseXlsxWorkbook(buffer: Buffer): Promise<ParsedWorkbook>
   }
 
   const headerIndexes = Object.keys(headerRow).map(Number).sort((left, right) => left - right);
-  const headers = headerIndexes.map((index) => String(headerRow[index]?.value ?? "").trim());
+  const headers = headerIndexes.map((index) => cellValueToText(headerRow[index]?.value).trim());
   if (new Set(headers.filter(Boolean)).size !== headers.filter(Boolean).length) {
     throw new ImportValidationError("DUPLICATE_IMPORT_COLUMN", "ملف Excel يحتوي عناوين أعمدة مكررة", 422);
   }
@@ -224,7 +274,7 @@ export async function parseXlsxWorkbook(buffer: Buffer): Promise<ParsedWorkbook>
     for (const [position, header] of headers.entries()) {
       if (!header) continue;
       const cell = row[headerIndexes[position]];
-      values[header] = cell?.formula ? `=${String(cell.value ?? "")}` : cell?.value ?? "";
+      values[header] = cell?.formula ? `=${cellValueToText(cell.value)}` : cell?.value ?? "";
     }
     return { rowNumber: offset + 2, values };
   });

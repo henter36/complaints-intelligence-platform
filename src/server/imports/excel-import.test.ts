@@ -1,9 +1,18 @@
 import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
-import { matchComplaintColumns, validateColumnMapping } from "./complaint-column-schema";
-import { validateXlsxZip } from "./file-storage";
-import { normalizeExcelSerialDate, normalizeImportRow } from "./normalization";
+import { matchComplaintColumns, normalizeColumnHeader, validateColumnMapping } from "./complaint-column-schema";
+import { getRequiredUncompressedSize, validateXlsxZip } from "./file-storage";
+import { buildImportErrorCsv, toSafeMessage } from "./error-report";
+import { normalizeDateCell, normalizeExcelSerialDate, normalizeImportRow, normalizeTextCell } from "./normalization";
 import { parseXlsxWorkbook } from "./xlsx-parser";
+import {
+  DUPLICATE_BLOCKING_IMPORT_STATUSES,
+  complaintCandidateIdentityKeys,
+  hasMeaningfulChange,
+  normalizedCandidateIdentityKeys,
+} from "./excel-import-service";
+import { ComplaintPriority, ComplaintStatus, ImportBatchStatus } from "@prisma/client";
+import { validateNormalizedComplaintRow } from "./row-validation";
 
 async function workbookBuffer(options: {
   sheets?: Array<{ name: string; rows: string[][]; state?: string }>;
@@ -126,6 +135,87 @@ describe("secure xlsx import parsing", () => {
     expect(() => validateColumnMapping(mapping)).toThrow(/تاريخ/);
   });
 
+  it("normalizes every repeated Arabic header character", () => {
+    expect(normalizeColumnHeader("آأإا  ةة  ىى")).toBe("اااا هه يي");
+  });
+
+  it("does not convert unsupported objects to object Object text", () => {
+    expect(normalizeTextCell({ message: "secret" })).toBeUndefined();
+    expect(buildImportErrorCsv([{
+      rowNumber: 2,
+      action: "REJECT" as never,
+      validationStatus: "INVALID" as never,
+      validationErrors: [{ field: {}, code: {}, message: {} }],
+      validationWarnings: [{}],
+    }])).not.toContain(["[object", "Object]"].join(" "));
+  });
+
+  it.each([
+    ["plain", "plain"],
+    [new Error("failed"), "failed"],
+    [{ message: "from object" }, "from object"],
+    [{ other: "ignored" }, ""],
+    [null, ""],
+    [undefined, ""],
+    [3, "3"],
+    [true, "true"],
+  ])("safely converts report message %s", (input, expected) => {
+    expect(toSafeMessage(input)).toBe(expected);
+  });
+
+  it("accepts explicit dates and rejects ambiguous local formats", () => {
+    expect(normalizeDateCell("2026-07-01")?.toISOString()).toBe("2026-07-01T00:00:00.000Z");
+    expect(normalizeDateCell("2026-07-01T12:30:00Z")?.toISOString()).toBe("2026-07-01T12:30:00.000Z");
+    expect(normalizeDateCell("03/04/2024")).toBeUndefined();
+    expect(normalizeDateCell("04-03-2024")).toBeUndefined();
+  });
+
+  it("rejects inherited enum-like properties", () => {
+    const mapping = matchComplaintColumns(["رقم الشكوى", "تاريخ الشكوى", "الموضوع", "الحالة", "الأولوية"]);
+    const result = normalizeImportRow({
+      rowNumber: 2,
+      values: {
+        "رقم الشكوى": "C-1",
+        "تاريخ الشكوى": "2026-07-01",
+        "الموضوع": "اختبار",
+        "الحالة": "constructor",
+        "الأولوية": "__proto__",
+      },
+    }, mapping);
+
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "INVALID_STATUS" }),
+      expect.objectContaining({ code: "INVALID_PRIORITY" }),
+    ]));
+  });
+
+  it("fails closed when zip entry size metadata is unavailable", () => {
+    expect(() => getRequiredUncompressedSize({ name: "xl/workbook.xml" } as never)).toThrow(/تعذر التحقق/);
+  });
+
+  it("ignores a huge non-selected sheet when a preferred sheet is present", async () => {
+    const hugeRows = [["تعليمات"], ...Array.from({ length: 10_050 }, () => ["نص"])];
+    const buffer = await workbookBuffer({
+      sheets: [
+        {
+          name: "الشكاوى",
+          rows: [["رقم الشكوى", "تاريخ الشكوى", "الموضوع"], ["C-1", "2026-07-01", "اختبار"]],
+        },
+        { name: "تعليمات", rows: hugeRows },
+      ],
+    });
+
+    await expect(parseXlsxWorkbook(buffer)).resolves.toMatchObject({ selectedSheet: "الشكاوى" });
+  }, 15_000);
+
+  it("rejects the selected sheet when it exceeds the row limit", async () => {
+    const rows = [["رقم الشكوى"], ...Array.from({ length: 10_050 }, (_, index) => [`C-${index}`])];
+
+    await expect(parseXlsxWorkbook(await workbookBuffer({
+      sheets: [{ name: "الشكاوى", rows }],
+    }))).rejects.toMatchObject({ code: "IMPORT_TOO_MANY_ROWS" });
+  }, 15_000);
+
   it("parses a generated 5000-row workbook within the configured row limit", async () => {
     const rows = [
       ["رقم الشكوى", "تاريخ الشكوى", "الموضوع"],
@@ -144,4 +234,132 @@ describe("secure xlsx import parsing", () => {
     expect(parsed.rows).toHaveLength(5_000);
     expect(durationMs).toBeLessThan(5_000);
   }, 10_000);
+
+  it("keeps missing date fields out of meaningful-change comparison", () => {
+    const complaint = {
+      id: "cmp_1",
+      externalId: "C-1",
+      sourceReference: null,
+      complaintDate: new Date("2026-07-01T00:00:00Z"),
+      receivedAt: new Date("2026-07-01T00:00:00Z"),
+      dueDate: new Date("2026-07-10T00:00:00Z"),
+      closedAt: null,
+      subject: "اختبار",
+      description: null,
+      status: ComplaintStatus.NEW,
+      priority: ComplaintPriority.MEDIUM,
+      region: null,
+      facility: null,
+      department: null,
+      channel: null,
+      resolution: null,
+    } as never;
+
+    expect(hasMeaningfulChange({ externalId: "C-1", subject: "اختبار" }, complaint)).toBe(false);
+    expect(hasMeaningfulChange({ dueDate: new Date("2026-07-11T00:00:00Z") }, complaint)).toBe(true);
+    expect(hasMeaningfulChange({ dueDate: new Date("2026-07-10T00:00:00Z") }, complaint)).toBe(false);
+  });
+
+  it("builds complaint identity keys for all supported strategies", () => {
+    const complaint = {
+      externalId: "C-1",
+      sourceReference: "SRC-1",
+      complaintDate: new Date("2026-07-01T00:00:00Z"),
+      region: "الرياض",
+      facility: "المركز",
+      department: "الدعم",
+      subject: "اختبار",
+    };
+
+    const complaintKeys = complaintCandidateIdentityKeys(complaint);
+    const rowKeys = normalizedCandidateIdentityKeys({
+      externalId: "C-1",
+      sourceReference: "SRC-1",
+      complaintDate: new Date("2026-07-01T00:00:00Z"),
+      region: "الرياض",
+      facility: "المركز",
+      department: "الدعم",
+      subject: "اختبار",
+    });
+
+    expect(complaintKeys).toEqual(expect.arrayContaining([
+      "externalId:c-1",
+      "sourceReferenceDate:src-1|2026-07-01",
+    ]));
+    expect(rowKeys.some((key) => key.startsWith("fingerprint:"))).toBe(true);
+  });
+
+  it("blocks duplicate uploads for active import states only", () => {
+    expect(DUPLICATE_BLOCKING_IMPORT_STATUSES).toEqual([
+      ImportBatchStatus.UPLOADED,
+      ImportBatchStatus.PARSING,
+      ImportBatchStatus.VALIDATED,
+      ImportBatchStatus.READY_FOR_CONFIRMATION,
+      ImportBatchStatus.CONFIRMING,
+      ImportBatchStatus.CONFIRMED,
+    ]);
+    expect(DUPLICATE_BLOCKING_IMPORT_STATUSES).not.toContain(ImportBatchStatus.FAILED);
+    expect(DUPLICATE_BLOCKING_IMPORT_STATUSES).not.toContain(ImportBatchStatus.ROLLED_BACK);
+  });
+
+  it("validates required fields, lifecycle, taxonomy, and lengths independently", () => {
+    const taxonomy = {
+      categories: [{
+        id: "cat_1",
+        nameAr: "فئة",
+        nameEn: null,
+        description: null,
+        displayOrder: 0,
+        isActive: true,
+        isDeleted: false,
+        deletedAt: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      }],
+      classifications: [{
+        id: "cls_1",
+        categoryId: "cat_1",
+        nameAr: "تصنيف",
+        nameEn: null,
+        description: null,
+        color: "#000",
+        keywords: null,
+        displayOrder: 0,
+        isActive: true,
+        isDeleted: false,
+        deletedAt: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        category: {
+          id: "cat_1",
+          nameAr: "فئة",
+          nameEn: null,
+          description: null,
+          displayOrder: 0,
+          isActive: true,
+          isDeleted: false,
+          deletedAt: null,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        },
+      }],
+    };
+
+    const messages = validateNormalizedComplaintRow({
+      status: ComplaintStatus.OPEN,
+      closedAt: new Date("2026-07-01T00:00:00Z"),
+      subject: "س".repeat(301),
+      category: "غير موجودة",
+      classification: "غير موجود",
+    }, taxonomy, new Date("2026-07-01T00:00:00Z"));
+
+    expect(messages.map((message) => message.code)).toEqual(expect.arrayContaining([
+      "MISSING_IDENTITY",
+      "MISSING_COMPLAINT_DATE",
+      "CLOSED_AT_FOR_OPEN_STATUS",
+      "SUBJECT_TOO_LONG",
+      "CATEGORY_NOT_FOUND",
+      "CLASSIFICATION_NOT_FOUND",
+    ]));
+  });
 });

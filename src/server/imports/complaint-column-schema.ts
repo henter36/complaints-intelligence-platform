@@ -75,10 +75,10 @@ const SYNONYMS: Record<ComplaintImportField, string[]> = {
 export function normalizeColumnHeader(value: string): string {
   return value
     .trim()
-    .replace(/[إأآا]/g, "ا")
-    .replace(/ى/g, "ي")
-    .replace(/ة/g, "ه")
-    .replace(/\s+/g, " ")
+    .replaceAll(/[إأآا]/g, "ا")
+    .replaceAll("ى", "ي")
+    .replaceAll("ة", "ه")
+    .replaceAll(/\s+/g, " ")
     .toLocaleLowerCase("ar-SA");
 }
 

@@ -15,14 +15,10 @@ const OPEN_STATUSES = new Set<ComplaintStatus>([
 ]);
 
 function normalizeLookup(value?: string): string {
-  return (value ?? "").trim().replace(/\s+/g, " ").toLocaleLowerCase("ar-SA");
+  return (value ?? "").trim().replaceAll(/\s+/g, " ").toLocaleLowerCase("ar-SA");
 }
 
-export function validateNormalizedComplaintRow(
-  row: NormalizedComplaintRow,
-  lookup: TaxonomyLookup,
-  now = new Date()
-): RowMessage[] {
+function validateRequiredFields(row: NormalizedComplaintRow): RowMessage[] {
   const errors: RowMessage[] = [];
 
   if (!row.externalId && !row.sourceReference) {
@@ -49,6 +45,11 @@ export function validateNormalizedComplaintRow(
     });
   }
 
+  return errors;
+}
+
+function validateDates(row: NormalizedComplaintRow, now: Date): RowMessage[] {
+  const errors: RowMessage[] = [];
   const complaintDate = row.complaintDate ?? row.receivedAt;
   if (complaintDate && complaintDate.getTime() > now.getTime() + 24 * 60 * 60 * 1000) {
     errors.push({
@@ -57,6 +58,12 @@ export function validateNormalizedComplaintRow(
       message: "تاريخ الشكوى مستقبلي بصورة غير مقبولة",
     });
   }
+
+  return errors;
+}
+
+function validateLifecycleConsistency(row: NormalizedComplaintRow): RowMessage[] {
+  const errors: RowMessage[] = [];
 
   if (row.closedAt && OPEN_STATUSES.has(row.status ?? ComplaintStatus.NEW)) {
     errors.push({
@@ -74,6 +81,12 @@ export function validateNormalizedComplaintRow(
     });
   }
 
+  return errors;
+}
+
+function validateFieldLengths(row: NormalizedComplaintRow): RowMessage[] {
+  const errors: RowMessage[] = [];
+
   if (row.subject && row.subject.length > 300) {
     errors.push({ field: "subject", code: "SUBJECT_TOO_LONG", message: "الموضوع يتجاوز الطول المسموح" });
   }
@@ -82,15 +95,35 @@ export function validateNormalizedComplaintRow(
     errors.push({ field: "description", code: "DESCRIPTION_TOO_LONG", message: "الوصف يتجاوز الطول المسموح" });
   }
 
+  return errors;
+}
+
+function findCategory(row: NormalizedComplaintRow, lookup: TaxonomyLookup): Category | null {
+  return row.category
+    ? lookup.categories.find((item) => normalizeLookup(item.nameAr) === normalizeLookup(row.category)) ?? null
+    : null;
+}
+
+function findClassification(
+  row: NormalizedComplaintRow,
+  lookup: TaxonomyLookup
+): (Classification & { category: Category }) | null {
+  return row.classification
+    ? lookup.classifications.find((item) => normalizeLookup(item.nameAr) === normalizeLookup(row.classification)) ?? null
+    : null;
+}
+
+function validateTaxonomy(row: NormalizedComplaintRow, lookup: TaxonomyLookup): RowMessage[] {
+  const errors: RowMessage[] = [];
   const category = row.category
-    ? lookup.categories.find((item) => normalizeLookup(item.nameAr) === normalizeLookup(row.category))
+    ? findCategory(row, lookup)
     : null;
   if (row.category && !category) {
     errors.push({ field: "category", code: "CATEGORY_NOT_FOUND", message: "الفئة غير موجودة أو غير فعالة" });
   }
 
   const classification = row.classification
-    ? lookup.classifications.find((item) => normalizeLookup(item.nameAr) === normalizeLookup(row.classification))
+    ? findClassification(row, lookup)
     : null;
   if (row.classification && !classification) {
     errors.push({
@@ -109,4 +142,18 @@ export function validateNormalizedComplaintRow(
   }
 
   return errors;
+}
+
+export function validateNormalizedComplaintRow(
+  row: NormalizedComplaintRow,
+  lookup: TaxonomyLookup,
+  now = new Date()
+): RowMessage[] {
+  return [
+    ...validateRequiredFields(row),
+    ...validateDates(row, now),
+    ...validateLifecycleConsistency(row),
+    ...validateFieldLengths(row),
+    ...validateTaxonomy(row, lookup),
+  ];
 }

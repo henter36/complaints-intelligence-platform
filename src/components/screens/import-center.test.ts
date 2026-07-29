@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { defaultPeriodRange, formatLocalDate } from "./import-center";
+import {
+  defaultPeriodRange,
+  formatLocalDate,
+  mappingContainsComplaintNumber,
+  normalizeUploadResultPayload,
+} from "./import-center";
 
 describe("import center date ranges", () => {
   it("formats local calendar dates without UTC conversion", () => {
@@ -31,5 +36,43 @@ describe("import center date ranges", () => {
 
     expect(range).toEqual({ start, end });
     expect(range.start <= range.end).toBe(true);
+  });
+});
+
+describe("import center mapping helpers", () => {
+  it.each([
+    [{ "رقم الشكوى": "externalId" }, true],
+    [{ "معرف الشكوى": "externalId" }, true],
+    [{ "Header C": "externalId" }, true],
+    [{ "الرقم المرجعي": "sourceReference" }, false],
+    [undefined, false],
+  ])("detects complaint number mapping %#", (mapping, expected) => {
+    expect(mappingContainsComplaintNumber(mapping)).toBe(expected);
+  });
+
+  it("preserves unmapped columns from upload payload", () => {
+    const result = normalizeUploadResultPayload({
+      batchId: "batch_1",
+      fileName: "complaints.xlsx",
+      totalRecords: 1,
+      validRecords: 1,
+      newRecords: 1,
+      updatedRecords: 0,
+      duplicateRecords: 0,
+      rejectedRecords: 0,
+      incompleteRecords: 0,
+      warningRecords: 0,
+      noChangeRecords: 0,
+      selectedSheet: "الشكاوى",
+      hasComplaintNumber: false,
+      unmappedColumns: ["عمود غير معروف"],
+      columnMapping: { "معرف الشكوى": "externalId" },
+      errors: [],
+      preview: [],
+      canApprove: false,
+    });
+
+    expect(result.hasComplaintNumber).toBe(true);
+    expect(result.unmappedColumns).toEqual(["عمود غير معروف"]);
   });
 });
