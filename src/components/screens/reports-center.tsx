@@ -275,6 +275,14 @@ const REPORT_TYPES: ReportTypeMeta[] = [
   },
 ];
 
+function formatLocalDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
 const FREQUENCY_OPTIONS = [
   { value: "daily", label: "يومي" },
   { value: "weekly", label: "أسبوعي" },
@@ -291,8 +299,8 @@ function defaultRange(): { from: string; to: string } {
   const from = new Date();
   from.setDate(from.getDate() - 30);
   return {
-    from: from.toISOString().slice(0, 10),
-    to: to.toISOString().slice(0, 10),
+    from: formatLocalDate(from),
+    to: formatLocalDate(to),
   };
 }
 
@@ -303,8 +311,8 @@ function previousRange(from: string, to: string): { from: string; to: string } {
   const prevStart = new Date(start.getTime() - diff - 24 * 60 * 60 * 1000);
   const prevEnd = new Date(start.getTime() - 24 * 60 * 60 * 1000);
   return {
-    from: prevStart.toISOString().slice(0, 10),
-    to: prevEnd.toISOString().slice(0, 10),
+    from: formatLocalDate(prevStart),
+    to: formatLocalDate(prevEnd),
   };
 }
 
@@ -751,8 +759,8 @@ export function ReportsCenter() {
                         const from = new Date();
                         from.setDate(from.getDate() - preset.days);
                         updateConfig({
-                          from: from.toISOString().slice(0, 10),
-                          to: to.toISOString().slice(0, 10),
+                          from: formatLocalDate(from),
+                          to: formatLocalDate(to),
                         });
                       }}
                     >

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import Home from "./page";
@@ -32,7 +32,7 @@ describe("Home page smoke", () => {
   it("renders the home screen and sidebar", async () => {
     render(<Home />);
 
-    await waitFor(() => expect(screen.getByText("نظام الشكاوى")).toBeInTheDocument());
+    expect(await screen.findByText("نظام الشكاوى")).toBeInTheDocument();
     expect(screen.getByText("الشاشة الرئيسية")).toBeInTheDocument();
     expect(screen.getByText("Dashboard screen")).toBeInTheDocument();
   });

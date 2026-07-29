@@ -3,6 +3,14 @@ import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { average, isComplaintLate, roundToTenth } from "@/lib/complaint-metrics";
 
+function formatLocalDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
 function parseDateRange(req: NextRequest): Prisma.ComplaintWhereInput {
   const url = new URL(req.url);
   const from = url.searchParams.get("from");
@@ -140,9 +148,9 @@ export async function GET(req: NextRequest) {
     const trendData: { date: string; total: number; closed: number }[] = [];
     for (let i = trendDays - 1; i >= 0; i--) {
       const day = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
-      const dayStr = day.toISOString().slice(0, 10);
+      const dayStr = formatLocalDate(day);
       const dayComplaints = trendComplaints.filter(c =>
-        c.receivedDate.toISOString().slice(0, 10) === dayStr
+        formatLocalDate(c.receivedDate) === dayStr
       );
       trendData.push({
         date: dayStr,

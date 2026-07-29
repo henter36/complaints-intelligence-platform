@@ -54,13 +54,13 @@ npm run typecheck
 npm run lint
 npm test
 npm run build
-npm audit --audit-level=high
+npm run audit:runtime
 ```
 
-Known exception: the full audit currently reports high findings in development tooling through `brace-expansion`/`minimatch` chains. Runtime high audit is available through:
+Runtime high audit is expected to pass. Known exception: the full audit currently reports high findings in development tooling through `brace-expansion`/`minimatch` chains:
 
 ```bash
-npm run audit:runtime
+npm audit --audit-level=high
 ```
 
 ## Documentation

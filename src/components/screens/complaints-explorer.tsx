@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { PageHeader } from "@/components/shared/page-header";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -68,6 +68,7 @@ import {
   statusBadgeClass,
   priorityBadgeClass,
 } from "@/lib/ar-utils";
+import { isAbortError } from "@/lib/abort";
 
 // ===================== Types =====================
 interface Region {
@@ -219,6 +220,14 @@ const SENTIMENT_COLORS: Record<string, string> = {
   very_negative: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300",
 };
 
+function formatLocalDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
 // ===================== Sub-components =====================
 
 function StarsRating({ value }: { value: number | null }) {
@@ -343,20 +352,39 @@ export function ComplaintsExplorer() {
   );
   const [selected, setSelected] = useState<Complaint | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
+  const filterRequestRef = useRef(0);
+  const complaintsRequestRef = useRef(0);
 
   // Load filter options once on mount
   useEffect(() => {
-    fetch("/api/filters")
+    const controller = new AbortController();
+    const requestId = filterRequestRef.current + 1;
+    filterRequestRef.current = requestId;
+
+    fetch("/api/filters", { signal: controller.signal })
       .then((r) => r.json())
-      .then(setFilterOptions)
-      .catch((e) => console.error("Failed to load filters:", e));
+      .then((json) => {
+        if (!controller.signal.aborted && filterRequestRef.current === requestId) {
+          setFilterOptions(json);
+        }
+      })
+      .catch((e) => {
+        if (!isAbortError(e)) {
+          console.error("Failed to load filters:", e);
+        }
+      });
+    return () => {
+      controller.abort();
+    };
   }, []);
 
   // Fetch complaints whenever applied filters / paging / sorting changes.
-  // The fetch is wrapped in an async IIFE so setState calls happen in
-  // promise callbacks (not synchronously in the effect body).
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
+    const requestId = complaintsRequestRef.current + 1;
+    complaintsRequestRef.current = requestId;
+    const canUpdate = () =>
+      !controller.signal.aborted && complaintsRequestRef.current === requestId;
     const params = new URLSearchParams();
     params.set("page", String(page));
     params.set("pageSize", String(PAGE_SIZE));
@@ -379,25 +407,32 @@ export function ComplaintsExplorer() {
     params.set("sortOrder", sortOrder);
 
     const run = async () => {
+      let aborted = false;
       try {
-        await Promise.resolve();
-        if (cancelled) return;
         setLoading(true);
-        const res = await fetch(`/api/complaints?${params.toString()}`);
+        const res = await fetch(`/api/complaints?${params.toString()}`, {
+          signal: controller.signal,
+        });
         const json: ComplaintsResponse = await res.json();
-        if (cancelled) return;
-        setData(json.data || []);
-        setTotal(json.total || 0);
-        setTotalPages(json.totalPages || 0);
+        if (canUpdate()) {
+          setData(json.data || []);
+          setTotal(json.total || 0);
+          setTotalPages(json.totalPages || 0);
+        }
       } catch (e) {
-        console.error("Failed to load complaints:", e);
+        aborted = isAbortError(e);
+        if (!aborted) {
+          console.error("Failed to load complaints:", e);
+        }
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!aborted && canUpdate()) {
+          setLoading(false);
+        }
       }
     };
-    run();
+    void run();
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [appliedFilters, page, sortBy, sortOrder]);
 
@@ -513,7 +548,7 @@ export function ComplaintsExplorer() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `complaints-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `complaints-${formatLocalDate(new Date())}.csv`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

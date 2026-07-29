@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { PageHeader } from "@/components/shared/page-header";
 import {
   Card,
@@ -61,7 +61,7 @@ import { formatNumber, formatDate } from "@/lib/ar-utils";
 
 // ===== Types =====
 
-type PeriodType = "daily" | "weekly" | "monthly" | "custom";
+export type PeriodType = "daily" | "weekly" | "monthly" | "custom";
 
 interface ImportError {
   row: number;
@@ -211,20 +211,51 @@ const STAT_CARDS = [
 
 // ===== Component =====
 
-function defaultPeriodRange(periodType: PeriodType) {
-  const today = new Date();
-  const fmt = (date: Date) => date.toISOString().slice(0, 10);
-  const end = fmt(today);
+export function formatLocalDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
+function daysInMonth(year: number, monthIndex: number): number {
+  return new Date(year, monthIndex + 1, 0).getDate();
+}
+
+function subtractOneCalendarMonth(date: Date): Date {
+  const targetMonth = date.getMonth() - 1;
+  const targetYear = date.getFullYear() + Math.floor(targetMonth / 12);
+  const normalizedTargetMonth = (targetMonth + 12) % 12;
+  const targetDay = Math.min(
+    date.getDate(),
+    daysInMonth(targetYear, normalizedTargetMonth)
+  );
+
+  return new Date(
+    targetYear,
+    normalizedTargetMonth,
+    targetDay,
+    date.getHours(),
+    date.getMinutes(),
+    date.getSeconds(),
+    date.getMilliseconds()
+  );
+}
+
+export function defaultPeriodRange(periodType: PeriodType, today = new Date()) {
+  const end = formatLocalDate(today);
   const startDate = new Date(today);
 
   if (periodType === "weekly") {
     startDate.setDate(startDate.getDate() - 6);
   } else if (periodType === "monthly") {
-    startDate.setMonth(startDate.getMonth() - 1);
+    const previousMonthDate = subtractOneCalendarMonth(today);
+    startDate.setTime(previousMonthDate.getTime());
     startDate.setDate(startDate.getDate() + 1);
   }
 
-  return { start: fmt(startDate), end };
+  return { start: formatLocalDate(startDate), end };
 }
 
 export function ImportCenter() {

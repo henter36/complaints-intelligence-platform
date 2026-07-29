@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { PageHeader } from "@/components/shared/page-header";
 import {
   Card, CardContent, CardHeader, CardTitle, CardDescription,
@@ -30,6 +30,7 @@ import {
   formatNumber, formatPercent, formatDate, formatDuration,
   STATUS_LABELS, PRIORITY_LABELS,
 } from "@/lib/ar-utils";
+import { isAbortError } from "@/lib/abort";
 
 // ---------- Types ----------
 interface DashboardData {
@@ -132,11 +133,18 @@ function daysAgoIso(days: number): string {
   const d = new Date();
   d.setDate(d.getDate() - days);
   d.setHours(0, 0, 0, 0);
-  return d.toISOString().slice(0, 10);
+  return formatLocalDate(d);
 }
 
 function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+  return formatLocalDate(new Date());
+}
+
+function formatLocalDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function formatDateShort(d: string): string {
@@ -169,19 +177,33 @@ export function Analytics() {
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("trends");
+  const filterRequestRef = useRef(0);
+  const dataRequestRef = useRef(0);
 
   // Load filter options once
   useEffect(() => {
+    const controller = new AbortController();
+    const requestId = filterRequestRef.current + 1;
+    filterRequestRef.current = requestId;
+    const canUpdate = () => !controller.signal.aborted && filterRequestRef.current === requestId;
+
     (async () => {
       try {
-        const res = await fetch("/api/filters");
+        const res = await fetch("/api/filters", { signal: controller.signal });
         const json = await res.json();
-        setRegions(json.regions || []);
-        setDepartments(json.departments || []);
+        if (canUpdate()) {
+          setRegions(json.regions || []);
+          setDepartments(json.departments || []);
+        }
       } catch (e) {
-        console.error(e);
+        if (!isAbortError(e)) {
+          console.error(e);
+        }
       }
     })();
+    return () => {
+      controller.abort();
+    };
   }, []);
 
   const buildQuery = useCallback(() => {
@@ -193,33 +215,44 @@ export function Analytics() {
     return params.toString();
   }, [from, to, regionId, departmentId]);
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (signal?: AbortSignal) => {
+    const requestId = dataRequestRef.current + 1;
+    dataRequestRef.current = requestId;
+    const canUpdate = () => !signal?.aborted && dataRequestRef.current === requestId;
     setLoading(true);
     const qs = buildQuery();
+    let aborted = false;
     try {
       const [dashRes, anaRes] = await Promise.all([
-        fetch(`/api/dashboard?${qs}`),
-        fetch(`/api/analytics?${qs}`),
+        fetch(`/api/dashboard?${qs}`, { signal }),
+        fetch(`/api/analytics?${qs}`, { signal }),
       ]);
       const [dashJson, anaJson] = await Promise.all([dashRes.json(), anaRes.json()]);
-      setDashboard(dashJson);
-      setAnalytics(anaJson);
+      if (canUpdate()) {
+        setDashboard(dashJson);
+        setAnalytics(anaJson);
+      }
     } catch (e) {
-      console.error(e);
+      aborted = isAbortError(e);
+      if (!aborted) {
+        console.error(e);
+      }
     } finally {
-      setLoading(false);
+      if (!aborted && canUpdate()) {
+        setLoading(false);
+      }
     }
   }, [buildQuery]);
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
     void Promise.resolve().then(() => {
-      if (!cancelled) {
-        void loadData();
+      if (!controller.signal.aborted) {
+        void loadData(controller.signal);
       }
     });
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [loadData]);
 
@@ -255,7 +288,7 @@ export function Analytics() {
         description="تحليل متعدد الأبعاد للشكاوى مع كشف الأنماط والمقارنات الزمنية"
         icon={<BarChart3 className="h-6 w-6" />}
         actions={
-          <Button variant="outline" size="sm" onClick={loadData} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={() => void loadData()} disabled={loading}>
             <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
             تحديث
           </Button>

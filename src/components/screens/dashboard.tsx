@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PageHeader } from "@/components/shared/page-header";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -20,6 +20,7 @@ import {
   formatNumber, formatPercent, formatDate, formatDuration,
   STATUS_LABELS, STATUS_COLORS, PRIORITY_LABELS,
 } from "@/lib/ar-utils";
+import { isAbortError } from "@/lib/abort";
 import type { ScreenId } from "@/app/page";
 
 interface DashboardData {
@@ -58,31 +59,43 @@ const CHART_COLORS = ["#0d9488", "#f59e0b", "#3b82f6", "#ef4444", "#a855f7", "#1
 export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void }) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
+  const loadRequestRef = useRef(0);
 
-  const loadData = async () => {
+  const loadData = useCallback(async (signal?: AbortSignal) => {
+    const requestId = loadRequestRef.current + 1;
+    loadRequestRef.current = requestId;
+    const canUpdate = () => !signal?.aborted && loadRequestRef.current === requestId;
     setLoading(true);
+    let aborted = false;
     try {
-      const res = await fetch("/api/dashboard");
+      const res = await fetch("/api/dashboard", { signal });
       const json = await res.json();
-      setData(json);
+      if (canUpdate()) {
+        setData(json);
+      }
     } catch (e) {
-      console.error(e);
+      aborted = isAbortError(e);
+      if (!aborted) {
+        console.error(e);
+      }
     } finally {
-      setLoading(false);
+      if (!aborted && canUpdate()) {
+        setLoading(false);
+      }
     }
-  };
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
     void Promise.resolve().then(() => {
-      if (!cancelled) {
-        void loadData();
+      if (!controller.signal.aborted) {
+        void loadData(controller.signal);
       }
     });
     return () => {
-      cancelled = true;
+      controller.abort();
     };
-  }, []);
+  }, [loadData]);
 
   const v = data?.volume;
   const p = data?.performance;
@@ -97,7 +110,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
         icon={<LayoutDashboard className="h-6 w-6" />}
         actions={
           <>
-            <Button variant="outline" size="sm" onClick={loadData} disabled={loading}>
+            <Button variant="outline" size="sm" onClick={() => void loadData()} disabled={loading}>
               <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
               تحديث
             </Button>
