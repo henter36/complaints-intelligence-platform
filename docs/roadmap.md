@@ -12,9 +12,9 @@ Normalize complaint entities, import batches, batch rows, classifications, SLA d
 
 Add one administrator credential, login, logout, password change, secure cookies, database-backed sessions, login rate limiting, CSRF/origin checks, security headers, and operational API protection without roles or multi-user permissions.
 
-## 4. Excel Import
+## 4. Excel Import - Completed
 
-Build the real Excel/CSV import pipeline: upload, parse, validate, map columns, detect duplicates, preview, store rows, and produce error reports.
+Build the real `.xlsx` import validation pipeline: upload, parse, validate, map columns, detect duplicates, preview, store rows, and produce error reports. The phase intentionally stops before confirmation.
 
 ## 5. Transactional Confirmation and Rollback
 

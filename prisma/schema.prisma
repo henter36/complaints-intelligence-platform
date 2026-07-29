@@ -196,12 +196,20 @@ model ImportBatch {
   updatedRows     Int                 @default(0)
   duplicateRows   Int                 @default(0)
   rejectedRows    Int                 @default(0)
+  warningRows      Int                 @default(0)
+  noChangeRows     Int                 @default(0)
   uploadedAt      DateTime            @default(now())
   validatedAt     DateTime?
   confirmedAt     DateTime?
   rolledBackAt    DateTime?
+  processingStartedAt DateTime?
+  processingCompletedAt DateTime?
   createdBy       String              @default("single-admin")
   notes           String?
+  failureCode     String?
+  storageKey      String?
+  selectedSheet   String?
+  columnMapping   Json?
   createdAt       DateTime            @default(now())
   updatedAt       DateTime            @updatedAt
   complaints      Complaint[]
@@ -211,6 +219,7 @@ model ImportBatch {
   @@index([fileHash])
   @@index([status])
   @@index([createdAt])
+  @@index([storageKey])
 }
 
 model ImportBatchRow {

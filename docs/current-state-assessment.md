@@ -10,11 +10,12 @@
 - Prisma schema validates, a real Phase 2 migration exists, and synthetic seed data can populate a local SQLite database.
 - Phase 2 domain services exist for complaint status history, duplicate identity, import batch transitions, row counters, and audit logging.
 - Phase 3 single-user secure mode protects operational pages and APIs with one administrator credential, database-backed sessions, logout, password change, rate limiting, and security headers.
+- Phase 4 import upload reads `.xlsx` files, validates OOXML/ZIP safety, stores private upload files, maps complaint columns, normalizes and validates rows, detects duplicates, persists `ImportBatchRow` preview data, and generates CSV error reports.
 - TypeScript, ESLint, Vitest, and production build run successfully after Phase 1 changes.
 
 ## Partially Working
 
-- Import Center is a rich UI prototype. It simulates upload/validation states, but it does not implement a complete Excel import engine.
+- Import Center now runs the Phase 4 upload and validation workflow, but import confirmation is not implemented.
 - Reports Center is UI-oriented and not backed by production export/scheduling workflows.
 - Classification management currently supports reading and creating categories/classifications. Update/delete operations, enterprise governance, and versioning are not implemented.
 - AI Insights can aggregate previously stored AI fields, but there is no governed model execution.
@@ -33,7 +34,7 @@
 - Complaint list pagination is validated, `pageSize` is capped at 100, and sorting uses an explicit allowlist rather than user-provided Prisma field names.
 - Reports Center respects the public `pageSize` cap by reading complaint pages sequentially at 100 rows per request with deterministic sorting.
 - Any screen that needs complainant PII should remain constrained to authenticated detail workflows in a later phase.
-- Upload endpoint for full Excel ingestion is not present.
+- Import upload/list/detail/error-report APIs are authenticated. Preview lists mask complainant identifier, phone, and name.
 - Scoped data access is not implemented.
 - Transactional import confirmation and rollback execution are not implemented.
 
@@ -43,7 +44,7 @@
 - Complete complaint domain model review.
 - Enterprise identity provider integration.
 - Role and scope enforcement.
-- Excel parser, validation pipeline, and error reports.
+- Transactional import confirmation and rollback.
 - Exportable PDF/Excel reports and scheduled delivery.
 - Governed AI provider abstraction, prompt/version audit, and human approval flow.
 
@@ -71,6 +72,12 @@
 - `GET /api/filters`
 - `GET|POST /api/classifications`
 - `GET /api/import/history`
+- `POST /api/import/upload`
+- `GET /api/import/{batchId}`
+- `GET /api/import/{batchId}/rows`
+- `POST /api/import/{batchId}/mapping`
+- `POST /api/import/{batchId}/reprocess`
+- `GET /api/import/{batchId}/errors`
 - `POST /api/import/approve`
 - `POST /api/ai/analyze` (disabled)
 - `POST /api/ai/summary` (disabled)
@@ -87,13 +94,13 @@
 
 ## Realistic Completion
 
-Foundation readiness is approximately 60%. The app now has a reliable build/test baseline, a normalized complaint/import data model, and single-user authentication, but core import/report/AI workflows remain prototype-level.
+Foundation readiness is approximately 70%. The app now has a reliable build/test baseline, a normalized complaint/import data model, single-user authentication, and a real Excel validation preview pipeline, but confirmation/report/AI workflows remain incomplete.
 
 ## Technical Debt
 
 - Replace SQLite with the selected production database and migrations.
 - Split API aggregation logic into tested services.
-- Replace prototype import UI simulation with a real Excel/CSV import pipeline.
+- Add transactional confirmation and rollback for validated import batches.
 - Remove or gate UI actions for unimplemented workflows.
 - Add scoped authorization only if the product moves beyond single-user operation.
 - Address remaining dev dependency audit exception when compatible releases are available.

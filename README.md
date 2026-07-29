@@ -1,15 +1,15 @@
 # Complaints Intelligence Platform
 
-Arabic complaints intelligence prototype with Phase 3 single-user secure mode foundations.
+Arabic complaints intelligence prototype with Phase 4 secure Excel upload and validation foundations.
 
-This repository is not production ready. Phase 1 made the codebase buildable and testable. Phase 2 added a normalized single-user complaint/import schema, migration, seed, and domain services. Phase 3 adds single-user administrator login, database-backed sessions, logout, password change, rate limiting, security headers, and API/page protection. Excel upload, report exports, and governed AI remain out of scope.
+This repository is not production ready. Phase 1 made the codebase buildable and testable. Phase 2 added a normalized single-user complaint/import schema, migration, seed, and domain services. Phase 3 adds single-user administrator login, database-backed sessions, logout, password change, rate limiting, security headers, and API/page protection. Phase 4 adds secure `.xlsx` upload, OOXML parsing, validation, duplicate detection, preview rows, and CSV error reports. Import confirmation, report exports, and governed AI remain out of scope.
 
 ## Current Status
 
 - Working: dashboard read APIs, complaints listing, filters, classification/category basics, import history, UI navigation, Phase 2 Prisma migration, synthetic Prisma seed, and Phase 3 single-user authentication.
 - Working foundation: `Complaint`, `ComplaintStatusHistory`, `ImportBatch`, `ImportBatchRow`, `AuditLog`, duplicate identity service, and import batch transition guards.
 - Security: one administrator credential, bcrypt password hashes, hashed session tokens in `AdminSession`, `cip_session` HttpOnly cookie, login rate limiting, logout, password change, and operational API guards.
-- Partial: import center UI can collect metadata, but full Excel parsing/import is not implemented.
+- Partial: import center can upload `.xlsx`, validate rows, store preview rows, and produce error reports; confirmation is intentionally not implemented yet.
 - Stubbed: import approval and AI approval/execution endpoints return `501` until their later phases.
 - Missing: scoped permissions, transactional import confirmation/rollback, production database architecture, exports, report scheduling, MFA, and external identity providers.
 
@@ -29,6 +29,12 @@ Create a local `.env` from `.env.example`:
 DATABASE_URL="file:./dev.db"
 AUTH_SECRET="CHANGE_ME_WITH_AT_LEAST_32_RANDOM_BYTES"
 SESSION_TTL_HOURS="8"
+IMPORT_MAX_FILE_SIZE_MB="10"
+IMPORT_MAX_ROWS="10000"
+IMPORT_MAX_COLUMNS="100"
+IMPORT_MAX_SHEETS="5"
+IMPORT_STORAGE_PATH="./storage/imports"
+IMPORT_RETENTION_DAYS="30"
 OPENAI_API_KEY="CHANGE_ME"
 ```
 
@@ -76,6 +82,12 @@ Runtime high audit is expected to pass. Known exception: the full audit currentl
 npm audit --audit-level=high
 ```
 
+## Excel Import
+
+Phase 4 accepts `.xlsx` files only. The server validates extension, MIME type, ZIP magic bytes, OOXML structure, internal ZIP paths, active workbook content, file size, sheet count, row count, and column count before saving import rows. Files are stored under `IMPORT_STORAGE_PATH`, which is ignored by Git, and are never placed under `public/`.
+
+The parser uses `jszip` and `fast-xml-parser` to read OOXML XML parts directly. It does not evaluate formulas, macros, or external links. Import batches stop at `READY_FOR_CONFIRMATION`; no `Complaint` rows are created or updated in this phase.
+
 ## Documentation
 
 - `docs/current-state-assessment.md`
@@ -84,4 +96,6 @@ npm audit --audit-level=high
 - `docs/phase-2-completion-report.md`
 - `docs/phase-3-single-user-security-design.md`
 - `docs/phase-3-completion-report.md`
+- `docs/phase-4-excel-import-design.md`
+- `docs/phase-4-completion-report.md`
 - `docs/roadmap.md`
