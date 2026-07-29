@@ -1,12 +1,14 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 
 function optionFromName(name: string) {
   return { id: name, name };
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
+    await requireAdminApiSession(req);
     const [regionRows, departmentRows, facilityRows, categories, channels] = await Promise.all([
       db.complaint.findMany({
         where: { isDeleted: false, region: { not: null } },
@@ -60,6 +62,9 @@ export async function GET() {
       channels: channels.flatMap(c => c.channel ? [c.channel] : []),
     });
   } catch (error) {
+    const authResponse = mapAuthError(error);
+    if (authResponse) return authResponse;
+
     console.error("Filters API error:", error);
     return NextResponse.json({ error: "Failed to fetch filters" }, { status: 500 });
   }

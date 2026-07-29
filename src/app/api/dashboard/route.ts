@@ -10,6 +10,7 @@ import {
   toLegacyPriority,
 } from "@/server/api/complaint-query";
 import { toLegacyStatus } from "@/server/complaints/status";
+import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 
 function formatLocalDate(date: Date): string {
   const year = date.getFullYear();
@@ -60,6 +61,7 @@ function withComplaintDate(
 
 export async function GET(req: NextRequest) {
   try {
+    await requireAdminApiSession(req);
     const url = new URL(req.url);
     const from = url.searchParams.get("from");
     const to = url.searchParams.get("to");
@@ -237,6 +239,9 @@ export async function GET(req: NextRequest) {
       },
     });
   } catch (error) {
+    const authResponse = mapAuthError(error);
+    if (authResponse) return authResponse;
+
     if (isInvalidComplaintQueryError(error)) {
       return NextResponse.json(
         { error: error.code, message: error.message },

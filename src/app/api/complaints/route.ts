@@ -8,6 +8,7 @@ import {
   InvalidComplaintQueryError,
   isInvalidComplaintQueryError,
 } from "@/server/api/complaint-query";
+import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_PAGE_SIZE = 20;
@@ -85,6 +86,7 @@ function calculateSkip(page: number, pageSize: number): number {
 
 export async function GET(req: NextRequest) {
   try {
+    await requireAdminApiSession(req);
     const url = new URL(req.url);
     const page = parsePositiveInteger(url.searchParams.get("page"), DEFAULT_PAGE, "page");
     const pageSize = parsePageSize(url.searchParams.get("pageSize"));
@@ -162,6 +164,9 @@ export async function GET(req: NextRequest) {
       hasNextPage: page < totalPages,
     });
   } catch (error) {
+    const authResponse = mapAuthError(error);
+    if (authResponse) return authResponse;
+
     if (isInvalidComplaintQueryError(error)) {
       return NextResponse.json(
         { error: error.code, message: error.message },

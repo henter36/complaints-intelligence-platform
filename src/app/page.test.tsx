@@ -3,6 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import Home from "./page";
 
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ replace: vi.fn() }),
+  redirect: vi.fn(),
+}));
 vi.mock("@/components/screens/dashboard", () => ({
   Dashboard: () => <div>Dashboard screen</div>,
 }));
@@ -27,10 +31,13 @@ vi.mock("@/components/screens/import-log", () => ({
 vi.mock("@/components/screens/ai-analysis", () => ({
   AiAnalysis: () => <div>AI analysis screen</div>,
 }));
+vi.mock("@/server/auth/session-service", () => ({
+  getCurrentAdminSessionFromCookies: vi.fn().mockResolvedValue({ id: "session_test", username: "admin" }),
+}));
 
 describe("Home page smoke", () => {
   it("renders the home screen and sidebar", async () => {
-    render(<Home />);
+    render(await Home());
 
     expect(await screen.findByText("نظام الشكاوى")).toBeInTheDocument();
     expect(screen.getByText("الشاشة الرئيسية")).toBeInTheDocument();
@@ -39,7 +46,7 @@ describe("Home page smoke", () => {
 
   it("navigates between primary screens", async () => {
     const user = userEvent.setup();
-    render(<Home />);
+    render(await Home());
 
     await user.click(screen.getByText("مركز الاستيراد"));
 

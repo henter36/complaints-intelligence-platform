@@ -13,6 +13,11 @@ vi.mock("@/lib/db", () => ({
   },
 }));
 
+vi.mock("@/server/auth/auth-guard", () => ({
+  requireAdminApiSession: vi.fn().mockResolvedValue({ id: "session_test", username: "admin" }),
+  mapAuthError: vi.fn().mockReturnValue(null),
+}));
+
 describe("GET /api/dashboard", () => {
   const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
 

@@ -15,7 +15,7 @@ type PaginationState = {
   totalPages: number;
 };
 
-function throwIfPaginationExceeded(page: number): void {
+export function assertReportPaginationWithinLimit(page: number): void {
   if (page > MAX_REPORT_PAGES) {
     throw new RangeError("Report complaints pagination did not terminate");
   }
@@ -159,7 +159,7 @@ export async function fetchAllComplaintsForReport<T extends ComplaintPageItem>(
   let total: number | null = null;
 
   while (true) {
-    throwIfPaginationExceeded(page);
+    assertReportPaginationWithinLimit(page);
     throwIfAborted(signal);
 
     const pageQuery = buildReportPageQuery(query, page);

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 200;
@@ -37,6 +38,7 @@ function parseLimit(value: string | null): number {
 //   - totals
 export async function GET(req: NextRequest) {
   try {
+    await requireAdminApiSession(req);
     const url = new URL(req.url);
     const limit = parseLimit(url.searchParams.get("limit"));
 
@@ -234,6 +236,9 @@ export async function GET(req: NextRequest) {
       duplicateClusters,
     });
   } catch (error: unknown) {
+    const authResponse = mapAuthError(error);
+    if (authResponse) return authResponse;
+
     const msg = error instanceof Error ? error.message : "خطأ غير معروف";
     if (msg.startsWith("limit must")) {
       return NextResponse.json(

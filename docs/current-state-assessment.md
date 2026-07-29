@@ -9,6 +9,7 @@
 - Filters, categories/classifications, and import history endpoints exist.
 - Prisma schema validates, a real Phase 2 migration exists, and synthetic seed data can populate a local SQLite database.
 - Phase 2 domain services exist for complaint status history, duplicate identity, import batch transitions, row counters, and audit logging.
+- Phase 3 single-user secure mode protects operational pages and APIs with one administrator credential, database-backed sessions, logout, password change, rate limiting, and security headers.
 - TypeScript, ESLint, Vitest, and production build run successfully after Phase 1 changes.
 
 ## Partially Working
@@ -25,15 +26,15 @@
 - `POST /api/ai/approve` returns `501 AI_NOT_CONFIGURED`.
 - `POST /api/import/approve` returns `501 NOT_IMPLEMENTED`.
 
-## Public API Data Exposure
+## Security And API Data Exposure
 
-- Authentication and authorization are not implemented yet.
-- Because list/search endpoints are currently public shape APIs, complaint list responses do not return complainant name, identifier, or phone fields.
+- Single-user authentication is implemented. Multi-user authorization, RBAC, roles, permissions, and scoped access are intentionally not implemented.
+- Complaint list responses still do not return complainant name, identifier, or phone fields.
 - Complaint list pagination is validated, `pageSize` is capped at 100, and sorting uses an explicit allowlist rather than user-provided Prisma field names.
 - Reports Center respects the public `pageSize` cap by reading complaint pages sequentially at 100 rows per request with deterministic sorting.
-- Any screen that needs complainant PII should remain unsupported until the appropriate authentication and authorization model exists.
+- Any screen that needs complainant PII should remain constrained to authenticated detail workflows in a later phase.
 - Upload endpoint for full Excel ingestion is not present.
-- Authentication, authorization, and scoped data access are not implemented.
+- Scoped data access is not implemented.
 - Transactional import confirmation and rollback execution are not implemented.
 
 ## Missing
@@ -60,6 +61,10 @@
 ## API Routes
 
 - `GET /api`
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+- `GET /api/auth/me`
+- `POST /api/auth/change-password`
 - `GET /api/dashboard`
 - `GET /api/analytics`
 - `GET /api/complaints`
@@ -78,11 +83,11 @@
 - Phase 2 schema is normalized for local single-user use, but still needs production database validation.
 - Full `npm audit --audit-level=high` still reports development-tooling high findings through `brace-expansion`/`minimatch` dependency chains.
 - UI contains screens for future workflows that are not fully backed by production behavior.
-- No authentication or authorization protects API routes.
+- Single-user authentication protects operational API routes, but multi-user authorization is not present.
 
 ## Realistic Completion
 
-Foundation readiness is approximately 50%. The app now has a reliable build/test baseline and a normalized complaint/import data model, but core product workflows remain prototype-level.
+Foundation readiness is approximately 60%. The app now has a reliable build/test baseline, a normalized complaint/import data model, and single-user authentication, but core import/report/AI workflows remain prototype-level.
 
 ## Technical Debt
 
@@ -90,5 +95,5 @@ Foundation readiness is approximately 50%. The app now has a reliable build/test
 - Split API aggregation logic into tested services.
 - Replace prototype import UI simulation with a real Excel/CSV import pipeline.
 - Remove or gate UI actions for unimplemented workflows.
-- Introduce route-level auth and scope checks.
+- Add scoped authorization only if the product moves beyond single-user operation.
 - Address remaining dev dependency audit exception when compatible releases are available.
