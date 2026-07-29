@@ -208,12 +208,12 @@ describe("Phase 2 API routes", () => {
     expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
       orderBy: [{ complaintDate: "desc" }, { id: "desc" }],
       skip: 0,
-      take: 20,
+      take: 25,
     }));
   });
 
   it.each([
-    ["?page=1", 0, 20],
+    ["?page=1", 0, 25],
     ["?page=2&pageSize=100", 100, 100],
     ["?pageSize=100", 0, 100],
   ])("accepts valid pagination query %s", async (query, expectedSkip, expectedTake) => {
@@ -268,7 +268,7 @@ describe("Phase 2 API routes", () => {
     const { response, body, findMany, count } = await callComplaintsApi(query);
 
     expect(response.status).toBe(400);
-    expect(body.error).toBe("INVALID_COMPLAINT_QUERY");
+    expect(body.error.code).toBe("INVALID_COMPLAINT_QUERY");
     expect(findMany).not.toHaveBeenCalled();
     expect(count).not.toHaveBeenCalled();
   });
@@ -294,7 +294,7 @@ describe("Phase 2 API routes", () => {
       expect(where.AND).toEqual([
         {
           dueDate: { lt: expect.any(Date) },
-          status: { in: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE", "RESOLVED"] },
+          status: { in: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE"] },
         },
       ]);
       return Promise.resolve([
@@ -324,7 +324,7 @@ describe("Phase 2 API routes", () => {
       expect(where.AND).toEqual([
         {
           dueDate: { lt: expect.any(Date) },
-          status: { in: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE", "RESOLVED"] },
+          status: { in: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE"] },
         },
       ]);
       return Promise.resolve([]);
@@ -464,7 +464,7 @@ describe("Phase 2 API routes", () => {
     const body = await response.json();
 
     expect(response.status).toBe(400);
-    expect(body.error).toBe("INVALID_COMPLAINT_QUERY");
+    expect(body.error.code).toBe("INVALID_COMPLAINT_QUERY");
     expect(findMany).not.toHaveBeenCalled();
     expect(count).not.toHaveBeenCalled();
   });

@@ -5,11 +5,33 @@ export const OPEN_COMPLAINT_STATUSES = new Set<ComplaintStatus>([
   ComplaintStatus.OPEN,
   ComplaintStatus.IN_PROGRESS,
   ComplaintStatus.AWAITING_RESPONSE,
-  ComplaintStatus.RESOLVED,
 ]);
 
+export const CLOSED_COMPLAINT_STATUSES = new Set<ComplaintStatus>([
+  ComplaintStatus.RESOLVED,
+  ComplaintStatus.CLOSED,
+]);
+
+export const TERMINAL_COMPLAINT_STATUSES = new Set<ComplaintStatus>([
+  ComplaintStatus.RESOLVED,
+  ComplaintStatus.CLOSED,
+  ComplaintStatus.CANCELLED,
+]);
+
+export function isOpenComplaintStatus(status: ComplaintStatus): boolean {
+  return OPEN_COMPLAINT_STATUSES.has(status);
+}
+
+export function isClosedComplaintStatus(status: ComplaintStatus): boolean {
+  return CLOSED_COMPLAINT_STATUSES.has(status);
+}
+
+export function isTerminalComplaintStatus(status: ComplaintStatus): boolean {
+  return TERMINAL_COMPLAINT_STATUSES.has(status);
+}
+
 export function isClosedStatus(status: ComplaintStatus): boolean {
-  return status === ComplaintStatus.CLOSED || status === ComplaintStatus.CANCELLED;
+  return isTerminalComplaintStatus(status);
 }
 
 export function isReopenTransition(
@@ -28,8 +50,17 @@ export function assertComplaintStatusTransition(
     return;
   }
 
+  if (fromStatus === toStatus) {
+    return;
+  }
+
   if (isReopenTransition(fromStatus, toStatus) && !options.reopenReason?.trim()) {
     throw new Error("Reopening a closed complaint requires a documented reason.");
+  }
+
+  const allowed = ALLOWED_STATUS_TRANSITIONS[fromStatus] ?? new Set<ComplaintStatus>();
+  if (!allowed.has(toStatus)) {
+    throw new Error("Invalid complaint status transition.");
   }
 }
 
@@ -38,11 +69,11 @@ export function assertClosedAtMatchesStatus(
   closedAt?: Date | null
 ) {
   if (closedAt && !isClosedStatus(status)) {
-    throw new Error("closedAt cannot be set unless the complaint is closed or cancelled.");
+    throw new Error("closedAt cannot be set unless the complaint is terminal.");
   }
 
-  if (status === ComplaintStatus.CLOSED && !closedAt) {
-    throw new Error("closedAt is required when closing a complaint.");
+  if (isClosedComplaintStatus(status) && !closedAt) {
+    throw new Error("closedAt is required when closing or resolving a complaint.");
   }
 }
 
@@ -71,3 +102,40 @@ export function toLegacyStatus(status: ComplaintStatus): string {
       return "rejected";
   }
 }
+
+const ALLOWED_STATUS_TRANSITIONS: Record<ComplaintStatus, Set<ComplaintStatus>> = {
+  [ComplaintStatus.NEW]: new Set([
+    ComplaintStatus.OPEN,
+    ComplaintStatus.IN_PROGRESS,
+    ComplaintStatus.CANCELLED,
+  ]),
+  [ComplaintStatus.OPEN]: new Set([
+    ComplaintStatus.IN_PROGRESS,
+    ComplaintStatus.AWAITING_RESPONSE,
+    ComplaintStatus.RESOLVED,
+    ComplaintStatus.CLOSED,
+    ComplaintStatus.CANCELLED,
+  ]),
+  [ComplaintStatus.IN_PROGRESS]: new Set([
+    ComplaintStatus.AWAITING_RESPONSE,
+    ComplaintStatus.RESOLVED,
+    ComplaintStatus.CLOSED,
+    ComplaintStatus.CANCELLED,
+  ]),
+  [ComplaintStatus.AWAITING_RESPONSE]: new Set([
+    ComplaintStatus.IN_PROGRESS,
+    ComplaintStatus.RESOLVED,
+    ComplaintStatus.CLOSED,
+    ComplaintStatus.CANCELLED,
+  ]),
+  [ComplaintStatus.RESOLVED]: new Set([
+    ComplaintStatus.CLOSED,
+    ComplaintStatus.OPEN,
+  ]),
+  [ComplaintStatus.CLOSED]: new Set([
+    ComplaintStatus.OPEN,
+  ]),
+  [ComplaintStatus.CANCELLED]: new Set([
+    ComplaintStatus.OPEN,
+  ]),
+};

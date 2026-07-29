@@ -20,7 +20,7 @@ Build the real `.xlsx` import validation pipeline: upload, parse, validate, map 
 
 Apply validated import batches transactionally, record every change, support rollback, and keep audit/status history consistent.
 
-## 6. Complaint Explorer and KPIs
+## 6. Complaint Explorer and KPIs - Completed
 
 Harden search, filters, KPI definitions, SLA calculations, quality metrics, pagination, sorting, and export-ready query contracts.
 

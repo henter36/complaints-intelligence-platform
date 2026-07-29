@@ -2,13 +2,10 @@ import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const findMany = vi.fn();
-const count = vi.fn();
-
 vi.mock("@/lib/db", () => ({
   db: {
     complaint: {
       findMany,
-      count,
     },
   },
 }));
@@ -23,7 +20,6 @@ describe("GET /api/dashboard", () => {
 
   beforeEach(() => {
     findMany.mockReset();
-    count.mockReset();
   });
 
   afterEach(() => {
@@ -64,8 +60,6 @@ describe("GET /api/dashboard", () => {
           status: "OPEN",
         },
       ]);
-    count.mockResolvedValue(0);
-
     const { GET } = await import("./route");
     const response = await GET(new NextRequest("http://localhost/api/dashboard"));
     const body = await response.json();
@@ -73,7 +67,8 @@ describe("GET /api/dashboard", () => {
     expect(response.status).toBe(200);
     expect(body.volume.total).toBe(1);
     expect(body.volume.late).toBe(1);
-    expect(body.distributions.byRegion).toEqual([{ name: "الرياض", count: 1 }]);
+    expect(body.kpis.currentlyLateComplaints.currentValue).toBe(1);
+    expect(body.distributions.byRegion[0]).toMatchObject({ name: "الرياض", count: 1 });
   });
 
   it("returns 500 when the database read fails", async () => {
@@ -84,10 +79,10 @@ describe("GET /api/dashboard", () => {
     const body = await response.json();
 
     expect(response.status).toBe(500);
-    expect(body.error).toBe("Failed to fetch dashboard data");
+    expect(body.error.code).toBe("DASHBOARD_QUERY_FAILED");
   });
 
-  it("applies dashboard request filters to trend query", async () => {
+  it("applies dashboard request filters to the central KPI query", async () => {
     const now = new Date("2026-07-31T12:00:00Z");
     vi.useFakeTimers();
     vi.setSystemTime(now);
@@ -115,13 +110,7 @@ describe("GET /api/dashboard", () => {
           channel: "الهاتف",
         },
       ])
-      .mockResolvedValueOnce([
-        {
-          complaintDate: new Date("2026-07-30T00:00:00Z"),
-          status: "OPEN",
-        },
-      ]);
-    count.mockResolvedValue(0);
+      .mockResolvedValueOnce([]);
 
     const { GET } = await import("./route");
     const response = await GET(new NextRequest(
@@ -129,7 +118,7 @@ describe("GET /api/dashboard", () => {
     ));
 
     expect(response.status).toBe(200);
-    expect(findMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+    expect(findMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
       where: expect.objectContaining({
         isDeleted: false,
         region: "الرياض",
@@ -146,22 +135,22 @@ describe("GET /api/dashboard", () => {
           lte: new Date("2026-07-31"),
         },
       }),
-      select: { complaintDate: true, status: true },
+      select: expect.objectContaining({ complaintDate: true, status: true, receivedAt: true }),
     }));
   });
 
-  it("returns an empty trend series when the requested dates do not intersect the 30-day window", async () => {
+  it("returns a stable empty trend series for empty data", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-31T12:00:00Z"));
-    findMany.mockResolvedValueOnce([]);
-    count.mockResolvedValue(0);
+    findMany.mockResolvedValue([]);
 
     const { GET } = await import("./route");
     const response = await GET(new NextRequest("http://localhost/api/dashboard?from=2026-01-01&to=2026-01-31"));
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body.trend.trendData).toEqual([]);
-    expect(findMany).toHaveBeenCalledTimes(1);
+    expect(body.trend.trendData).toHaveLength(30);
+    expect(body.trend.trendData.every((row: { total: number }) => row.total === 0)).toBe(true);
+    expect(findMany).toHaveBeenCalled();
   });
 });

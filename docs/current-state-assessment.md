@@ -3,15 +3,16 @@
 ## What Works
 
 - Next.js app shell with Arabic RTL layout and sidebar navigation.
-- Dashboard API aggregates complaint volume, performance, trends, distributions, and alerts from the Phase 2 complaint model.
-- Complaints API lists complaints with filters, pagination, sorting, soft-delete exclusion, and computed `isLate`.
-- Analytics API returns cross-tabs, channel effectiveness, recurring themes, and anomaly summaries.
+- Dashboard API aggregates complaint volume, performance, trends, distributions, and alerts through the central Phase 6 KPI service.
+- Complaints API lists complaints with central query validation, filters, pagination, deterministic sorting, soft-delete exclusion, and computed timing fields.
+- Analytics API returns central KPI-backed cross-tabs, channel effectiveness, anomaly summaries, and distributions.
 - Filters, categories/classifications, and import history endpoints exist.
 - Prisma schema validates, a real Phase 2 migration exists, and synthetic seed data can populate a local SQLite database.
 - Phase 2 domain services exist for complaint status history, duplicate identity, import batch transitions, row counters, and audit logging.
 - Phase 3 single-user secure mode protects operational pages and APIs with one administrator credential, database-backed sessions, logout, password change, rate limiting, and security headers.
 - Phase 4 import upload reads `.xlsx` files, validates OOXML/ZIP safety, stores private upload files, maps complaint columns, normalizes and validates rows, detects duplicates, persists `ImportBatchRow` preview data, and generates CSV error reports.
 - Phase 5 import confirmation applies eligible preview batches transactionally, writes snapshots/status history/audit logs, and supports atomic rollback.
+- Phase 6 adds complaint detail, manual update, status transition, central KPI, and safe CSV export APIs.
 - TypeScript, ESLint, Vitest, and production build run successfully after Phase 1 changes.
 
 ## Partially Working
@@ -32,6 +33,7 @@
 
 - Single-user authentication is implemented. Multi-user authorization, RBAC, roles, permissions, and scoped access are intentionally not implemented.
 - Complaint list responses still do not return complainant name, identifier, or phone fields.
+- Complaint detail responses are authenticated and mask identifier/phone before returning them.
 - Complaint list pagination is validated, `pageSize` is capped at 100, and sorting uses an explicit allowlist rather than user-provided Prisma field names.
 - Reports Center respects the public `pageSize` cap by reading complaint pages sequentially at 100 rows per request with deterministic sorting.
 - Any screen that needs complainant PII should remain constrained to authenticated detail workflows in a later phase.
@@ -69,6 +71,10 @@
 - `GET /api/dashboard`
 - `GET /api/analytics`
 - `GET /api/complaints`
+- `GET /api/complaints/export`
+- `GET /api/complaints/{id}`
+- `PATCH /api/complaints/{id}`
+- `POST /api/complaints/{id}/status`
 - `GET /api/filters`
 - `GET|POST /api/classifications`
 - `GET /api/import/history`
@@ -96,7 +102,7 @@
 
 ## Realistic Completion
 
-Foundation readiness is approximately 78%. The app now has a reliable build/test baseline, a normalized complaint/import data model, single-user authentication, a real Excel validation preview pipeline, and transactional confirmation/rollback. Report and governed AI workflows remain incomplete.
+Foundation readiness is approximately 84%. The app now has a reliable build/test baseline, a normalized complaint/import data model, single-user authentication, a real Excel validation preview pipeline, transactional confirmation/rollback, and central complaint/KPI query APIs. Report and governed AI workflows remain incomplete.
 
 ## Technical Debt
 

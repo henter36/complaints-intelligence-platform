@@ -96,7 +96,7 @@ describe("complaint query filters", () => {
       {
         dueDate: { lt: new Date("2026-07-31T00:00:00Z") },
         status: {
-          in: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE", "RESOLVED"],
+          in: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE"],
         },
       },
     ]);
@@ -115,7 +115,7 @@ describe("complaint query filters", () => {
         OR: [
           { dueDate: null },
           { dueDate: { gte: new Date("2026-07-31T00:00:00Z") } },
-          { status: { notIn: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE", "RESOLVED"] } },
+          { status: { notIn: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE"] } },
         ],
       },
     ]);
@@ -135,7 +135,7 @@ describe("complaint query filters", () => {
     expect(where.AND).toEqual([
       {
         dueDate: { lt: new Date("2026-07-15T00:00:00Z") },
-        status: { in: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE", "RESOLVED"] },
+        status: { in: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE"] },
       },
     ]);
   });

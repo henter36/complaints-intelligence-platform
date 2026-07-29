@@ -95,29 +95,40 @@ interface FiltersResponse {
 
 interface Complaint {
   id: string;
+  externalId?: string | null;
+  sourceReference?: string | null;
   complaintNumber: string;
   receivedDate: string;
-  channel: string;
+  receivedAt?: string;
+  channel: string | null;
   subject: string;
-  description: string;
+  description?: string;
   status: string;
   priority: string;
   severity: string;
-  isRepeated: boolean;
-  isValidated: boolean;
-  isPotentialDuplicate: boolean;
+  isRepeated?: boolean;
+  isValidated?: boolean;
+  isPotentialDuplicate?: boolean;
   beneficiarySatisfaction: number | null;
   delayReason: string | null;
   resolution: string | null;
   dueDate: string | null;
   closureDate: string | null;
+  closedAt?: string | null;
   firstActionDate: string | null;
   referralDate: string | null;
   region: { name: string } | null;
   location: { name: string } | null;
+  facility?: string | null;
   department: { name: string } | null;
   classification: { name: string; color: string } | null;
   isLate: boolean;
+  isCurrentlyLate?: boolean;
+  wasClosedLate?: boolean;
+  latenessDays?: number | null;
+  resolutionDays?: number | null;
+  version?: number;
+  updatedAt?: string;
   aiClassification?: string | null;
   aiConfidence?: number | null;
   aiReasoning?: string | null;
@@ -128,11 +139,18 @@ interface Complaint {
 }
 
 interface ComplaintsResponse {
-  data: Complaint[];
-  total: number;
-  page: number;
-  pageSize: number;
-  totalPages: number;
+  items?: Complaint[];
+  data?: Complaint[];
+  pagination?: {
+    total: number;
+    page: number;
+    pageSize: number;
+    totalPages: number;
+  };
+  total?: number;
+  page?: number;
+  pageSize?: number;
+  totalPages?: number;
 }
 
 interface FilterState {
@@ -205,6 +223,69 @@ const SORT_FIELDS: { key: string; label: string }[] = [
   { key: "priority", label: "الأولوية" },
   { key: "severity", label: "الخطورة" },
 ];
+
+function toLegacyStatusValue(status: string): string {
+  const normalized = status.toUpperCase();
+  if (normalized === "NEW" || normalized === "OPEN") return "open";
+  if (normalized === "IN_PROGRESS") return "in_progress";
+  if (normalized === "AWAITING_RESPONSE") return "in_progress";
+  if (normalized === "RESOLVED" || normalized === "CLOSED") return "closed";
+  if (normalized === "CANCELLED") return "rejected";
+  return status;
+}
+
+function toLegacyPriorityValue(priority: string | null | undefined): string {
+  return (priority ?? "medium").toLowerCase();
+}
+
+function normalizeComplaint(item: Complaint): Complaint {
+  return {
+    ...item,
+    complaintNumber: item.complaintNumber ?? item.externalId ?? item.sourceReference ?? item.id,
+    receivedDate: item.receivedDate ?? item.receivedAt ?? "",
+    channel: item.channel ?? "",
+    description: item.description ?? "",
+    status: toLegacyStatusValue(item.status),
+    priority: toLegacyPriorityValue(item.priority),
+    severity: toLegacyPriorityValue(item.severity),
+    isRepeated: item.isRepeated ?? false,
+    isValidated: item.isValidated ?? false,
+    isPotentialDuplicate: item.isPotentialDuplicate ?? false,
+    beneficiarySatisfaction: item.beneficiarySatisfaction ?? null,
+    delayReason: item.delayReason ?? null,
+    resolution: item.resolution ?? null,
+    closureDate: item.closureDate ?? item.closedAt ?? null,
+    firstActionDate: item.firstActionDate ?? null,
+    referralDate: item.referralDate ?? null,
+    location: item.location ?? (item.facility ? { name: item.facility } : null),
+    isLate: item.isLate ?? item.isCurrentlyLate ?? item.wasClosedLate ?? false,
+  };
+}
+
+function initialSearchParams(): URLSearchParams {
+  if (typeof window === "undefined") return new URLSearchParams();
+  return new URLSearchParams(window.location.search);
+}
+
+function initialFilterState(): FilterState {
+  const params = initialSearchParams();
+  return {
+    ...DEFAULT_FILTERS,
+    search: params.get("search") ?? "",
+    regionId: params.get("regionId") ?? "",
+    departmentId: params.get("departmentId") ?? "",
+    classificationId: params.get("classificationId") ?? "",
+    channel: params.get("channel") ?? "",
+    status: params.get("status") ?? "",
+    priority: params.get("priority") ?? "",
+    severity: params.get("severity") ?? "",
+    from: params.get("from") ?? "",
+    to: params.get("to") ?? "",
+    isLate: params.get("isLate") === "true",
+    isRepeated: params.get("isRepeated") === "true",
+    isValidated: params.get("isValidated") === "true",
+  };
+}
 
 const SENTIMENT_LABELS: Record<string, string> = {
   positive: "إيجابي",
@@ -337,12 +418,14 @@ function SectionTitle({
 
 // ===================== Main Component =====================
 export function ComplaintsExplorer() {
-  const [filters, setFilters] = useState<FilterState>(DEFAULT_FILTERS);
-  const [appliedFilters, setAppliedFilters] = useState<FilterState>(DEFAULT_FILTERS);
+  const [filters, setFilters] = useState<FilterState>(initialFilterState);
+  const [appliedFilters, setAppliedFilters] = useState<FilterState>(initialFilterState);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [page, setPage] = useState(1);
-  const [sortBy, setSortBy] = useState("receivedDate");
-  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+  const [page, setPage] = useState(() => Number(initialSearchParams().get("page") ?? "1") || 1);
+  const [sortBy, setSortBy] = useState(() => initialSearchParams().get("sortBy") ?? "receivedDate");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">(() =>
+    initialSearchParams().get("sortOrder") === "asc" ? "asc" : "desc"
+  );
   const [data, setData] = useState<Complaint[]>([]);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
@@ -414,10 +497,12 @@ export function ComplaintsExplorer() {
           signal: controller.signal,
         });
         const json: ComplaintsResponse = await res.json();
+        const items = json.items ?? json.data ?? [];
+        const pagination = json.pagination;
         if (canUpdate()) {
-          setData(json.data || []);
-          setTotal(json.total || 0);
-          setTotalPages(json.totalPages || 0);
+          setData(items.map(normalizeComplaint));
+          setTotal(pagination?.total ?? json.total ?? 0);
+          setTotalPages(pagination?.totalPages ?? json.totalPages ?? 0);
         }
       } catch (e) {
         aborted = isAbortError(e);
@@ -457,7 +542,18 @@ export function ComplaintsExplorer() {
   const applyFilters = useCallback(() => {
     setAppliedFilters(filters);
     setPage(1);
-  }, [filters]);
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters)) {
+      if (typeof value === "boolean") {
+        if (value) params.set(key, "true");
+      } else if (value) {
+        params.set(key, value);
+      }
+    }
+    params.set("sortBy", sortBy);
+    params.set("sortOrder", sortOrder);
+    window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
+  }, [filters, sortBy, sortOrder]);
 
   const resetFilters = useCallback(() => {
     setFilters(DEFAULT_FILTERS);
@@ -487,72 +583,23 @@ export function ComplaintsExplorer() {
   };
 
   const exportCSV = () => {
-    const headers = [
-      "رقم الشكوى",
-      "تاريخ الاستلام",
-      "القناة",
-      "الموضوع",
-      "الوصف",
-      "الحالة",
-      "الأولوية",
-      "الخطورة",
-      "المنطقة",
-      "الموقع",
-      "الإدارة",
-      "التصنيف",
-      "متأخرة",
-      "متكررة",
-      "معتمدة",
-      "تكرار محتمل",
-      "تقييم المستفيد",
-      "تاريخ الاستحقاق",
-      "تاريخ الإغلاق",
-      "سبب التأخير",
-      "القرار",
-    ];
-    const rows = data.map((c) => [
-      c.complaintNumber,
-      c.receivedDate,
-      c.channel,
-      c.subject,
-      c.description,
-      STATUS_LABELS[c.status] || c.status,
-      PRIORITY_LABELS[c.priority] || c.priority,
-      SEVERITY_LABELS[c.severity] || c.severity,
-      c.region?.name || "",
-      c.location?.name || "",
-      c.department?.name || "",
-      c.classification?.name || "",
-      c.isLate ? "نعم" : "لا",
-      c.isRepeated ? "نعم" : "لا",
-      c.isValidated ? "نعم" : "لا",
-      c.isPotentialDuplicate ? "نعم" : "لا",
-      c.beneficiarySatisfaction != null ? String(c.beneficiarySatisfaction) : "",
-      c.dueDate || "",
-      c.closureDate || "",
-      c.delayReason || "",
-      c.resolution || "",
-    ]);
-
-    const escape = (cell: unknown) => {
-      const s = String(cell ?? "").replace(/"/g, '""');
-      return `"${s}"`;
-    };
-
-    // BOM for proper Arabic rendering in Excel
-    const csv =
-      "\uFEFF" +
-      [headers, ...rows].map((r) => r.map(escape).join(",")).join("\n");
-
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `complaints-${formatLocalDate(new Date())}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    const params = new URLSearchParams();
+    if (appliedFilters.search) params.set("search", appliedFilters.search);
+    if (appliedFilters.regionId) params.set("regionId", appliedFilters.regionId);
+    if (appliedFilters.departmentId) params.set("departmentId", appliedFilters.departmentId);
+    if (appliedFilters.classificationId) params.set("classificationId", appliedFilters.classificationId);
+    if (appliedFilters.channel) params.set("channel", appliedFilters.channel);
+    if (appliedFilters.status) params.set("status", appliedFilters.status);
+    if (appliedFilters.priority) params.set("priority", appliedFilters.priority);
+    if (appliedFilters.severity) params.set("severity", appliedFilters.severity);
+    if (appliedFilters.from) params.set("from", appliedFilters.from);
+    if (appliedFilters.to) params.set("to", appliedFilters.to);
+    if (appliedFilters.isLate) params.set("isLate", "true");
+    if (appliedFilters.isRepeated) params.set("isRepeated", "true");
+    if (appliedFilters.isValidated) params.set("isValidated", "true");
+    params.set("sortBy", sortBy);
+    params.set("sortOrder", sortOrder);
+    window.location.href = `/api/complaints/export?${params.toString()}`;
   };
 
   // Pagination range

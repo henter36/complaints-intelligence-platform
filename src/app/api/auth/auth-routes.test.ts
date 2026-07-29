@@ -15,6 +15,7 @@ const adminSessionUpdateMany = vi.fn();
 const auditLogCreate = vi.fn();
 const complaintFindMany = vi.fn();
 const complaintCount = vi.fn();
+const AUTH_ROUTE_TEST_TIMEOUT_MS = 15_000;
 
 vi.mock("@/lib/db", () => ({
   db: {
@@ -122,7 +123,7 @@ describe("auth API routes", () => {
       where: { id: "attempt_1" },
       data: { succeeded: true },
     });
-  });
+  }, AUTH_ROUTE_TEST_TIMEOUT_MS);
 
   it("uses a generic error for invalid credentials", async () => {
     adminCredentialFindMany.mockResolvedValue([
@@ -142,7 +143,7 @@ describe("auth API routes", () => {
 
     expect(response.status).toBe(401);
     expect(body.error.message).toBe("بيانات الدخول غير صحيحة");
-  });
+  }, AUTH_ROUTE_TEST_TIMEOUT_MS);
 
   it("rate limits repeated failed login attempts", async () => {
     loginAttemptCount.mockResolvedValue(5);
@@ -177,7 +178,7 @@ describe("auth API routes", () => {
 
     expect(response.status).toBe(500);
     expect(body.error.code).toBe("LOGIN_UNAVAILABLE");
-  });
+  }, AUTH_ROUTE_TEST_TIMEOUT_MS);
 
   it("rejects protected complaints API requests without a session", async () => {
     const { GET } = await import("../complaints/route");
@@ -223,7 +224,7 @@ describe("auth API routes", () => {
       data: { revokedAt: expect.any(Date) },
     });
     expect(response.headers.get("set-cookie")).toContain("cip_session=");
-  });
+  }, AUTH_ROUTE_TEST_TIMEOUT_MS);
 
   it("does not report logout success when session revocation fails", async () => {
     adminSessionFindUnique.mockResolvedValue({

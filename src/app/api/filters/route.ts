@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
+import { ComplaintPriority, ComplaintStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 
 function optionFromName(name: string) {
   return { id: name, name };
 }
+
+const compareArabicLabels = (left: string, right: string): number => left.localeCompare(right, "ar");
 
 export async function GET(req: NextRequest) {
   try {
@@ -14,19 +17,16 @@ export async function GET(req: NextRequest) {
         where: { isDeleted: false, region: { not: null } },
         select: { region: true },
         distinct: ["region"],
-        orderBy: { region: "asc" },
       }),
       db.complaint.findMany({
         where: { isDeleted: false, department: { not: null } },
         select: { department: true },
         distinct: ["department"],
-        orderBy: { department: "asc" },
       }),
       db.complaint.findMany({
         where: { isDeleted: false, facility: { not: null } },
         select: { facility: true, region: true },
         distinct: ["facility"],
-        orderBy: { facility: "asc" },
       }),
       db.category.findMany({
         where: { isDeleted: false, isActive: true },
@@ -46,9 +46,11 @@ export async function GET(req: NextRequest) {
     ]);
 
     return NextResponse.json({
-      regions: regionRows.flatMap(r => r.region ? [optionFromName(r.region)] : []),
-      departments: departmentRows.flatMap(d => d.department ? [optionFromName(d.department)] : []),
-      locations: facilityRows.flatMap(f => f.facility ? [{ id: f.facility, name: f.facility, regionId: f.region }] : []),
+      regions: regionRows.flatMap(r => r.region ? [optionFromName(r.region)] : []).sort((a, b) => compareArabicLabels(a.name, b.name)),
+      departments: departmentRows.flatMap(d => d.department ? [optionFromName(d.department)] : []).sort((a, b) => compareArabicLabels(a.name, b.name)),
+      facilities: facilityRows.flatMap(f => f.facility ? [{ id: f.facility, name: f.facility, regionId: f.region }] : []).sort((a, b) => compareArabicLabels(a.name, b.name)),
+      locations: facilityRows.flatMap(f => f.facility ? [{ id: f.facility, name: f.facility, regionId: f.region }] : []).sort((a, b) => compareArabicLabels(a.name, b.name)),
+      categories: categories.map(category => ({ id: category.id, name: category.nameAr })),
       classifications: categories.map(category => ({
         id: category.id,
         name: category.nameAr,
@@ -59,7 +61,9 @@ export async function GET(req: NextRequest) {
           color: classification.color,
         })),
       })),
-      channels: channels.flatMap(c => c.channel ? [c.channel] : []),
+      statuses: Object.values(ComplaintStatus),
+      priorities: Object.values(ComplaintPriority),
+      channels: channels.flatMap(c => c.channel ? [c.channel] : []).sort(compareArabicLabels),
     });
   } catch (error) {
     const authResponse = mapAuthError(error);
