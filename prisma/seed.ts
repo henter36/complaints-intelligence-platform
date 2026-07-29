@@ -5,15 +5,19 @@ import {
   ImportRowAction,
   ImportRowValidationStatus,
   PeriodType,
+  type PrismaClient,
 } from "@prisma/client";
-import { db } from "../src/lib/db";
+import { pathToFileURL } from "node:url";
+import { db as appDb } from "../src/lib/db";
 import { createComplaint, updateComplaintStatus } from "../src/server/complaints/complaint-service";
 import { writeAuditLog, AUDIT_ACTOR_SINGLE_ADMIN } from "../src/server/audit/audit-log-service";
 
 const actor = AUDIT_ACTOR_SINGLE_ADMIN;
 const baseDate = new Date("2026-07-15T09:00:00.000Z");
 
-async function seed() {
+export async function seed(database: PrismaClient = appDb) {
+  const db = database;
+
   console.log("Seeding Phase 2 data model...");
 
   await db.auditLog.deleteMany();
@@ -213,6 +217,7 @@ async function seed() {
   }, { actor });
 
   await updateComplaintStatus(db, openComplaint.id, ComplaintStatus.IN_PROGRESS, {
+    expectedVersion: openComplaint.version,
     actor,
     reason: "Synthetic processing started.",
     importBatchId: confirmedBatch.id,
@@ -307,15 +312,33 @@ async function seed() {
     actor,
   });
 
+  await db.reportTemplate.create({
+    data: {
+      name: "ملخص الشكاوى الشهري التجريبي",
+      type: "monthly-summary",
+      config: {
+        periodType: "MONTHLY",
+        periodStart: "2026-07-01",
+        periodEnd: "2026-07-31",
+        sections: ["overview", "statusDistribution", "lateComplaints"],
+        synthetic: true,
+      },
+      createdBy: actor,
+    },
+  });
+
   console.log("Seed completed successfully!");
   console.log("- 2 categories");
   console.log("- 3 classifications");
   console.log("- 4 complaints");
   console.log("- 2 import batches");
   console.log("- 6 import rows");
+  console.log("- 1 report template");
 }
 
-seed().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-}).finally(() => db.$disconnect());
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  seed().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  }).finally(() => appDb.$disconnect());
+}

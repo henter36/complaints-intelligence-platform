@@ -2,7 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { ComplaintStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { average, isComplaintLate, roundToTenth } from "@/lib/complaint-metrics";
-import { buildComplaintWhereFromParams, toLegacyPriority } from "@/server/api/complaint-query";
+import {
+  buildComplaintWhereFromParams,
+  isInvalidComplaintQueryError,
+  toLegacyPriority,
+} from "@/server/api/complaint-query";
 import { toLegacyStatus } from "@/server/complaints/status";
 
 function formatLocalDate(date: Date): string {
@@ -197,6 +201,12 @@ export async function GET(req: NextRequest) {
       },
     });
   } catch (error) {
+    if (isInvalidComplaintQueryError(error)) {
+      return NextResponse.json(
+        { error: error.code, message: error.message },
+        { status: 400 }
+      );
+    }
     console.error("Dashboard API error:", error);
     return NextResponse.json({ error: "Failed to fetch dashboard data" }, { status: 500 });
   }

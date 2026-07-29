@@ -14,7 +14,7 @@ Phase 2 rebuilds the complaint and import data model for a single-user local pro
 - `ImportBatchRow`
 - `AuditLog`
 
-`ReportTemplate` remains for existing UI shape, but report generation is outside Phase 2.
+`ReportTemplate` remains for existing UI shape, and the seed creates one synthetic monthly summary template. Report generation is outside Phase 2.
 
 ## Enums
 
@@ -44,14 +44,14 @@ The migration creates the normalized schema from an empty SQLite database. A Vit
 `ComplaintIdentityService` implements the matching order:
 
 1. Normalized `externalId`.
-2. Normalized `sourceReference` plus local `complaintDate`.
-3. Stable composite fingerprint using complaint date, source reference, region, facility, department, and subject.
+2. Normalized `sourceReference` plus the UTC calendar date derived from `complaintDate`.
+3. Stable composite fingerprint using the UTC calendar date derived from `complaintDate`, source reference, region, facility, department, and subject.
 
 It never merges on complainant name, phone number, identifier, or complaint text alone.
 
 ## Services
 
-- `src/server/complaints/complaint-service.ts`: creation, status changes, soft delete, version increments, status history, audit.
+- `src/server/complaints/complaint-service.ts`: creation, status changes, soft delete, optimistic concurrency with `expectedVersion`, status history, audit.
 - `src/server/complaints/identity-service.ts`: duplicate identity and fingerprint policy.
 - `src/server/imports/import-batch-service.ts`: batch creation, status transition guards, confirmation/rollback rules, row counters.
 - `src/server/audit/audit-log-service.ts`: append-only audit log writes.
@@ -65,6 +65,7 @@ The seed creates:
 - 4 synthetic complaints: open, closed, late, and within SLA.
 - 2 import batches: confirmed and ready for confirmation.
 - 6 import rows covering new, update, duplicate, and reject actions.
+- 1 synthetic monthly report template for the current UI shape.
 - Complaint status history.
 - Audit logs.
 
@@ -87,11 +88,13 @@ No real personal data is used.
 - `DATABASE_URL="file:./dev.db" npx prisma migrate reset --force`: blocked by Prisma's AI-agent dangerous-action guard before execution.
 - `DATABASE_URL="file:./dev.db" npx prisma migrate deploy`: passed, no pending migrations after applying the Phase 2 migration.
 - `DATABASE_URL="file:./dev.db" npm run db:seed`: passed.
+- Temporary SQLite `prisma migrate deploy` + `npm run db:seed`: passed.
 - `npm run typecheck`: passed.
 - `npm run lint`: passed.
-- `npm test`: passed, 36 tests.
-- `DATABASE_URL="file:./dev.db" npm run build`: passed outside sandbox due Turbopack process/port requirements.
+- `npm test`: passed, 58 tests.
+- `DATABASE_URL="file:./dev.db" npm run build`: passed outside the sandbox due to Turbopack process/port requirements.
 - `npm run audit:runtime`: passed, 0 vulnerabilities.
+- `npm audit --audit-level=high`: fails only for documented development tooling chains through `brace-expansion`/`minimatch`.
 - `git diff --check`: passed.
 
 Coverage includes complaint creation, unique external IDs, soft delete, version increments, status history, import batch transition guards, row uniqueness and JSON persistence, duplicate detection, route compatibility, and temporary-database migration deployment.

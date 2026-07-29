@@ -5,6 +5,29 @@ export type ComplaintListItem<T extends ComplaintTiming> = T & {
   isLate: boolean;
 };
 
+type LegacyClassification = { name: string; color: string } | null;
+
+function resolveLegacyClassification(
+  classification?: { nameAr: string; color?: string | null } | null,
+  category?: { nameAr: string } | null
+): LegacyClassification {
+  if (classification) {
+    return {
+      name: classification.nameAr,
+      color: classification.color ?? "#64748b",
+    };
+  }
+
+  if (category) {
+    return {
+      name: category.nameAr,
+      color: "#64748b",
+    };
+  }
+
+  return null;
+}
+
 export function toComplaintListItem<T extends ComplaintTiming>(
   complaint: T,
   now = new Date()
@@ -37,11 +60,7 @@ export function toComplaintListItem<T extends ComplaintTiming>(
     region: raw.region ? { name: raw.region } : null,
     location: raw.facility ? { name: raw.facility } : null,
     department: raw.department ? { name: raw.department } : null,
-    classification: raw.classification
-      ? { name: raw.classification.nameAr, color: raw.classification.color ?? "#64748b" }
-      : raw.category
-        ? { name: raw.category.nameAr, color: "#64748b" }
-        : null,
+    classification: resolveLegacyClassification(raw.classification, raw.category),
     isLate: isComplaintLate(complaint, now),
   };
 }

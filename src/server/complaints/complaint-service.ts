@@ -1,4 +1,4 @@
-import { ComplaintStatus, type Complaint, type Prisma } from "@prisma/client";
+import { ComplaintStatus, type Complaint, type Prisma, type PrismaClient } from "@prisma/client";
 import { writeAuditLog, AUDIT_ACTOR_SYSTEM } from "@/server/audit/audit-log-service";
 import {
   assertClosedAtMatchesStatus,
@@ -6,9 +6,51 @@ import {
 } from "./status";
 
 export type ComplaintServiceClient = Pick<
-  Prisma.TransactionClient,
-  "complaint" | "complaintStatusHistory" | "auditLog"
+  PrismaClient,
+  "complaint" | "complaintStatusHistory" | "auditLog" | "$transaction"
 >;
+
+export class ComplaintValidationError extends Error {
+  readonly code = "COMPLAINT_VALIDATION_ERROR";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ComplaintValidationError";
+  }
+}
+
+export class ComplaintConcurrencyError extends Error {
+  readonly code = "COMPLAINT_VERSION_CONFLICT";
+
+  constructor(message = "Complaint was modified by another operation") {
+    super(message);
+    this.name = "ComplaintConcurrencyError";
+  }
+}
+
+export function isComplaintConcurrencyError(error: unknown): error is ComplaintConcurrencyError {
+  return error instanceof ComplaintConcurrencyError;
+}
+
+export function getComplaintServiceErrorStatus(error: unknown): number | undefined {
+  if (error instanceof ComplaintConcurrencyError) return 409;
+  if (error instanceof ComplaintValidationError) return 400;
+  return undefined;
+}
+
+export function normalizeOptionalDateTime(
+  value: Date | string | null | undefined,
+  fieldName: string
+): Date | null {
+  if (value == null) return null;
+  const parsed = value instanceof Date ? value : new Date(value);
+
+  if (Number.isNaN(parsed.getTime())) {
+    throw new ComplaintValidationError(`${fieldName} must be a valid date`);
+  }
+
+  return parsed;
+}
 
 export async function createComplaint(
   db: ComplaintServiceClient,
@@ -16,7 +58,7 @@ export async function createComplaint(
   options: { actor?: string; importBatchId?: string | null } = {}
 ): Promise<Complaint> {
   const inputStatus = input.status ?? ComplaintStatus.NEW;
-  const inputClosedAt = input.closedAt instanceof Date ? input.closedAt : null;
+  const inputClosedAt = normalizeOptionalDateTime(input.closedAt ?? null, "closedAt");
   assertClosedAtMatchesStatus(inputStatus, inputClosedAt);
 
   const complaint = await db.complaint.create({
@@ -53,51 +95,67 @@ export async function updateComplaintStatus(
   complaintId: string,
   toStatus: ComplaintStatus,
   options: {
+    expectedVersion: number;
     actor?: string;
     reason?: string | null;
     importBatchId?: string | null;
-    changedAt?: Date;
-    closedAt?: Date | null;
-  } = {}
+    changedAt?: Date | string;
+    closedAt?: Date | string | null;
+  }
 ): Promise<Complaint> {
-  const existing = await db.complaint.findUniqueOrThrow({ where: { id: complaintId } });
-  assertComplaintStatusTransition(existing.status, toStatus, { reopenReason: options.reason });
+  const changedAt = normalizeOptionalDateTime(options.changedAt ?? new Date(), "changedAt")!;
+  const requestedClosedAt = normalizeOptionalDateTime(options.closedAt ?? null, "closedAt");
 
-  const closedAt = toStatus === ComplaintStatus.CLOSED
-    ? options.closedAt ?? options.changedAt ?? new Date()
-    : options.closedAt ?? null;
-  assertClosedAtMatchesStatus(toStatus, closedAt);
+  return db.$transaction(async (tx) => {
+    const existing = await tx.complaint.findUniqueOrThrow({ where: { id: complaintId } });
+    assertComplaintStatusTransition(existing.status, toStatus, { reopenReason: options.reason });
 
-  const complaint = await db.complaint.update({
-    where: { id: complaintId },
-    data: {
-      status: toStatus,
-      closedAt,
-      version: { increment: 1 },
-    },
+    const closedAt = toStatus === ComplaintStatus.CLOSED
+      ? requestedClosedAt ?? changedAt
+      : requestedClosedAt;
+    assertClosedAtMatchesStatus(toStatus, closedAt);
+
+    const result = await tx.complaint.updateMany({
+      where: {
+        id: complaintId,
+        version: options.expectedVersion,
+        isDeleted: false,
+      },
+      data: {
+        status: toStatus,
+        closedAt,
+        version: { increment: 1 },
+      },
+    });
+
+    if (result.count !== 1) {
+      throw new ComplaintConcurrencyError();
+    }
+
+    const complaint = await tx.complaint.findUniqueOrThrow({ where: { id: complaintId } });
+
+    await tx.complaintStatusHistory.create({
+      data: {
+        complaintId,
+        fromStatus: existing.status,
+        toStatus,
+        changedAt,
+        changedBy: options.actor ?? AUDIT_ACTOR_SYSTEM,
+        reason: options.reason ?? null,
+        importBatchId: options.importBatchId ?? null,
+      },
+    });
+
+    await writeAuditLog(tx, {
+      action: "COMPLAINT_STATUS_CHANGED",
+      entityType: "Complaint",
+      entityId: complaintId,
+      actor: options.actor,
+      metadata: { fromStatus: existing.status, toStatus },
+    });
+
+    return complaint;
   });
-
-  await db.complaintStatusHistory.create({
-    data: {
-      complaintId,
-      fromStatus: existing.status,
-      toStatus,
-      changedAt: options.changedAt ?? new Date(),
-      changedBy: options.actor ?? AUDIT_ACTOR_SYSTEM,
-      reason: options.reason ?? null,
-      importBatchId: options.importBatchId ?? null,
-    },
-  });
-
-  await writeAuditLog(db, {
-    action: "COMPLAINT_STATUS_CHANGED",
-    entityType: "Complaint",
-    entityId: complaintId,
-    actor: options.actor,
-    metadata: { fromStatus: existing.status, toStatus },
-  });
-
-  return complaint;
 }
 
 export async function softDeleteComplaint(

@@ -15,7 +15,7 @@
 
 - Import Center is a rich UI prototype. It simulates upload/validation states, but it does not implement a complete Excel import engine.
 - Reports Center is UI-oriented and not backed by production export/scheduling workflows.
-- Classification management supports simple CRUD shape, but no enterprise governance or versioning exists.
+- Classification management currently supports reading and creating categories/classifications. Update/delete operations, enterprise governance, and versioning are not implemented.
 - AI Insights can aggregate previously stored AI fields, but there is no governed model execution.
 
 ## Stubbed Or Shape-Only

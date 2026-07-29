@@ -2,7 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { ComplaintStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { average, isComplaintLate, roundToTenth } from "@/lib/complaint-metrics";
-import { buildComplaintWhereFromParams, toLegacyPriority } from "@/server/api/complaint-query";
+import {
+  buildComplaintWhereFromParams,
+  isInvalidComplaintQueryError,
+  toLegacyPriority,
+} from "@/server/api/complaint-query";
+
+export const compareArabicLabels = (left: string, right: string): number =>
+  left.localeCompare(right, "ar");
 
 function getPreviousRange(from?: string | null, to?: string | null) {
   if (!from || !to) return null;
@@ -52,9 +59,9 @@ export async function GET(req: NextRequest) {
     const now = new Date();
     const classifications = Array.from(
       new Set(complaints.map(c => c.classification?.nameAr || "غير مصنف"))
-    ).sort();
-    const regions = Array.from(new Set(complaints.map(c => c.region || "غير محدد"))).sort();
-    const departments = Array.from(new Set(complaints.map(c => c.department || "غير محدد"))).sort();
+    ).sort(compareArabicLabels);
+    const regions = Array.from(new Set(complaints.map(c => c.region || "غير محدد"))).sort(compareArabicLabels);
+    const departments = Array.from(new Set(complaints.map(c => c.department || "غير محدد"))).sort(compareArabicLabels);
 
     const classificationByRegion = classifications.map(cls => {
       const row: Record<string, number | string> = { classification: cls };
@@ -185,6 +192,12 @@ export async function GET(req: NextRequest) {
       totalCount: complaints.length,
     });
   } catch (error) {
+    if (isInvalidComplaintQueryError(error)) {
+      return NextResponse.json(
+        { error: error.code, message: error.message },
+        { status: 400 }
+      );
+    }
     console.error("Analytics API error:", error);
     return NextResponse.json({ error: "Failed to fetch analytics data" }, { status: 500 });
   }

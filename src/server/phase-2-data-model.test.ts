@@ -4,8 +4,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PrismaClient, ComplaintPriority, ComplaintStatus, ImportBatchStatus, ImportRowAction, ImportRowValidationStatus, PeriodType } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createComplaint, softDeleteComplaint, updateComplaintStatus } from "./complaints/complaint-service";
-import { arePotentialDuplicateIdentities, buildComplaintFingerprint, resolveComplaintIdentity } from "./complaints/identity-service";
+import {
+  ComplaintConcurrencyError,
+  ComplaintValidationError,
+  createComplaint,
+  getComplaintServiceErrorStatus,
+  softDeleteComplaint,
+  updateComplaintStatus,
+} from "./complaints/complaint-service";
+import {
+  arePotentialDuplicateIdentities,
+  buildComplaintFingerprint,
+  ComplaintIdentityValidationError,
+  resolveComplaintIdentity,
+} from "./complaints/identity-service";
+import {
+  assertComplaintStatusTransition,
+  isReopenTransition,
+} from "./complaints/status";
 import { calculateRowCounters, confirmImportBatch, createImportBatch, rollbackImportBatch } from "./imports/import-batch-service";
 
 let prisma: PrismaClient;
@@ -98,6 +114,7 @@ describe("Complaint domain model", () => {
     });
 
     const closed = await updateComplaintStatus(prisma, complaint.id, ComplaintStatus.CLOSED, {
+      expectedVersion: complaint.version,
       reason: "تمت المعالجة",
       changedAt: new Date("2026-07-02T00:00:00Z"),
     });
@@ -120,11 +137,125 @@ describe("Complaint domain model", () => {
       closedAt: new Date("2026-07-02T00:00:00Z"),
     });
 
-    await expect(updateComplaintStatus(prisma, complaint.id, ComplaintStatus.OPEN)).rejects.toThrow(/documented reason/);
-    await expect(updateComplaintStatus(prisma, complaint.id, ComplaintStatus.OPEN, { reason: "إعادة فتح موثقة" })).resolves.toMatchObject({
+    await expect(updateComplaintStatus(prisma, complaint.id, ComplaintStatus.OPEN, {
+      expectedVersion: complaint.version,
+    })).rejects.toThrow(/documented reason/);
+    await expect(updateComplaintStatus(prisma, complaint.id, ComplaintStatus.OPEN, {
+      expectedVersion: complaint.version,
+      reason: "إعادة فتح موثقة",
+    })).resolves.toMatchObject({
       status: ComplaintStatus.OPEN,
       closedAt: null,
     });
+  });
+
+  it("normalizes closedAt from Date and ISO string and rejects invalid date strings", async () => {
+    await expect(createComplaint(prisma, {
+      externalId: "EXT-CLOSED-DATE",
+      subject: "إغلاق بتاريخ Date",
+      status: ComplaintStatus.CLOSED,
+      closedAt: new Date("2026-07-03T08:00:00Z"),
+    })).resolves.toMatchObject({
+      status: ComplaintStatus.CLOSED,
+      closedAt: new Date("2026-07-03T08:00:00Z"),
+    });
+
+    await expect(createComplaint(prisma, {
+      externalId: "EXT-CLOSED-STRING",
+      subject: "إغلاق بتاريخ نصي",
+      status: ComplaintStatus.CLOSED,
+      closedAt: "2026-07-04T08:00:00.000Z",
+    })).resolves.toMatchObject({
+      status: ComplaintStatus.CLOSED,
+      closedAt: new Date("2026-07-04T08:00:00.000Z"),
+    });
+
+    await expect(createComplaint(prisma, {
+      externalId: "EXT-CLOSED-INVALID",
+      subject: "إغلاق بتاريخ غير صالح",
+      status: ComplaintStatus.CLOSED,
+      closedAt: "not-a-date",
+    })).rejects.toBeInstanceOf(ComplaintValidationError);
+
+    await expect(createComplaint(prisma, {
+      externalId: "EXT-OPEN-CLOSED-AT",
+      subject: "مفتوحة بتاريخ إغلاق",
+      status: ComplaintStatus.OPEN,
+      closedAt: "2026-07-04T08:00:00.000Z",
+    })).rejects.toThrow(/closedAt cannot be set/);
+  });
+
+  it("enforces optimistic concurrency and skips history and audit on conflicts", async () => {
+    const complaint = await createComplaint(prisma, {
+      externalId: "EXT-CONCURRENCY-1",
+      subject: "شكوى تزامن",
+      status: ComplaintStatus.OPEN,
+    });
+
+    const updated = await updateComplaintStatus(prisma, complaint.id, ComplaintStatus.IN_PROGRESS, {
+      expectedVersion: complaint.version,
+      reason: "بدء المعالجة",
+    });
+    expect(updated.version).toBe(complaint.version + 1);
+
+    const historyAfterSuccess = await prisma.complaintStatusHistory.count({ where: { complaintId: complaint.id } });
+    const auditAfterSuccess = await prisma.auditLog.count({
+      where: { entityId: complaint.id, action: "COMPLAINT_STATUS_CHANGED" },
+    });
+    expect(historyAfterSuccess).toBe(2);
+    expect(auditAfterSuccess).toBe(1);
+
+    await expect(updateComplaintStatus(prisma, complaint.id, ComplaintStatus.AWAITING_RESPONSE, {
+      expectedVersion: complaint.version,
+      reason: "نسخة قديمة",
+    })).rejects.toBeInstanceOf(ComplaintConcurrencyError);
+    expect(getComplaintServiceErrorStatus(new ComplaintConcurrencyError())).toBe(409);
+
+    const unchanged = await prisma.complaint.findUniqueOrThrow({ where: { id: complaint.id } });
+    expect(unchanged.status).toBe(ComplaintStatus.IN_PROGRESS);
+    expect(unchanged.version).toBe(updated.version);
+    await expect(prisma.complaintStatusHistory.count({ where: { complaintId: complaint.id } })).resolves.toBe(historyAfterSuccess);
+    await expect(prisma.auditLog.count({
+      where: { entityId: complaint.id, action: "COMPLAINT_STATUS_CHANGED" },
+    })).resolves.toBe(auditAfterSuccess);
+  });
+
+  it("allows only one concurrent transition for the same expected version", async () => {
+    const complaint = await createComplaint(prisma, {
+      externalId: "EXT-CONCURRENCY-2",
+      subject: "شكوى تزامن متزامن",
+      status: ComplaintStatus.OPEN,
+    });
+
+    const results = await Promise.allSettled([
+      updateComplaintStatus(prisma, complaint.id, ComplaintStatus.IN_PROGRESS, {
+        expectedVersion: complaint.version,
+        reason: "العملية الأولى",
+      }),
+      updateComplaintStatus(prisma, complaint.id, ComplaintStatus.AWAITING_RESPONSE, {
+        expectedVersion: complaint.version,
+        reason: "العملية الثانية",
+      }),
+    ]);
+
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
+    await expect(prisma.complaintStatusHistory.count({ where: { complaintId: complaint.id } })).resolves.toBe(2);
+    await expect(prisma.auditLog.count({
+      where: { entityId: complaint.id, action: "COMPLAINT_STATUS_CHANGED" },
+    })).resolves.toBe(1);
+  });
+
+  it("treats CANCELLED to an open status as a reopen transition", () => {
+    expect(isReopenTransition(ComplaintStatus.CLOSED, ComplaintStatus.OPEN)).toBe(true);
+    expect(isReopenTransition(ComplaintStatus.CANCELLED, ComplaintStatus.OPEN)).toBe(true);
+    expect(isReopenTransition(ComplaintStatus.CLOSED, ComplaintStatus.CANCELLED)).toBe(false);
+    expect(isReopenTransition(ComplaintStatus.CANCELLED, ComplaintStatus.CLOSED)).toBe(false);
+    expect(isReopenTransition(ComplaintStatus.OPEN, ComplaintStatus.IN_PROGRESS)).toBe(false);
+    expect(() => assertComplaintStatusTransition(
+      ComplaintStatus.CANCELLED,
+      ComplaintStatus.OPEN
+    )).toThrow(/documented reason/);
   });
 });
 
@@ -216,6 +347,7 @@ describe("Complaint identity service", () => {
       complaintDate: new Date("2026-07-01T21:00:00Z"),
     });
     expect(identity.strategy).toBe("sourceReferenceDate");
+    expect(identity).toMatchObject({ complaintDate: "2026-07-01" });
     expect(arePotentialDuplicateIdentities(
       { sourceReference: "SRC-1", complaintDate: "2026-07-01" },
       { sourceReference: " src-1 ", complaintDate: "2026-07-01" }
@@ -236,5 +368,41 @@ describe("Complaint identity service", () => {
       { subject: "نفس النص فقط", region: "الرياض" },
       { subject: "نفس النص فقط", region: "مكة" }
     )).toBe(false);
+  });
+
+  it("uses UTC calendar dates and rejects invalid identity dates", () => {
+    const identity = resolveComplaintIdentity({
+      sourceReference: "TZ-1",
+      complaintDate: "2026-07-01T21:00:00Z",
+    });
+
+    expect(identity).toMatchObject({
+      strategy: "sourceReferenceDate",
+      value: "tz-1|2026-07-01",
+      complaintDate: "2026-07-01",
+    });
+    expect(() => buildComplaintFingerprint({
+      complaintDate: "not-a-date",
+      subject: "شكوى غير صالحة",
+    })).toThrow(ComplaintIdentityValidationError);
+    expect(() => resolveComplaintIdentity({
+      sourceReference: "TZ-2",
+      complaintDate: "not-a-date",
+    })).toThrow(ComplaintIdentityValidationError);
+  });
+});
+
+describe("Seed data", () => {
+  it("creates one deterministic synthetic report template when rerun", async () => {
+    const { seed } = await import("../../prisma/seed");
+    await seed(prisma);
+    await seed(prisma);
+
+    await expect(prisma.reportTemplate.count()).resolves.toBe(1);
+    await expect(prisma.reportTemplate.findFirstOrThrow()).resolves.toMatchObject({
+      name: "ملخص الشكاوى الشهري التجريبي",
+      type: "monthly-summary",
+      createdBy: "single-admin",
+    });
   });
 });

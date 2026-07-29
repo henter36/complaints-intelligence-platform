@@ -16,7 +16,7 @@ export function isReopenTransition(
   fromStatus: ComplaintStatus,
   toStatus: ComplaintStatus
 ): boolean {
-  return fromStatus === ComplaintStatus.CLOSED && OPEN_COMPLAINT_STATUSES.has(toStatus);
+  return isClosedStatus(fromStatus) && OPEN_COMPLAINT_STATUSES.has(toStatus);
 }
 
 export function assertComplaintStatusTransition(

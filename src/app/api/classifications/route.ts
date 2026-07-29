@@ -42,11 +42,34 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const { name, description, color, keywords, parentId } = body;
+    const normalizedParentId = typeof parentId === "string" ? parentId.trim() : "";
 
-    if (parentId) {
+    if (parentId != null && normalizedParentId.length === 0) {
+      return NextResponse.json(
+        { error: "INVALID_PARENT_CATEGORY", message: "parentId must reference an active category." },
+        { status: 400 }
+      );
+    }
+
+    if (normalizedParentId) {
+      const parentCategory = await db.category.findFirst({
+        where: {
+          id: normalizedParentId,
+          isDeleted: false,
+        },
+        select: { id: true },
+      });
+
+      if (!parentCategory) {
+        return NextResponse.json(
+          { error: "CATEGORY_NOT_FOUND", message: "Parent category was not found or is inactive." },
+          { status: 404 }
+        );
+      }
+
       const classification = await db.classification.create({
         data: {
-          categoryId: parentId,
+          categoryId: parentCategory.id,
           nameAr: name,
           description,
           color: color || "#64748b",

@@ -60,10 +60,10 @@ The Phase 1 schema mixed prototype UI needs with future enterprise concepts. `Us
 Duplicate identity is centralized in `ComplaintIdentityService`:
 
 1. Use normalized `externalId` when present.
-2. Use normalized `sourceReference` plus local complaint date when `externalId` is absent.
+2. Use normalized `sourceReference` plus the UTC calendar date derived from `complaintDate` when `externalId` is absent.
 3. Use a documented composite fingerprint only when both source identifiers are absent.
 
-The composite fingerprint uses local complaint date, source reference, region, facility, department, and subject. It intentionally does not use complainant name, phone, identifier, or complaint text alone.
+Duplicate identity keys normalize `complaintDate` to its UTC calendar date so fingerprints remain stable across hosts and deployment timezones. The composite fingerprint uses that UTC complaint date, source reference, region, facility, department, and subject. It intentionally does not use complainant name, phone, identifier, or complaint text alone.
 
 ## Import Batch Lifecycle
 

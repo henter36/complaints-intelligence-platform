@@ -2,7 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { toComplaintListItem } from "@/lib/api-transformers";
-import { buildComplaintWhereFromParams } from "@/server/api/complaint-query";
+import {
+  buildComplaintWhereFromParams,
+  isInvalidComplaintQueryError,
+} from "@/server/api/complaint-query";
 
 export async function GET(req: NextRequest) {
   try {
@@ -103,6 +106,12 @@ export async function GET(req: NextRequest) {
       totalPages: Math.ceil((isLate === "true" ? filteredLate.length : total) / pageSize),
     });
   } catch (error) {
+    if (isInvalidComplaintQueryError(error)) {
+      return NextResponse.json(
+        { error: error.code, message: error.message },
+        { status: 400 }
+      );
+    }
     console.error("Complaints API error:", error);
     return NextResponse.json({ error: "Failed to fetch complaints" }, { status: 500 });
   }
