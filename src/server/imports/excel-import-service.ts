@@ -251,6 +251,129 @@ function classifyRows(input: {
   });
 }
 
+type ProcessedWorkbook = {
+  selectedSheet: string;
+  columnMapping: ColumnMapping;
+  processedRows: ProcessedImportRow[];
+  counters: ReturnType<typeof calculateRowCounters>;
+};
+
+async function processWorkbookPreview(buffer: Buffer, mapping?: ColumnMapping | null): Promise<ProcessedWorkbook> {
+  const workbook = await parseXlsxWorkbook(buffer);
+  const columnMapping = mapping ?? matchComplaintColumns(workbook.headers);
+  validateColumnMapping(columnMapping);
+
+  const taxonomy = {
+    categories: await db.category.findMany({ where: { isActive: true, isDeleted: false } }),
+    classifications: await db.classification.findMany({
+      where: { isActive: true, isDeleted: false, category: { isActive: true, isDeleted: false } },
+      include: { category: true },
+    }),
+  };
+
+  const normalizedRows = workbook.rows.map((row) => {
+    const normalized = normalizeImportRow(row, columnMapping);
+    return {
+      row: normalized.normalized,
+      warnings: normalized.warnings,
+      errors: [
+        ...normalized.errors,
+        ...validateNormalizedComplaintRow(normalized.normalized, taxonomy),
+      ],
+    };
+  });
+
+  const existingByIdentity = await findExistingComplaints(
+    normalizedRows.filter((row) => row.errors.length === 0).map((row) => row.row)
+  );
+  const processedRows = classifyRows({
+    rawRows: workbook.rows,
+    normalizedRows,
+    existingByIdentity,
+  });
+
+  return {
+    selectedSheet: workbook.selectedSheet,
+    columnMapping,
+    processedRows,
+    counters: calculateRowCounters(processedRows),
+  };
+}
+
+async function persistPreviewRows(
+  tx: Prisma.TransactionClient,
+  batchId: string,
+  processedRows: ProcessedImportRow[]
+): Promise<void> {
+  await tx.importBatchRow.deleteMany({ where: { importBatchId: batchId } });
+  for (let index = 0; index < processedRows.length; index += WRITE_CHUNK_SIZE) {
+    const chunk = processedRows.slice(index, index + WRITE_CHUNK_SIZE);
+    await tx.importBatchRow.createMany({
+      data: chunk.map((row) => ({
+        importBatchId: batchId,
+        rowNumber: row.rowNumber,
+        rawData: row.rawData,
+        normalizedData: row.normalizedData ?? undefined,
+        externalId: row.externalId,
+        action: row.action,
+        validationStatus: row.validationStatus,
+        validationErrors: row.validationErrors ?? undefined,
+        validationWarnings: row.validationWarnings ?? undefined,
+        matchedComplaintId: row.matchedComplaintId,
+      })),
+    });
+  }
+}
+
+function toImportUploadResult(
+  batchId: string,
+  fileName: string,
+  processed: ProcessedWorkbook
+): ImportUploadResult {
+  return {
+    batchId,
+    fileName,
+    status: ImportBatchStatus.READY_FOR_CONFIRMATION,
+    selectedSheet: processed.selectedSheet,
+    totalRecords: processed.counters.totalRows,
+    validRecords: processed.counters.validRows,
+    newRecords: processed.counters.newRows,
+    updatedRecords: processed.counters.updatedRows,
+    duplicateRecords: processed.counters.duplicateRows,
+    rejectedRecords: processed.counters.rejectedRows,
+    incompleteRecords: processed.counters.invalidRows,
+    warningRecords: processed.counters.warningRows,
+    noChangeRecords: processed.counters.noChangeRows,
+    columnMapping: processed.columnMapping,
+    errors: processed.processedRows
+      .filter((row) => row.validationErrors || row.validationWarnings)
+      .slice(0, 100)
+      .map((row) => ({
+        row: row.rowNumber,
+        errors: (row.validationErrors as unknown as RowMessage[]) ?? [],
+        warnings: (row.validationWarnings as unknown as RowMessage[]) ?? [],
+      })),
+    preview: processed.processedRows.slice(0, 50).map((row) => {
+      const normalized = row.normalizedData as Record<string, unknown> | null;
+      return {
+        row: row.rowNumber,
+        action: row.action,
+        validationStatus: row.validationStatus,
+        complaintNumber: row.externalId,
+        externalId: row.externalId,
+        receivedDate: normalized?.receivedAt ?? normalized?.complaintDate ?? null,
+        channel: normalized?.channel ?? null,
+        subject: normalized?.subject ?? null,
+        status: normalized?.status ?? null,
+        priority: normalized?.priority ?? null,
+        region: normalized?.region ?? null,
+        department: normalized?.department ?? null,
+      };
+    }),
+    canApprove: false,
+  };
+}
+
 export async function processUploadedImportFile(input: UploadInput): Promise<ImportUploadResult> {
   assertSupportedExcelUpload({
     originalFileName: input.file.name,
@@ -315,67 +438,18 @@ export async function processUploadedImportFile(input: UploadInput): Promise<Imp
       actor,
     });
 
-    const workbook = await parseXlsxWorkbook(buffer);
-    const columnMapping = matchComplaintColumns(workbook.headers);
-    validateColumnMapping(columnMapping);
-
-    const taxonomy = {
-      categories: await db.category.findMany({ where: { isActive: true, isDeleted: false } }),
-      classifications: await db.classification.findMany({
-        where: { isActive: true, isDeleted: false, category: { isActive: true, isDeleted: false } },
-        include: { category: true },
-      }),
-    };
-
-    const normalizedRows = workbook.rows.map((row) => {
-      const normalized = normalizeImportRow(row, columnMapping);
-      return {
-        row: normalized.normalized,
-        warnings: normalized.warnings,
-        errors: [
-          ...normalized.errors,
-          ...validateNormalizedComplaintRow(normalized.normalized, taxonomy),
-        ],
-      };
-    });
-
-    const existingByIdentity = await findExistingComplaints(
-      normalizedRows.filter((row) => row.errors.length === 0).map((row) => row.row)
-    );
-    const processedRows = classifyRows({
-      rawRows: workbook.rows,
-      normalizedRows,
-      existingByIdentity,
-    });
-    const counters = calculateRowCounters(processedRows);
+    const processed = await processWorkbookPreview(buffer);
 
     await db.$transaction(async (tx) => {
-      await tx.importBatchRow.deleteMany({ where: { importBatchId: batch.id } });
-      for (let index = 0; index < processedRows.length; index += WRITE_CHUNK_SIZE) {
-        const chunk = processedRows.slice(index, index + WRITE_CHUNK_SIZE);
-        await tx.importBatchRow.createMany({
-          data: chunk.map((row) => ({
-            importBatchId: batch.id,
-            rowNumber: row.rowNumber,
-            rawData: row.rawData,
-            normalizedData: row.normalizedData ?? undefined,
-            externalId: row.externalId,
-            action: row.action,
-            validationStatus: row.validationStatus,
-            validationErrors: row.validationErrors ?? undefined,
-            validationWarnings: row.validationWarnings ?? undefined,
-            matchedComplaintId: row.matchedComplaintId,
-          })),
-        });
-      }
+      await persistPreviewRows(tx, batch.id, processed.processedRows);
       await tx.importBatch.update({
         where: { id: batch.id },
         data: {
-          ...counters,
+          ...processed.counters,
           status: ImportBatchStatus.VALIDATED,
           validatedAt: new Date(),
-          selectedSheet: workbook.selectedSheet,
-          columnMapping: toJsonValue(columnMapping),
+          selectedSheet: processed.selectedSheet,
+          columnMapping: toJsonValue(processed.columnMapping),
         },
       });
       await tx.importBatch.update({
@@ -390,7 +464,7 @@ export async function processUploadedImportFile(input: UploadInput): Promise<Imp
         entityType: "ImportBatch",
         entityId: batch.id,
         actor,
-        metadata: toJsonValue(counters),
+        metadata: toJsonValue(processed.counters),
       });
       await writeAuditLog(tx, {
         action: "IMPORT_READY_FOR_CONFIRMATION",
@@ -400,48 +474,7 @@ export async function processUploadedImportFile(input: UploadInput): Promise<Imp
       });
     });
 
-    return {
-      batchId: batch.id,
-      fileName: input.file.name,
-      status: ImportBatchStatus.READY_FOR_CONFIRMATION,
-      selectedSheet: workbook.selectedSheet,
-      totalRecords: counters.totalRows,
-      validRecords: counters.validRows,
-      newRecords: counters.newRows,
-      updatedRecords: counters.updatedRows,
-      duplicateRecords: counters.duplicateRows,
-      rejectedRecords: counters.rejectedRows,
-      incompleteRecords: counters.invalidRows,
-      warningRecords: counters.warningRows,
-      noChangeRecords: counters.noChangeRows,
-      columnMapping,
-      errors: processedRows
-        .filter((row) => row.validationErrors || row.validationWarnings)
-        .slice(0, 100)
-        .map((row) => ({
-          row: row.rowNumber,
-          errors: (row.validationErrors as unknown as RowMessage[]) ?? [],
-          warnings: (row.validationWarnings as unknown as RowMessage[]) ?? [],
-        })),
-      preview: processedRows.slice(0, 50).map((row) => {
-        const normalized = row.normalizedData as Record<string, unknown> | null;
-        return {
-        row: row.rowNumber,
-        action: row.action,
-        validationStatus: row.validationStatus,
-        complaintNumber: row.externalId,
-        externalId: row.externalId,
-        receivedDate: normalized?.receivedAt ?? normalized?.complaintDate ?? null,
-        channel: normalized?.channel ?? null,
-        subject: normalized?.subject ?? null,
-        status: normalized?.status ?? null,
-        priority: normalized?.priority ?? null,
-        region: normalized?.region ?? null,
-        department: normalized?.department ?? null,
-      };
-      }),
-      canApprove: false,
-    };
+    return toImportUploadResult(batch.id, input.file.name, processed);
   } catch (error) {
     if (batchId) {
       await db.importBatch.update({
@@ -481,9 +514,7 @@ export async function reprocessImportBatch(batchId: string, mapping?: ColumnMapp
 
   const buffer = await readStoredImportFile(batch.storageKey);
   const actor = AUDIT_ACTOR_SINGLE_ADMIN;
-  const workbook = await parseXlsxWorkbook(buffer);
-  const columnMapping = mapping ?? (batch.columnMapping as ColumnMapping | null) ?? matchComplaintColumns(workbook.headers);
-  validateColumnMapping(columnMapping);
+  const processed = await processWorkbookPreview(buffer, mapping ?? (batch.columnMapping as ColumnMapping | null));
 
   await db.importBatch.update({
     where: { id: batchId },
@@ -496,63 +527,17 @@ export async function reprocessImportBatch(batchId: string, mapping?: ColumnMapp
     },
   });
 
-  const taxonomy = {
-    categories: await db.category.findMany({ where: { isActive: true, isDeleted: false } }),
-    classifications: await db.classification.findMany({
-      where: { isActive: true, isDeleted: false, category: { isActive: true, isDeleted: false } },
-      include: { category: true },
-    }),
-  };
-
-  const normalizedRows = workbook.rows.map((row) => {
-    const normalized = normalizeImportRow(row, columnMapping);
-    return {
-      row: normalized.normalized,
-      warnings: normalized.warnings,
-      errors: [
-        ...normalized.errors,
-        ...validateNormalizedComplaintRow(normalized.normalized, taxonomy),
-      ],
-    };
-  });
-  const existingByIdentity = await findExistingComplaints(
-    normalizedRows.filter((row) => row.errors.length === 0).map((row) => row.row)
-  );
-  const processedRows = classifyRows({
-    rawRows: workbook.rows,
-    normalizedRows,
-    existingByIdentity,
-  });
-  const counters = calculateRowCounters(processedRows);
-
   await db.$transaction(async (tx) => {
-    await tx.importBatchRow.deleteMany({ where: { importBatchId: batchId } });
-    for (let index = 0; index < processedRows.length; index += WRITE_CHUNK_SIZE) {
-      const chunk = processedRows.slice(index, index + WRITE_CHUNK_SIZE);
-      await tx.importBatchRow.createMany({
-        data: chunk.map((row) => ({
-          importBatchId: batchId,
-          rowNumber: row.rowNumber,
-          rawData: row.rawData,
-          normalizedData: row.normalizedData ?? undefined,
-          externalId: row.externalId,
-          action: row.action,
-          validationStatus: row.validationStatus,
-          validationErrors: row.validationErrors ?? undefined,
-          validationWarnings: row.validationWarnings ?? undefined,
-          matchedComplaintId: row.matchedComplaintId,
-        })),
-      });
-    }
+    await persistPreviewRows(tx, batchId, processed.processedRows);
     await tx.importBatch.update({
       where: { id: batchId },
       data: {
-        ...counters,
+        ...processed.counters,
         status: ImportBatchStatus.READY_FOR_CONFIRMATION,
         validatedAt: new Date(),
         processingCompletedAt: new Date(),
-        selectedSheet: workbook.selectedSheet,
-        columnMapping: toJsonValue(columnMapping),
+        selectedSheet: processed.selectedSheet,
+        columnMapping: toJsonValue(processed.columnMapping),
       },
     });
     await writeAuditLog(tx, {
@@ -560,50 +545,9 @@ export async function reprocessImportBatch(batchId: string, mapping?: ColumnMapp
       entityType: "ImportBatch",
       entityId: batchId,
       actor,
-      metadata: toJsonValue(counters),
+      metadata: toJsonValue(processed.counters),
     });
   });
 
-  return {
-    batchId,
-    fileName: batch.originalFileName,
-    status: ImportBatchStatus.READY_FOR_CONFIRMATION,
-    selectedSheet: workbook.selectedSheet,
-    totalRecords: counters.totalRows,
-    validRecords: counters.validRows,
-    newRecords: counters.newRows,
-    updatedRecords: counters.updatedRows,
-    duplicateRecords: counters.duplicateRows,
-    rejectedRecords: counters.rejectedRows,
-    incompleteRecords: counters.invalidRows,
-    warningRecords: counters.warningRows,
-    noChangeRecords: counters.noChangeRows,
-    columnMapping,
-    errors: processedRows
-      .filter((row) => row.validationErrors || row.validationWarnings)
-      .slice(0, 100)
-      .map((row) => ({
-        row: row.rowNumber,
-        errors: (row.validationErrors as unknown as RowMessage[]) ?? [],
-        warnings: (row.validationWarnings as unknown as RowMessage[]) ?? [],
-      })),
-    preview: processedRows.slice(0, 50).map((row) => {
-      const normalized = row.normalizedData as Record<string, unknown> | null;
-      return {
-        row: row.rowNumber,
-        action: row.action,
-        validationStatus: row.validationStatus,
-        complaintNumber: row.externalId,
-        externalId: row.externalId,
-        receivedDate: normalized?.receivedAt ?? normalized?.complaintDate ?? null,
-        channel: normalized?.channel ?? null,
-        subject: normalized?.subject ?? null,
-        status: normalized?.status ?? null,
-        priority: normalized?.priority ?? null,
-        region: normalized?.region ?? null,
-        department: normalized?.department ?? null,
-      };
-    }),
-    canApprove: false,
-  };
+  return toImportUploadResult(batchId, batch.originalFileName, processed);
 }
