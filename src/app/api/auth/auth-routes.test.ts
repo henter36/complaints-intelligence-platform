@@ -1,10 +1,11 @@
 import { NextRequest } from "next/server";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hashPassword } from "@/server/auth/password-service";
 
 const loginAttemptCount = vi.fn();
 const loginAttemptCreate = vi.fn();
 const loginAttemptDeleteMany = vi.fn();
+const loginAttemptUpdate = vi.fn();
 const adminCredentialFindMany = vi.fn();
 const adminCredentialUpdate = vi.fn();
 const adminSessionCreate = vi.fn();
@@ -21,6 +22,7 @@ vi.mock("@/lib/db", () => ({
       count: loginAttemptCount,
       create: loginAttemptCreate,
       deleteMany: loginAttemptDeleteMany,
+      update: loginAttemptUpdate,
     },
     adminCredential: {
       findMany: adminCredentialFindMany,
@@ -46,6 +48,12 @@ vi.mock("@/lib/db", () => ({
         findFirst: vi.fn().mockResolvedValue({ username: "admin" }),
         update: adminCredentialUpdate,
       },
+      loginAttempt: {
+        count: loginAttemptCount,
+        create: loginAttemptCreate,
+        deleteMany: loginAttemptDeleteMany,
+        update: loginAttemptUpdate,
+      },
       adminSession: {
         create: adminSessionCreate,
         findUnique: adminSessionFindUnique,
@@ -70,15 +78,22 @@ function jsonRequest(path: string, body: unknown) {
 }
 
 describe("auth API routes", () => {
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
   beforeEach(() => {
     vi.clearAllMocks();
     loginAttemptCount.mockResolvedValue(0);
-    loginAttemptCreate.mockResolvedValue({});
+    loginAttemptCreate.mockResolvedValue({ id: "attempt_1" });
     loginAttemptDeleteMany.mockResolvedValue({ count: 0 });
+    loginAttemptUpdate.mockResolvedValue({ id: "attempt_1" });
     adminSessionCreate.mockResolvedValue({ id: "session_1" });
     adminCredentialUpdate.mockResolvedValue({ id: "admin_1", username: "admin" });
     adminSessionUpdateMany.mockResolvedValue({ count: 1 });
     auditLogCreate.mockResolvedValue({});
+  });
+
+  afterEach(() => {
+    consoleError.mockClear();
   });
 
   it("logs in with valid credentials and does not return the session token in JSON", async () => {
@@ -103,6 +118,10 @@ describe("auth API routes", () => {
     expect(response.headers.get("set-cookie")).toContain("cip_session=");
     expect(response.headers.get("set-cookie")).toContain("HttpOnly");
     expect(response.headers.get("set-cookie")?.toLowerCase()).toContain("samesite=lax");
+    expect(loginAttemptUpdate).toHaveBeenCalledWith({
+      where: { id: "attempt_1" },
+      data: { succeeded: true },
+    });
   });
 
   it("uses a generic error for invalid credentials", async () => {
@@ -137,6 +156,27 @@ describe("auth API routes", () => {
 
     expect(response.status).toBe(429);
     expect(body.error.code).toBe("TOO_MANY_REQUESTS");
+  });
+
+  it("returns 500 when session creation fails after credentials are valid", async () => {
+    adminCredentialFindMany.mockResolvedValue([
+      {
+        id: "admin_1",
+        username: "admin",
+        passwordHash: await hashPassword("StrongPassword123"),
+      },
+    ]);
+    adminSessionCreate.mockRejectedValueOnce(new Error("session store unavailable"));
+
+    const { POST } = await import("./login/route");
+    const response = await POST(jsonRequest("/api/auth/login", {
+      username: "admin",
+      password: "StrongPassword123",
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(500);
+    expect(body.error.code).toBe("LOGIN_UNAVAILABLE");
   });
 
   it("rejects protected complaints API requests without a session", async () => {
@@ -183,5 +223,27 @@ describe("auth API routes", () => {
       data: { revokedAt: expect.any(Date) },
     });
     expect(response.headers.get("set-cookie")).toContain("cip_session=");
+  });
+
+  it("does not report logout success when session revocation fails", async () => {
+    adminSessionFindUnique.mockResolvedValue({
+      id: "session_1",
+      tokenHash: "hashed",
+      expiresAt: new Date(Date.now() + 60_000),
+      revokedAt: null,
+      lastSeenAt: new Date(),
+    });
+    adminSessionUpdate.mockRejectedValueOnce(new Error("revocation failed"));
+
+    const { POST } = await import("./logout/route");
+    const request = jsonRequest("/api/auth/logout", {});
+    request.cookies.set("cip_session", "raw-token");
+
+    const response = await POST(request);
+    const body = await response.json();
+
+    expect(response.status).toBe(500);
+    expect(body.error.code).toBe("LOGOUT_FAILED");
+    expect(response.headers.get("set-cookie")).toBeNull();
   });
 });

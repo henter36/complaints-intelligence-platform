@@ -74,8 +74,13 @@ export function AppSidebar({ activeScreen, onNavigate, username }: Readonly<AppS
   const [passwordLoading, setPasswordLoading] = useState(false);
 
   async function logout() {
-    await fetch("/api/auth/logout", { method: "POST" });
-    router.replace("/login");
+    const response = await fetch("/api/auth/logout", { method: "POST" });
+    if (response.ok) {
+      router.replace("/login");
+      return;
+    }
+
+    setPasswordError("تعذر تسجيل الخروج، حاول مرة أخرى");
   }
 
   async function changePassword(formData: FormData) {
@@ -83,26 +88,31 @@ export function AppSidebar({ activeScreen, onNavigate, username }: Readonly<AppS
     setPasswordError("");
     setPasswordSuccess("");
 
-    const response = await fetch("/api/auth/change-password", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        currentPassword: formData.get("currentPassword"),
-        newPassword: formData.get("newPassword"),
-        confirmPassword: formData.get("confirmPassword"),
-      }),
-    });
+    try {
+      const response = await fetch("/api/auth/change-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          currentPassword: formData.get("currentPassword"),
+          newPassword: formData.get("newPassword"),
+          confirmPassword: formData.get("confirmPassword"),
+        }),
+      });
 
-    const payload = await response.json().catch(() => null);
-    setPasswordLoading(false);
+      const payload = await response.json().catch(() => null);
 
-    if (!response.ok) {
-      setPasswordError(payload?.error?.message ?? "تعذر تغيير كلمة المرور");
-      return;
+      if (!response.ok) {
+        setPasswordError(payload?.error?.message ?? "تعذر تغيير كلمة المرور");
+        return;
+      }
+
+      setPasswordSuccess("تم تغيير كلمة المرور. سجل الدخول مجددًا.");
+      setTimeout(() => router.replace("/login"), 600);
+    } catch {
+      setPasswordError("تعذر الاتصال بالخادم");
+    } finally {
+      setPasswordLoading(false);
     }
-
-    setPasswordSuccess("تم تغيير كلمة المرور. سجل الدخول مجددًا.");
-    setTimeout(() => router.replace("/login"), 600);
   }
 
   return (

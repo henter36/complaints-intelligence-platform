@@ -8,9 +8,9 @@
 - Login, logout, session status, and password change API routes.
 - Login page and limited shell updates for username, logout, and password change.
 - Operational API guards and page protection.
-- Login rate limiting using persisted `LoginAttempt` rows.
-- Same-origin validation for sensitive POST requests.
-- Security headers in middleware.
+- Login rate limiting using persisted `LoginAttempt` rows with a transactionally reserved attempt before bcrypt verification.
+- Same-origin validation for sensitive POST requests, including fail-closed handling for missing or malformed origin headers.
+- Security headers in proxy, including a nonce-based `script-src`.
 - Authentication audit events.
 
 ## Migration
@@ -33,7 +33,7 @@ Creates:
 - `DATABASE_URL="file:./dev.db" npm run db:seed`: passed.
 - `npm run typecheck`: passed.
 - `npm run lint`: passed.
-- `npm test`: passed, 117 tests.
+- `npm test`: passed, 119 tests.
 - `DATABASE_URL="file:./dev.db" npm run build`: passed.
 - `npm run audit:runtime`: passed, 0 vulnerabilities.
 - `git diff --check`: passed.
@@ -45,7 +45,7 @@ The full audit still reports the documented development-tooling `brace-expansion
 - The system is still single-user only and intentionally has no MFA.
 - Password reset by email is intentionally excluded.
 - SQLite remains acceptable for local single-user mode but should be revisited before hosted multi-user operation.
-- CSP is intentionally conservative but still allows inline script/style required by the current Next.js frontend.
+- CSP uses a per-request script nonce. Inline style remains allowed for current frontend compatibility.
 
 ## Excluded
 

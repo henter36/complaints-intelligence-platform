@@ -5,15 +5,23 @@ import { getSessionTokenFromRequest, revokeSessionByToken } from "@/server/auth/
 import { writeAuditLog } from "@/server/audit/audit-log-service";
 import { assertSameOrigin, CsrfValidationError } from "@/server/auth/auth-guard";
 
-export async function POST(request: NextRequest) {
+async function writeLogoutAudit(): Promise<void> {
   try {
-    assertSameOrigin(request);
-    await revokeSessionByToken(getSessionTokenFromRequest(request));
     await writeAuditLog(db, {
       action: "AUTH_LOGOUT",
       entityType: "AdminSession",
       actor: AUTH_ACTOR,
     });
+  } catch (error) {
+    console.error("Logout audit write failed:", error);
+  }
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    assertSameOrigin(request);
+    await revokeSessionByToken(getSessionTokenFromRequest(request));
+    await writeLogoutAudit();
 
     const response = NextResponse.json({ ok: true });
     response.cookies.delete(SESSION_COOKIE_NAME);
@@ -26,8 +34,10 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const response = NextResponse.json({ ok: true });
-    response.cookies.delete(SESSION_COOKIE_NAME);
-    return response;
+    console.error("Logout failed:", error);
+    return NextResponse.json(
+      { error: { code: "LOGOUT_FAILED", message: "تعذر تسجيل الخروج" } },
+      { status: 500 }
+    );
   }
 }

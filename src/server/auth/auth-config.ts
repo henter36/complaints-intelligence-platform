@@ -11,6 +11,10 @@ export const AUTH_ERROR_RESPONSE = {
 };
 
 export function getAuthSecret(): string {
+  if (env.nodeEnv === "production" && !env.authSecret) {
+    throw new Error("AUTH_SECRET is required in production.");
+  }
+
   const secret = env.authSecret ?? "test-auth-secret-with-at-least-32-bytes";
 
   if (env.nodeEnv === "production" && secret.length < 32) {

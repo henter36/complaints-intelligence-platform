@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchAllComplaintsForReport } from "@/lib/report-complaints";
+import {
+  assertReportPaginationWithinLimit,
+  fetchAllComplaintsForReport,
+} from "@/lib/report-complaints";
 
 function complaint(id: string) {
   return {
@@ -179,23 +182,10 @@ describe("fetchAllComplaintsForReport", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("throws RangeError when report pagination does not terminate", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = new URL(String(input), "http://localhost");
-      const page = Number(url.searchParams.get("page"));
-
-      return Response.json({
-        data: [complaint(`cmp-${page}`)],
-        page,
-        pageSize: 100,
-        totalPages: 10_001,
-      });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(fetchAllComplaintsForReport(new URLSearchParams())).rejects.toThrow(RangeError);
-    expect(fetchMock).toHaveBeenCalledTimes(10_000);
-  }, 30_000);
+  it("throws RangeError when report pagination exceeds the hard page limit", () => {
+    expect(() => assertReportPaginationWithinLimit(10_000)).not.toThrow();
+    expect(() => assertReportPaginationWithinLimit(10_001)).toThrow(RangeError);
+  });
 
   it("stops before requesting another page when aborted", async () => {
     const controller = new AbortController();

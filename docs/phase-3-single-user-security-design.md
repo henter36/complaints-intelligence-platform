@@ -11,11 +11,11 @@ The platform runs in Single-User Secure Mode. It has one administrator credentia
 Initialization:
 
 ```bash
-npm run auth:hash-password -- "YOUR_LONG_PASSWORD"
-ADMIN_USERNAME="admin" ADMIN_PASSWORD_HASH="<hash>" npm run auth:init-admin
+npm run auth:hash-password
+npm run auth:init-admin -- --env-file .env.admin
 ```
 
-`auth:init-admin -- --replace` intentionally replaces the existing single credential and revokes sessions.
+`auth:hash-password` reads from a hidden prompt when interactive, or protected stdin in automation. Store `ADMIN_USERNAME` and `ADMIN_PASSWORD_HASH` in a protected `.env.admin` file. `auth:init-admin -- --replace --env-file .env.admin` intentionally replaces the existing single credential and revokes sessions.
 
 ## Sessions
 
@@ -33,11 +33,11 @@ Sessions have absolute expiry. Expired and revoked sessions are rejected. `lastS
 
 ## Rate Limiting
 
-`LoginAttempt` stores hashed identifiers and hashed IP values. The login route allows five failed attempts per 15 minutes before returning `429 TOO_MANY_REQUESTS`.
+`LoginAttempt` stores hashed identifiers and hashed IP values. The login route reserves a failed attempt inside a database transaction before running bcrypt verification, then marks that attempt as succeeded after a valid login. This prevents parallel requests from all passing a separate count-before-insert check. The route allows five failed attempts per 15 minutes before returning `429 TOO_MANY_REQUESTS`.
 
 ## CSRF
 
-State-changing auth endpoints use POST and validate same-origin requests when an `Origin` header is present. Cookie `SameSite=Lax` is also applied.
+State-changing auth endpoints use POST and validate same-origin requests. Missing or malformed `Origin`/`Host` headers are rejected for unsafe methods. Cookie `SameSite=Lax` is also applied.
 
 ## Security Headers
 
@@ -47,7 +47,7 @@ Middleware applies:
 - `Referrer-Policy: strict-origin-when-cross-origin`
 - `X-Frame-Options: DENY`
 - `Permissions-Policy`
-- A constrained CSP without `unsafe-eval`
+- A constrained CSP with a per-request script nonce and no `unsafe-inline` in `script-src`
 
 ## Protected Surface
 

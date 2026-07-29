@@ -39,10 +39,14 @@ export function assertSameOrigin(request: NextRequest): void {
   const host = request.headers.get("host");
 
   if (!origin || !host) {
-    return;
+    throw new CsrfValidationError();
   }
 
-  if (new URL(origin).host !== host) {
+  try {
+    if (new URL(origin).host !== host) {
+      throw new CsrfValidationError();
+    }
+  } catch {
     throw new CsrfValidationError();
   }
 }

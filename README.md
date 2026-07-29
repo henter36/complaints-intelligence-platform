@@ -27,8 +27,6 @@ Create a local `.env` from `.env.example`:
 
 ```env
 DATABASE_URL="file:./dev.db"
-ADMIN_USERNAME="admin"
-ADMIN_PASSWORD_HASH="CHANGE_ME_TO_BCRYPT_HASH"
 AUTH_SECRET="CHANGE_ME_WITH_AT_LEAST_32_RANDOM_BYTES"
 SESSION_TTL_HOURS="8"
 OPENAI_API_KEY="CHANGE_ME"
@@ -37,9 +35,11 @@ OPENAI_API_KEY="CHANGE_ME"
 Generate and initialize the administrator credential:
 
 ```bash
-npm run auth:hash-password -- "YOUR_LONG_PASSWORD"
-ADMIN_USERNAME="admin" ADMIN_PASSWORD_HASH="<hash>" npm run auth:init-admin
+npm run auth:hash-password
+npm run auth:init-admin -- --env-file .env.admin
 ```
+
+`auth:hash-password` reads from a hidden prompt when run interactively, or protected stdin in automation. Store `ADMIN_USERNAME` and `ADMIN_PASSWORD_HASH` in a protected local env file such as `.env.admin`; do not pass reusable administrator credentials or password hashes inline in shell commands.
 
 `DATABASE_URL`, `AUTH_SECRET`, and the initialized admin credential are required for authenticated operation. `OPENAI_API_KEY` remains a placeholder until governed AI is implemented.
 
@@ -51,7 +51,7 @@ DATABASE_URL="file:./dev.db" npm run db:validate
 DATABASE_URL="file:./dev.db" npm run db:generate
 DATABASE_URL="file:./dev.db" npx prisma migrate deploy
 DATABASE_URL="file:./dev.db" npm run db:seed
-ADMIN_USERNAME="admin" ADMIN_PASSWORD_HASH="<hash>" npm run auth:init-admin
+npm run auth:init-admin -- --env-file .env.admin
 npm run dev
 ```
 

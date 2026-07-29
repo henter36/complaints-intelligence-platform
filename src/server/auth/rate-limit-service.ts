@@ -27,39 +27,45 @@ export function getLoginAttemptIdentity(input: {
   };
 }
 
-export async function assertLoginAllowed(input: {
+export async function reserveLoginAttempt(input: {
   identifierHash: string;
   ipHash?: string | null;
-}): Promise<void> {
-  const since = new Date(Date.now() - WINDOW_MS);
-  const failedAttempts = await db.loginAttempt.count({
-    where: {
-      identifierHash: input.identifierHash,
-      succeeded: false,
-      attemptedAt: { gte: since },
-    },
-  });
+}): Promise<{ id: string }> {
+  return db.$transaction(async (tx) => {
+    const since = new Date(Date.now() - WINDOW_MS);
+    const failedAttempts = await tx.loginAttempt.count({
+      where: {
+        identifierHash: input.identifierHash,
+        succeeded: false,
+        attemptedAt: { gte: since },
+      },
+    });
 
-  if (failedAttempts >= MAX_FAILED_ATTEMPTS) {
-    throw new LoginRateLimitError();
-  }
+    if (failedAttempts >= MAX_FAILED_ATTEMPTS) {
+      throw new LoginRateLimitError();
+    }
+
+    const attempt = await tx.loginAttempt.create({
+      data: {
+        identifierHash: input.identifierHash,
+        ipHash: input.ipHash ?? null,
+        succeeded: false,
+      },
+      select: { id: true },
+    });
+
+    const cutoff = new Date(Date.now() - WINDOW_MS * 4);
+    await tx.loginAttempt.deleteMany({
+      where: { attemptedAt: { lt: cutoff } },
+    });
+
+    return attempt;
+  });
 }
 
-export async function recordLoginAttempt(input: {
-  identifierHash: string;
-  ipHash?: string | null;
-  succeeded: boolean;
-}): Promise<void> {
-  await db.loginAttempt.create({
-    data: {
-      identifierHash: input.identifierHash,
-      ipHash: input.ipHash ?? null,
-      succeeded: input.succeeded,
-    },
-  });
-
-  const cutoff = new Date(Date.now() - WINDOW_MS * 4);
-  await db.loginAttempt.deleteMany({
-    where: { attemptedAt: { lt: cutoff } },
+export async function markLoginAttemptSucceeded(id: string): Promise<void> {
+  await db.loginAttempt.update({
+    where: { id },
+    data: { succeeded: true },
   });
 }

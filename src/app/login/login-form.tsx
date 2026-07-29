@@ -18,23 +18,27 @@ export function LoginForm() {
     setLoading(true);
 
     const form = new FormData(event.currentTarget);
-    const response = await fetch("/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        username: form.get("username"),
-        password: form.get("password"),
-      }),
-    });
+    try {
+      const response = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username: form.get("username"),
+          password: form.get("password"),
+        }),
+      });
 
-    setLoading(false);
+      if (!response.ok) {
+        setError("بيانات الدخول غير صحيحة");
+        return;
+      }
 
-    if (!response.ok) {
-      setError("بيانات الدخول غير صحيحة");
-      return;
+      router.replace(params.get("next") || "/");
+    } catch {
+      setError("تعذر الاتصال بالخادم");
+    } finally {
+      setLoading(false);
     }
-
-    router.replace(params.get("next") || "/");
   }
 
   return (

@@ -130,12 +130,16 @@ export async function revokeSessionByToken(
     data: { revokedAt: new Date() },
   });
 
-  await writeAuditLog(client, {
-    action: "AUTH_SESSION_REVOKED",
-    entityType: "AdminSession",
-    entityId: session.id,
-    actor: AUTH_ACTOR,
-  });
+  try {
+    await writeAuditLog(client, {
+      action: "AUTH_SESSION_REVOKED",
+      entityType: "AdminSession",
+      entityId: session.id,
+      actor: AUTH_ACTOR,
+    });
+  } catch (error) {
+    console.error("Session revoke audit write failed:", error);
+  }
 }
 
 export async function cleanupExpiredSessions(): Promise<number> {

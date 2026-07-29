@@ -30,10 +30,6 @@ if (isProductionRuntime) {
   if (!parsed.data.AUTH_SECRET || parsed.data.AUTH_SECRET.length < 32) {
     throw new Error("AUTH_SECRET must be at least 32 characters in production.");
   }
-
-  if (!parsed.data.ADMIN_USERNAME) {
-    throw new Error("ADMIN_USERNAME is required in production.");
-  }
 }
 
 export const env = {

@@ -5,10 +5,10 @@ import { AUTH_ACTOR, getCookieOptions, SESSION_COOKIE_NAME } from "@/server/auth
 import { createAdminSession, getRequestIp } from "@/server/auth/session-service";
 import { validateAdminLogin } from "@/server/auth/admin-service";
 import {
-  assertLoginAllowed,
   getLoginAttemptIdentity,
   isLoginRateLimitError,
-  recordLoginAttempt,
+  markLoginAttemptSucceeded,
+  reserveLoginAttempt,
 } from "@/server/auth/rate-limit-service";
 import { writeAuditLog } from "@/server/audit/audit-log-service";
 import { assertSameOrigin, CsrfValidationError } from "@/server/auth/auth-guard";
@@ -24,6 +24,21 @@ const INVALID_LOGIN_RESPONSE = {
     message: "بيانات الدخول غير صحيحة",
   },
 };
+
+const LOGIN_UNAVAILABLE_RESPONSE = {
+  error: {
+    code: "LOGIN_UNAVAILABLE",
+    message: "تعذر تسجيل الدخول مؤقتًا",
+  },
+};
+
+async function writeAuthAudit(input: Parameters<typeof writeAuditLog>[1]): Promise<void> {
+  try {
+    await writeAuditLog(db, input);
+  } catch (error) {
+    console.error("Auth audit write failed:", error);
+  }
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -43,13 +58,11 @@ export async function POST(request: NextRequest) {
       ip: getRequestIp(request),
     });
 
-    await assertLoginAllowed(identity);
-
+    const attempt = await reserveLoginAttempt(identity);
     const admin = await validateAdminLogin(input.username, input.password);
-    await recordLoginAttempt({ ...identity, succeeded: Boolean(admin) });
 
     if (!admin) {
-      await writeAuditLog(db, {
+      await writeAuthAudit({
         action: "AUTH_LOGIN_FAILED",
         entityType: "AdminCredential",
         actor: AUTH_ACTOR,
@@ -60,7 +73,13 @@ export async function POST(request: NextRequest) {
 
     const { token, session } = await createAdminSession({ request, username: admin.username });
 
-    await writeAuditLog(db, {
+    try {
+      await markLoginAttemptSucceeded(attempt.id);
+    } catch (error) {
+      console.error("Login attempt success update failed:", error);
+    }
+
+    await writeAuthAudit({
       action: "AUTH_LOGIN_SUCCEEDED",
       entityType: "AdminSession",
       entityId: session.id,
@@ -79,7 +98,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (isLoginRateLimitError(error)) {
-      await writeAuditLog(db, {
+      await writeAuthAudit({
         action: "AUTH_RATE_LIMITED",
         entityType: "LoginAttempt",
         actor: AUTH_ACTOR,
@@ -95,6 +114,6 @@ export async function POST(request: NextRequest) {
     }
 
     console.error("Login failed:", error);
-    return NextResponse.json(INVALID_LOGIN_RESPONSE, { status: 401 });
+    return NextResponse.json(LOGIN_UNAVAILABLE_RESPONSE, { status: 500 });
   }
 }
