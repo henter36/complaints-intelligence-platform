@@ -22,6 +22,19 @@ export function isInvalidComplaintQueryError(error: unknown): error is InvalidCo
   return error instanceof InvalidComplaintQueryError;
 }
 
+function addAndCondition(
+  where: Prisma.ComplaintWhereInput,
+  condition: Prisma.ComplaintWhereInput
+): void {
+  const current = where.AND;
+  if (!current) {
+    where.AND = [condition];
+    return;
+  }
+
+  where.AND = Array.isArray(current) ? [...current, condition] : [current, condition];
+}
+
 export function parsePriority(value: string | null): ComplaintPriority | undefined {
   if (!value) return undefined;
   const normalized = value.trim().toUpperCase();
@@ -49,13 +62,17 @@ export function buildComplaintWhereFromParams(params: URLSearchParams): Prisma.C
   const department = params.get("departmentId");
   const classificationId = params.get("classificationId");
   const channel = params.get("channel");
-  const status = parseComplaintStatus(params.get("status"));
+  const statusValue = params.get("status");
+  const status = parseComplaintStatus(statusValue);
   const priority = parsePriority(params.get("priority"));
   const severity = parsePriority(params.get("severity"));
 
   const where: Prisma.ComplaintWhereInput = { isDeleted: false };
   if (from && to && from > to) {
     throw new InvalidComplaintQueryError("from must be before or equal to to");
+  }
+  if (statusValue && !status) {
+    throw new InvalidComplaintQueryError("status is not supported");
   }
 
   if (from || to) {
@@ -88,13 +105,13 @@ export function addComplaintRequestFilters(
   if (search) {
     const searchFilter: Prisma.ComplaintWhereInput = {
       OR: [
-      { externalId: { contains: search } },
-      { sourceReference: { contains: search } },
-      { subject: { contains: search } },
-      { description: { contains: search } },
+        { externalId: { contains: search } },
+        { sourceReference: { contains: search } },
+        { subject: { contains: search } },
+        { description: { contains: search } },
       ],
     };
-    where.AND = [...(Array.isArray(where.AND) ? where.AND : []), searchFilter];
+    addAndCondition(where, searchFilter);
   }
   if (isRepeated === "true") where.isRepeated = true;
   if (isRepeated === "false") where.isRepeated = false;
@@ -103,20 +120,19 @@ export function addComplaintRequestFilters(
   if (aiAnalyzed === "true") where.aiAnalyzedAt = { not: null };
   if (aiAnalyzed === "false") where.aiAnalyzedAt = null;
   if (isLate === "true") {
-    where.dueDate = { lt: now };
-    where.status = { in: OPEN_LATE_STATUSES };
+    addAndCondition(where, {
+      dueDate: { lt: now },
+      status: { in: OPEN_LATE_STATUSES },
+    });
   }
   if (isLate === "false") {
-    where.AND = [
-      ...(Array.isArray(where.AND) ? where.AND : []),
-      {
-        OR: [
-          { dueDate: null },
-          { dueDate: { gte: now } },
-          { status: { notIn: OPEN_LATE_STATUSES } },
-        ],
-      },
-    ];
+    addAndCondition(where, {
+      OR: [
+        { dueDate: null },
+        { dueDate: { gte: now } },
+        { status: { notIn: OPEN_LATE_STATUSES } },
+      ],
+    });
   }
 
   return where;

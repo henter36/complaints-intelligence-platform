@@ -6,6 +6,7 @@ import { PrismaClient, ComplaintPriority, ComplaintStatus, ImportBatchStatus, Im
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   ComplaintConcurrencyError,
+  ComplaintNotFoundError,
   ComplaintValidationError,
   createComplaint,
   getComplaintServiceErrorStatus,
@@ -68,7 +69,7 @@ beforeAll(async () => {
     stdio: "pipe",
   });
   prisma = new PrismaClient();
-});
+}, 30_000);
 
 afterAll(async () => {
   await prisma.$disconnect();
@@ -218,6 +219,76 @@ describe("Complaint domain model", () => {
     await expect(prisma.auditLog.count({
       where: { entityId: complaint.id, action: "COMPLAINT_STATUS_CHANGED" },
     })).resolves.toBe(auditAfterSuccess);
+  });
+
+  it("returns not found for missing or soft-deleted complaints without history or audit", async () => {
+    await expect(updateComplaintStatus(prisma, "missing-complaint", ComplaintStatus.OPEN, {
+      expectedVersion: 1,
+      reason: "غير موجود",
+    })).rejects.toBeInstanceOf(ComplaintNotFoundError);
+    expect(getComplaintServiceErrorStatus(new ComplaintNotFoundError("missing-complaint"))).toBe(404);
+
+    const complaint = await createComplaint(prisma, {
+      externalId: "EXT-NOT-FOUND-SOFT-DELETED",
+      subject: "شكوى محذوفة",
+      status: ComplaintStatus.OPEN,
+    });
+    const historyBefore = await prisma.complaintStatusHistory.count({ where: { complaintId: complaint.id } });
+    const auditBefore = await prisma.auditLog.count({ where: { entityId: complaint.id } });
+
+    await softDeleteComplaint(prisma, complaint.id);
+    const deleted = await prisma.complaint.findUniqueOrThrow({ where: { id: complaint.id } });
+    await expect(updateComplaintStatus(prisma, complaint.id, ComplaintStatus.IN_PROGRESS, {
+      expectedVersion: deleted.version,
+      reason: "محاولة على محذوف",
+    })).rejects.toBeInstanceOf(ComplaintNotFoundError);
+
+    const after = await prisma.complaint.findUniqueOrThrow({ where: { id: complaint.id } });
+    expect(after.version).toBe(deleted.version);
+    await expect(prisma.complaintStatusHistory.count({ where: { complaintId: complaint.id } })).resolves.toBe(historyBefore);
+    await expect(prisma.auditLog.count({ where: { entityId: complaint.id } })).resolves.toBe(auditBefore + 1);
+  });
+
+  it("classifies a soft delete between read and update as not found", async () => {
+    const complaint = await createComplaint(prisma, {
+      externalId: "EXT-NOT-FOUND-RACE",
+      subject: "شكوى حذف أثناء التحديث",
+      status: ComplaintStatus.OPEN,
+    });
+    const historyBefore = await prisma.complaintStatusHistory.count({ where: { complaintId: complaint.id } });
+    const auditBefore = await prisma.auditLog.count({ where: { entityId: complaint.id } });
+
+    const tx = {
+      complaint: {
+        findUnique: prisma.complaint.findUnique.bind(prisma.complaint),
+        findUniqueOrThrow: prisma.complaint.findUniqueOrThrow.bind(prisma.complaint),
+        updateMany: async () => {
+          await prisma.complaint.update({
+            where: { id: complaint.id },
+            data: { isDeleted: true, deletedAt: new Date("2026-07-20T00:00:00Z") },
+          });
+          return { count: 0 };
+        },
+      },
+      complaintStatusHistory: prisma.complaintStatusHistory,
+      auditLog: prisma.auditLog,
+    };
+    const raceClient = {
+      $transaction: async <T>(callback: (transaction: typeof tx) => Promise<T>) => callback(tx),
+      complaint: prisma.complaint,
+      complaintStatusHistory: prisma.complaintStatusHistory,
+      auditLog: prisma.auditLog,
+    } as unknown as typeof prisma;
+
+    await expect(updateComplaintStatus(raceClient, complaint.id, ComplaintStatus.IN_PROGRESS, {
+      expectedVersion: complaint.version,
+      reason: "سباق حذف",
+    })).rejects.toBeInstanceOf(ComplaintNotFoundError);
+
+    const after = await prisma.complaint.findUniqueOrThrow({ where: { id: complaint.id } });
+    expect(after.version).toBe(complaint.version);
+    await expect(prisma.complaintStatusHistory.count({ where: { complaintId: complaint.id } })).resolves.toBe(historyBefore);
+    await expect(prisma.auditLog.count({ where: { entityId: complaint.id } })).resolves.toBe(auditBefore);
   });
 
   it("allows only one concurrent transition for the same expected version", async () => {

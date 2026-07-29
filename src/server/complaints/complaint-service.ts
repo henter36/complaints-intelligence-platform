@@ -28,11 +28,21 @@ export class ComplaintConcurrencyError extends Error {
   }
 }
 
+export class ComplaintNotFoundError extends Error {
+  readonly code = "COMPLAINT_NOT_FOUND";
+
+  constructor(_complaintId: string) {
+    super("Complaint was not found");
+    this.name = "ComplaintNotFoundError";
+  }
+}
+
 export function isComplaintConcurrencyError(error: unknown): error is ComplaintConcurrencyError {
   return error instanceof ComplaintConcurrencyError;
 }
 
 export function getComplaintServiceErrorStatus(error: unknown): number | undefined {
+  if (error instanceof ComplaintNotFoundError) return 404;
   if (error instanceof ComplaintConcurrencyError) return 409;
   if (error instanceof ComplaintValidationError) return 400;
   return undefined;
@@ -107,7 +117,11 @@ export async function updateComplaintStatus(
   const requestedClosedAt = normalizeOptionalDateTime(options.closedAt ?? null, "closedAt");
 
   return db.$transaction(async (tx) => {
-    const existing = await tx.complaint.findUniqueOrThrow({ where: { id: complaintId } });
+    const existing = await tx.complaint.findUnique({ where: { id: complaintId } });
+    if (!existing || existing.isDeleted) {
+      throw new ComplaintNotFoundError(complaintId);
+    }
+
     assertComplaintStatusTransition(existing.status, toStatus, { reopenReason: options.reason });
 
     const closedAt = toStatus === ComplaintStatus.CLOSED
@@ -129,10 +143,21 @@ export async function updateComplaintStatus(
     });
 
     if (result.count !== 1) {
+      const current = await tx.complaint.findUnique({
+        where: { id: complaintId },
+        select: { version: true, isDeleted: true },
+      });
+      if (!current || current.isDeleted) {
+        throw new ComplaintNotFoundError(complaintId);
+      }
+
       throw new ComplaintConcurrencyError();
     }
 
-    const complaint = await tx.complaint.findUniqueOrThrow({ where: { id: complaintId } });
+    const complaint = await tx.complaint.findUnique({ where: { id: complaintId } });
+    if (!complaint || complaint.isDeleted) {
+      throw new ComplaintNotFoundError(complaintId);
+    }
 
     await tx.complaintStatusHistory.create({
       data: {

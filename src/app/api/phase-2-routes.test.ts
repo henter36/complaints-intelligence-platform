@@ -169,7 +169,7 @@ describe("Phase 2 API routes", () => {
 
     expect(response.status).toBe(200);
     expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
-      orderBy: { complaintDate: "desc" },
+      orderBy: [{ complaintDate: "desc" }, { id: "desc" }],
       skip: 0,
       take: 20,
     }));
@@ -187,6 +187,31 @@ describe("Phase 2 API routes", () => {
       skip: expectedSkip,
       take: expectedTake,
     }));
+  });
+
+  it("returns stable pagination metadata for empty result sets", async () => {
+    vi.resetModules();
+    const findMany = vi.fn().mockResolvedValue([]);
+    const count = vi.fn().mockResolvedValue(0);
+    vi.doMock("@/lib/db", () => ({
+      db: {
+        complaint: { findMany, count },
+      },
+    }));
+
+    const { GET } = await import("./complaints/route");
+    const response = await GET(new NextRequest("http://localhost/api/complaints?page=5&pageSize=20"));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      data: [],
+      total: 0,
+      page: 5,
+      pageSize: 20,
+      totalPages: 0,
+      hasNextPage: false,
+    });
   });
 
   it.each([
@@ -221,8 +246,65 @@ describe("Phase 2 API routes", () => {
 
     expect(response.status).toBe(200);
     expect(findMany).toHaveBeenCalledWith(expect.objectContaining({
-      orderBy: expectedOrderBy,
+      orderBy: [expectedOrderBy, { id: Object.values(expectedOrderBy)[0] }],
     }));
+  });
+
+  it("keeps explicit status when applying isLate=true in the complaints API", async () => {
+    vi.resetModules();
+    const findMany = vi.fn().mockImplementation(({ where }) => {
+      expect(where.status).toBe("IN_PROGRESS");
+      expect(where.AND).toEqual([
+        {
+          dueDate: { lt: expect.any(Date) },
+          status: { in: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE", "RESOLVED"] },
+        },
+      ]);
+      return Promise.resolve([
+        complaintApiRecord({ id: "in-progress-late", status: "IN_PROGRESS" }),
+      ]);
+    });
+    const count = vi.fn().mockResolvedValue(1);
+    vi.doMock("@/lib/db", () => ({
+      db: {
+        complaint: { findMany, count },
+      },
+    }));
+
+    const { GET } = await import("./complaints/route");
+    const response = await GET(new NextRequest("http://localhost/api/complaints?status=IN_PROGRESS&isLate=true"));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].rawStatus).toBe("IN_PROGRESS");
+  });
+
+  it("does not replace status=CLOSED with open statuses when isLate=true", async () => {
+    vi.resetModules();
+    const findMany = vi.fn().mockImplementation(({ where }) => {
+      expect(where.status).toBe("CLOSED");
+      expect(where.AND).toEqual([
+        {
+          dueDate: { lt: expect.any(Date) },
+          status: { in: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE", "RESOLVED"] },
+        },
+      ]);
+      return Promise.resolve([]);
+    });
+    const count = vi.fn().mockResolvedValue(0);
+    vi.doMock("@/lib/db", () => ({
+      db: {
+        complaint: { findMany, count },
+      },
+    }));
+
+    const { GET } = await import("./complaints/route");
+    const response = await GET(new NextRequest("http://localhost/api/complaints?status=CLOSED&isLate=true"));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body.data).toEqual([]);
   });
 
   it("returns import history without user relations", async () => {

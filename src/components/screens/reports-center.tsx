@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { PageHeader } from "@/components/shared/page-header";
 import {
   Card, CardContent, CardHeader, CardTitle, CardDescription,
@@ -37,6 +37,7 @@ import {
   formatNumber, formatPercent, formatDate, formatDateTime, formatDuration,
   STATUS_LABELS, PRIORITY_LABELS, SEVERITY_LABELS,
 } from "@/lib/ar-utils";
+import { fetchAllComplaintsForReport } from "@/lib/report-complaints";
 
 // =========================================================================
 // Types
@@ -367,6 +368,7 @@ function groupBy<T, K extends string | number>(
 
 export function ReportsCenter() {
   const { toast } = useToast();
+  const reportAbortControllerRef = useRef<AbortController | null>(null);
   const [filters, setFilters] = useState<FiltersData | null>(null);
   const [activeTab, setActiveTab] = useState<string>("new");
 
@@ -406,6 +408,10 @@ export function ReportsCenter() {
       .catch(e => console.error("filters error", e));
   }, []);
 
+  useEffect(() => () => {
+    reportAbortControllerRef.current?.abort();
+  }, []);
+
   // When selecting a report type, init its indicators to all true
   const selectReportType = useCallback((typeId: ReportTypeId) => {
     const meta = REPORT_TYPES.find(t => t.id === typeId)!;
@@ -443,21 +449,25 @@ export function ReportsCenter() {
       toast({ title: "تنبيه", description: "يرجى اختيار نوع التقرير أولاً", variant: "destructive" });
       return;
     }
+    reportAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    reportAbortControllerRef.current = controller;
     setGenerating(true);
     try {
       const qs = buildQuery(config);
+      const complaintQuery = new URLSearchParams(qs);
       const [dashRes, compRes, impRes] = await Promise.all([
-        fetch(`/api/dashboard?${qs}`).then(r => r.json()),
-        fetch(`/api/complaints?${qs}&pageSize=1000`).then(r => r.json()),
-        fetch(`/api/import/history`).then(r => r.json().catch(() => [])),
+        fetch(`/api/dashboard?${qs}`, { signal: controller.signal }).then(r => r.json()),
+        fetchAllComplaintsForReport<ComplaintRow>(complaintQuery, controller.signal),
+        fetch(`/api/import/history`, { signal: controller.signal }).then(r => r.json().catch(() => [])),
       ]);
-      const complaints: ComplaintRow[] = compRes.data || [];
+      const complaints: ComplaintRow[] = compRes;
 
       let previousDashboard: DashboardData | null = null;
       if (selectedType === "time_comparison") {
         const pr = previousRange(config.from, config.to);
         const prevQs = buildQuery({ ...config, from: pr.from, to: pr.to });
-        previousDashboard = await fetch(`/api/dashboard?${prevQs}`).then(r => r.json());
+        previousDashboard = await fetch(`/api/dashboard?${prevQs}`, { signal: controller.signal }).then(r => r.json());
       }
 
       const report = {
@@ -501,10 +511,16 @@ export function ReportsCenter() {
         document.getElementById("report-display")?.scrollIntoView({ behavior: "smooth", block: "start" });
       }, 100);
     } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") {
+        return;
+      }
       console.error(e);
       toast({ title: "خطأ", description: "فشل في توليد التقرير", variant: "destructive" });
     } finally {
-      setGenerating(false);
+      if (reportAbortControllerRef.current === controller) {
+        reportAbortControllerRef.current = null;
+        setGenerating(false);
+      }
     }
   }, [selectedType, config, filters, toast]);
 

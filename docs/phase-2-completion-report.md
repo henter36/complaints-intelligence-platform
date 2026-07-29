@@ -81,8 +81,10 @@ No real personal data is used.
 - AI approval returns `501 AI_NOT_CONFIGURED`; AI execution remains outside scope.
 - Complaint list query inputs validate `page`, `pageSize`, `sortBy`, and `sortOrder`; `pageSize` is capped at 100 and sort fields use an allowlist.
 - Complaint list responses omit complainant name, identifier, and phone fields because the routes are not authenticated.
+- Reports Center paginates complaint reads at 100 rows per request instead of bypassing the public cap.
 - Dashboard trend data applies the same non-time request filters as the KPI query and intersects request `from/to` with the last 30 days.
 - Import history exposes `rejectionReason` only for failed or rolled-back batches, and legacy approved fields only for confirmed batches.
+- Complaint status changes map missing or soft-deleted records to `404 COMPLAINT_NOT_FOUND`, while active-record version conflicts remain `409 COMPLAINT_VERSION_CONFLICT`.
 
 ## Verification Results
 
@@ -95,7 +97,7 @@ No real personal data is used.
 - Temporary SQLite `prisma migrate deploy` + `npm run db:seed`: passed.
 - `npm run typecheck`: passed.
 - `npm run lint`: passed.
-- `npm test`: passed, 83 tests.
+- `npm test`: passed, 103 tests.
 - `DATABASE_URL="file:./dev.db" npm run build`: passed outside the sandbox due to Turbopack process/port requirements.
 - `npm run audit:runtime`: passed, 0 vulnerabilities.
 - `npm audit --audit-level=high`: fails only for documented development tooling chains through `brace-expansion`/`minimatch`.

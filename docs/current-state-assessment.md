@@ -30,6 +30,7 @@
 - Authentication and authorization are not implemented yet.
 - Because list/search endpoints are currently public shape APIs, complaint list responses do not return complainant name, identifier, or phone fields.
 - Complaint list pagination is validated, `pageSize` is capped at 100, and sorting uses an explicit allowlist rather than user-provided Prisma field names.
+- Reports Center respects the public `pageSize` cap by reading complaint pages sequentially at 100 rows per request with deterministic sorting.
 - Any screen that needs complainant PII should remain unsupported until the appropriate authentication and authorization model exists.
 - Upload endpoint for full Excel ingestion is not present.
 - Authentication, authorization, and scoped data access are not implemented.

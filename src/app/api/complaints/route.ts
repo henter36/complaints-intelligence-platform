@@ -86,6 +86,10 @@ export async function GET(req: NextRequest) {
       url.searchParams
     );
     const sortField = SORT_FIELDS[sortBy];
+    const orderBy: Prisma.ComplaintOrderByWithRelationInput[] = [
+      { [sortField]: sortOrder },
+      { id: sortOrder },
+    ];
 
     const [complaints, total] = await Promise.all([
       db.complaint.findMany({
@@ -127,7 +131,7 @@ export async function GET(req: NextRequest) {
           classification: { select: { nameAr: true, color: true } },
           category: { select: { nameAr: true } },
         },
-        orderBy: { [sortField]: sortOrder },
+        orderBy,
         skip,
         take: pageSize,
       }),
@@ -137,12 +141,14 @@ export async function GET(req: NextRequest) {
     const now = new Date();
     const enriched = complaints.map(c => toComplaintListItem(c, now));
 
+    const totalPages = Math.ceil(total / pageSize);
     return NextResponse.json({
       data: enriched,
       total,
       page,
       pageSize,
-      totalPages: Math.ceil(total / pageSize),
+      totalPages,
+      hasNextPage: page < totalPages,
     });
   } catch (error) {
     if (isInvalidComplaintQueryError(error)) {
