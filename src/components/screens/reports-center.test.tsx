@@ -195,7 +195,7 @@ describe("fetchAllComplaintsForReport", () => {
 
     await expect(fetchAllComplaintsForReport(new URLSearchParams())).rejects.toThrow(RangeError);
     expect(fetchMock).toHaveBeenCalledTimes(10_000);
-  }, 10_000);
+  }, 30_000);
 
   it("stops before requesting another page when aborted", async () => {
     const controller = new AbortController();

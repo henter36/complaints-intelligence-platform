@@ -2,6 +2,11 @@ import { NextRequest } from "next/server";
 import { ImportBatchStatus } from "@prisma/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@/server/auth/auth-guard", () => ({
+  requireAdminApiSession: vi.fn().mockResolvedValue({ id: "session_test", username: "admin" }),
+  mapAuthError: vi.fn().mockReturnValue(null),
+}));
+
 afterEach(() => {
   vi.resetModules();
   vi.restoreAllMocks();
@@ -95,7 +100,7 @@ async function callComplaintsApi(query = "") {
 describe("Phase 2 API routes", () => {
   it("does not return a fake success for import approval", async () => {
     const { POST } = await import("./import/approve/route");
-    const response = await POST();
+    const response = await POST(new NextRequest("http://localhost/api/import/approve", { method: "POST" }));
     const body = await response.json();
 
     expect(response.status).toBe(501);
@@ -341,7 +346,7 @@ describe("Phase 2 API routes", () => {
     }));
 
     const { GET } = await import("./import/history/route");
-    const response = await GET();
+    const response = await GET(new NextRequest("http://localhost/api/import/history"));
     const body = await response.json();
 
     expect(response.status).toBe(200);
@@ -388,7 +393,7 @@ describe("Phase 2 API routes", () => {
     }));
 
     const { GET } = await import("./import/history/route");
-    const response = await GET();
+    const response = await GET(new NextRequest("http://localhost/api/import/history"));
     const body = await response.json();
 
     expect(response.status).toBe(200);

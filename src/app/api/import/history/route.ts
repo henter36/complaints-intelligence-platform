@@ -1,6 +1,7 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { ImportBatchStatus } from "@prisma/client";
 import { db } from "@/lib/db";
+import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 
 function toLegacyPeriodType(periodType: string): string {
   return periodType.toLowerCase();
@@ -25,8 +26,9 @@ export function isRejectedOrFailedImportStatus(status: ImportBatchStatus): boole
   return status === ImportBatchStatus.FAILED || status === ImportBatchStatus.ROLLED_BACK;
 }
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
+    await requireAdminApiSession(req);
     const batches = await db.importBatch.findMany({
       select: {
         id: true,
@@ -90,6 +92,9 @@ export async function GET() {
       };
     }));
   } catch (error) {
+    const authResponse = mapAuthError(error);
+    if (authResponse) return authResponse;
+
     console.error("Import history error:", error);
     return NextResponse.json({ error: "Failed to fetch import history" }, { status: 500 });
   }

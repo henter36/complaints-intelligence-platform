@@ -7,6 +7,7 @@ import {
   isInvalidComplaintQueryError,
   toLegacyPriority,
 } from "@/server/api/complaint-query";
+import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 
 export const compareArabicLabels = (left: string, right: string): number =>
   left.localeCompare(right, "ar");
@@ -32,6 +33,7 @@ function groupByCount<T>(arr: T[], fn: (item: T) => string) {
 
 export async function GET(req: NextRequest) {
   try {
+    await requireAdminApiSession(req);
     const url = new URL(req.url);
     const where = buildComplaintWhereFromParams(url.searchParams);
     const from = url.searchParams.get("from");
@@ -192,6 +194,9 @@ export async function GET(req: NextRequest) {
       totalCount: complaints.length,
     });
   } catch (error) {
+    const authResponse = mapAuthError(error);
+    if (authResponse) return authResponse;
+
     if (isInvalidComplaintQueryError(error)) {
       return NextResponse.json(
         { error: error.code, message: error.message },

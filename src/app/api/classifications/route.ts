@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
+    await requireAdminApiSession(req);
     const categories = await db.category.findMany({
       where: { isDeleted: false },
       include: {
@@ -33,6 +35,9 @@ export async function GET() {
       })),
     })));
   } catch (error) {
+    const authResponse = mapAuthError(error);
+    if (authResponse) return authResponse;
+
     console.error("Classifications API error:", error);
     return NextResponse.json({ error: "Failed to fetch classifications" }, { status: 500 });
   }
@@ -40,6 +45,7 @@ export async function GET() {
 
 export async function POST(req: NextRequest) {
   try {
+    await requireAdminApiSession(req);
     const body = await req.json();
     const { name, description, color, keywords, parentId } = body;
     const normalizedParentId = typeof parentId === "string" ? parentId.trim() : "";
@@ -96,6 +102,9 @@ export async function POST(req: NextRequest) {
       parentId: null,
     }, { status: 201 });
   } catch (error) {
+    const authResponse = mapAuthError(error);
+    if (authResponse) return authResponse;
+
     console.error("Create classification error:", error);
     return NextResponse.json({ error: "Failed to create classification" }, { status: 500 });
   }
