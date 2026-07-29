@@ -212,7 +212,15 @@ export function Analytics() {
   }, [buildQuery]);
 
   useEffect(() => {
-    loadData();
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (!cancelled) {
+        void loadData();
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [loadData]);
 
   const applyPreset = (presetId: string) => {
@@ -566,7 +574,6 @@ export function Analytics() {
                   label="الشكاوى المغلقة"
                   current={v!.closed}
                   previous={0}
-                  customSuffix=""
                   hideGrowth
                 />
                 <ComparisonStat

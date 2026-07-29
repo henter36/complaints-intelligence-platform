@@ -431,7 +431,15 @@ export function ImportLog() {
   };
 
   useEffect(() => {
-    fetchBatches();
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (!cancelled) {
+        void fetchBatches();
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Filtered batches

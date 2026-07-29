@@ -546,7 +546,15 @@ export function ClassificationsManager() {
   }, [toast]);
 
   useEffect(() => {
-    fetchData();
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (!cancelled) {
+        void fetchData();
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [fetchData]);
 
   // Flat list for selectors

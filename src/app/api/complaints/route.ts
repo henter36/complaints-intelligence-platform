@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
+import { toComplaintListItem } from "@/lib/api-transformers";
 
 export async function GET(req: NextRequest) {
   try {
@@ -23,7 +25,7 @@ export async function GET(req: NextRequest) {
     const sortBy = url.searchParams.get("sortBy") || "receivedDate";
     const sortOrder = (url.searchParams.get("sortOrder") || "desc") as "asc" | "desc";
 
-    const where: any = {};
+    const where: Prisma.ComplaintWhereInput = {};
     if (search) {
       where.OR = [
         { complaintNumber: { contains: search } },
@@ -44,9 +46,10 @@ export async function GET(req: NextRequest) {
     if (aiAnalyzed === "true") where.aiAnalyzedAt = { not: null };
     if (aiAnalyzed === "false") where.aiAnalyzedAt = null;
     if (from || to) {
-      where.receivedDate = {};
-      if (from) where.receivedDate.gte = new Date(from);
-      if (to) where.receivedDate.lte = new Date(to);
+      where.receivedDate = {
+        ...(from ? { gte: new Date(from) } : {}),
+        ...(to ? { lte: new Date(to) } : {}),
+      };
     }
 
     const validSortFields = ["receivedDate", "complaintNumber", "status", "priority", "severity"];
@@ -70,12 +73,7 @@ export async function GET(req: NextRequest) {
 
     // Compute isLate for each
     const now = new Date();
-    const enriched = complaints.map(c => ({
-      ...c,
-      isLate: c.status === "closed" && c.closureDate
-        ? c.closureDate > c.dueDate
-        : (c.status !== "closed" && c.status !== "rejected" && now > c.dueDate),
-    }));
+    const enriched = complaints.map(c => toComplaintListItem(c, now));
 
     const filteredLate = isLate === "true"
       ? enriched.filter(c => c.isLate)

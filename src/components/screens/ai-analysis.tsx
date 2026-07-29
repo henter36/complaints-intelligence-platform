@@ -350,7 +350,15 @@ export function AiAnalysis() {
   }, [loadUnanalyzed, loadAnalyzed, loadInsights]);
 
   useEffect(() => {
-    loadAll();
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (!cancelled) {
+        loadAll();
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [loadAll]);
 
   // Auto-switch to insights tab when analyzed complaints exist

@@ -72,7 +72,17 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
     }
   };
 
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.resolve().then(() => {
+      if (!cancelled) {
+        void loadData();
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const v = data?.volume;
   const p = data?.performance;

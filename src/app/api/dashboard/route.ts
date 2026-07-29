@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
+import { average, isComplaintLate, roundToTenth } from "@/lib/complaint-metrics";
 
-function parseDateRange(req: NextRequest) {
+function parseDateRange(req: NextRequest): Prisma.ComplaintWhereInput {
   const url = new URL(req.url);
   const from = url.searchParams.get("from");
   const to = url.searchParams.get("to");
@@ -16,7 +18,7 @@ function parseDateRange(req: NextRequest) {
   const startDate = from ? new Date(from) : undefined;
   const endDate = to ? new Date(to) : undefined;
 
-  const where: any = {};
+  const where: Prisma.ComplaintWhereInput = {};
   if (startDate && endDate) {
     where.receivedDate = { gte: startDate, lte: endDate };
   } else if (startDate) {
@@ -62,10 +64,7 @@ export async function GET(req: NextRequest) {
     const rejected = complaints.filter(c => c.status === "rejected").length;
 
     const now = new Date();
-    const late = complaints.filter(c => {
-      if (c.status === "closed" && c.closureDate) return c.closureDate > c.dueDate;
-      return c.status !== "closed" && c.status !== "rejected" && now > c.dueDate;
-    }).length;
+    const late = complaints.filter(c => isComplaintLate(c, now)).length;
 
     const repeated = complaints.filter(c => c.isRepeated).length;
     const validated = complaints.filter(c => c.isValidated).length;
@@ -73,31 +72,30 @@ export async function GET(req: NextRequest) {
     const potentialDuplicates = complaints.filter(c => c.isPotentialDuplicate).length;
 
     const closureRate = total > 0 ? (closed / total) * 100 : 0;
-    const closedOnTime = complaints.filter(c => c.status === "closed" && c.closureDate && c.closureDate <= c.dueDate).length;
+    const closedOnTime = complaints.filter(c =>
+      c.status === "closed" && c.closureDate && c.dueDate && c.closureDate <= c.dueDate
+    ).length;
     const onTimeRate = closed > 0 ? (closedOnTime / closed) * 100 : 0;
     const lateRate = total > 0 ? (late / total) * 100 : 0;
 
     const responseTimes = complaints
       .filter(c => c.referralDate && c.firstActionDate)
       .map(c => (c.firstActionDate!.getTime() - c.referralDate!.getTime()) / (1000 * 60 * 60));
-    const avgFirstResponse = responseTimes.length > 0
-      ? responseTimes.reduce((a, b) => a + b, 0) / responseTimes.length : 0;
+    const avgFirstResponse = average(responseTimes);
 
     const processingTimes = complaints
       .filter(c => c.firstActionDate && c.closureDate)
       .map(c => (c.closureDate!.getTime() - c.firstActionDate!.getTime()) / (1000 * 60 * 60));
-    const avgProcessing = processingTimes.length > 0
-      ? processingTimes.reduce((a, b) => a + b, 0) / processingTimes.length : 0;
+    const avgProcessing = average(processingTimes);
 
     const openAges = complaints
       .filter(c => c.status === "open" || c.status === "in_progress")
       .map(c => (now.getTime() - c.receivedDate.getTime()) / (1000 * 60 * 60));
-    const avgOpenAge = openAges.length > 0
-      ? openAges.reduce((a, b) => a + b, 0) / openAges.length : 0;
+    const avgOpenAge = average(openAges);
 
     const overdueNoAction = complaints.filter(c =>
       c.status !== "closed" && c.status !== "rejected" &&
-      now > c.dueDate && !c.firstActionDate
+      c.dueDate && now > c.dueDate && !c.firstActionDate
     ).length;
     const overdueNoActionRate = total > 0 ? (overdueNoAction / total) * 100 : 0;
 
@@ -110,8 +108,8 @@ export async function GET(req: NextRequest) {
     const satisfactionRate = satisfactions.filter(s => s >= 4).length;
     const satisfactionPct = satisfactions.length > 0 ? (satisfactionRate / satisfactions.length) * 100 : 0;
 
-    let previousTotal = null;
-    let growthRate = null;
+    let previousTotal: number | null = null;
+    let growthRate: number | null = null;
     if (from && to) {
       const prevRange = getPreviousPeriodRange(from, to);
       if (prevRange) {
@@ -156,8 +154,7 @@ export async function GET(req: NextRequest) {
     const criticalComplaints = complaints.filter(c => c.severity === "critical" || c.priority === "critical").length;
     const lateCritical = complaints.filter(c =>
       (c.severity === "critical" || c.priority === "critical") &&
-      ((c.status === "closed" && c.closureDate && c.closureDate > c.dueDate) ||
-       (c.status !== "closed" && c.status !== "rejected" && now > c.dueDate))
+      isComplaintLate(c, now)
     ).length;
 
     const missingFields = complaints.filter(c => !c.regionId || !c.departmentId || !c.classificationId).length;
@@ -169,22 +166,22 @@ export async function GET(req: NextRequest) {
         repeated, validated, notValidated, potentialDuplicates,
       },
       performance: {
-        closureRate: Math.round(closureRate * 10) / 10,
-        onTimeRate: Math.round(onTimeRate * 10) / 10,
-        lateRate: Math.round(lateRate * 10) / 10,
-        avgFirstResponseHours: Math.round(avgFirstResponse * 10) / 10,
-        avgProcessingHours: Math.round(avgProcessing * 10) / 10,
-        avgOpenAgeHours: Math.round(avgOpenAge * 10) / 10,
+        closureRate: roundToTenth(closureRate),
+        onTimeRate: roundToTenth(onTimeRate),
+        lateRate: roundToTenth(lateRate),
+        avgFirstResponseHours: roundToTenth(avgFirstResponse),
+        avgProcessingHours: roundToTenth(avgProcessing),
+        avgOpenAgeHours: roundToTenth(avgOpenAge),
         overdueNoAction,
-        overdueNoActionRate: Math.round(overdueNoActionRate * 10) / 10,
-        reopenRate: Math.round(reopenRate * 10) / 10,
-        validityRate: Math.round(validityRate * 10) / 10,
-        avgSatisfaction: Math.round(avgSatisfaction * 10) / 10,
-        satisfactionRate: Math.round(satisfactionPct * 10) / 10,
+        overdueNoActionRate: roundToTenth(overdueNoActionRate),
+        reopenRate: roundToTenth(reopenRate),
+        validityRate: roundToTenth(validityRate),
+        avgSatisfaction: roundToTenth(avgSatisfaction),
+        satisfactionRate: roundToTenth(satisfactionPct),
       },
       trend: {
         previousTotal,
-        growthRate: growthRate !== null ? Math.round(growthRate * 10) / 10 : null,
+        growthRate: growthRate !== null ? roundToTenth(growthRate) : null,
         trendData,
       },
       distributions: {
@@ -200,7 +197,7 @@ export async function GET(req: NextRequest) {
         criticalComplaints,
         lateCritical,
         missingFields,
-        dataQualityRate: Math.round(dataQualityRate * 10) / 10,
+        dataQualityRate: roundToTenth(dataQualityRate),
       },
     });
   } catch (error) {

@@ -211,15 +211,32 @@ const STAT_CARDS = [
 
 // ===== Component =====
 
+function defaultPeriodRange(periodType: PeriodType) {
+  const today = new Date();
+  const fmt = (date: Date) => date.toISOString().slice(0, 10);
+  const end = fmt(today);
+  const startDate = new Date(today);
+
+  if (periodType === "weekly") {
+    startDate.setDate(startDate.getDate() - 6);
+  } else if (periodType === "monthly") {
+    startDate.setMonth(startDate.getMonth() - 1);
+    startDate.setDate(startDate.getDate() + 1);
+  }
+
+  return { start: fmt(startDate), end };
+}
+
 export function ImportCenter() {
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const initialPeriod = useMemo(() => defaultPeriodRange("daily"), []);
 
   // Form state
   const [file, setFile] = useState<File | null>(null);
   const [periodType, setPeriodType] = useState<PeriodType>("daily");
-  const [periodStart, setPeriodStart] = useState<string>("");
-  const [periodEnd, setPeriodEnd] = useState<string>("");
+  const [periodStart, setPeriodStart] = useState<string>(initialPeriod.start);
+  const [periodEnd, setPeriodEnd] = useState<string>(initialPeriod.end);
   const [entity, setEntity] = useState<string>("");
   const [dragOver, setDragOver] = useState(false);
 
@@ -231,26 +248,14 @@ export function ImportCenter() {
   const [approved, setApproved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Default dates based on period type
-  useEffect(() => {
-    const today = new Date();
-    const fmt = (d: Date) => d.toISOString().slice(0, 10);
-    const end = fmt(today);
-    let start = end;
-    const s = new Date(today);
-    if (periodType === "daily") {
-      start = fmt(s);
-    } else if (periodType === "weekly") {
-      s.setDate(s.getDate() - 6);
-      start = fmt(s);
-    } else if (periodType === "monthly") {
-      s.setMonth(s.getMonth() - 1);
-      s.setDate(s.getDate() + 1);
-      start = fmt(s);
+  const handlePeriodTypeChange = (value: PeriodType) => {
+    setPeriodType(value);
+    if (value !== "custom") {
+      const range = defaultPeriodRange(value);
+      setPeriodStart(range.start);
+      setPeriodEnd(range.end);
     }
-    setPeriodStart(start);
-    setPeriodEnd(end);
-  }, [periodType]);
+  };
 
   // Compute current stage
   const currentStage: StageKey = useMemo(() => {
@@ -671,7 +676,7 @@ export function ImportCenter() {
                   </Label>
                   <Select
                     value={periodType}
-                    onValueChange={(v) => setPeriodType(v as PeriodType)}
+                    onValueChange={(v) => handlePeriodTypeChange(v as PeriodType)}
                   >
                     <SelectTrigger className="w-full">
                       <SelectValue />
