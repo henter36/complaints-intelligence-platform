@@ -54,7 +54,7 @@ type UploadInput = {
   actor?: string;
 };
 
-type ProcessedImportRow = {
+export type ProcessedImportRow = {
   rowNumber: number;
   rawData: Prisma.InputJsonValue;
   normalizedData: Prisma.InputJsonValue | null;
@@ -474,14 +474,15 @@ async function processWorkbookPreview(buffer: Buffer, mapping?: ColumnMapping | 
   };
 }
 
-async function persistPreviewRows(
+export async function persistPreviewRows(
   batchId: string,
-  processedRows: ProcessedImportRow[]
+  processedRows: ProcessedImportRow[],
+  client: Pick<typeof db, "importBatchRow"> = db
 ): Promise<void> {
-  await db.importBatchRow.deleteMany({ where: { importBatchId: batchId } });
+  await client.importBatchRow.deleteMany({ where: { importBatchId: batchId } });
   for (let index = 0; index < processedRows.length; index += WRITE_CHUNK_SIZE) {
     const chunk = processedRows.slice(index, index + WRITE_CHUNK_SIZE);
-    await db.importBatchRow.createMany({
+    await client.importBatchRow.createMany({
       data: chunk.map((row) => ({
         importBatchId: batchId,
         rowNumber: row.rowNumber,

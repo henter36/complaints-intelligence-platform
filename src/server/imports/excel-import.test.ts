@@ -1,5 +1,5 @@
 import JSZip from "jszip";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { matchComplaintColumns, normalizeColumnHeader, validateColumnMapping } from "./complaint-column-schema";
 import { getRequiredUncompressedSize, validateXlsxZip } from "./file-storage";
 import { buildImportErrorCsv, toSafeMessage } from "./error-report";
@@ -10,8 +10,16 @@ import {
   complaintCandidateIdentityKeys,
   hasMeaningfulChange,
   normalizedCandidateIdentityKeys,
+  persistPreviewRows,
+  type ProcessedImportRow,
 } from "./excel-import-service";
-import { ComplaintPriority, ComplaintStatus, ImportBatchStatus } from "@prisma/client";
+import {
+  ComplaintPriority,
+  ComplaintStatus,
+  ImportBatchStatus,
+  ImportRowAction,
+  ImportRowValidationStatus,
+} from "@prisma/client";
 import { validateNormalizedComplaintRow } from "./row-validation";
 
 async function workbookBuffer(options: {
@@ -300,6 +308,36 @@ describe("secure xlsx import parsing", () => {
     ]);
     expect(DUPLICATE_BLOCKING_IMPORT_STATUSES).not.toContain(ImportBatchStatus.FAILED);
     expect(DUPLICATE_BLOCKING_IMPORT_STATUSES).not.toContain(ImportBatchStatus.ROLLED_BACK);
+  });
+
+  it("persists 10000 preview rows in bounded chunks", async () => {
+    const createMany = vi.fn().mockResolvedValue({ count: 500 });
+    const deleteMany = vi.fn().mockResolvedValue({ count: 0 });
+    const rows: ProcessedImportRow[] = Array.from({ length: 10_000 }, (_, index) => ({
+      rowNumber: index + 1,
+      rawData: { externalId: `C-${index + 1}` },
+      normalizedData: { externalId: `C-${index + 1}` },
+      externalId: `C-${index + 1}`,
+      action: ImportRowAction.NEW,
+      validationStatus: ImportRowValidationStatus.VALID,
+      validationErrors: null,
+      validationWarnings: null,
+      matchedComplaintId: null,
+    }));
+
+    await persistPreviewRows("batch_1", rows, {
+      importBatchRow: { createMany, deleteMany },
+    } as never);
+
+    expect(deleteMany).toHaveBeenCalledWith({ where: { importBatchId: "batch_1" } });
+    expect(createMany).toHaveBeenCalledTimes(20);
+    expect(createMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      data: expect.arrayContaining([expect.objectContaining({ rowNumber: 1 })]),
+    }));
+    expect(createMany).toHaveBeenLastCalledWith(expect.objectContaining({
+      data: expect.arrayContaining([expect.objectContaining({ rowNumber: 10_000 })]),
+    }));
+    expect(createMany.mock.calls.every(([input]) => input.data.length <= 500)).toBe(true);
   });
 
   it("validates required fields, lifecycle, taxonomy, and lengths independently", () => {
