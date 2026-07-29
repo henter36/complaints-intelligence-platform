@@ -85,7 +85,7 @@ async function readSharedStrings(zip: JSZip): Promise<string[]> {
   if (!file) return [];
 
   const shared = parser.parse(await file.async("string")) as {
-    sst?: { si?: unknown[] | unknown };
+    sst?: { si?: unknown };
   };
 
   return toArray(shared.sst?.si).map((item) => extractText(item));

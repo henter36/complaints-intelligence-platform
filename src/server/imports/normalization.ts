@@ -128,7 +128,7 @@ export function parseUtcCalendarDate(text: string): Date | undefined {
 }
 
 function parseExplicitIsoDateTime(text: string): Date | undefined {
-  if (!text.includes("T") && !/[zZ]|[+-]\d{2}:\d{2}$/.test(text)) {
+  if (!text.includes("T") && !/(?:[zZ]|[+-]\d{2}:\d{2})$/.test(text)) {
     return undefined;
   }
 
@@ -153,7 +153,7 @@ export function normalizeDateCell(value: unknown): Date | undefined {
 function normalizeStatus(value: unknown): ComplaintStatus | undefined {
   const text = normalizeTextCell(value);
   if (!text) return undefined;
-  if (Object.prototype.hasOwnProperty.call(ComplaintStatus, text)) {
+  if (Object.hasOwn(ComplaintStatus, text)) {
     return ComplaintStatus[text as keyof typeof ComplaintStatus];
   }
   return STATUS_LABELS.get(normalizeArabicToken(text));
@@ -162,7 +162,7 @@ function normalizeStatus(value: unknown): ComplaintStatus | undefined {
 function normalizePriority(value: unknown): ComplaintPriority | undefined {
   const text = normalizeTextCell(value);
   if (!text) return undefined;
-  if (Object.prototype.hasOwnProperty.call(ComplaintPriority, text)) {
+  if (Object.hasOwn(ComplaintPriority, text)) {
     return ComplaintPriority[text as keyof typeof ComplaintPriority];
   }
   return PRIORITY_LABELS.get(normalizeArabicToken(text));

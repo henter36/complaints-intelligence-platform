@@ -92,7 +92,7 @@ export type ImportUploadResult = {
 
 function parsePeriodType(value?: string | null): PeriodType {
   const normalized = (value ?? "monthly").toUpperCase();
-  if (Object.prototype.hasOwnProperty.call(PeriodType, normalized)) {
+  if (Object.hasOwn(PeriodType, normalized)) {
     return PeriodType[normalized as keyof typeof PeriodType];
   }
   throw new ImportValidationError("INVALID_IMPORT_PERIOD", "نوع الفترة غير مدعوم", 400);
@@ -138,63 +138,49 @@ function safeIdentityKey(input: {
   return identityKey(resolveComplaintIdentity(input));
 }
 
+function fingerprintIdentityKey(input: {
+  complaintDate?: Date | string | null;
+  region?: string | null;
+  facility?: string | null;
+  department?: string | null;
+  subject?: string | null;
+}): string {
+  return `fingerprint:${buildComplaintFingerprint(input)}`;
+}
+
+function uniqueIdentityKeys(keys: Array<string | null>): string[] {
+  return [...new Set(keys.filter((key): key is string => key !== null))];
+}
+
 export function complaintCandidateIdentityKeys(complaint: Pick<Complaint, "externalId" | "sourceReference" | "complaintDate" | "region" | "facility" | "department" | "subject">): string[] {
-  const keys: string[] = [];
-
-  if (complaint.externalId) {
-    keys.push(safeIdentityKey({ externalId: complaint.externalId }));
-  }
-
-  if (complaint.sourceReference && complaint.complaintDate) {
-    keys.push(safeIdentityKey({
-      sourceReference: complaint.sourceReference,
-      complaintDate: complaint.complaintDate,
-    }));
-  }
-
-  keys.push(safeIdentityKey({
-    complaintDate: complaint.complaintDate,
-    region: complaint.region,
-    facility: complaint.facility,
-    department: complaint.department,
-    subject: complaint.subject,
-  }));
-  keys.push(`fingerprint:${buildComplaintFingerprint({
-    complaintDate: complaint.complaintDate,
-    region: complaint.region,
-    facility: complaint.facility,
-    department: complaint.department,
-    subject: complaint.subject,
-  })}`);
-
-  return [...new Set(keys)];
+  return uniqueIdentityKeys([
+    complaint.externalId ? safeIdentityKey({ externalId: complaint.externalId }) : null,
+    complaint.sourceReference && complaint.complaintDate
+      ? safeIdentityKey({
+          sourceReference: complaint.sourceReference,
+          complaintDate: complaint.complaintDate,
+        })
+      : null,
+    fingerprintIdentityKey(complaint),
+  ]);
 }
 
 export function normalizedCandidateIdentityKeys(row: NormalizedComplaintRow): string[] {
   const complaintDate = row.complaintDate ?? row.receivedAt;
-  const keys: string[] = [];
 
-  if (row.externalId) keys.push(safeIdentityKey({ externalId: row.externalId }));
-  if (row.sourceReference && complaintDate) {
-    keys.push(safeIdentityKey({ sourceReference: row.sourceReference, complaintDate }));
-  }
-
-  keys.push(safeIdentityKey({
-    complaintDate,
-    region: row.region,
-    facility: row.facility,
-    department: row.department,
-    subject: row.subject,
-  }));
-  keys.push(`fingerprint:${buildComplaintFingerprint({
-    complaintDate,
-    region: row.region,
-    facility: row.facility,
-    department: row.department,
-    subject: row.subject,
-  })}`);
-
-  return [...new Set(keys)];
+  return uniqueIdentityKeys([
+    row.externalId ? safeIdentityKey({ externalId: row.externalId }) : null,
+    row.sourceReference && complaintDate
+      ? safeIdentityKey({ sourceReference: row.sourceReference, complaintDate })
+      : null,
+    fingerprintIdentityKey({
+      complaintDate,
+      region: row.region,
+      facility: row.facility,
+      department: row.department,
+      subject: row.subject,
+    }),
+  ]);
 }
 
 export function hasMeaningfulChange(row: NormalizedComplaintRow, complaint: Complaint): boolean {
@@ -288,83 +274,154 @@ async function findExistingComplaints(rows: NormalizedComplaintRow[]): Promise<M
   return result;
 }
 
+type RowClassificationContext = {
+  seenImportIdentities: Map<string, number>;
+  seenMatchedComplaints: Map<string, number>;
+  existingByIdentity: Map<string, ComplaintIndexEntry>;
+};
+
+type RowClassification = {
+  action: ImportRowAction;
+  matchedComplaintId: string | null;
+};
+
+function duplicateRowError(firstRow: number): RowMessage {
+  return {
+    field: "externalId",
+    code: "DUPLICATE_ROW_IN_FILE",
+    message: `الصف يكرر صفًا سابقًا في الملف: ${firstRow}`,
+  };
+}
+
+function duplicateTargetError(firstMatchedRow: number): RowMessage {
+  return {
+    field: "externalId",
+    code: "DUPLICATE_TARGET_COMPLAINT",
+    message: `يوجد صف آخر يستهدف الشكوى نفسها: ${firstMatchedRow}`,
+  };
+}
+
+function ambiguousIdentityError(): RowMessage {
+  return {
+    field: "externalId",
+    code: "AMBIGUOUS_COMPLAINT_IDENTITY",
+    message: "هوية الصف تطابق أكثر من شكوى قائمة",
+  };
+}
+
+function isDuplicateImportIdentity(
+  identity: string,
+  rowNumber: number,
+  context: RowClassificationContext,
+  errors: RowMessage[]
+): boolean {
+  const firstRow = context.seenImportIdentities.get(identity);
+  if (firstRow) {
+    errors.push(duplicateRowError(firstRow));
+    return true;
+  }
+
+  context.seenImportIdentities.set(identity, rowNumber);
+  return false;
+}
+
+function findExistingComplaintEntry(
+  normalized: NormalizedComplaintRow,
+  existingByIdentity: Map<string, ComplaintIndexEntry>
+): ComplaintIndexEntry | undefined {
+  return normalizedCandidateIdentityKeys(normalized)
+    .map((key) => existingByIdentity.get(key))
+    .find(Boolean);
+}
+
+function classifyMatchedComplaint(
+  complaint: Complaint,
+  normalized: NormalizedComplaintRow,
+  rowNumber: number,
+  context: RowClassificationContext,
+  errors: RowMessage[]
+): RowClassification {
+  const firstMatchedRow = context.seenMatchedComplaints.get(complaint.id);
+  if (firstMatchedRow) {
+    errors.push(duplicateTargetError(firstMatchedRow));
+    return { action: ImportRowAction.DUPLICATE, matchedComplaintId: null };
+  }
+
+  context.seenMatchedComplaints.set(complaint.id, rowNumber);
+
+  return {
+    action: hasMeaningfulChange(normalized, complaint)
+      ? ImportRowAction.UPDATE
+      : ImportRowAction.NO_CHANGE,
+    matchedComplaintId: complaint.id,
+  };
+}
+
+function classifyValidImportRow(
+  normalized: NormalizedComplaintRow,
+  rowNumber: number,
+  context: RowClassificationContext,
+  errors: RowMessage[]
+): RowClassification {
+  const identity = normalizedCandidateIdentityKeys(normalized)[0];
+  if (isDuplicateImportIdentity(identity, rowNumber, context, errors)) {
+    return { action: ImportRowAction.DUPLICATE, matchedComplaintId: null };
+  }
+
+  const existing = findExistingComplaintEntry(normalized, context.existingByIdentity);
+  if (!existing) {
+    return { action: ImportRowAction.NEW, matchedComplaintId: null };
+  }
+
+  if (existing.kind === "ambiguous") {
+    errors.push(ambiguousIdentityError());
+    return { action: ImportRowAction.DUPLICATE, matchedComplaintId: null };
+  }
+
+  return classifyMatchedComplaint(existing.complaint, normalized, rowNumber, context, errors);
+}
+
+function buildProcessedImportRow(input: {
+  rawRow: RawImportRow;
+  normalized: NormalizedComplaintRow;
+  errors: RowMessage[];
+  warnings: RowMessage[];
+  classification: RowClassification;
+}): ProcessedImportRow {
+  return {
+    rowNumber: input.rawRow.rowNumber,
+    rawData: toJsonValue(input.rawRow.values),
+    normalizedData: input.errors.length > 0 ? null : toJsonValue(input.normalized),
+    externalId: input.normalized.externalId ?? null,
+    action: input.classification.action,
+    validationStatus: resolveValidationStatus(input.errors, input.warnings),
+    validationErrors: input.errors.length ? toJsonValue(input.errors) : null,
+    validationWarnings: input.warnings.length ? toJsonValue(input.warnings) : null,
+    matchedComplaintId: input.classification.matchedComplaintId,
+  };
+}
+
 function classifyRows(input: {
   rawRows: RawImportRow[];
   normalizedRows: Array<{ row: NormalizedComplaintRow; errors: RowMessage[]; warnings: RowMessage[] }>;
   existingByIdentity: Map<string, ComplaintIndexEntry>;
 }): ProcessedImportRow[] {
-  const seenImportIdentities = new Map<string, number>();
-  const seenMatchedComplaints = new Map<string, number>();
+  const context: RowClassificationContext = {
+    seenImportIdentities: new Map<string, number>(),
+    seenMatchedComplaints: new Map<string, number>(),
+    existingByIdentity: input.existingByIdentity,
+  };
 
   return input.rawRows.map((rawRow, index) => {
     const normalizedResult = input.normalizedRows[index];
     const errors = [...normalizedResult.errors];
     const warnings = [...normalizedResult.warnings];
     const normalized = normalizedResult.row;
-    let action: ImportRowAction = ImportRowAction.REJECT;
-    let matchedComplaintId: string | null = null;
+    const classification = errors.length === 0
+      ? classifyValidImportRow(normalized, rawRow.rowNumber, context, errors)
+      : { action: ImportRowAction.REJECT, matchedComplaintId: null };
 
-    if (errors.length === 0) {
-      const identity = normalizedCandidateIdentityKeys(normalized)[0];
-      const firstRow = seenImportIdentities.get(identity);
-      if (firstRow) {
-        action = ImportRowAction.DUPLICATE;
-        errors.push({
-          field: "externalId",
-          code: "DUPLICATE_ROW_IN_FILE",
-          message: `الصف يكرر صفًا سابقًا في الملف: ${firstRow}`,
-        });
-        } else {
-          seenImportIdentities.set(identity, rawRow.rowNumber);
-        const existing = normalizedCandidateIdentityKeys(normalized)
-          .map((key) => input.existingByIdentity.get(key))
-          .find(Boolean);
-        if (existing?.kind === "ambiguous") {
-          action = ImportRowAction.DUPLICATE;
-          errors.push({
-            field: "externalId",
-            code: "AMBIGUOUS_COMPLAINT_IDENTITY",
-            message: "هوية الصف تطابق أكثر من شكوى قائمة",
-          });
-        } else if (existing?.kind === "match") {
-          const firstMatchedRow = seenMatchedComplaints.get(existing.complaint.id);
-          if (firstMatchedRow) {
-            action = ImportRowAction.DUPLICATE;
-            errors.push({
-              field: "externalId",
-              code: "DUPLICATE_TARGET_COMPLAINT",
-              message: `يوجد صف آخر يستهدف الشكوى نفسها: ${firstMatchedRow}`,
-            });
-          } else {
-            seenMatchedComplaints.set(existing.complaint.id, rawRow.rowNumber);
-            matchedComplaintId = existing.complaint.id;
-            action = hasMeaningfulChange(normalized, existing.complaint)
-              ? ImportRowAction.UPDATE
-              : ImportRowAction.NO_CHANGE;
-          }
-        } else {
-          action = ImportRowAction.NEW;
-        }
-      }
-    }
-
-    if (errors.length > 0 && action !== ImportRowAction.DUPLICATE) {
-      action = ImportRowAction.REJECT;
-    }
-
-    const validationStatus = resolveValidationStatus(errors, warnings);
-
-    return {
-      rowNumber: rawRow.rowNumber,
-      rawData: toJsonValue(rawRow.values),
-      normalizedData: errors.length > 0 ? null : toJsonValue(normalized),
-      externalId: normalized.externalId ?? null,
-      action,
-      validationStatus,
-      validationErrors: errors.length ? toJsonValue(errors) : null,
-      validationWarnings: warnings.length ? toJsonValue(warnings) : null,
-      matchedComplaintId,
-    };
+    return buildProcessedImportRow({ rawRow, normalized, errors, warnings, classification });
   });
 }
 
