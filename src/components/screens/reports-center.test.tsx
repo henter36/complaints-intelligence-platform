@@ -127,6 +127,76 @@ describe("fetchAllComplaintsForReport", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it("throws TypeError when the complaints response has no data array", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ total: 1 })));
+
+    await expect(fetchAllComplaintsForReport(new URLSearchParams())).rejects.toThrow(TypeError);
+    await expect(fetchAllComplaintsForReport(new URLSearchParams())).rejects.toThrow(
+      "Invalid report complaints response"
+    );
+  });
+
+  it("throws TypeError when the complaints response data is not an array", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ data: { id: "cmp-1" } })));
+
+    await expect(fetchAllComplaintsForReport(new URLSearchParams())).rejects.toThrow(TypeError);
+  });
+
+  it("loads multiple pages when only total metadata is available", async () => {
+    const records = Array.from({ length: 101 }, (_, index) => complaint(`cmp-${index + 1}`));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      const page = Number(url.searchParams.get("page"));
+      const pageSize = Number(url.searchParams.get("pageSize"));
+      const start = (page - 1) * pageSize;
+
+      return Response.json({
+        data: records.slice(start, start + pageSize),
+        total: records.length,
+        pageSize,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchAllComplaintsForReport(new URLSearchParams())).resolves.toHaveLength(101);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("continues without pagination metadata until an empty page terminates loading", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      const page = Number(url.searchParams.get("page"));
+
+      return Response.json({
+        data: page === 1 ? [complaint("cmp-1")] : [],
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchAllComplaintsForReport(new URLSearchParams())).resolves.toEqual([
+      complaint("cmp-1"),
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("throws RangeError when report pagination does not terminate", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input), "http://localhost");
+      const page = Number(url.searchParams.get("page"));
+
+      return Response.json({
+        data: [complaint(`cmp-${page}`)],
+        page,
+        pageSize: 100,
+        totalPages: 10_001,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchAllComplaintsForReport(new URLSearchParams())).rejects.toThrow(RangeError);
+    expect(fetchMock).toHaveBeenCalledTimes(10_000);
+  }, 10_000);
+
   it("stops before requesting another page when aborted", async () => {
     const controller = new AbortController();
     const fetchMock = vi.fn(async () => {

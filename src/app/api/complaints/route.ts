@@ -52,15 +52,26 @@ function parsePageSize(value: string | null): number {
   return pageSize;
 }
 
-function parseSortOrder(value: string | null): ComplaintSortOrder {
-  if (value == null || value === "") return "desc";
-  if (value === "asc" || value === "desc") return value;
+function valueOrDefault(value: string | null, defaultValue: string): string {
+  if (value == null || value === "") {
+    return defaultValue;
+  }
+
+  return value;
+}
+
+function parseSortOrder(value: string | null = null): ComplaintSortOrder {
+  const candidate = valueOrDefault(value, "desc");
+  if (candidate === "asc" || candidate === "desc") return candidate;
   throw new InvalidComplaintQueryError("sortOrder must be asc or desc");
 }
 
-function parseSortBy(value: string | null): ComplaintSortKey {
-  const candidate = value || "receivedDate";
-  if (candidate in SORT_FIELDS) return candidate as ComplaintSortKey;
+function parseSortBy(value: string | null = null): ComplaintSortKey {
+  const candidate = valueOrDefault(value, "receivedDate");
+  if (Object.prototype.hasOwnProperty.call(SORT_FIELDS, candidate)) {
+    return candidate as ComplaintSortKey;
+  }
+
   throw new InvalidComplaintQueryError("sortBy is not supported");
 }
 

@@ -55,39 +55,88 @@ export function parseOptionalDateFilter(
   return parsed;
 }
 
-export function buildComplaintWhereFromParams(params: URLSearchParams): Prisma.ComplaintWhereInput {
-  const from = parseOptionalDateFilter(params.get("from"), "from");
-  const to = parseOptionalDateFilter(params.get("to"), "to");
-  const region = params.get("regionId");
-  const department = params.get("departmentId");
-  const classificationId = params.get("classificationId");
-  const channel = params.get("channel");
-  const statusValue = params.get("status");
-  const status = parseComplaintStatus(statusValue);
-  const priority = parsePriority(params.get("priority"));
-  const severity = parsePriority(params.get("severity"));
+type ComplaintBaseFilters = {
+  from?: Date;
+  to?: Date;
+  region: string | null;
+  department: string | null;
+  classificationId: string | null;
+  channel: string | null;
+  status?: ComplaintStatus;
+  priority?: ComplaintPriority;
+  severity?: ComplaintPriority;
+};
 
-  const where: Prisma.ComplaintWhereInput = { isDeleted: false };
+function validateDateRange(from?: Date, to?: Date): void {
   if (from && to && from > to) {
     throw new InvalidComplaintQueryError("from must be before or equal to to");
   }
-  if (statusValue && !status) {
+}
+
+function parseAndValidateStatus(value: string | null): ComplaintStatus | undefined {
+  const status = parseComplaintStatus(value);
+
+  if (value && !status) {
     throw new InvalidComplaintQueryError("status is not supported");
   }
 
-  if (from || to) {
-    where.complaintDate = {
-      ...(from ? { gte: from } : {}),
-      ...(to ? { lte: to } : {}),
-    };
+  return status;
+}
+
+function readBaseFilters(params: URLSearchParams): ComplaintBaseFilters {
+  const from = parseOptionalDateFilter(params.get("from"), "from");
+  const to = parseOptionalDateFilter(params.get("to"), "to");
+
+  validateDateRange(from, to);
+
+  return {
+    from,
+    to,
+    region: params.get("regionId"),
+    department: params.get("departmentId"),
+    classificationId: params.get("classificationId"),
+    channel: params.get("channel"),
+    status: parseAndValidateStatus(params.get("status")),
+    priority: parsePriority(params.get("priority")),
+    severity: parsePriority(params.get("severity")),
+  };
+}
+
+function applyDateFilter(
+  where: Prisma.ComplaintWhereInput,
+  from?: Date,
+  to?: Date
+): void {
+  if (!from && !to) {
+    return;
   }
-  if (region) where.region = region;
-  if (department) where.department = department;
-  if (classificationId) where.classificationId = classificationId;
-  if (channel) where.channel = channel;
-  if (status) where.status = status;
-  if (priority) where.priority = priority;
-  if (severity) where.severity = severity;
+
+  where.complaintDate = {
+    ...(from ? { gte: from } : {}),
+    ...(to ? { lte: to } : {}),
+  };
+}
+
+function applyBaseScalarFilters(
+  where: Prisma.ComplaintWhereInput,
+  filters: ComplaintBaseFilters
+): void {
+  if (filters.region) where.region = filters.region;
+  if (filters.department) where.department = filters.department;
+  if (filters.classificationId) where.classificationId = filters.classificationId;
+  if (filters.channel) where.channel = filters.channel;
+  if (filters.status) where.status = filters.status;
+  if (filters.priority) where.priority = filters.priority;
+  if (filters.severity) where.severity = filters.severity;
+}
+
+export function buildComplaintWhereFromParams(params: URLSearchParams): Prisma.ComplaintWhereInput {
+  const filters = readBaseFilters(params);
+  const where: Prisma.ComplaintWhereInput = { isDeleted: false };
+
+  applyDateFilter(where, filters.from, filters.to);
+  applyBaseScalarFilters(where, filters);
+
   return where;
 }
 

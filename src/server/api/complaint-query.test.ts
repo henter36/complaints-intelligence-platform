@@ -33,6 +33,29 @@ describe("complaint query filters", () => {
     });
   });
 
+  it("builds all supported base filters together", () => {
+    expect(
+      buildComplaintWhereFromParams(
+        params(
+          "from=2026-07-01&to=2026-07-31&regionId=riyadh&departmentId=er&classificationId=cls-1&channel=phone&status=OPEN&priority=HIGH&severity=CRITICAL"
+        )
+      )
+    ).toEqual({
+      isDeleted: false,
+      complaintDate: {
+        gte: new Date("2026-07-01"),
+        lte: new Date("2026-07-31"),
+      },
+      region: "riyadh",
+      department: "er",
+      classificationId: "cls-1",
+      channel: "phone",
+      status: "OPEN",
+      priority: "HIGH",
+      severity: "CRITICAL",
+    });
+  });
+
   it("rejects an invalid from date", () => {
     expect(() => buildComplaintWhereFromParams(params("from=invalid"))).toThrow(InvalidComplaintQueryError);
   });
