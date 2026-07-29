@@ -1,8 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
+import { average, isComplaintLate, roundToTenth } from "@/lib/complaint-metrics";
 
 // Build where clause from filter params
-function buildWhere(req: NextRequest) {
+function buildWhere(req: NextRequest): {
+  where: Prisma.ComplaintWhereInput;
+  from: string | null;
+  to: string | null;
+} {
   const url = new URL(req.url);
   const from = url.searchParams.get("from");
   const to = url.searchParams.get("to");
@@ -14,7 +20,7 @@ function buildWhere(req: NextRequest) {
   const priority = url.searchParams.get("priority");
   const severity = url.searchParams.get("severity");
 
-  const where: any = {};
+  const where: Prisma.ComplaintWhereInput = {};
   if (from && to) {
     where.receivedDate = { gte: new Date(from), lte: new Date(to) };
   } else if (from) {
@@ -111,20 +117,15 @@ export async function GET(req: NextRequest) {
       const procTimes = items
         .filter(c => c.firstActionDate && c.closureDate)
         .map(c => (c.closureDate!.getTime() - c.firstActionDate!.getTime()) / (1000 * 60 * 60));
-      const avgProc = procTimes.length > 0
-        ? procTimes.reduce((a, b) => a + b, 0) / procTimes.length
-        : 0;
-      const late = items.filter(c => {
-        if (c.status === "closed" && c.closureDate) return c.closureDate > c.dueDate;
-        return c.status !== "closed" && c.status !== "rejected" && now > c.dueDate;
-      }).length;
+      const avgProc = average(procTimes);
+      const late = items.filter(c => isComplaintLate(c, now)).length;
       return {
         channel: ch,
         total: items.length,
         closed: closed.length,
-        closureRate: items.length > 0 ? Math.round((closed.length / items.length) * 1000) / 10 : 0,
-        lateRate: items.length > 0 ? Math.round((late / items.length) * 1000) / 10 : 0,
-        avgProcessingHours: Math.round(avgProc * 10) / 10,
+        closureRate: items.length > 0 ? roundToTenth((closed.length / items.length) * 100) : 0,
+        lateRate: items.length > 0 ? roundToTenth((late / items.length) * 100) : 0,
+        avgProcessingHours: roundToTenth(avgProc),
       };
     }).sort((a, b) => b.total - a.total);
 
@@ -160,8 +161,8 @@ export async function GET(req: NextRequest) {
         return {
           name: i.name,
           count: i.count,
-          average: Math.round(avg * 10) / 10,
-          deviation: Math.round(deviation * 1000) / 10,
+          average: roundToTenth(avg),
+          deviation: roundToTenth(deviation * 100),
           isAnomaly: avg > 0 && i.count > avg * 1.5,
         };
       });

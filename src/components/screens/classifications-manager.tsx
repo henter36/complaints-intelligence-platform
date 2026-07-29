@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo, useCallback } from "react";
+import { useEffect, useState, useMemo, useCallback, useRef } from "react";
 import { PageHeader } from "@/components/shared/page-header";
 import {
   Card,
@@ -70,6 +70,7 @@ import {
   AlertCircle,
 } from "lucide-react";
 import { formatNumber } from "@/lib/ar-utils";
+import { isAbortError } from "@/lib/abort";
 
 // ---------- Types ----------
 interface Classification {
@@ -513,17 +514,21 @@ export function ClassificationsManager() {
   const [mergeMode, setMergeMode] = useState(false);
   const [mergeSelection, setMergeSelection] = useState<Classification[]>([]);
   const [mergeDialogOpen, setMergeDialogOpen] = useState(false);
+  const fetchRequestRef = useRef(0);
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (signal?: AbortSignal) => {
+    const requestId = fetchRequestRef.current + 1;
+    fetchRequestRef.current = requestId;
+    const canUpdate = () => !signal?.aborted && fetchRequestRef.current === requestId;
     setLoading(true);
+    let aborted = false;
     try {
       const [classRes, dashRes] = await Promise.all([
-        fetch("/api/classifications"),
-        fetch("/api/dashboard"),
+        fetch("/api/classifications", { signal }),
+        fetch("/api/dashboard", { signal }),
       ]);
       if (!classRes.ok) throw new Error("فشل تحميل التصنيفات");
       const classData: Classification[] = await classRes.json();
-      setClassifications(classData);
 
       if (dashRes.ok) {
         const dashData: DashboardData = await dashRes.json();
@@ -531,9 +536,18 @@ export function ClassificationsManager() {
         for (const item of dashData.distributions?.byClassification ?? []) {
           map.set(item.name, item.count);
         }
-        setDistributionMap(map);
+        if (canUpdate()) {
+          setClassifications(classData);
+          setDistributionMap(map);
+        }
+      } else if (canUpdate()) {
+        setClassifications(classData);
       }
     } catch (err) {
+      aborted = isAbortError(err);
+      if (aborted) {
+        return;
+      }
       const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
       toast({
         title: "خطأ",
@@ -541,12 +555,22 @@ export function ClassificationsManager() {
         variant: "destructive",
       });
     } finally {
-      setLoading(false);
+      if (!aborted && canUpdate()) {
+        setLoading(false);
+      }
     }
   }, [toast]);
 
   useEffect(() => {
-    fetchData();
+    const controller = new AbortController();
+    void Promise.resolve().then(() => {
+      if (!controller.signal.aborted) {
+        void fetchData(controller.signal);
+      }
+    });
+    return () => {
+      controller.abort();
+    };
   }, [fetchData]);
 
   // Flat list for selectors
@@ -708,7 +732,7 @@ export function ClassificationsManager() {
         icon={<FolderTree className="h-6 w-6" />}
         actions={
           <>
-            <Button variant="outline" onClick={fetchData} size="sm">
+            <Button variant="outline" onClick={() => void fetchData()} size="sm">
               <RefreshCw className="h-4 w-4" />
               تحديث
             </Button>

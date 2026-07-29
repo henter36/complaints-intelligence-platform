@@ -45,6 +45,7 @@
 
 :root {
   --radius: 0.625rem;
+  --font-cairo: "Cairo", "IBM Plex Sans Arabic", "Segoe UI", tahoma, arial, sans-serif;
   --background: oklch(0.99 0.005 95);
   --foreground: oklch(0.18 0.02 160);
   --card: oklch(1 0 0);

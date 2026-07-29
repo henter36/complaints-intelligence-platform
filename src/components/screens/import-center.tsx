@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { PageHeader } from "@/components/shared/page-header";
 import {
   Card,
@@ -61,7 +61,7 @@ import { formatNumber, formatDate } from "@/lib/ar-utils";
 
 // ===== Types =====
 
-type PeriodType = "daily" | "weekly" | "monthly" | "custom";
+export type PeriodType = "daily" | "weekly" | "monthly" | "custom";
 
 interface ImportError {
   row: number;
@@ -211,15 +211,63 @@ const STAT_CARDS = [
 
 // ===== Component =====
 
+export function formatLocalDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
+}
+
+function daysInMonth(year: number, monthIndex: number): number {
+  return new Date(year, monthIndex + 1, 0).getDate();
+}
+
+function subtractOneCalendarMonth(date: Date): Date {
+  const targetMonth = date.getMonth() - 1;
+  const targetYear = date.getFullYear() + Math.floor(targetMonth / 12);
+  const normalizedTargetMonth = (targetMonth + 12) % 12;
+  const targetDay = Math.min(
+    date.getDate(),
+    daysInMonth(targetYear, normalizedTargetMonth)
+  );
+
+  return new Date(
+    targetYear,
+    normalizedTargetMonth,
+    targetDay,
+    date.getHours(),
+    date.getMinutes(),
+    date.getSeconds(),
+    date.getMilliseconds()
+  );
+}
+
+export function defaultPeriodRange(periodType: PeriodType, today = new Date()) {
+  const end = formatLocalDate(today);
+  const startDate = new Date(today);
+
+  if (periodType === "weekly") {
+    startDate.setDate(startDate.getDate() - 6);
+  } else if (periodType === "monthly") {
+    const previousMonthDate = subtractOneCalendarMonth(today);
+    startDate.setTime(previousMonthDate.getTime());
+    startDate.setDate(startDate.getDate() + 1);
+  }
+
+  return { start: formatLocalDate(startDate), end };
+}
+
 export function ImportCenter() {
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const initialPeriod = useMemo(() => defaultPeriodRange("daily"), []);
 
   // Form state
   const [file, setFile] = useState<File | null>(null);
   const [periodType, setPeriodType] = useState<PeriodType>("daily");
-  const [periodStart, setPeriodStart] = useState<string>("");
-  const [periodEnd, setPeriodEnd] = useState<string>("");
+  const [periodStart, setPeriodStart] = useState<string>(initialPeriod.start);
+  const [periodEnd, setPeriodEnd] = useState<string>(initialPeriod.end);
   const [entity, setEntity] = useState<string>("");
   const [dragOver, setDragOver] = useState(false);
 
@@ -231,26 +279,14 @@ export function ImportCenter() {
   const [approved, setApproved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Default dates based on period type
-  useEffect(() => {
-    const today = new Date();
-    const fmt = (d: Date) => d.toISOString().slice(0, 10);
-    const end = fmt(today);
-    let start = end;
-    const s = new Date(today);
-    if (periodType === "daily") {
-      start = fmt(s);
-    } else if (periodType === "weekly") {
-      s.setDate(s.getDate() - 6);
-      start = fmt(s);
-    } else if (periodType === "monthly") {
-      s.setMonth(s.getMonth() - 1);
-      s.setDate(s.getDate() + 1);
-      start = fmt(s);
+  const handlePeriodTypeChange = (value: PeriodType) => {
+    setPeriodType(value);
+    if (value !== "custom") {
+      const range = defaultPeriodRange(value);
+      setPeriodStart(range.start);
+      setPeriodEnd(range.end);
     }
-    setPeriodStart(start);
-    setPeriodEnd(end);
-  }, [periodType]);
+  };
 
   // Compute current stage
   const currentStage: StageKey = useMemo(() => {
@@ -671,7 +707,7 @@ export function ImportCenter() {
                   </Label>
                   <Select
                     value={periodType}
-                    onValueChange={(v) => setPeriodType(v as PeriodType)}
+                    onValueChange={(v) => handlePeriodTypeChange(v as PeriodType)}
                   >
                     <SelectTrigger className="w-full">
                       <SelectValue />

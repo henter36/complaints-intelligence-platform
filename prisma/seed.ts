@@ -1,3 +1,4 @@
+import type { Classification, Department, Location, Region } from "@prisma/client";
 import { db } from "../src/lib/db";
 
 const regions = [
@@ -118,25 +119,35 @@ function randomDate(start: Date, end: Date) {
 }
 function pick<T>(arr: T[]): T { return arr[Math.floor(Math.random() * arr.length)]; }
 function pickMany<T>(arr: T[], n: number): T[] { return [...arr].sort(() => Math.random() - 0.5).slice(0, n); }
+function isPresent<T>(value: T | null): value is T { return value !== null; }
 
 async function seed() {
   console.log("Seeding database...");
 
+  await db.auditLog.deleteMany();
+  await db.complaintHistory.deleteMany();
+  await db.complaint.deleteMany();
+  await db.importBatch.deleteMany();
+  await db.reportTemplate.deleteMany();
+  await db.location.deleteMany();
+  await db.region.deleteMany();
+  await db.department.deleteMany();
+  await db.classification.deleteMany();
+  await db.user.deleteMany();
+
   // Create user
-  const user = await db.user.upsert({
-    where: { email: "admin@shakawi.gov.sa" },
-    update: {},
-    create: { email: "admin@shakawi.gov.sa", name: "مدير النظام", role: "admin" },
+  const user = await db.user.create({
+    data: { email: "admin@shakawi.gov.sa", name: "مدير النظام", role: "admin" },
   });
 
   // Create regions
-  const regionRecords = [];
+  const regionRecords: Region[] = [];
   for (const r of regions) {
     regionRecords.push(await db.region.create({ data: r }));
   }
 
   // Create locations
-  const locationRecords = [];
+  const locationRecords: Location[] = [];
   for (let i = 0; i < locations.length; i++) {
     const region = regionRecords[i % regionRecords.length];
     locationRecords.push(await db.location.create({
@@ -145,13 +156,13 @@ async function seed() {
   }
 
   // Create departments
-  const deptRecords = [];
+  const deptRecords: Department[] = [];
   for (const d of departments) {
     deptRecords.push(await db.department.create({ data: d }));
   }
 
   // Create classifications with children
-  const classRecords = [];
+  const classRecords: Classification[] = [];
   for (const c of classifications) {
     const parent = await db.classification.create({
       data: { name: c.name, color: c.color, description: `تصنيف رئيسي: ${c.name}` },
@@ -224,12 +235,11 @@ async function seed() {
       processingDate = new Date(firstActionDate.getTime() + Math.random() * 7 * 24 * 60 * 60 * 1000);
       closureDate = new Date(processingDate.getTime() + Math.random() * 5 * 24 * 60 * 60 * 1000);
       if (closureDate > dueDate || isLate) {
-        delayReason = pick(delayReasons.filter(r => r !== null));
+        delayReason = pick(delayReasons.filter(isPresent));
       }
-      resolution = pick(resolutions.filter(r => r !== null));
+      resolution = pick(resolutions.filter(isPresent));
     }
 
-    const isLate = closureDate ? closureDate > dueDate : now > dueDate;
     const isValidated = status === "closed" ? Math.random() > 0.2 : Math.random() > 0.7;
     const satisfaction = status === "closed" ? pick([1, 2, 3, 4, 5, 5, 4]) : null;
     const isRepeated = Math.random() > 0.85;

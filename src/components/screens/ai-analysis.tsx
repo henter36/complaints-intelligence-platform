@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PageHeader } from "@/components/shared/page-header";
 import {
   Card,
@@ -72,6 +72,7 @@ import {
   STATUS_LABELS,
   statusBadgeClass,
 } from "@/lib/ar-utils";
+import { isAbortError } from "@/lib/abort";
 
 // ---------- Types ----------
 interface ComplaintRelation {
@@ -287,70 +288,119 @@ export function AiAnalysis() {
   const [modifySeverity, setModifySeverity] = useState<string>("");
   const [modifyPriority, setModifyPriority] = useState<string>("");
   const [approvingId, setApprovingId] = useState<string | null>(null);
+  const unanalyzedRequestRef = useRef(0);
+  const analyzedRequestRef = useRef(0);
+  const insightsRequestRef = useRef(0);
 
-  const loadUnanalyzed = useCallback(async () => {
+  const loadUnanalyzed = useCallback(async (signal?: AbortSignal) => {
+    const requestId = unanalyzedRequestRef.current + 1;
+    unanalyzedRequestRef.current = requestId;
+    const canUpdate = () => !signal?.aborted && unanalyzedRequestRef.current === requestId;
     setLoadingUnanalyzed(true);
+    let aborted = false;
     try {
       const res = await fetch(
-        "/api/complaints?aiAnalyzed=false&pageSize=50&sortBy=receivedDate&sortOrder=desc"
+        "/api/complaints?aiAnalyzed=false&pageSize=50&sortBy=receivedDate&sortOrder=desc",
+        { signal }
       );
       const json = await res.json();
-      setUnanalyzed(json?.data ?? []);
-    } catch {
+      if (canUpdate()) {
+        setUnanalyzed(json?.data ?? []);
+      }
+    } catch (err) {
+      aborted = isAbortError(err);
+      if (aborted) {
+        return;
+      }
       toast({
         variant: "destructive",
         title: "خطأ",
         description: "تعذّر تحميل الشكاوى غير المحللة",
       });
     } finally {
-      setLoadingUnanalyzed(false);
+      if (!aborted && canUpdate()) {
+        setLoadingUnanalyzed(false);
+      }
     }
   }, [toast]);
 
-  const loadAnalyzed = useCallback(async () => {
+  const loadAnalyzed = useCallback(async (signal?: AbortSignal) => {
+    const requestId = analyzedRequestRef.current + 1;
+    analyzedRequestRef.current = requestId;
+    const canUpdate = () => !signal?.aborted && analyzedRequestRef.current === requestId;
     setLoadingAnalyzed(true);
+    let aborted = false;
     try {
       const res = await fetch(
-        "/api/complaints?aiAnalyzed=true&pageSize=50&sortBy=receivedDate&sortOrder=desc"
+        "/api/complaints?aiAnalyzed=true&pageSize=50&sortBy=receivedDate&sortOrder=desc",
+        { signal }
       );
       const json = await res.json();
-      setAnalyzed(json?.data ?? []);
-    } catch {
+      if (canUpdate()) {
+        setAnalyzed(json?.data ?? []);
+      }
+    } catch (err) {
+      aborted = isAbortError(err);
+      if (aborted) {
+        return;
+      }
       toast({
         variant: "destructive",
         title: "خطأ",
         description: "تعذّر تحميل الشكاوى المحللة",
       });
     } finally {
-      setLoadingAnalyzed(false);
+      if (!aborted && canUpdate()) {
+        setLoadingAnalyzed(false);
+      }
     }
   }, [toast]);
 
-  const loadInsights = useCallback(async () => {
+  const loadInsights = useCallback(async (signal?: AbortSignal) => {
+    const requestId = insightsRequestRef.current + 1;
+    insightsRequestRef.current = requestId;
+    const canUpdate = () => !signal?.aborted && insightsRequestRef.current === requestId;
     setLoadingInsights(true);
+    let aborted = false;
     try {
-      const res = await fetch("/api/ai/insights?limit=200");
+      const res = await fetch("/api/ai/insights?limit=200", { signal });
       const json = await res.json();
-      setInsights(json);
-    } catch {
+      if (canUpdate()) {
+        setInsights(json);
+      }
+    } catch (err) {
+      aborted = isAbortError(err);
+      if (aborted) {
+        return;
+      }
       toast({
         variant: "destructive",
         title: "خطأ",
         description: "تعذّر تحميل الرؤى المجمعة",
       });
     } finally {
-      setLoadingInsights(false);
+      if (!aborted && canUpdate()) {
+        setLoadingInsights(false);
+      }
     }
   }, [toast]);
 
-  const loadAll = useCallback(() => {
-    loadUnanalyzed();
-    loadAnalyzed();
-    loadInsights();
+  const loadAll = useCallback((signal?: AbortSignal) => {
+    void loadUnanalyzed(signal);
+    void loadAnalyzed(signal);
+    void loadInsights(signal);
   }, [loadUnanalyzed, loadAnalyzed, loadInsights]);
 
   useEffect(() => {
-    loadAll();
+    const controller = new AbortController();
+    void Promise.resolve().then(() => {
+      if (!controller.signal.aborted) {
+        loadAll(controller.signal);
+      }
+    });
+    return () => {
+      controller.abort();
+    };
   }, [loadAll]);
 
   // Auto-switch to insights tab when analyzed complaints exist
@@ -602,7 +652,7 @@ export function AiAnalysis() {
         description="تحليل آلي مساعد لنصوص الشكاوى باستخدام الذكاء الاصطناعي"
         icon={<Sparkles className="h-6 w-6" />}
         actions={
-          <Button variant="outline" size="sm" onClick={loadAll}>
+          <Button variant="outline" size="sm" onClick={() => loadAll()}>
             <RefreshCw className="h-4 w-4" />
             تحديث
           </Button>

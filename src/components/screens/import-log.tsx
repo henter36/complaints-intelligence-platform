@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useMemo, Fragment } from "react";
+import { useEffect, useState, useMemo, Fragment, useCallback, useRef } from "react";
 import { PageHeader } from "@/components/shared/page-header";
 import {
   Card,
@@ -71,6 +71,7 @@ import {
   formatDate,
   formatDateTime,
 } from "@/lib/ar-utils";
+import { isAbortError } from "@/lib/abort";
 
 // ---------- Types ----------
 interface UserRef {
@@ -410,15 +411,26 @@ export function ImportLog() {
   const [rollbackBatch, setRollbackBatch] = useState<ImportBatch | null>(null);
   const [rollbackDialogOpen, setRollbackDialogOpen] = useState(false);
   const [rollingBack, setRollingBack] = useState(false);
+  const fetchRequestRef = useRef(0);
 
-  const fetchBatches = async () => {
+  const fetchBatches = useCallback(async (signal?: AbortSignal) => {
+    const requestId = fetchRequestRef.current + 1;
+    fetchRequestRef.current = requestId;
+    const canUpdate = () => !signal?.aborted && fetchRequestRef.current === requestId;
     setLoading(true);
+    let aborted = false;
     try {
-      const res = await fetch("/api/import/history");
+      const res = await fetch("/api/import/history", { signal });
       if (!res.ok) throw new Error("فشل تحميل سجل الاستيراد");
       const data: ImportBatch[] = await res.json();
-      setBatches(data);
+      if (canUpdate()) {
+        setBatches(data);
+      }
     } catch (err) {
+      aborted = isAbortError(err);
+      if (aborted) {
+        return;
+      }
       const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
       toast({
         title: "خطأ",
@@ -426,13 +438,23 @@ export function ImportLog() {
         variant: "destructive",
       });
     } finally {
-      setLoading(false);
+      if (!aborted && canUpdate()) {
+        setLoading(false);
+      }
     }
-  };
+  }, [toast]);
 
   useEffect(() => {
-    fetchBatches();
-  }, []);
+    const controller = new AbortController();
+    void Promise.resolve().then(() => {
+      if (!controller.signal.aborted) {
+        void fetchBatches(controller.signal);
+      }
+    });
+    return () => {
+      controller.abort();
+    };
+  }, [fetchBatches]);
 
   // Filtered batches
   const filtered = useMemo(() => {
@@ -495,7 +517,7 @@ export function ImportLog() {
         description="سجل عمليات استيراد ملفات الشكاوى وحالتها"
         icon={<History className="h-6 w-6" />}
         actions={
-          <Button variant="outline" onClick={fetchBatches} size="sm">
+          <Button variant="outline" onClick={() => void fetchBatches()} size="sm">
             <RefreshCw className="h-4 w-4" />
             تحديث
           </Button>
