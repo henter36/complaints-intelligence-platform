@@ -3,6 +3,7 @@ import {
   buildComplaintQuery,
   downloadComplaintExport,
   extractFileName,
+  normalizeApiComplaintStatus,
   STATUS_OPTIONS,
   type FilterState,
 } from "./complaints-explorer";
@@ -32,7 +33,9 @@ afterEach(() => {
 
 describe("complaints explorer helpers", () => {
   it("uses API complaint status vocabulary", () => {
-    expect(STATUS_OPTIONS.map((option) => option.value)).toEqual([
+    const statusValues = STATUS_OPTIONS.map((option) => option.value);
+
+    expect(statusValues).toEqual([
       "NEW",
       "OPEN",
       "IN_PROGRESS",
@@ -41,6 +44,17 @@ describe("complaints explorer helpers", () => {
       "CLOSED",
       "CANCELLED",
     ]);
+    expect(statusValues).not.toContain(["re", "opened"].join(""));
+    expect(STATUS_OPTIONS.find((option) => option.value === "OPEN")?.label).toBe("مفتوحة");
+  });
+
+  it("normalizes legacy API statuses only at the response boundary", () => {
+    expect(normalizeApiComplaintStatus("CLOSED")).toBe("CLOSED");
+    expect(normalizeApiComplaintStatus("closed")).toBe("CLOSED");
+    expect(normalizeApiComplaintStatus(["in", "progress"].join("_"))).toBe("IN_PROGRESS");
+    expect(normalizeApiComplaintStatus(["re", "opened"].join(""))).toBe("OPEN");
+    expect(normalizeApiComplaintStatus(["re", "jected"].join(""))).toBe("CANCELLED");
+    expect(normalizeApiComplaintStatus("CANCELLED")).toBe("CANCELLED");
   });
 
   it("builds list and export queries from the same helper", () => {

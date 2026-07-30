@@ -62,7 +62,6 @@ import {
   formatNumber,
   formatDate,
   formatDateTime,
-  STATUS_LABELS,
   PRIORITY_LABELS,
   SEVERITY_LABELS,
   statusBadgeClass,
@@ -196,7 +195,17 @@ export const STATUS_OPTIONS = [
   { value: "RESOLVED", label: "تمت المعالجة" },
   { value: "CLOSED", label: "مغلقة" },
   { value: "CANCELLED", label: "ملغاة" },
-];
+] as const;
+
+const STATUS_LABELS: Record<string, string> = {
+  NEW: "جديدة",
+  OPEN: "مفتوحة",
+  IN_PROGRESS: "قيد المعالجة",
+  AWAITING_RESPONSE: "بانتظار الرد",
+  RESOLVED: "تمت المعالجة",
+  CLOSED: "مغلقة",
+  CANCELLED: "ملغاة",
+};
 
 const PRIORITY_OPTIONS = [
   { value: "low", label: "منخفضة" },
@@ -228,14 +237,26 @@ const SORT_FIELDS: { key: string; label: string }[] = [
   { key: "severity", label: "الخطورة" },
 ];
 
-function toLegacyStatusValue(status: string): string {
-  const normalized = status.toUpperCase();
-  if (normalized === "NEW" || normalized === "OPEN") return "open";
-  if (normalized === "IN_PROGRESS") return "in_progress";
-  if (normalized === "AWAITING_RESPONSE") return "in_progress";
-  if (normalized === "RESOLVED" || normalized === "CLOSED") return "closed";
-  if (normalized === "CANCELLED") return "rejected";
-  return status;
+const STATUS_ALIASES: Record<string, string> = {
+  NEW: "NEW",
+  OPEN: "OPEN",
+  IN_PROGRESS: "IN_PROGRESS",
+  AWAITING_RESPONSE: "AWAITING_RESPONSE",
+  RESOLVED: "RESOLVED",
+  CLOSED: "CLOSED",
+  CANCELLED: "CANCELLED",
+  REJECTED: "CANCELLED",
+  REOPENED: "OPEN",
+};
+
+export function normalizeApiComplaintStatus(value: string): string {
+  const normalized = value.trim().toUpperCase();
+
+  if (!normalized) {
+    return "";
+  }
+
+  return STATUS_ALIASES[normalized] ?? normalized;
 }
 
 function toLegacyPriorityValue(priority: string | null | undefined): string {
@@ -249,7 +270,7 @@ function normalizeComplaint(item: Complaint): Complaint {
     receivedDate: item.receivedDate ?? item.receivedAt ?? "",
     channel: item.channel ?? "",
     description: item.description ?? "",
-    status: toLegacyStatusValue(item.status),
+    status: normalizeApiComplaintStatus(item.status),
     priority: toLegacyPriorityValue(item.priority),
     severity: toLegacyPriorityValue(item.severity),
     isRepeated: item.isRepeated ?? false,
@@ -280,7 +301,7 @@ function initialFilterState(): FilterState {
     departmentId: params.get("departmentId") ?? "",
     classificationId: params.get("classificationId") ?? "",
     channel: params.get("channel") ?? "",
-    status: params.get("status") ?? "",
+    status: normalizeApiComplaintStatus(params.get("status") ?? ""),
     priority: params.get("priority") ?? "",
     severity: params.get("severity") ?? "",
     from: params.get("from") ?? "",

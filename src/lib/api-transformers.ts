@@ -1,5 +1,4 @@
 import { isComplaintLate, type ComplaintTiming } from "@/lib/complaint-metrics";
-import { toLegacyStatus } from "@/server/complaints/status";
 
 export type ComplaintListItem<T extends ComplaintTiming> = T & {
   isLate: boolean;
@@ -86,7 +85,7 @@ export function toComplaintListItem<T extends ComplaintTiming>(
     firstActionAt: raw.firstActionAt ?? null,
     processingDate: raw.processingStartedAt ?? null,
     processingStartedAt: raw.processingStartedAt ?? null,
-    status: toLegacyStatus(raw.status as never),
+    status: raw.status ?? null,
     rawStatus: raw.status ?? null,
     subject: raw.subject ?? "",
     description: raw.description ?? "",

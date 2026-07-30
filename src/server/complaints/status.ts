@@ -85,24 +85,6 @@ export function parseComplaintStatus(value: string | null): ComplaintStatus | un
   return Object.values(ComplaintStatus).find((status) => status === normalized);
 }
 
-export function toLegacyStatus(status: ComplaintStatus): string {
-  switch (status) {
-    case ComplaintStatus.NEW:
-    case ComplaintStatus.OPEN:
-      return "open";
-    case ComplaintStatus.IN_PROGRESS:
-      return "in_progress";
-    case ComplaintStatus.AWAITING_RESPONSE:
-      return "awaiting_response";
-    case ComplaintStatus.RESOLVED:
-      return "resolved";
-    case ComplaintStatus.CLOSED:
-      return "closed";
-    case ComplaintStatus.CANCELLED:
-      return "rejected";
-  }
-}
-
 const ALLOWED_STATUS_TRANSITIONS: Record<ComplaintStatus, Set<ComplaintStatus>> = {
   [ComplaintStatus.NEW]: new Set([
     ComplaintStatus.OPEN,

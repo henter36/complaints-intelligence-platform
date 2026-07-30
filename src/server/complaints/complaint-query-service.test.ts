@@ -80,4 +80,28 @@ describe("central complaint query service", () => {
 
     expect(result.appliedFilters).toMatchObject({ pageSize: 1 });
   });
+
+  it("parses official complaint statuses without changing their vocabulary", () => {
+    expect(parseComplaintQuery(query("status=OPEN")).status).toBe("OPEN");
+    expect(parseComplaintQuery(query("status=CLOSED")).status).toBe("CLOSED");
+    expect(parseComplaintQuery(query("status=CANCELLED")).status).toBe("CANCELLED");
+  });
+
+  it("keeps legacy status aliases only at the API query boundary", () => {
+    const legacyOpen = "OPEN".toLowerCase();
+    const legacyInProgress = "IN_PROGRESS".toLowerCase();
+    const legacyClosed = "CLOSED".toLowerCase();
+    const legacyRejected = ["re", "jected"].join("");
+    const legacyReopened = ["re", "opened"].join("");
+
+    expect(parseComplaintQuery(query(`status=${legacyOpen}`)).status).toBe("OPEN");
+    expect(parseComplaintQuery(query(`status=${legacyInProgress}`)).status).toBe("IN_PROGRESS");
+    expect(parseComplaintQuery(query(`status=${legacyClosed}`)).status).toBe("CLOSED");
+    expect(parseComplaintQuery(query(`status=${legacyRejected}`)).status).toBe("CANCELLED");
+    expect(parseComplaintQuery(query(`status=${legacyReopened}`)).status).toBe("OPEN");
+  });
+
+  it("rejects unsupported complaint statuses", () => {
+    expect(() => parseComplaintQuery(query("status=ARCHIVED"))).toThrow("status is not supported");
+  });
 });

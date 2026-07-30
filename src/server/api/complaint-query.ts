@@ -1,4 +1,4 @@
-import { ComplaintPriority, ComplaintStatus, type Prisma } from "@prisma/client";
+import { ComplaintPriority, type Prisma } from "@prisma/client";
 import {
   buildComplaintWhere,
   ComplaintQueryValidationError,
@@ -121,12 +121,4 @@ export function mergeComplaintWhere(
   ].filter((condition) => Object.keys(condition).length > 0);
 
   return conditions.length === 1 ? conditions[0]! : { AND: conditions };
-}
-
-export function toLegacyPriority(priority: ComplaintPriority): string {
-  return priority.toLowerCase();
-}
-
-export function toLegacyStatus(status: ComplaintStatus): string {
-  return status.toLowerCase();
 }

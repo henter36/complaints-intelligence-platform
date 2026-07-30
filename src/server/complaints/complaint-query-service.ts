@@ -61,7 +61,7 @@ const querySchema = z.object({
   search: optionalText,
   externalId: optionalText,
   sourceReference: optionalText,
-  status: z.string().optional().transform((value, ctx) => parseEnumValue(value, ComplaintStatus, ctx, "status")),
+  status: z.string().optional().transform((value, ctx) => parseStatusValue(value, ctx)),
   priority: z.string().optional().transform((value, ctx) => parseEnumValue(value, ComplaintPriority, ctx, "priority")),
   severity: z.string().optional().transform((value, ctx) => parseEnumValue(value, ComplaintPriority, ctx, "severity")),
   channel: optionalText,
@@ -177,6 +177,32 @@ const complaintListSelect = {
 } satisfies Prisma.ComplaintSelect;
 
 type ComplaintListRecord = Prisma.ComplaintGetPayload<{ select: typeof complaintListSelect }>;
+
+const COMPLAINT_STATUS_ALIASES = {
+  NEW: ComplaintStatus.NEW,
+  OPEN: ComplaintStatus.OPEN,
+  IN_PROGRESS: ComplaintStatus.IN_PROGRESS,
+  AWAITING_RESPONSE: ComplaintStatus.AWAITING_RESPONSE,
+  RESOLVED: ComplaintStatus.RESOLVED,
+  CLOSED: ComplaintStatus.CLOSED,
+  CANCELLED: ComplaintStatus.CANCELLED,
+  REJECTED: ComplaintStatus.CANCELLED,
+  REOPENED: ComplaintStatus.OPEN,
+} as const satisfies Record<string, ComplaintStatus>;
+
+function parseStatusValue(
+  value: string | undefined,
+  ctx: z.RefinementCtx
+): ComplaintStatus | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim().toUpperCase();
+  const status = COMPLAINT_STATUS_ALIASES[normalized as keyof typeof COMPLAINT_STATUS_ALIASES];
+  if (!status) {
+    ctx.addIssue({ code: "custom", message: "status is not supported" });
+    return z.NEVER;
+  }
+  return status;
+}
 
 function parseEnumValue<T extends Record<string, string>>(
   value: string | undefined,
