@@ -5,11 +5,12 @@ import { buildComplaintTiming, type ComplaintTimingSnapshot } from "./complaint-
 import {
   CLOSED_COMPLAINT_STATUSES,
   OPEN_COMPLAINT_STATUSES,
-  parseComplaintStatus,
 } from "./status";
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_PAGE_SIZE = 25;
+const DEFAULT_SORT_BY = "receivedDate";
+const DEFAULT_SORT_ORDER = "desc";
 const MAX_PAGE_SIZE = 100;
 const EXPORT_LIMIT = 10_000;
 
@@ -87,8 +88,8 @@ const querySchema = z.object({
   isRepeated: booleanSchema,
   isValidated: booleanSchema,
   aiAnalyzed: booleanSchema,
-  sortBy: z.string().default("receivedDate"),
-  sortOrder: z.enum(["asc", "desc"]).default("desc"),
+  sortBy: z.string().default(DEFAULT_SORT_BY),
+  sortOrder: z.enum(["asc", "desc"]).default(DEFAULT_SORT_ORDER),
 });
 
 export type ComplaintQuery = z.infer<typeof querySchema>;
@@ -237,8 +238,21 @@ function dateRange(from?: Date, to?: Date): Prisma.DateTimeNullableFilter | unde
 
 export function buildComplaintWhere(query: ComplaintQuery, now = new Date()): Prisma.ComplaintWhereInput {
   const where: Prisma.ComplaintWhereInput = { isDeleted: false };
+  applyIdentityFilters(where, query);
+  applyScalarFilters(where, query);
+  applyDateFilters(where, query);
+  applyTextSearch(where, query.search);
+  applyBooleanFilters(where, query, now);
+  return where;
+}
+
+function applyIdentityFilters(where: Prisma.ComplaintWhereInput, query: ComplaintQuery): void {
   if (query.externalId) where.externalId = { contains: query.externalId };
   if (query.sourceReference) where.sourceReference = { contains: query.sourceReference };
+  if (query.importBatchId) where.importBatchId = query.importBatchId;
+}
+
+function applyScalarFilters(where: Prisma.ComplaintWhereInput, query: ComplaintQuery): void {
   if (query.status) where.status = query.status;
   if (query.priority) where.priority = query.priority;
   if (query.severity) where.severity = query.severity;
@@ -248,24 +262,21 @@ export function buildComplaintWhere(query: ComplaintQuery, now = new Date()): Pr
   if (query.department ?? query.departmentId) where.department = query.department ?? query.departmentId;
   if (query.categoryId) where.categoryId = query.categoryId;
   if (query.classificationId) where.classificationId = query.classificationId;
-  if (query.importBatchId) where.importBatchId = query.importBatchId;
   if (query.isRepeated !== undefined) where.isRepeated = query.isRepeated;
   if (query.isValidated !== undefined) where.isValidated = query.isValidated;
   if (query.aiAnalyzed !== undefined) where.aiAnalyzedAt = query.aiAnalyzed ? { not: null } : null;
+}
 
+function applyDateFilters(where: Prisma.ComplaintWhereInput, query: ComplaintQuery): void {
   const complaintDate = dateRange(query.from, query.to);
   if (complaintDate) where.complaintDate = complaintDate;
   const dueDate = dateRange(query.dueFrom, query.dueTo);
   if (dueDate) where.dueDate = dueDate;
   const closedAt = dateRange(query.closedFrom, query.closedTo);
   if (closedAt) where.closedAt = closedAt;
-
-  applySearch(where, query.search);
-  applyBooleanFilters(where, query, now);
-  return where;
 }
 
-function applySearch(where: Prisma.ComplaintWhereInput, search?: string): void {
+function applyTextSearch(where: Prisma.ComplaintWhereInput, search?: string): void {
   if (!search) return;
   addAnd(where, {
     OR: [
@@ -283,9 +294,9 @@ function applyBooleanFilters(where: Prisma.ComplaintWhereInput, query: Complaint
   if (query.isClosed === true) addAnd(where, { status: { in: [...CLOSED_COMPLAINT_STATUSES] } });
   if (query.isClosed === false) addAnd(where, { status: { notIn: [...CLOSED_COMPLAINT_STATUSES] } });
   if (query.hasDueDate === true) addAnd(where, { dueDate: { not: null } });
-  if (query.hasDueDate === false) where.dueDate = null;
+  if (query.hasDueDate === false) addAnd(where, { dueDate: null });
   if (query.hasClassification === true) addAnd(where, { classificationId: { not: null } });
-  if (query.hasClassification === false) where.classificationId = null;
+  if (query.hasClassification === false) addAnd(where, { classificationId: null });
   if (query.isLate === true) {
     addAnd(where, { dueDate: { lt: now }, status: { in: [...OPEN_COMPLAINT_STATUSES] } });
   }
@@ -348,7 +359,29 @@ export async function listComplaints(
 
 function appliedFilters(query: ComplaintQuery): Record<string, unknown> {
   return Object.fromEntries(
-    Object.entries(query).filter(([, value]) => value !== undefined && value !== "" && value !== DEFAULT_PAGE && value !== DEFAULT_PAGE_SIZE)
+    Object.entries(query).filter(([key, value]) => {
+      if (value === undefined || value === "") {
+        return false;
+      }
+
+      if (key === "page" && value === DEFAULT_PAGE) {
+        return false;
+      }
+
+      if (key === "pageSize" && value === DEFAULT_PAGE_SIZE) {
+        return false;
+      }
+
+      if (key === "sortBy" && value === DEFAULT_SORT_BY) {
+        return false;
+      }
+
+      if (key === "sortOrder" && value === DEFAULT_SORT_ORDER) {
+        return false;
+      }
+
+      return true;
+    })
   );
 }
 

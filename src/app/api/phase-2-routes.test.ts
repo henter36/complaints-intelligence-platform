@@ -556,7 +556,28 @@ describe("Phase 2 API routes", () => {
     expect(body.crossTabs.classifications).toEqual(["إبراهيم", "أحمد"]);
     expect(body.crossTabs.regions).toEqual(["أحمد", "ياسمين"]);
     expect(body.crossTabs.departments).toEqual(["إبراهيم", "بدر"]);
-    expect(body.crossTabs.classificationByRegion[0].classification).toBe("إبراهيم");
+    expect(body.crossTabs.classificationByRegion).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ classification: "أحمد", group: "أحمد", count: 1 }),
+        expect.objectContaining({ classification: "أحمد", group: "ياسمين", count: 1 }),
+        expect.objectContaining({ classification: "إبراهيم", group: "أحمد", count: 1 }),
+      ])
+    );
+    expect(body.crossTabs.classificationByDepartment).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ classification: "أحمد", group: "بدر", count: 2 }),
+        expect.objectContaining({ classification: "إبراهيم", group: "إبراهيم", count: 1 }),
+      ])
+    );
+    expect(body.anomalies.classifications[0]).toEqual(
+      expect.objectContaining({
+        name: expect.any(String),
+        count: expect.any(Number),
+        average: expect.any(Number),
+        deviation: expect.any(Number),
+        isAnomaly: expect.any(Boolean),
+      })
+    );
   });
 
   it("creates a classification only under an active parent category", async () => {

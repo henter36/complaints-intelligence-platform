@@ -5,7 +5,7 @@
 - Next.js app shell with Arabic RTL layout and sidebar navigation.
 - Dashboard API aggregates complaint volume, performance, trends, distributions, and alerts through the central Phase 6 KPI service.
 - Complaints API lists complaints with central query validation, filters, pagination, deterministic sorting, soft-delete exclusion, and computed timing fields.
-- Analytics API returns central KPI-backed cross-tabs, channel effectiveness, anomaly summaries, and distributions.
+- Analytics API returns central KPI-backed count cross-tabs by classification/region/department, channel effectiveness, anomaly summaries, and distributions.
 - Filters, categories/classifications, and import history endpoints exist.
 - Prisma schema validates, a real Phase 2 migration exists, and synthetic seed data can populate a local SQLite database.
 - Phase 2 domain services exist for complaint status history, duplicate identity, import batch transitions, row counters, and audit logging.

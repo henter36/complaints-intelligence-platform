@@ -149,7 +149,7 @@ describe("GET /api/dashboard", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body.trend.trendData).toHaveLength(30);
+    expect(body.trend.trendData).toHaveLength(31);
     expect(body.trend.trendData.every((row: { total: number }) => row.total === 0)).toBe(true);
     expect(findMany).toHaveBeenCalled();
   });

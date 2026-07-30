@@ -12,7 +12,7 @@ This repository is not production ready. Phase 1 made the codebase buildable and
 - Working: import center can upload `.xlsx`, validate rows, store preview rows, confirm eligible batches, and roll back confirmed batches.
 - Working: complaint explorer can query confirmed active complaints with validated filters, deterministic sorting, pagination, detail APIs, status/update APIs, central KPIs, and safe CSV export.
 - Stubbed: AI approval/execution endpoints return `501` until their later phases.
-- Missing: scoped permissions, production database architecture, exports, report scheduling, MFA, and external identity providers.
+- Missing: scoped permissions, production database architecture, PDF/XLSX exports, report scheduling, MFA, and external identity providers.
 
 ## Requirements
 

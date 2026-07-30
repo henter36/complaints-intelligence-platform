@@ -26,9 +26,34 @@ const HEADERS = [
 ];
 
 function csvCell(value: unknown): string {
-  const text = value == null ? "" : String(value);
+  const text = toCsvCellText(value);
   const protectedText = /^[=+\-@]/.test(text) ? `'${text}` : text;
   return `"${protectedText.replaceAll("\"", "\"\"")}"`;
+}
+
+function toCsvCellText(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "";
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (
+    typeof value === "number"
+    || typeof value === "boolean"
+    || typeof value === "bigint"
+  ) {
+    const primitiveValue = value;
+    return String(primitiveValue);
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  return "";
 }
 
 function filename(): string {

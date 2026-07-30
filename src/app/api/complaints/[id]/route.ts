@@ -51,6 +51,9 @@ function jsonError(code: string, message: string, status: number): NextResponse 
 
 async function assertClassificationRelation(categoryId?: string | null, classificationId?: string | null): Promise<void> {
   if (!classificationId) return;
+  if (!categoryId) {
+    throw new Error("INVALID_CLASSIFICATION_RELATION");
+  }
   const classification = await db.classification.findFirst({
     where: { id: classificationId, isDeleted: false, isActive: true },
     select: { categoryId: true },
@@ -151,7 +154,17 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
     const session = await requireAdminApiSession(req);
     const { id } = await context.params;
     const body = updateSchema.parse(await req.json());
-    await assertClassificationRelation(body.categoryId, body.classificationId);
+    const existing = await db.complaint.findFirst({
+      where: { id, isDeleted: false },
+      select: { id: true, categoryId: true, classificationId: true },
+    });
+    if (!existing) {
+      return jsonError("COMPLAINT_NOT_FOUND", "الشكوى غير موجودة", 404);
+    }
+
+    const effectiveCategoryId = body.categoryId !== undefined ? body.categoryId : existing.categoryId;
+    const effectiveClassificationId = body.classificationId !== undefined ? body.classificationId : existing.classificationId;
+    await assertClassificationRelation(effectiveCategoryId, effectiveClassificationId);
 
     const data: Prisma.ComplaintUncheckedUpdateManyInput = {
       sourceReference: body.sourceReference,

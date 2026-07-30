@@ -62,6 +62,9 @@ export type KpiValue = {
   direction: "positive" | "negative" | "neutral";
 };
 
+type MetricTrend = KpiValue["trend"];
+type MetricDirection = KpiValue["direction"];
+
 export type ComplaintKpiSummary = {
   totalComplaints: KpiValue;
   openComplaints: KpiValue;
@@ -141,7 +144,13 @@ export type ComplaintKpiResult = {
     byStatus: { name: string; count: number }[];
     byPriority: { name: string; count: number }[];
     bySeverity: { name: string; count: number }[];
+    byDelayReason: { name: string; count: number }[];
+    bySubject: { name: string; count: number }[];
     byMonth: { name: string; count: number }[];
+  };
+  crossTabs: {
+    classificationByRegion: CrossTabRow[];
+    classificationByDepartment: CrossTabRow[];
   };
   alerts: {
     criticalComplaints: number;
@@ -149,6 +158,14 @@ export type ComplaintKpiResult = {
     missingFields: number;
     dataQualityRate: number;
   };
+};
+
+export type CrossTabRow = {
+  classificationId?: string | null;
+  classification: string;
+  groupId?: string | null;
+  group: string;
+  count: number;
 };
 
 type RawMetrics = {
@@ -178,7 +195,7 @@ export async function getComplaintKpis(params: URLSearchParams, now = new Date()
     db.complaint.findMany({ where: currentWhere, select: kpiSelect }),
     previousWhere ? db.complaint.findMany({ where: previousWhere, select: kpiSelect }) : Promise.resolve(null),
   ]);
-  return buildKpiResult(current, previous, now);
+  return buildKpiResult(current, previous, now, query);
 }
 
 function buildPreviousWhere(query: ComplaintQuery, now: Date): Prisma.ComplaintWhereInput | null {
@@ -193,11 +210,15 @@ function buildPreviousWhere(query: ComplaintQuery, now: Date): Prisma.ComplaintW
   return buildComplaintWhere(previousQuery, now);
 }
 
-function buildKpiResult(current: KpiComplaint[], previous: KpiComplaint[] | null, now: Date): ComplaintKpiResult {
+function buildKpiResult(
+  current: KpiComplaint[],
+  previous: KpiComplaint[] | null,
+  now: Date,
+  query: ComplaintQuery
+): ComplaintKpiResult {
   const currentRaw = calculateRawMetrics(current, now);
   const previousRaw = previous ? calculateRawMetrics(previous, now) : null;
   const kpis = buildKpiValues(currentRaw, previousRaw);
-  const closed = current.filter((complaint) => isClosedComplaintStatus(complaint.status));
   const firstResponses = current
     .filter((complaint) => complaint.firstActionAt)
     .map((complaint) => hoursBetween(complaint.complaintDate ?? complaint.receivedAt, complaint.firstActionAt!));
@@ -247,9 +268,10 @@ function buildKpiResult(current: KpiComplaint[], previous: KpiComplaint[] | null
     trend: {
       previousTotal: previousRaw?.totalComplaints ?? null,
       growthRate: previousRaw ? percentageChange(currentRaw.totalComplaints, previousRaw.totalComplaints) : null,
-      trendData: buildTrend(current, now),
+      trendData: buildTrend(current, now, query.from, query.to),
     },
     distributions: buildDistributions(current, now),
+    crossTabs: buildCrossTabs(current),
     alerts: {
       criticalComplaints: current.filter((complaint) =>
         complaint.priority === ComplaintPriority.CRITICAL || complaint.severity === ComplaintPriority.CRITICAL
@@ -318,12 +340,33 @@ function buildKpiValues(current: RawMetrics, previous: RawMetrics | null): Compl
 
 function compareMetric(current: number, previous: number | null, higherIsNegative: boolean): KpiValue {
   const absoluteChange = previous === null ? null : roundToTenth(current - previous);
-  const pct = previous === null ? null : percentageChange(current, previous);
-  const trend = absoluteChange === null ? "none" : absoluteChange > 0 ? "up" : absoluteChange < 0 ? "down" : "flat";
-  const direction = trend === "flat" || trend === "none"
-    ? "neutral"
-    : (trend === "up") === !higherIsNegative ? "positive" : "negative";
-  return { currentValue: current, previousValue: previous, absoluteChange, percentageChange: pct, trend, direction };
+  const trend = resolveTrend(current, previous);
+  return {
+    currentValue: current,
+    previousValue: previous,
+    absoluteChange,
+    percentageChange: resolvePercentageChange(current, previous),
+    trend,
+    direction: resolveDirection(trend, higherIsNegative),
+  };
+}
+
+function resolveTrend(current: number, previous: number | null): MetricTrend {
+  if (previous === null) return "none";
+  if (current === previous) return "flat";
+  return current > previous ? "up" : "down";
+}
+
+function resolveDirection(trend: MetricTrend, higherIsNegative: boolean): MetricDirection {
+  if (trend === "flat" || trend === "none") return "neutral";
+  const increased = trend === "up";
+  if (higherIsNegative) return increased ? "negative" : "positive";
+  return increased ? "positive" : "negative";
+}
+
+function resolvePercentageChange(current: number, previous: number | null): number | null {
+  if (previous === null) return null;
+  return percentageChange(current, previous);
 }
 
 function negativeWhenHigher(key: keyof RawMetrics): boolean {
@@ -335,6 +378,7 @@ function negativeWhenHigher(key: keyof RawMetrics): boolean {
     "averageResolutionDays",
     "medianResolutionDays",
     "averageOpenAgeDays",
+    "reopenCount",
   ].includes(key);
 }
 
@@ -355,6 +399,8 @@ function buildDistributions(complaints: KpiComplaint[], now: Date): ComplaintKpi
     byStatus: groupCount(complaints, (complaint) => complaint.status),
     byPriority: groupCount(complaints, (complaint) => complaint.priority),
     bySeverity: groupCount(complaints, (complaint) => complaint.severity),
+    byDelayReason: groupCount(complaints.filter((complaint) => complaint.delayReason), (complaint) => complaint.delayReason ?? UNSPECIFIED_LABEL),
+    bySubject: groupCount(complaints, (complaint) => complaint.subject),
     byMonth: groupCount(complaints, (complaint) => monthKey(complaint.complaintDate ?? complaint.receivedAt)),
   };
 }
@@ -367,16 +413,18 @@ function groupMetrics(
   const map = new Map<string, { id?: string | null; items: KpiComplaint[] }>();
   for (const complaint of complaints) {
     const key = keyFn(complaint);
-    const current = map.get(key.name) ?? { id: key.id, items: [] };
+    const mapKey = groupKey(key);
+    const current = map.get(mapKey) ?? { id: key.id, items: [] };
     current.items.push(complaint);
-    map.set(key.name, current);
+    map.set(mapKey, current);
   }
 
-  return Array.from(map.entries())
-    .map(([name, value]) => {
+  return Array.from(map.values())
+    .map((value) => {
       const raw = calculateRawMetrics(value.items, now);
+      const representative = keyFn(value.items[0]!);
       return {
-        name,
+        name: representative.name,
         id: value.id,
         count: raw.totalComplaints,
         total: raw.totalComplaints,
@@ -392,6 +440,10 @@ function groupMetrics(
     .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name, "ar"));
 }
 
+function groupKey(key: { name: string; id?: string | null }): string {
+  return key.id ? `id:${key.id}` : `name:${key.name}`;
+}
+
 function groupCount<T>(items: T[], keyFn: (item: T) => string): { name: string; count: number }[] {
   const map = new Map<string, number>();
   for (const item of items) {
@@ -403,11 +455,15 @@ function groupCount<T>(items: T[], keyFn: (item: T) => string): { name: string; 
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name, "ar"));
 }
 
-function buildTrend(complaints: KpiComplaint[], now: Date): { date: string; total: number; closed: number; open: number }[] {
-  const start = new Date(now.getTime() - 29 * DAY_MS);
+function buildTrend(
+  complaints: KpiComplaint[],
+  now: Date,
+  from?: Date,
+  to?: Date
+): { date: string; total: number; closed: number; open: number }[] {
+  const { start, end } = resolveTrendRange(now, from, to);
   const result: { date: string; total: number; closed: number; open: number }[] = [];
-  for (let i = 0; i < 30; i += 1) {
-    const day = new Date(start.getTime() + i * DAY_MS);
+  for (let day = start; day <= end; day = new Date(day.getTime() + DAY_MS)) {
     const key = dayKey(day);
     const items = complaints.filter((complaint) => dayKey(complaint.complaintDate ?? complaint.receivedAt) === key);
     result.push({
@@ -418,6 +474,45 @@ function buildTrend(complaints: KpiComplaint[], now: Date): { date: string; tota
     });
   }
   return result;
+}
+
+function resolveTrendRange(now: Date, from?: Date, to?: Date): { start: Date; end: Date } {
+  const fallbackStart = new Date(now.getTime() - 29 * DAY_MS);
+  const start = startOfUtcDay(from ?? fallbackStart);
+  const end = startOfUtcDay(to ?? now);
+  if (start <= end) {
+    return { start, end };
+  }
+  return { start: end, end };
+}
+
+function startOfUtcDay(date: Date): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
+function buildCrossTabs(complaints: KpiComplaint[]): ComplaintKpiResult["crossTabs"] {
+  return {
+    classificationByRegion: buildClassificationCrossTab(complaints, (complaint) => complaint.region ?? UNSPECIFIED_LABEL),
+    classificationByDepartment: buildClassificationCrossTab(complaints, (complaint) => complaint.department ?? UNSPECIFIED_LABEL),
+  };
+}
+
+function buildClassificationCrossTab(
+  complaints: KpiComplaint[],
+  groupName: (complaint: KpiComplaint) => string
+): CrossTabRow[] {
+  const map = new Map<string, CrossTabRow>();
+  for (const complaint of complaints) {
+    const classification = complaint.classification?.nameAr ?? UNCLASSIFIED_LABEL;
+    const classificationId = complaint.classification?.id ?? null;
+    const group = groupName(complaint);
+    const key = `${classificationId ?? classification}:${group}`;
+    const current = map.get(key) ?? { classificationId, classification, group, count: 0 };
+    current.count += 1;
+    map.set(key, current);
+  }
+  return Array.from(map.values())
+    .sort((a, b) => b.count - a.count || a.classification.localeCompare(b.classification, "ar") || a.group.localeCompare(b.group, "ar"));
 }
 
 function hoursBetween(start: Date, end: Date): number {
