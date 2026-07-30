@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { ComplaintPriority, type Prisma } from "@prisma/client";
+import { ComplaintPriority, type Complaint, type Prisma } from "@prisma/client";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { writeAuditLog } from "@/server/audit/audit-log-service";
@@ -33,6 +33,75 @@ const updateSchema = z.object({
   complainantPhone: nullableString,
 }).strict();
 
+const COMPLAINT_DETAIL_SELECT = {
+  id: true,
+  externalId: true,
+  sourceReference: true,
+  complaintDate: true,
+  receivedAt: true,
+  dueDate: true,
+  closedAt: true,
+  status: true,
+  subject: true,
+  description: true,
+  complainantName: true,
+  complainantIdentifier: true,
+  complainantPhone: true,
+  region: true,
+  facility: true,
+  department: true,
+  categoryId: true,
+  classificationId: true,
+  priority: true,
+  severity: true,
+  channel: true,
+  resolution: true,
+  version: true,
+  createdAt: true,
+  updatedAt: true,
+  importBatch: {
+    select: {
+      id: true,
+      originalFileName: true,
+      status: true,
+      confirmedAt: true,
+    },
+  },
+  category: { select: { id: true, nameAr: true } },
+  classification: { select: { id: true, nameAr: true, color: true } },
+  statusHistory: {
+    orderBy: { changedAt: "desc" },
+    select: {
+      id: true,
+      fromStatus: true,
+      toStatus: true,
+      changedAt: true,
+      changedBy: true,
+      reason: true,
+      importBatchId: true,
+    },
+  },
+} satisfies Prisma.ComplaintSelect;
+
+type ComplaintPatchPayload = z.infer<typeof updateSchema>;
+type ComplaintDetailProjection = Prisma.ComplaintGetPayload<{ select: typeof COMPLAINT_DETAIL_SELECT }>;
+type ActiveComplaintProjection = Pick<Complaint, "id" | "categoryId" | "classificationId">;
+
+class ComplaintRouteError extends Error {
+  constructor(
+    readonly code:
+      | "COMPLAINT_NOT_FOUND"
+      | "COMPLAINT_VERSION_CONFLICT"
+      | "CLASSIFICATION_NOT_FOUND"
+      | "INVALID_CLASSIFICATION_RELATION",
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = "ComplaintRouteError";
+  }
+}
+
 function mask(value: string | null): string | null {
   if (!value) return null;
   if (value.length <= 4) return "****";
@@ -49,80 +118,168 @@ function jsonError(code: string, message: string, status: number): NextResponse 
   return NextResponse.json({ error: { code, message } }, { status });
 }
 
+async function resolveComplaintId(context: RouteContext): Promise<string> {
+  const { id } = await context.params;
+  return id;
+}
+
+async function parseComplaintPatchRequest(request: NextRequest): Promise<ComplaintPatchPayload> {
+  return updateSchema.parse(await request.json());
+}
+
+function validateComplaintPatchPayload(_payload: ComplaintPatchPayload): void {
+  // Zod performs structural and scalar validation. This hook keeps route flow explicit.
+}
+
+async function loadActiveComplaintOrThrow(id: string): Promise<ActiveComplaintProjection> {
+  const complaint = await db.complaint.findFirst({
+    where: { id, isDeleted: false },
+    select: { id: true, categoryId: true, classificationId: true },
+  });
+
+  if (!complaint) {
+    throw new ComplaintRouteError("COMPLAINT_NOT_FOUND", "الشكوى غير موجودة", 404);
+  }
+
+  return complaint;
+}
+
+async function loadComplaintDetailOrThrow(id: string): Promise<ComplaintDetailProjection> {
+  const complaint = await db.complaint.findFirst({
+    where: { id, isDeleted: false },
+    select: COMPLAINT_DETAIL_SELECT,
+  });
+
+  if (!complaint) {
+    throw new ComplaintRouteError("COMPLAINT_NOT_FOUND", "الشكوى غير موجودة", 404);
+  }
+
+  return complaint;
+}
+
 async function assertClassificationRelation(categoryId?: string | null, classificationId?: string | null): Promise<void> {
   if (!classificationId) return;
   if (!categoryId) {
-    throw new Error("INVALID_CLASSIFICATION_RELATION");
+    throw new ComplaintRouteError("INVALID_CLASSIFICATION_RELATION", "التصنيف لا يتبع الفئة المحددة", 422);
   }
   const classification = await db.classification.findFirst({
     where: { id: classificationId, isDeleted: false, isActive: true },
     select: { categoryId: true },
   });
   if (!classification) {
-    throw new Error("CLASSIFICATION_NOT_FOUND");
+    throw new ComplaintRouteError("CLASSIFICATION_NOT_FOUND", "التصنيف غير موجود أو غير فعال", 422);
   }
   if (categoryId && classification.categoryId !== categoryId) {
-    throw new Error("INVALID_CLASSIFICATION_RELATION");
+    throw new ComplaintRouteError("INVALID_CLASSIFICATION_RELATION", "التصنيف لا يتبع الفئة المحددة", 422);
   }
+}
+
+async function validateEffectiveClassificationRelation(
+  current: ActiveComplaintProjection,
+  payload: ComplaintPatchPayload
+): Promise<void> {
+  const effectiveCategoryId = payload.categoryId !== undefined ? payload.categoryId : current.categoryId;
+  const effectiveClassificationId = payload.classificationId !== undefined
+    ? payload.classificationId
+    : current.classificationId;
+
+  await assertClassificationRelation(effectiveCategoryId, effectiveClassificationId);
+}
+
+function buildComplaintUpdateData(payload: ComplaintPatchPayload): Prisma.ComplaintUncheckedUpdateManyInput {
+  return {
+    sourceReference: payload.sourceReference,
+    complaintDate: parseDate(payload.complaintDate),
+    receivedAt: payload.receivedAt ? new Date(payload.receivedAt) : undefined,
+    dueDate: parseDate(payload.dueDate),
+    subject: payload.subject,
+    description: payload.description,
+    region: payload.region,
+    facility: payload.facility,
+    department: payload.department,
+    categoryId: payload.categoryId,
+    classificationId: payload.classificationId,
+    priority: payload.priority,
+    channel: payload.channel,
+    resolution: payload.resolution,
+    complainantName: payload.complainantName,
+    complainantIdentifier: payload.complainantIdentifier,
+    complainantPhone: payload.complainantPhone,
+    version: { increment: 1 },
+  };
+}
+
+function toComplaintDetailResponse(complaint: ComplaintDetailProjection) {
+  return {
+    id: complaint.id,
+    externalId: complaint.externalId,
+    sourceReference: complaint.sourceReference,
+    complaintDate: complaint.complaintDate,
+    receivedAt: complaint.receivedAt,
+    dueDate: complaint.dueDate,
+    closedAt: complaint.closedAt,
+    status: complaint.status,
+    subject: complaint.subject,
+    description: complaint.description,
+    complainantName: complaint.complainantName,
+    complainantIdentifier: mask(complaint.complainantIdentifier),
+    complainantPhone: mask(complaint.complainantPhone),
+    region: complaint.region,
+    facility: complaint.facility,
+    department: complaint.department,
+    categoryId: complaint.categoryId,
+    classificationId: complaint.classificationId,
+    priority: complaint.priority,
+    severity: complaint.severity,
+    channel: complaint.channel,
+    resolution: complaint.resolution,
+    version: complaint.version,
+    createdAt: complaint.createdAt,
+    updatedAt: complaint.updatedAt,
+    importBatch: complaint.importBatch,
+    category: complaint.category,
+    classification: complaint.classification,
+    statusHistory: complaint.statusHistory,
+    timing: buildComplaintTiming(complaint),
+  };
+}
+
+async function updateComplaint(
+  current: ActiveComplaintProjection,
+  payload: ComplaintPatchPayload
+): Promise<ComplaintDetailProjection> {
+  const result = await db.complaint.updateMany({
+    where: { id: current.id, version: payload.expectedVersion, isDeleted: false },
+    data: buildComplaintUpdateData(payload),
+  });
+
+  if (result.count !== 1) {
+    const exists = await db.complaint.findFirst({ where: { id: current.id, isDeleted: false }, select: { id: true } });
+    if (!exists) {
+      throw new ComplaintRouteError("COMPLAINT_NOT_FOUND", "الشكوى غير موجودة", 404);
+    }
+
+    throw new ComplaintRouteError("COMPLAINT_VERSION_CONFLICT", "تم تعديل الشكوى من عملية أخرى", 409);
+  }
+
+  return loadComplaintDetailOrThrow(current.id);
+}
+
+function mapComplaintRouteError(error: unknown, fallbackCode: string, fallbackMessage: string): NextResponse {
+  const authResponse = mapAuthError(error);
+  if (authResponse) return authResponse;
+  if (error instanceof ComplaintRouteError) return jsonError(error.code, error.message, error.status);
+  if (error instanceof z.ZodError) return jsonError("INVALID_COMPLAINT_UPDATE", "مدخلات تعديل الشكوى غير صالحة", 400);
+
+  console.error(`${fallbackCode}:`, error);
+  return jsonError(fallbackCode, fallbackMessage, 500);
 }
 
 export async function GET(req: NextRequest, context: RouteContext) {
   try {
     const session = await requireAdminApiSession(req);
-    const { id } = await context.params;
-    const complaint = await db.complaint.findFirst({
-      where: { id, isDeleted: false },
-      select: {
-        id: true,
-        externalId: true,
-        sourceReference: true,
-        complaintDate: true,
-        receivedAt: true,
-        dueDate: true,
-        closedAt: true,
-        status: true,
-        subject: true,
-        description: true,
-        complainantName: true,
-        complainantIdentifier: true,
-        complainantPhone: true,
-        region: true,
-        facility: true,
-        department: true,
-        categoryId: true,
-        classificationId: true,
-        priority: true,
-        severity: true,
-        channel: true,
-        resolution: true,
-        version: true,
-        createdAt: true,
-        updatedAt: true,
-        importBatch: {
-          select: {
-            id: true,
-            originalFileName: true,
-            status: true,
-            confirmedAt: true,
-          },
-        },
-        category: { select: { id: true, nameAr: true } },
-        classification: { select: { id: true, nameAr: true, color: true } },
-        statusHistory: {
-          orderBy: { changedAt: "desc" },
-          select: {
-            id: true,
-            fromStatus: true,
-            toStatus: true,
-            changedAt: true,
-            changedBy: true,
-            reason: true,
-            importBatchId: true,
-          },
-        },
-      },
-    });
-    if (!complaint) return jsonError("COMPLAINT_NOT_FOUND", "الشكوى غير موجودة", 404);
+    const id = await resolveComplaintId(context);
+    const complaint = await loadComplaintDetailOrThrow(id);
 
     await writeAuditLog(db, {
       action: "COMPLAINT_VIEWED_SENSITIVE_DETAILS",
@@ -132,93 +289,32 @@ export async function GET(req: NextRequest, context: RouteContext) {
       metadata: { hasComplainantFields: Boolean(complaint.complainantName || complaint.complainantIdentifier || complaint.complainantPhone) },
     });
 
-    const timing = buildComplaintTiming(complaint);
-    return NextResponse.json({
-      item: {
-        ...complaint,
-        complainantIdentifier: mask(complaint.complainantIdentifier),
-        complainantPhone: mask(complaint.complainantPhone),
-        timing,
-      },
-    });
+    return NextResponse.json({ item: toComplaintDetailResponse(complaint) });
   } catch (error) {
-    const authResponse = mapAuthError(error);
-    if (authResponse) return authResponse;
-    console.error("Complaint detail API error:", error);
-    return jsonError("COMPLAINT_DETAIL_FAILED", "تعذر جلب تفاصيل الشكوى", 500);
+    return mapComplaintRouteError(error, "COMPLAINT_DETAIL_FAILED", "تعذر جلب تفاصيل الشكوى");
   }
 }
 
 export async function PATCH(req: NextRequest, context: RouteContext) {
   try {
     const session = await requireAdminApiSession(req);
-    const { id } = await context.params;
-    const body = updateSchema.parse(await req.json());
-    const existing = await db.complaint.findFirst({
-      where: { id, isDeleted: false },
-      select: { id: true, categoryId: true, classificationId: true },
-    });
-    if (!existing) {
-      return jsonError("COMPLAINT_NOT_FOUND", "الشكوى غير موجودة", 404);
-    }
-
-    const effectiveCategoryId = body.categoryId !== undefined ? body.categoryId : existing.categoryId;
-    const effectiveClassificationId = body.classificationId !== undefined ? body.classificationId : existing.classificationId;
-    await assertClassificationRelation(effectiveCategoryId, effectiveClassificationId);
-
-    const data: Prisma.ComplaintUncheckedUpdateManyInput = {
-      sourceReference: body.sourceReference,
-      complaintDate: parseDate(body.complaintDate),
-      receivedAt: body.receivedAt ? new Date(body.receivedAt) : undefined,
-      dueDate: parseDate(body.dueDate),
-      subject: body.subject,
-      description: body.description,
-      region: body.region,
-      facility: body.facility,
-      department: body.department,
-      categoryId: body.categoryId,
-      classificationId: body.classificationId,
-      priority: body.priority,
-      channel: body.channel,
-      resolution: body.resolution,
-      complainantName: body.complainantName,
-      complainantIdentifier: body.complainantIdentifier,
-      complainantPhone: body.complainantPhone,
-      version: { increment: 1 },
-    };
-
-    const result = await db.complaint.updateMany({
-      where: { id, version: body.expectedVersion, isDeleted: false },
-      data,
-    });
-    if (result.count !== 1) {
-      const exists = await db.complaint.findFirst({ where: { id, isDeleted: false }, select: { id: true } });
-      return exists
-        ? jsonError("COMPLAINT_VERSION_CONFLICT", "تم تعديل الشكوى من عملية أخرى", 409)
-        : jsonError("COMPLAINT_NOT_FOUND", "الشكوى غير موجودة", 404);
-    }
+    const id = await resolveComplaintId(context);
+    const current = await loadActiveComplaintOrThrow(id);
+    const payload = await parseComplaintPatchRequest(req);
+    validateComplaintPatchPayload(payload);
+    await validateEffectiveClassificationRelation(current, payload);
+    const updated = await updateComplaint(current, payload);
 
     await writeAuditLog(db, {
       action: "COMPLAINT_UPDATED",
       entityType: "Complaint",
       entityId: id,
       actor: session.username,
-      metadata: { fields: Object.keys(body).filter((key) => key !== "expectedVersion" && !key.startsWith("complainant")) },
+      metadata: { fields: Object.keys(payload).filter((key) => key !== "expectedVersion" && !key.startsWith("complainant")) },
     });
 
-    const complaint = await db.complaint.findFirst({ where: { id, isDeleted: false } });
-    return NextResponse.json({ item: complaint });
+    return NextResponse.json({ item: toComplaintDetailResponse(updated) });
   } catch (error) {
-    const authResponse = mapAuthError(error);
-    if (authResponse) return authResponse;
-    if (error instanceof z.ZodError) return jsonError("INVALID_COMPLAINT_UPDATE", "مدخلات تعديل الشكوى غير صالحة", 400);
-    if (error instanceof Error && error.message === "INVALID_CLASSIFICATION_RELATION") {
-      return jsonError("INVALID_CLASSIFICATION_RELATION", "التصنيف لا يتبع الفئة المحددة", 422);
-    }
-    if (error instanceof Error && error.message === "CLASSIFICATION_NOT_FOUND") {
-      return jsonError("INVALID_CLASSIFICATION_RELATION", "التصنيف غير موجود أو غير فعال", 422);
-    }
-    console.error("Complaint update API error:", error);
-    return jsonError("COMPLAINT_UPDATE_FAILED", "تعذر تعديل الشكوى", 500);
+    return mapComplaintRouteError(error, "COMPLAINT_UPDATE_FAILED", "تعذر تعديل الشكوى");
   }
 }

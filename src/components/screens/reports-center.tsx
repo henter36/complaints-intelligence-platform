@@ -2552,7 +2552,7 @@ function DataQualityReport({ report }: { report: ReportViewProps["report"] }) {
         if (age > 30) return true;
       }
       // Reopened more than once
-      if (c.status === "reopened") return true;
+      if (c.status === "OPEN") return true;
       return false;
     });
   }, [complaints]);

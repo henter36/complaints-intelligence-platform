@@ -4,6 +4,7 @@ import {
   ComplaintQueryValidationError,
   isComplaintQueryValidationError,
   parseComplaintQuery,
+  type ComplaintQuery,
 } from "@/server/complaints/complaint-query-service";
 
 export class InvalidComplaintQueryError extends ComplaintQueryValidationError {
@@ -31,7 +32,7 @@ export function parseOptionalDateFilter(value: string | null, fieldName: "from" 
 
 export function buildComplaintWhereFromParams(params: URLSearchParams): Prisma.ComplaintWhereInput {
   try {
-    return buildComplaintWhere(parseComplaintQuery(params));
+    return buildComplaintWhere(withoutRequestFilters(parseComplaintQuery(params)));
   } catch (error) {
     if (isComplaintQueryValidationError(error)) {
       throw new InvalidComplaintQueryError(error.message);
@@ -46,14 +47,80 @@ export function addComplaintRequestFilters(
   now = new Date()
 ): Prisma.ComplaintWhereInput {
   try {
-    const nextWhere = buildComplaintWhere(parseComplaintQuery(params), now);
-    return { ...where, ...nextWhere };
+    const nextWhere = buildComplaintWhere(onlyRequestFilters(parseComplaintQuery(params)), now);
+    delete nextWhere.isDeleted;
+    return mergeComplaintWhere(where, nextWhere);
   } catch (error) {
     if (isComplaintQueryValidationError(error)) {
       throw new InvalidComplaintQueryError(error.message);
     }
     throw error;
   }
+}
+
+function withoutRequestFilters(query: ComplaintQuery): ComplaintQuery {
+  return {
+    ...query,
+    isLate: undefined,
+    isOpen: undefined,
+    isClosed: undefined,
+    hasDueDate: undefined,
+    hasClassification: undefined,
+  };
+}
+
+function onlyRequestFilters(query: ComplaintQuery): ComplaintQuery {
+  return {
+    ...query,
+    search: undefined,
+    externalId: undefined,
+    sourceReference: undefined,
+    status: undefined,
+    priority: undefined,
+    severity: undefined,
+    channel: undefined,
+    region: undefined,
+    regionId: undefined,
+    facility: undefined,
+    facilityId: undefined,
+    department: undefined,
+    departmentId: undefined,
+    categoryId: undefined,
+    classificationId: undefined,
+    importBatchId: undefined,
+    from: undefined,
+    to: undefined,
+    dueFrom: undefined,
+    dueTo: undefined,
+    closedFrom: undefined,
+    closedTo: undefined,
+    isRepeated: undefined,
+    isValidated: undefined,
+    aiAnalyzed: undefined,
+  };
+}
+
+function toAndConditions(
+  value: Prisma.ComplaintWhereInput["AND"]
+): Prisma.ComplaintWhereInput[] {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+export function mergeComplaintWhere(
+  base: Prisma.ComplaintWhereInput,
+  additional: Prisma.ComplaintWhereInput
+): Prisma.ComplaintWhereInput {
+  const { AND: baseAnd, ...baseWithoutAnd } = base;
+  const { AND: additionalAnd, ...additionalWithoutAnd } = additional;
+  const conditions = [
+    baseWithoutAnd,
+    ...toAndConditions(baseAnd),
+    additionalWithoutAnd,
+    ...toAndConditions(additionalAnd),
+  ].filter((condition) => Object.keys(condition).length > 0);
+
+  return conditions.length === 1 ? conditions[0]! : { AND: conditions };
 }
 
 export function toLegacyPriority(priority: ComplaintPriority): string {

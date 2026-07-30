@@ -287,6 +287,61 @@ describe("Phase 6 complaint routes", () => {
     expect(updateMany).toHaveBeenCalled();
   });
 
+  it("does not return raw complainant PII from patch responses", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    mockDb({
+      findFirst: vi.fn()
+        .mockResolvedValueOnce({ id: "cmp_phase6", categoryId: null, classificationId: null })
+        .mockResolvedValueOnce(complaintRecord()),
+      updateMany,
+    });
+
+    const { PATCH } = await import("./[id]/route");
+    const response = await PATCH(
+      new NextRequest("http://localhost/api/complaints/cmp_phase6", {
+        method: "PATCH",
+        body: JSON.stringify({ expectedVersion: 1, subject: "موضوع معدل" }),
+      }),
+      { params: Promise.resolve({ id: "cmp_phase6" }) }
+    );
+    const body = await response.json();
+    const serialized = JSON.stringify(body);
+
+    expect(response.status).toBe(200);
+    expect(body.item.complainantIdentifier).toBe("12****90");
+    expect(body.item.complainantPhone).toBe("05****67");
+    expect(serialized).not.toContain("1234567890");
+    expect(serialized).not.toContain("0501234567");
+  });
+
+  it("uses the same masked detail DTO for get and patch", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const detail = complaintRecord();
+    mockDb({
+      findFirst: vi.fn()
+        .mockResolvedValueOnce(detail)
+        .mockResolvedValueOnce({ id: "cmp_phase6", categoryId: null, classificationId: null })
+        .mockResolvedValueOnce(detail),
+      updateMany,
+    });
+
+    const { GET, PATCH } = await import("./[id]/route");
+    const context = { params: Promise.resolve({ id: "cmp_phase6" }) };
+    const getResponse = await GET(new NextRequest("http://localhost/api/complaints/cmp_phase6"), context);
+    const patchResponse = await PATCH(
+      new NextRequest("http://localhost/api/complaints/cmp_phase6", {
+        method: "PATCH",
+        body: JSON.stringify({ expectedVersion: 1, subject: "موضوع معدل" }),
+      }),
+      { params: Promise.resolve({ id: "cmp_phase6" }) }
+    );
+    const getBody = await getResponse.json();
+    const patchBody = await patchResponse.json();
+
+    expect(Object.keys(patchBody.item).sort()).toEqual(Object.keys(getBody.item).sort());
+    expect(patchBody.item.complainantPhone).toBe(getBody.item.complainantPhone);
+  });
+
   it("rejects classification-only updates when it conflicts with the current category", async () => {
     const { classificationFindFirst } = mockDb({
       findFirst: vi.fn().mockResolvedValue({ id: "cmp_phase6", categoryId: "cat_current", classificationId: "cls_old" }),

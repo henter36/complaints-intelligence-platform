@@ -153,7 +153,7 @@ interface ComplaintsResponse {
   totalPages?: number;
 }
 
-interface FilterState {
+export interface FilterState {
   search: string;
   regionId: string;
   departmentId: string;
@@ -167,6 +167,7 @@ interface FilterState {
   isLate: boolean;
   isRepeated: boolean;
   isValidated: boolean;
+  aiAnalyzed: boolean;
 }
 
 // ===================== Constants =====================
@@ -184,14 +185,17 @@ const DEFAULT_FILTERS: FilterState = {
   isLate: false,
   isRepeated: false,
   isValidated: false,
+  aiAnalyzed: false,
 };
 
-const STATUS_OPTIONS = [
-  { value: "open", label: "مفتوحة" },
-  { value: "in_progress", label: "قيد المعالجة" },
-  { value: "closed", label: "مغلقة" },
-  { value: "reopened", label: "معاد فتحها" },
-  { value: "rejected", label: "مرفوضة" },
+export const STATUS_OPTIONS = [
+  { value: "NEW", label: "جديدة" },
+  { value: "OPEN", label: "مفتوحة" },
+  { value: "IN_PROGRESS", label: "قيد المعالجة" },
+  { value: "AWAITING_RESPONSE", label: "بانتظار الرد" },
+  { value: "RESOLVED", label: "تمت المعالجة" },
+  { value: "CLOSED", label: "مغلقة" },
+  { value: "CANCELLED", label: "ملغاة" },
 ];
 
 const PRIORITY_OPTIONS = [
@@ -284,6 +288,7 @@ function initialFilterState(): FilterState {
     isLate: params.get("isLate") === "true",
     isRepeated: params.get("isRepeated") === "true",
     isValidated: params.get("isValidated") === "true",
+    aiAnalyzed: params.get("aiAnalyzed") === "true",
   };
 }
 
@@ -307,6 +312,69 @@ function formatLocalDate(date: Date): string {
   const day = String(date.getDate()).padStart(2, "0");
 
   return `${year}-${month}-${day}`;
+}
+
+export function buildComplaintQuery(
+  filters: FilterState,
+  sortBy: string,
+  sortOrder: "asc" | "desc",
+  page?: number
+): URLSearchParams {
+  const params = new URLSearchParams();
+  if (page !== undefined) params.set("page", String(page));
+  params.set("pageSize", String(PAGE_SIZE));
+  if (filters.search) params.set("search", filters.search);
+  if (filters.regionId) params.set("regionId", filters.regionId);
+  if (filters.departmentId) params.set("departmentId", filters.departmentId);
+  if (filters.classificationId) params.set("classificationId", filters.classificationId);
+  if (filters.channel) params.set("channel", filters.channel);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.priority) params.set("priority", filters.priority);
+  if (filters.severity) params.set("severity", filters.severity);
+  if (filters.from) params.set("from", filters.from);
+  if (filters.to) params.set("to", filters.to);
+  if (filters.isLate) params.set("isLate", "true");
+  if (filters.isRepeated) params.set("isRepeated", "true");
+  if (filters.isValidated) params.set("isValidated", "true");
+  if (filters.aiAnalyzed) params.set("aiAnalyzed", "true");
+  params.set("sortBy", sortBy);
+  params.set("sortOrder", sortOrder);
+  return params;
+}
+
+export function extractFileName(disposition: string | null): string | null {
+  if (!disposition) return null;
+  const match = /filename="([^"]+)"/.exec(disposition);
+  return match?.[1] ?? null;
+}
+
+export function triggerBlobDownload(blob: Blob, fileName: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+export async function downloadComplaintExport(
+  filters: FilterState,
+  sortBy: string,
+  sortOrder: "asc" | "desc"
+): Promise<void> {
+  const params = buildComplaintQuery(filters, sortBy, sortOrder);
+  const response = await fetch(`/api/complaints/export?${params.toString()}`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as { error?: { message?: string } } | null;
+    throw new Error(payload?.error?.message ?? "تعذر تصدير الشكاوى");
+  }
+
+  const blob = await response.blob();
+  const disposition = response.headers.get("content-disposition");
+  const fileName = extractFileName(disposition) ?? `complaints-${formatLocalDate(new Date())}.csv`;
+  triggerBlobDownload(blob, fileName);
 }
 
 // ===================== Sub-components =====================
@@ -430,6 +498,7 @@ export function ComplaintsExplorer() {
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [exportError, setExportError] = useState("");
   const [filterOptions, setFilterOptions] = useState<FiltersResponse | null>(
     null,
   );
@@ -468,26 +537,7 @@ export function ComplaintsExplorer() {
     complaintsRequestRef.current = requestId;
     const canUpdate = () =>
       !controller.signal.aborted && complaintsRequestRef.current === requestId;
-    const params = new URLSearchParams();
-    params.set("page", String(page));
-    params.set("pageSize", String(PAGE_SIZE));
-    if (appliedFilters.search) params.set("search", appliedFilters.search);
-    if (appliedFilters.regionId) params.set("regionId", appliedFilters.regionId);
-    if (appliedFilters.departmentId)
-      params.set("departmentId", appliedFilters.departmentId);
-    if (appliedFilters.classificationId)
-      params.set("classificationId", appliedFilters.classificationId);
-    if (appliedFilters.channel) params.set("channel", appliedFilters.channel);
-    if (appliedFilters.status) params.set("status", appliedFilters.status);
-    if (appliedFilters.priority) params.set("priority", appliedFilters.priority);
-    if (appliedFilters.severity) params.set("severity", appliedFilters.severity);
-    if (appliedFilters.from) params.set("from", appliedFilters.from);
-    if (appliedFilters.to) params.set("to", appliedFilters.to);
-    if (appliedFilters.isLate) params.set("isLate", "true");
-    if (appliedFilters.isRepeated) params.set("isRepeated", "true");
-    if (appliedFilters.isValidated) params.set("isValidated", "true");
-    params.set("sortBy", sortBy);
-    params.set("sortOrder", sortOrder);
+    const params = buildComplaintQuery(appliedFilters, sortBy, sortOrder, page);
 
     const run = async () => {
       let aborted = false;
@@ -521,6 +571,11 @@ export function ComplaintsExplorer() {
     };
   }, [appliedFilters, page, sortBy, sortOrder]);
 
+  useEffect(() => {
+    const params = buildComplaintQuery(appliedFilters, sortBy, sortOrder, page);
+    window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
+  }, [appliedFilters, sortBy, sortOrder, page]);
+
   const activeFilterCount = useMemo(() => {
     let count = 0;
     if (appliedFilters.search) count++;
@@ -542,18 +597,7 @@ export function ComplaintsExplorer() {
   const applyFilters = useCallback(() => {
     setAppliedFilters(filters);
     setPage(1);
-    const params = new URLSearchParams();
-    for (const [key, value] of Object.entries(filters)) {
-      if (typeof value === "boolean") {
-        if (value) params.set(key, "true");
-      } else if (value) {
-        params.set(key, value);
-      }
-    }
-    params.set("sortBy", sortBy);
-    params.set("sortOrder", sortOrder);
-    window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
-  }, [filters, sortBy, sortOrder]);
+  }, [filters]);
 
   const resetFilters = useCallback(() => {
     setFilters(DEFAULT_FILTERS);
@@ -582,24 +626,13 @@ export function ComplaintsExplorer() {
     setSheetOpen(true);
   };
 
-  const exportCSV = () => {
-    const params = new URLSearchParams();
-    if (appliedFilters.search) params.set("search", appliedFilters.search);
-    if (appliedFilters.regionId) params.set("regionId", appliedFilters.regionId);
-    if (appliedFilters.departmentId) params.set("departmentId", appliedFilters.departmentId);
-    if (appliedFilters.classificationId) params.set("classificationId", appliedFilters.classificationId);
-    if (appliedFilters.channel) params.set("channel", appliedFilters.channel);
-    if (appliedFilters.status) params.set("status", appliedFilters.status);
-    if (appliedFilters.priority) params.set("priority", appliedFilters.priority);
-    if (appliedFilters.severity) params.set("severity", appliedFilters.severity);
-    if (appliedFilters.from) params.set("from", appliedFilters.from);
-    if (appliedFilters.to) params.set("to", appliedFilters.to);
-    if (appliedFilters.isLate) params.set("isLate", "true");
-    if (appliedFilters.isRepeated) params.set("isRepeated", "true");
-    if (appliedFilters.isValidated) params.set("isValidated", "true");
-    params.set("sortBy", sortBy);
-    params.set("sortOrder", sortOrder);
-    window.location.href = `/api/complaints/export?${params.toString()}`;
+  const exportCSV = async () => {
+    try {
+      setExportError("");
+      await downloadComplaintExport(appliedFilters, sortBy, sortOrder);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : "تعذر تصدير الشكاوى");
+    }
   };
 
   // Pagination range
@@ -999,6 +1032,13 @@ export function ComplaintsExplorer() {
           )}
         </CardContent>
       </Card>
+
+      {/* Results summary */}
+      {exportError && (
+        <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
+          {exportError}
+        </div>
+      )}
 
       {/* Results summary */}
       <div className="flex flex-wrap items-center justify-between gap-3">
