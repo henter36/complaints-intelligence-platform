@@ -1,8 +1,8 @@
 # Complaints Intelligence Platform
 
-Arabic complaints intelligence prototype with Phase 5 transactional import confirmation and rollback.
+Arabic complaints intelligence prototype with Phase 6 complaint explorer and KPI engine.
 
-This repository is not production ready. Phase 1 made the codebase buildable and testable. Phase 2 added a normalized single-user complaint/import schema, migration, seed, and domain services. Phase 3 adds single-user administrator login, database-backed sessions, logout, password change, rate limiting, security headers, and API/page protection. Phase 4 adds secure `.xlsx` upload, OOXML parsing, validation, duplicate detection, preview rows, and CSV error reports. Phase 5 adds transactional import confirmation and rollback. Report exports and governed AI remain out of scope.
+This repository is not production ready. Phase 1 made the codebase buildable and testable. Phase 2 added a normalized single-user complaint/import schema, migration, seed, and domain services. Phase 3 adds single-user administrator login, database-backed sessions, logout, password change, rate limiting, security headers, and API/page protection. Phase 4 adds secure `.xlsx` upload, OOXML parsing, validation, duplicate detection, preview rows, and CSV error reports. Phase 5 adds transactional import confirmation and rollback. Phase 6 adds a central complaint query service, KPI engine, complaint detail/update/status APIs, and safe CSV list export. PDF/XLSX reports and governed AI remain out of scope.
 
 ## Current Status
 
@@ -10,8 +10,9 @@ This repository is not production ready. Phase 1 made the codebase buildable and
 - Working foundation: `Complaint`, `ComplaintStatusHistory`, `ImportBatch`, `ImportBatchRow`, `AuditLog`, duplicate identity service, and import batch transition guards.
 - Security: one administrator credential, bcrypt password hashes, hashed session tokens in `AdminSession`, `cip_session` HttpOnly cookie, login rate limiting, logout, password change, and operational API guards.
 - Working: import center can upload `.xlsx`, validate rows, store preview rows, confirm eligible batches, and roll back confirmed batches.
+- Working: complaint explorer can query confirmed active complaints with validated filters, deterministic sorting, pagination, detail APIs, status/update APIs, central KPIs, and safe CSV export.
 - Stubbed: AI approval/execution endpoints return `501` until their later phases.
-- Missing: scoped permissions, production database architecture, exports, report scheduling, MFA, and external identity providers.
+- Missing: scoped permissions, production database architecture, PDF/XLSX exports, report scheduling, MFA, and external identity providers.
 
 ## Requirements
 
@@ -92,6 +93,10 @@ The parser uses `jszip` and `fast-xml-parser` to read OOXML XML parts directly. 
 
 Phase 5 confirms batches only from `READY_FOR_CONFIRMATION`. Confirmation runs transactionally, creates `NEW` complaints, updates `UPDATE` complaints with optimistic preview-version checks, skips `NO_CHANGE` and `DUPLICATE`, and blocks any batch containing rejected or invalid rows. Rollback uses immutable `ImportChangeSnapshot` records and refuses to proceed if complaints changed after confirmation.
 
+## Complaint Explorer And KPIs
+
+Phase 6 centralizes complaint filters and KPI definitions. `GET /api/complaints`, `GET /api/dashboard`, `GET /api/analytics`, and `GET /api/complaints/export` share the same query contract. `RESOLVED` and `CLOSED` are operationally closed, `CANCELLED` is terminal but separate, and due-date compliance uses only closed complaints with due dates in its denominator.
+
 ## Documentation
 
 - `docs/current-state-assessment.md`
@@ -104,4 +109,6 @@ Phase 5 confirms batches only from `READY_FOR_CONFIRMATION`. Confirmation runs t
 - `docs/phase-4-completion-report.md`
 - `docs/phase-5-import-confirmation-design.md`
 - `docs/phase-5-completion-report.md`
+- `docs/phase-6-explorer-kpi-design.md`
+- `docs/phase-6-completion-report.md`
 - `docs/roadmap.md`

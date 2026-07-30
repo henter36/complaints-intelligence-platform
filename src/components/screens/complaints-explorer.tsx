@@ -62,7 +62,6 @@ import {
   formatNumber,
   formatDate,
   formatDateTime,
-  STATUS_LABELS,
   PRIORITY_LABELS,
   SEVERITY_LABELS,
   statusBadgeClass,
@@ -95,29 +94,40 @@ interface FiltersResponse {
 
 interface Complaint {
   id: string;
+  externalId?: string | null;
+  sourceReference?: string | null;
   complaintNumber: string;
   receivedDate: string;
-  channel: string;
+  receivedAt?: string;
+  channel: string | null;
   subject: string;
-  description: string;
+  description?: string;
   status: string;
   priority: string;
   severity: string;
-  isRepeated: boolean;
-  isValidated: boolean;
-  isPotentialDuplicate: boolean;
+  isRepeated?: boolean;
+  isValidated?: boolean;
+  isPotentialDuplicate?: boolean;
   beneficiarySatisfaction: number | null;
   delayReason: string | null;
   resolution: string | null;
   dueDate: string | null;
   closureDate: string | null;
+  closedAt?: string | null;
   firstActionDate: string | null;
   referralDate: string | null;
   region: { name: string } | null;
   location: { name: string } | null;
+  facility?: string | null;
   department: { name: string } | null;
   classification: { name: string; color: string } | null;
   isLate: boolean;
+  isCurrentlyLate?: boolean;
+  wasClosedLate?: boolean;
+  latenessDays?: number | null;
+  resolutionDays?: number | null;
+  version?: number;
+  updatedAt?: string;
   aiClassification?: string | null;
   aiConfidence?: number | null;
   aiReasoning?: string | null;
@@ -128,14 +138,21 @@ interface Complaint {
 }
 
 interface ComplaintsResponse {
-  data: Complaint[];
-  total: number;
-  page: number;
-  pageSize: number;
-  totalPages: number;
+  items?: Complaint[];
+  data?: Complaint[];
+  pagination?: {
+    total: number;
+    page: number;
+    pageSize: number;
+    totalPages: number;
+  };
+  total?: number;
+  page?: number;
+  pageSize?: number;
+  totalPages?: number;
 }
 
-interface FilterState {
+export interface FilterState {
   search: string;
   regionId: string;
   departmentId: string;
@@ -149,6 +166,7 @@ interface FilterState {
   isLate: boolean;
   isRepeated: boolean;
   isValidated: boolean;
+  aiAnalyzed: boolean;
 }
 
 // ===================== Constants =====================
@@ -166,15 +184,28 @@ const DEFAULT_FILTERS: FilterState = {
   isLate: false,
   isRepeated: false,
   isValidated: false,
+  aiAnalyzed: false,
 };
 
-const STATUS_OPTIONS = [
-  { value: "open", label: "مفتوحة" },
-  { value: "in_progress", label: "قيد المعالجة" },
-  { value: "closed", label: "مغلقة" },
-  { value: "reopened", label: "معاد فتحها" },
-  { value: "rejected", label: "مرفوضة" },
-];
+export const STATUS_OPTIONS = [
+  { value: "NEW", label: "جديدة" },
+  { value: "OPEN", label: "مفتوحة" },
+  { value: "IN_PROGRESS", label: "قيد المعالجة" },
+  { value: "AWAITING_RESPONSE", label: "بانتظار الرد" },
+  { value: "RESOLVED", label: "تمت المعالجة" },
+  { value: "CLOSED", label: "مغلقة" },
+  { value: "CANCELLED", label: "ملغاة" },
+] as const;
+
+const STATUS_LABELS: Record<string, string> = {
+  NEW: "جديدة",
+  OPEN: "مفتوحة",
+  IN_PROGRESS: "قيد المعالجة",
+  AWAITING_RESPONSE: "بانتظار الرد",
+  RESOLVED: "تمت المعالجة",
+  CLOSED: "مغلقة",
+  CANCELLED: "ملغاة",
+};
 
 const PRIORITY_OPTIONS = [
   { value: "low", label: "منخفضة" },
@@ -206,6 +237,82 @@ const SORT_FIELDS: { key: string; label: string }[] = [
   { key: "severity", label: "الخطورة" },
 ];
 
+const STATUS_ALIASES: Record<string, string> = {
+  NEW: "NEW",
+  OPEN: "OPEN",
+  IN_PROGRESS: "IN_PROGRESS",
+  AWAITING_RESPONSE: "AWAITING_RESPONSE",
+  RESOLVED: "RESOLVED",
+  CLOSED: "CLOSED",
+  CANCELLED: "CANCELLED",
+  REJECTED: "CANCELLED",
+  REOPENED: "OPEN",
+};
+
+export function normalizeApiComplaintStatus(value: string): string {
+  const normalized = value.trim().toUpperCase();
+
+  if (!normalized) {
+    return "";
+  }
+
+  return STATUS_ALIASES[normalized] ?? normalized;
+}
+
+function toLegacyPriorityValue(priority: string | null | undefined): string {
+  return (priority ?? "medium").toLowerCase();
+}
+
+function normalizeComplaint(item: Complaint): Complaint {
+  return {
+    ...item,
+    complaintNumber: item.complaintNumber ?? item.externalId ?? item.sourceReference ?? item.id,
+    receivedDate: item.receivedDate ?? item.receivedAt ?? "",
+    channel: item.channel ?? "",
+    description: item.description ?? "",
+    status: normalizeApiComplaintStatus(item.status),
+    priority: toLegacyPriorityValue(item.priority),
+    severity: toLegacyPriorityValue(item.severity),
+    isRepeated: item.isRepeated ?? false,
+    isValidated: item.isValidated ?? false,
+    isPotentialDuplicate: item.isPotentialDuplicate ?? false,
+    beneficiarySatisfaction: item.beneficiarySatisfaction ?? null,
+    delayReason: item.delayReason ?? null,
+    resolution: item.resolution ?? null,
+    closureDate: item.closureDate ?? item.closedAt ?? null,
+    firstActionDate: item.firstActionDate ?? null,
+    referralDate: item.referralDate ?? null,
+    location: item.location ?? (item.facility ? { name: item.facility } : null),
+    isLate: item.isLate ?? item.isCurrentlyLate ?? item.wasClosedLate ?? false,
+  };
+}
+
+function initialSearchParams(): URLSearchParams {
+  if (typeof window === "undefined") return new URLSearchParams();
+  return new URLSearchParams(window.location.search);
+}
+
+function initialFilterState(): FilterState {
+  const params = initialSearchParams();
+  return {
+    ...DEFAULT_FILTERS,
+    search: params.get("search") ?? "",
+    regionId: params.get("regionId") ?? "",
+    departmentId: params.get("departmentId") ?? "",
+    classificationId: params.get("classificationId") ?? "",
+    channel: params.get("channel") ?? "",
+    status: normalizeApiComplaintStatus(params.get("status") ?? ""),
+    priority: params.get("priority") ?? "",
+    severity: params.get("severity") ?? "",
+    from: params.get("from") ?? "",
+    to: params.get("to") ?? "",
+    isLate: params.get("isLate") === "true",
+    isRepeated: params.get("isRepeated") === "true",
+    isValidated: params.get("isValidated") === "true",
+    aiAnalyzed: params.get("aiAnalyzed") === "true",
+  };
+}
+
 const SENTIMENT_LABELS: Record<string, string> = {
   positive: "إيجابي",
   neutral: "محايد",
@@ -226,6 +333,69 @@ function formatLocalDate(date: Date): string {
   const day = String(date.getDate()).padStart(2, "0");
 
   return `${year}-${month}-${day}`;
+}
+
+export function buildComplaintQuery(
+  filters: FilterState,
+  sortBy: string,
+  sortOrder: "asc" | "desc",
+  page?: number
+): URLSearchParams {
+  const params = new URLSearchParams();
+  if (page !== undefined) params.set("page", String(page));
+  params.set("pageSize", String(PAGE_SIZE));
+  if (filters.search) params.set("search", filters.search);
+  if (filters.regionId) params.set("regionId", filters.regionId);
+  if (filters.departmentId) params.set("departmentId", filters.departmentId);
+  if (filters.classificationId) params.set("classificationId", filters.classificationId);
+  if (filters.channel) params.set("channel", filters.channel);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.priority) params.set("priority", filters.priority);
+  if (filters.severity) params.set("severity", filters.severity);
+  if (filters.from) params.set("from", filters.from);
+  if (filters.to) params.set("to", filters.to);
+  if (filters.isLate) params.set("isLate", "true");
+  if (filters.isRepeated) params.set("isRepeated", "true");
+  if (filters.isValidated) params.set("isValidated", "true");
+  if (filters.aiAnalyzed) params.set("aiAnalyzed", "true");
+  params.set("sortBy", sortBy);
+  params.set("sortOrder", sortOrder);
+  return params;
+}
+
+export function extractFileName(disposition: string | null): string | null {
+  if (!disposition) return null;
+  const match = /filename="([^"]+)"/.exec(disposition);
+  return match?.[1] ?? null;
+}
+
+export function triggerBlobDownload(blob: Blob, fileName: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+export async function downloadComplaintExport(
+  filters: FilterState,
+  sortBy: string,
+  sortOrder: "asc" | "desc"
+): Promise<void> {
+  const params = buildComplaintQuery(filters, sortBy, sortOrder);
+  const response = await fetch(`/api/complaints/export?${params.toString()}`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null) as { error?: { message?: string } } | null;
+    throw new Error(payload?.error?.message ?? "تعذر تصدير الشكاوى");
+  }
+
+  const blob = await response.blob();
+  const disposition = response.headers.get("content-disposition");
+  const fileName = extractFileName(disposition) ?? `complaints-${formatLocalDate(new Date())}.csv`;
+  triggerBlobDownload(blob, fileName);
 }
 
 // ===================== Sub-components =====================
@@ -337,16 +507,19 @@ function SectionTitle({
 
 // ===================== Main Component =====================
 export function ComplaintsExplorer() {
-  const [filters, setFilters] = useState<FilterState>(DEFAULT_FILTERS);
-  const [appliedFilters, setAppliedFilters] = useState<FilterState>(DEFAULT_FILTERS);
+  const [filters, setFilters] = useState<FilterState>(initialFilterState);
+  const [appliedFilters, setAppliedFilters] = useState<FilterState>(initialFilterState);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [page, setPage] = useState(1);
-  const [sortBy, setSortBy] = useState("receivedDate");
-  const [sortOrder, setSortOrder] = useState<"asc" | "desc">("desc");
+  const [page, setPage] = useState(() => Number(initialSearchParams().get("page") ?? "1") || 1);
+  const [sortBy, setSortBy] = useState(() => initialSearchParams().get("sortBy") ?? "receivedDate");
+  const [sortOrder, setSortOrder] = useState<"asc" | "desc">(() =>
+    initialSearchParams().get("sortOrder") === "asc" ? "asc" : "desc"
+  );
   const [data, setData] = useState<Complaint[]>([]);
   const [total, setTotal] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [exportError, setExportError] = useState("");
   const [filterOptions, setFilterOptions] = useState<FiltersResponse | null>(
     null,
   );
@@ -385,26 +558,7 @@ export function ComplaintsExplorer() {
     complaintsRequestRef.current = requestId;
     const canUpdate = () =>
       !controller.signal.aborted && complaintsRequestRef.current === requestId;
-    const params = new URLSearchParams();
-    params.set("page", String(page));
-    params.set("pageSize", String(PAGE_SIZE));
-    if (appliedFilters.search) params.set("search", appliedFilters.search);
-    if (appliedFilters.regionId) params.set("regionId", appliedFilters.regionId);
-    if (appliedFilters.departmentId)
-      params.set("departmentId", appliedFilters.departmentId);
-    if (appliedFilters.classificationId)
-      params.set("classificationId", appliedFilters.classificationId);
-    if (appliedFilters.channel) params.set("channel", appliedFilters.channel);
-    if (appliedFilters.status) params.set("status", appliedFilters.status);
-    if (appliedFilters.priority) params.set("priority", appliedFilters.priority);
-    if (appliedFilters.severity) params.set("severity", appliedFilters.severity);
-    if (appliedFilters.from) params.set("from", appliedFilters.from);
-    if (appliedFilters.to) params.set("to", appliedFilters.to);
-    if (appliedFilters.isLate) params.set("isLate", "true");
-    if (appliedFilters.isRepeated) params.set("isRepeated", "true");
-    if (appliedFilters.isValidated) params.set("isValidated", "true");
-    params.set("sortBy", sortBy);
-    params.set("sortOrder", sortOrder);
+    const params = buildComplaintQuery(appliedFilters, sortBy, sortOrder, page);
 
     const run = async () => {
       let aborted = false;
@@ -414,10 +568,12 @@ export function ComplaintsExplorer() {
           signal: controller.signal,
         });
         const json: ComplaintsResponse = await res.json();
+        const items = json.items ?? json.data ?? [];
+        const pagination = json.pagination;
         if (canUpdate()) {
-          setData(json.data || []);
-          setTotal(json.total || 0);
-          setTotalPages(json.totalPages || 0);
+          setData(items.map(normalizeComplaint));
+          setTotal(pagination?.total ?? json.total ?? 0);
+          setTotalPages(pagination?.totalPages ?? json.totalPages ?? 0);
         }
       } catch (e) {
         aborted = isAbortError(e);
@@ -435,6 +591,11 @@ export function ComplaintsExplorer() {
       controller.abort();
     };
   }, [appliedFilters, page, sortBy, sortOrder]);
+
+  useEffect(() => {
+    const params = buildComplaintQuery(appliedFilters, sortBy, sortOrder, page);
+    window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
+  }, [appliedFilters, sortBy, sortOrder, page]);
 
   const activeFilterCount = useMemo(() => {
     let count = 0;
@@ -486,73 +647,13 @@ export function ComplaintsExplorer() {
     setSheetOpen(true);
   };
 
-  const exportCSV = () => {
-    const headers = [
-      "رقم الشكوى",
-      "تاريخ الاستلام",
-      "القناة",
-      "الموضوع",
-      "الوصف",
-      "الحالة",
-      "الأولوية",
-      "الخطورة",
-      "المنطقة",
-      "الموقع",
-      "الإدارة",
-      "التصنيف",
-      "متأخرة",
-      "متكررة",
-      "معتمدة",
-      "تكرار محتمل",
-      "تقييم المستفيد",
-      "تاريخ الاستحقاق",
-      "تاريخ الإغلاق",
-      "سبب التأخير",
-      "القرار",
-    ];
-    const rows = data.map((c) => [
-      c.complaintNumber,
-      c.receivedDate,
-      c.channel,
-      c.subject,
-      c.description,
-      STATUS_LABELS[c.status] || c.status,
-      PRIORITY_LABELS[c.priority] || c.priority,
-      SEVERITY_LABELS[c.severity] || c.severity,
-      c.region?.name || "",
-      c.location?.name || "",
-      c.department?.name || "",
-      c.classification?.name || "",
-      c.isLate ? "نعم" : "لا",
-      c.isRepeated ? "نعم" : "لا",
-      c.isValidated ? "نعم" : "لا",
-      c.isPotentialDuplicate ? "نعم" : "لا",
-      c.beneficiarySatisfaction != null ? String(c.beneficiarySatisfaction) : "",
-      c.dueDate || "",
-      c.closureDate || "",
-      c.delayReason || "",
-      c.resolution || "",
-    ]);
-
-    const escape = (cell: unknown) => {
-      const s = String(cell ?? "").replace(/"/g, '""');
-      return `"${s}"`;
-    };
-
-    // BOM for proper Arabic rendering in Excel
-    const csv =
-      "\uFEFF" +
-      [headers, ...rows].map((r) => r.map(escape).join(",")).join("\n");
-
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `complaints-${formatLocalDate(new Date())}.csv`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+  const exportCSV = async () => {
+    try {
+      setExportError("");
+      await downloadComplaintExport(appliedFilters, sortBy, sortOrder);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : "تعذر تصدير الشكاوى");
+    }
   };
 
   // Pagination range
@@ -952,6 +1053,13 @@ export function ComplaintsExplorer() {
           )}
         </CardContent>
       </Card>
+
+      {/* Results summary */}
+      {exportError && (
+        <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-300">
+          {exportError}
+        </div>
+      )}
 
       {/* Results summary */}
       <div className="flex flex-wrap items-center justify-between gap-3">

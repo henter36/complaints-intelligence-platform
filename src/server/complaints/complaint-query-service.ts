@@ -1,0 +1,458 @@
+import { ComplaintPriority, ComplaintStatus, type Prisma } from "@prisma/client";
+import { z } from "zod";
+import { db } from "@/lib/db";
+import { buildComplaintTiming, type ComplaintTimingSnapshot } from "./complaint-timing";
+import {
+  CLOSED_COMPLAINT_STATUSES,
+  OPEN_COMPLAINT_STATUSES,
+} from "./status";
+
+const DEFAULT_PAGE = 1;
+const DEFAULT_PAGE_SIZE = 25;
+const DEFAULT_SORT_BY = "receivedDate";
+const DEFAULT_SORT_ORDER = "desc";
+const MAX_PAGE_SIZE = 100;
+const EXPORT_LIMIT = 10_000;
+
+const SORT_FIELDS = {
+  receivedDate: "complaintDate",
+  complaintDate: "complaintDate",
+  receivedAt: "receivedAt",
+  dueDate: "dueDate",
+  closedAt: "closedAt",
+  createdAt: "createdAt",
+  updatedAt: "updatedAt",
+  priority: "priority",
+  severity: "severity",
+  status: "status",
+  complaintNumber: "externalId",
+  externalId: "externalId",
+} as const satisfies Record<string, keyof Prisma.ComplaintOrderByWithRelationInput>;
+
+const booleanSchema = z
+  .string()
+  .optional()
+  .transform((value, ctx) => {
+    if (value === undefined || value === "") return undefined;
+    if (value === "true") return true;
+    if (value === "false") return false;
+    ctx.addIssue({ code: "custom", message: "must be true or false" });
+    return z.NEVER;
+  });
+
+const dateSchema = z
+  .string()
+  .optional()
+  .transform((value, ctx) => {
+    if (!value) return undefined;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) {
+      ctx.addIssue({ code: "custom", message: "must be a valid date" });
+      return z.NEVER;
+    }
+    return date;
+  });
+
+const optionalText = z.string().trim().optional().transform((value) => value || undefined);
+
+const querySchema = z.object({
+  page: z.coerce.number().int().positive().default(DEFAULT_PAGE),
+  pageSize: z.coerce.number().int().positive().max(MAX_PAGE_SIZE).default(DEFAULT_PAGE_SIZE),
+  search: optionalText,
+  externalId: optionalText,
+  sourceReference: optionalText,
+  status: z.string().optional().transform((value, ctx) => parseStatusValue(value, ctx)),
+  priority: z.string().optional().transform((value, ctx) => parseEnumValue(value, ComplaintPriority, ctx, "priority")),
+  severity: z.string().optional().transform((value, ctx) => parseEnumValue(value, ComplaintPriority, ctx, "severity")),
+  channel: optionalText,
+  region: optionalText,
+  regionId: optionalText,
+  facility: optionalText,
+  facilityId: optionalText,
+  department: optionalText,
+  departmentId: optionalText,
+  categoryId: optionalText,
+  classificationId: optionalText,
+  importBatchId: optionalText,
+  from: dateSchema,
+  to: dateSchema,
+  dueFrom: dateSchema,
+  dueTo: dateSchema,
+  closedFrom: dateSchema,
+  closedTo: dateSchema,
+  isLate: booleanSchema,
+  isOpen: booleanSchema,
+  isClosed: booleanSchema,
+  hasDueDate: booleanSchema,
+  hasClassification: booleanSchema,
+  isRepeated: booleanSchema,
+  isValidated: booleanSchema,
+  aiAnalyzed: booleanSchema,
+  sortBy: z.string().default(DEFAULT_SORT_BY),
+  sortOrder: z.enum(["asc", "desc"]).default(DEFAULT_SORT_ORDER),
+});
+
+export type ComplaintQuery = z.infer<typeof querySchema>;
+export type ComplaintSortKey = keyof typeof SORT_FIELDS;
+
+export class ComplaintQueryValidationError extends Error {
+  readonly code = "INVALID_COMPLAINT_QUERY";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "ComplaintQueryValidationError";
+  }
+}
+
+export type ComplaintListItem = {
+  id: string;
+  externalId: string | null;
+  sourceReference: string | null;
+  complaintNumber: string;
+  complaintDate: string | null;
+  receivedAt: string;
+  receivedDate: string;
+  dueDate: string | null;
+  closedAt: string | null;
+  status: ComplaintStatus;
+  rawStatus: ComplaintStatus;
+  subject: string;
+  region: { name: string } | null;
+  regionName: string | null;
+  facility: string | null;
+  location: { name: string } | null;
+  department: { name: string } | null;
+  departmentName: string | null;
+  category: { id: string; name: string } | null;
+  classification: { id: string; name: string; color: string | null } | null;
+  priority: ComplaintPriority;
+  severity: ComplaintPriority;
+  channel: string | null;
+  isCurrentlyLate: boolean;
+  wasClosedLate: boolean;
+  isClosedWithinDueDate: boolean;
+  isLate: boolean;
+  latenessDays: number | null;
+  resolutionDays: number | null;
+  version: number;
+  updatedAt: string;
+};
+
+export type ComplaintListResult = {
+  items: ComplaintListItem[];
+  pagination: {
+    page: number;
+    pageSize: number;
+    total: number;
+    totalPages: number;
+    hasNextPage: boolean;
+    hasPreviousPage: boolean;
+  };
+  appliedFilters: Record<string, unknown>;
+  where: Prisma.ComplaintWhereInput;
+};
+
+const complaintListSelect = {
+  id: true,
+  externalId: true,
+  sourceReference: true,
+  complaintDate: true,
+  receivedAt: true,
+  dueDate: true,
+  closedAt: true,
+  status: true,
+  subject: true,
+  region: true,
+  facility: true,
+  department: true,
+  categoryId: true,
+  classificationId: true,
+  priority: true,
+  severity: true,
+  channel: true,
+  version: true,
+  updatedAt: true,
+  category: { select: { id: true, nameAr: true } },
+  classification: { select: { id: true, nameAr: true, color: true } },
+} satisfies Prisma.ComplaintSelect;
+
+type ComplaintListRecord = Prisma.ComplaintGetPayload<{ select: typeof complaintListSelect }>;
+
+const COMPLAINT_STATUS_ALIASES = {
+  NEW: ComplaintStatus.NEW,
+  OPEN: ComplaintStatus.OPEN,
+  IN_PROGRESS: ComplaintStatus.IN_PROGRESS,
+  AWAITING_RESPONSE: ComplaintStatus.AWAITING_RESPONSE,
+  RESOLVED: ComplaintStatus.RESOLVED,
+  CLOSED: ComplaintStatus.CLOSED,
+  CANCELLED: ComplaintStatus.CANCELLED,
+  REJECTED: ComplaintStatus.CANCELLED,
+  REOPENED: ComplaintStatus.OPEN,
+} as const satisfies Record<string, ComplaintStatus>;
+
+function parseStatusValue(
+  value: string | undefined,
+  ctx: z.RefinementCtx
+): ComplaintStatus | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim().toUpperCase();
+  const status = COMPLAINT_STATUS_ALIASES[normalized as keyof typeof COMPLAINT_STATUS_ALIASES];
+  if (!status) {
+    ctx.addIssue({ code: "custom", message: "status is not supported" });
+    return z.NEVER;
+  }
+  return status;
+}
+
+function parseEnumValue<T extends Record<string, string>>(
+  value: string | undefined,
+  choices: T,
+  ctx: z.RefinementCtx,
+  fieldName: string
+): T[keyof T] | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim().toUpperCase();
+  const match = Object.values(choices).find((choice) => choice === normalized);
+  if (!match) {
+    ctx.addIssue({ code: "custom", message: `${fieldName} is not supported` });
+    return z.NEVER;
+  }
+  return match as T[keyof T];
+}
+
+export function parseComplaintQuery(params: URLSearchParams): ComplaintQuery {
+  const raw = Object.fromEntries(params.entries());
+  const parsed = querySchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new ComplaintQueryValidationError(parsed.error.issues[0]?.message ?? "Invalid complaint query");
+  }
+  if (!(parsed.data.sortBy in SORT_FIELDS)) {
+    throw new ComplaintQueryValidationError("sortBy is not supported");
+  }
+  validateRange(parsed.data.from, parsed.data.to, "from", "to");
+  validateRange(parsed.data.dueFrom, parsed.data.dueTo, "dueFrom", "dueTo");
+  validateRange(parsed.data.closedFrom, parsed.data.closedTo, "closedFrom", "closedTo");
+  return parsed.data;
+}
+
+export function isComplaintQueryValidationError(error: unknown): error is ComplaintQueryValidationError {
+  return error instanceof ComplaintQueryValidationError;
+}
+
+function validateRange(start: Date | undefined, end: Date | undefined, startName: string, endName: string): void {
+  if (start && end && start > end) {
+    throw new ComplaintQueryValidationError(`${startName} must be before or equal to ${endName}`);
+  }
+}
+
+function addAnd(where: Prisma.ComplaintWhereInput, condition: Prisma.ComplaintWhereInput): void {
+  const current = where.AND;
+  if (!current) {
+    where.AND = [condition];
+    return;
+  }
+  where.AND = Array.isArray(current) ? [...current, condition] : [current, condition];
+}
+
+function dateRange(from?: Date, to?: Date): Prisma.DateTimeNullableFilter | undefined {
+  if (!from && !to) return undefined;
+  return {
+    ...(from ? { gte: from } : {}),
+    ...(to ? { lte: to } : {}),
+  };
+}
+
+export function buildComplaintWhere(query: ComplaintQuery, now = new Date()): Prisma.ComplaintWhereInput {
+  const where: Prisma.ComplaintWhereInput = { isDeleted: false };
+  applyIdentityFilters(where, query);
+  applyScalarFilters(where, query);
+  applyDateFilters(where, query);
+  applyTextSearch(where, query.search);
+  applyBooleanFilters(where, query, now);
+  return where;
+}
+
+function applyIdentityFilters(where: Prisma.ComplaintWhereInput, query: ComplaintQuery): void {
+  if (query.externalId) where.externalId = { contains: query.externalId };
+  if (query.sourceReference) where.sourceReference = { contains: query.sourceReference };
+  if (query.importBatchId) where.importBatchId = query.importBatchId;
+}
+
+function applyScalarFilters(where: Prisma.ComplaintWhereInput, query: ComplaintQuery): void {
+  if (query.status) where.status = query.status;
+  if (query.priority) where.priority = query.priority;
+  if (query.severity) where.severity = query.severity;
+  if (query.channel) where.channel = query.channel;
+  if (query.region ?? query.regionId) where.region = query.region ?? query.regionId;
+  if (query.facility ?? query.facilityId) where.facility = query.facility ?? query.facilityId;
+  if (query.department ?? query.departmentId) where.department = query.department ?? query.departmentId;
+  if (query.categoryId) where.categoryId = query.categoryId;
+  if (query.classificationId) where.classificationId = query.classificationId;
+  if (query.isRepeated !== undefined) where.isRepeated = query.isRepeated;
+  if (query.isValidated !== undefined) where.isValidated = query.isValidated;
+  if (query.aiAnalyzed !== undefined) where.aiAnalyzedAt = query.aiAnalyzed ? { not: null } : null;
+}
+
+function applyDateFilters(where: Prisma.ComplaintWhereInput, query: ComplaintQuery): void {
+  const complaintDate = dateRange(query.from, query.to);
+  if (complaintDate) where.complaintDate = complaintDate;
+  const dueDate = dateRange(query.dueFrom, query.dueTo);
+  if (dueDate) where.dueDate = dueDate;
+  const closedAt = dateRange(query.closedFrom, query.closedTo);
+  if (closedAt) where.closedAt = closedAt;
+}
+
+function applyTextSearch(where: Prisma.ComplaintWhereInput, search?: string): void {
+  if (!search) return;
+  addAnd(where, {
+    OR: [
+      { externalId: { contains: search } },
+      { sourceReference: { contains: search } },
+      { subject: { contains: search } },
+      { description: { contains: search } },
+    ],
+  });
+}
+
+function applyBooleanFilters(where: Prisma.ComplaintWhereInput, query: ComplaintQuery, now: Date): void {
+  if (query.isOpen === true) addAnd(where, { status: { in: [...OPEN_COMPLAINT_STATUSES] } });
+  if (query.isOpen === false) addAnd(where, { status: { notIn: [...OPEN_COMPLAINT_STATUSES] } });
+  if (query.isClosed === true) addAnd(where, { status: { in: [...CLOSED_COMPLAINT_STATUSES] } });
+  if (query.isClosed === false) addAnd(where, { status: { notIn: [...CLOSED_COMPLAINT_STATUSES] } });
+  if (query.hasDueDate === true) addAnd(where, { dueDate: { not: null } });
+  if (query.hasDueDate === false) addAnd(where, { dueDate: null });
+  if (query.hasClassification === true) addAnd(where, { classificationId: { not: null } });
+  if (query.hasClassification === false) addAnd(where, { classificationId: null });
+  if (query.isLate === true) {
+    addAnd(where, { dueDate: { lt: now }, status: { in: [...OPEN_COMPLAINT_STATUSES] } });
+  }
+  if (query.isLate === false) {
+    addAnd(where, {
+      OR: [
+        { dueDate: null },
+        { dueDate: { gte: now } },
+        { status: { notIn: [...OPEN_COMPLAINT_STATUSES] } },
+      ],
+    });
+  }
+}
+
+export function buildComplaintOrderBy(query: ComplaintQuery): Prisma.ComplaintOrderByWithRelationInput[] {
+  const sortField = SORT_FIELDS[query.sortBy as ComplaintSortKey];
+  return [{ [sortField]: query.sortOrder }, { id: query.sortOrder }];
+}
+
+export async function listComplaints(
+  params: URLSearchParams,
+  options: { now?: Date; limit?: number } = {}
+): Promise<ComplaintListResult> {
+  const query = parseComplaintQuery(params);
+  const now = options.now ?? new Date();
+  const where = buildComplaintWhere(query, now);
+  const pageSize = options.limit ? Math.min(options.limit, EXPORT_LIMIT) : query.pageSize;
+  const skip = (query.page - 1) * query.pageSize;
+
+  if (!Number.isSafeInteger(skip)) {
+    throw new ComplaintQueryValidationError("Requested page is outside the supported range");
+  }
+
+  const [records, total] = await Promise.all([
+    db.complaint.findMany({
+      where,
+      select: complaintListSelect,
+      orderBy: buildComplaintOrderBy(query),
+      skip: options.limit ? 0 : skip,
+      take: pageSize,
+    }),
+    db.complaint.count({ where }),
+  ]);
+
+  const totalPages = Math.ceil(total / query.pageSize);
+  return {
+    items: records.map((record) => toComplaintListItem(record, now)),
+    pagination: {
+      page: query.page,
+      pageSize: query.pageSize,
+      total,
+      totalPages,
+      hasNextPage: query.page < totalPages,
+      hasPreviousPage: query.page > 1,
+    },
+    appliedFilters: appliedFilters(query),
+    where,
+  };
+}
+
+function appliedFilters(query: ComplaintQuery): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(query).filter(([key, value]) => {
+      if (value === undefined || value === "") {
+        return false;
+      }
+
+      if (key === "page" && value === DEFAULT_PAGE) {
+        return false;
+      }
+
+      if (key === "pageSize" && value === DEFAULT_PAGE_SIZE) {
+        return false;
+      }
+
+      if (key === "sortBy" && value === DEFAULT_SORT_BY) {
+        return false;
+      }
+
+      if (key === "sortOrder" && value === DEFAULT_SORT_ORDER) {
+        return false;
+      }
+
+      return true;
+    })
+  );
+}
+
+function iso(value: Date | null): string | null {
+  return value ? value.toISOString() : null;
+}
+
+export function toComplaintListItem(record: ComplaintListRecord, now = new Date()): ComplaintListItem {
+  const timing = buildComplaintTiming(record satisfies ComplaintTimingSnapshot, now);
+  return {
+    id: record.id,
+    externalId: record.externalId,
+    sourceReference: record.sourceReference,
+    complaintNumber: record.externalId ?? record.sourceReference ?? record.id,
+    complaintDate: iso(record.complaintDate),
+    receivedAt: record.receivedAt.toISOString(),
+    receivedDate: (record.complaintDate ?? record.receivedAt).toISOString(),
+    dueDate: iso(record.dueDate),
+    closedAt: iso(record.closedAt),
+    status: record.status,
+    rawStatus: record.status,
+    subject: record.subject,
+    region: record.region ? { name: record.region } : null,
+    regionName: record.region,
+    facility: record.facility,
+    location: record.facility ? { name: record.facility } : null,
+    department: record.department ? { name: record.department } : null,
+    departmentName: record.department,
+    category: record.category ? { id: record.category.id, name: record.category.nameAr } : null,
+    classification: record.classification
+      ? { id: record.classification.id, name: record.classification.nameAr, color: record.classification.color }
+      : null,
+    priority: record.priority,
+    severity: record.severity,
+    channel: record.channel,
+    isCurrentlyLate: timing.isCurrentlyLate,
+    wasClosedLate: timing.wasClosedLate,
+    isClosedWithinDueDate: timing.isClosedWithinDueDate,
+    isLate: timing.isCurrentlyLate || timing.wasClosedLate,
+    latenessDays: timing.latenessDays,
+    resolutionDays: timing.resolutionDays,
+    version: record.version ?? 1,
+    updatedAt: (record.updatedAt ?? record.receivedAt).toISOString(),
+  };
+}
+
+export const COMPLAINT_LIST_SELECT = complaintListSelect;
+export const COMPLAINT_EXPORT_LIMIT = EXPORT_LIMIT;

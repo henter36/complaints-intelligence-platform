@@ -3,6 +3,7 @@ import {
   addComplaintRequestFilters,
   buildComplaintWhereFromParams,
   InvalidComplaintQueryError,
+  mergeComplaintWhere,
 } from "./complaint-query";
 
 function params(query = "") {
@@ -87,19 +88,15 @@ describe("complaint query filters", () => {
       new Date("2026-07-31T00:00:00Z")
     );
 
-    if (expectedStatus) {
-      expect(where.status).toBe(expectedStatus);
-    } else {
-      expect(where.status).toBeUndefined();
-    }
-    expect(where.AND).toEqual([
+    expect(where.AND).toEqual(expect.arrayContaining([
+      expect.objectContaining(expectedStatus ? { status: expectedStatus } : { isDeleted: false }),
       {
         dueDate: { lt: new Date("2026-07-31T00:00:00Z") },
         status: {
-          in: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE", "RESOLVED"],
+          in: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE"],
         },
       },
-    ]);
+    ]));
   });
 
   it("adds not-late filters without overwriting explicit status", () => {
@@ -109,16 +106,16 @@ describe("complaint query filters", () => {
       new Date("2026-07-31T00:00:00Z")
     );
 
-    expect(where.status).toBe("IN_PROGRESS");
-    expect(where.AND).toEqual([
+    expect(where.AND).toEqual(expect.arrayContaining([
+      expect.objectContaining({ status: "IN_PROGRESS" }),
       {
         OR: [
           { dueDate: null },
           { dueDate: { gte: new Date("2026-07-31T00:00:00Z") } },
-          { status: { notIn: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE", "RESOLVED"] } },
+          { status: { notIn: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE"] } },
         ],
       },
-    ]);
+    ]));
   });
 
   it("keeps existing dueDate range and intersects late filters through AND", () => {
@@ -128,15 +125,86 @@ describe("complaint query filters", () => {
       new Date("2026-07-15T00:00:00Z")
     );
 
-    expect(where.complaintDate).toEqual({
-      gte: new Date("2026-07-01"),
-      lte: new Date("2026-07-31"),
-    });
-    expect(where.AND).toEqual([
+    expect(where.AND).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        complaintDate: {
+          gte: new Date("2026-07-01"),
+          lte: new Date("2026-07-31"),
+        },
+      }),
       {
         dueDate: { lt: new Date("2026-07-15T00:00:00Z") },
-        status: { in: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE", "RESOLVED"] },
+        status: { in: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE"] },
       },
-    ]);
+    ]));
+  });
+
+  it("merges base and additional AND predicates without overwriting them", () => {
+    const where = mergeComplaintWhere(
+      { isDeleted: false, AND: [{ status: "OPEN" }] },
+      { AND: [{ dueDate: { lt: new Date("2026-07-31T00:00:00Z") } }] }
+    );
+
+    expect(where).toEqual({
+      AND: [
+        { isDeleted: false },
+        { status: "OPEN" },
+        { dueDate: { lt: new Date("2026-07-31T00:00:00Z") } },
+      ],
+    });
+  });
+
+  it("preserves base status when additional late filters add status intersection", () => {
+    const where = mergeComplaintWhere(
+      { isDeleted: false, status: "CLOSED" },
+      {
+        isDeleted: false,
+        AND: [
+          {
+            dueDate: { lt: new Date("2026-07-31T00:00:00Z") },
+            status: { in: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE"] },
+          },
+        ],
+      }
+    );
+
+    expect(where).toEqual({
+      AND: [
+        { isDeleted: false, status: "CLOSED" },
+        { isDeleted: false },
+        {
+          dueDate: { lt: new Date("2026-07-31T00:00:00Z") },
+          status: { in: ["NEW", "OPEN", "IN_PROGRESS", "AWAITING_RESPONSE"] },
+        },
+      ],
+    });
+  });
+
+  it("preserves OR predicates during complaint where merges", () => {
+    const where = mergeComplaintWhere(
+      { OR: [{ subject: { contains: "أ" } }] },
+      { isDeleted: false, status: "OPEN" }
+    );
+
+    expect(where).toEqual({
+      AND: [
+        { OR: [{ subject: { contains: "أ" } }] },
+        { isDeleted: false, status: "OPEN" },
+      ],
+    });
+  });
+
+  it("keeps contradictory predicates instead of overwriting one side", () => {
+    const where = mergeComplaintWhere(
+      { classificationId: "cls-1" },
+      { AND: [{ classificationId: null }] }
+    );
+
+    expect(where).toEqual({
+      AND: [
+        { classificationId: "cls-1" },
+        { classificationId: null },
+      ],
+    });
   });
 });

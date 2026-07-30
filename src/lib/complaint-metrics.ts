@@ -1,3 +1,9 @@
+import { ComplaintStatus } from "@prisma/client";
+import {
+  isClosedComplaintStatus,
+  isOpenComplaintStatus,
+} from "@/server/complaints/status";
+
 export type ComplaintTiming = {
   status: string;
   dueDate: Date | null;
@@ -5,20 +11,28 @@ export type ComplaintTiming = {
   closureDate?: Date | null;
 };
 
-const CLOSED_STATUSES = new Set(["CLOSED", "closed"]);
-const CANCELLED_STATUSES = new Set(["CANCELLED", "cancelled", "rejected"]);
+function normalizeStatus(status: string): ComplaintStatus | null {
+  const normalized = status.toUpperCase();
+  if (normalized === "REJECTED") return ComplaintStatus.CANCELLED;
+  if (Object.values(ComplaintStatus).includes(normalized as ComplaintStatus)) {
+    return normalized as ComplaintStatus;
+  }
+  return null;
+}
 
 export function isComplaintLate(complaint: ComplaintTiming, now = new Date()): boolean {
   if (!complaint.dueDate) {
     return false;
   }
 
+  const status = normalizeStatus(complaint.status);
+  if (!status) return false;
   const closedAt = complaint.closedAt ?? complaint.closureDate ?? null;
-  if (CLOSED_STATUSES.has(complaint.status)) {
+  if (isClosedComplaintStatus(status)) {
     return closedAt ? closedAt > complaint.dueDate : false;
   }
 
-  return !CANCELLED_STATUSES.has(complaint.status) && now > complaint.dueDate;
+  return isOpenComplaintStatus(status) && now > complaint.dueDate;
 }
 
 export function average(values: number[]): number {
