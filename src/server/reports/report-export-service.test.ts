@@ -143,6 +143,223 @@ describe("runReport orchestration", () => {
     expect(auditActions).toContain("REPORT_RUN_FAILED");
   });
 
+  it("marks FAILED with the original errorCode when reportArtifact.deleteMany itself throws during cleanup", async () => {
+    dbMocks.runCreate.mockResolvedValue({ id: "run_3" });
+    dataMocks.buildReportData.mockResolvedValue({
+      type: ReportType.EXECUTIVE_SUMMARY, title: "t", generatedAt: new Date().toISOString(),
+      period: { from: "2026-07-01", to: "2026-07-31" }, filters: VALID_FILTERS,
+      kpis: {}, sections: [], warnings: [], rowCount: 0,
+    });
+    pdfMocks.renderReportPdf.mockResolvedValue({ buffer: Buffer.from("pdf"), warnings: [] });
+    storageMocks.storeReportArtifact.mockResolvedValue({ storageKey: "abc.pdf", fileSize: 3, sha256: "hash" });
+    dbMocks.artifactCreate.mockResolvedValue({ id: "art_1", format: ReportFormat.PDF, fileName: "x.pdf", fileSize: 3, sha256: "hash" });
+    storageMocks.deleteReportArtifact.mockResolvedValue(undefined);
+    dbMocks.artifactDeleteMany.mockRejectedValue(new Error("db connection lost"));
+    xlsxMocks.renderReportXlsx.mockRejectedValue(new Error("internal exceljs boom"));
+    dbMocks.runUpdate.mockResolvedValue({ id: "run_3" });
+
+    const { runReport, isReportRunError } = await import("./report-export-service");
+    let caught: unknown;
+    try {
+      await runReport(
+        { request: buildRequest(), formats: [ReportFormat.PDF, ReportFormat.XLSX], requestedBy: "admin" },
+        new Date("2026-08-01T00:00:00Z")
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    // The original export error must still be classified and preserved, even
+    // though the row-deletion cleanup step itself rejected.
+    expect(isReportRunError(caught)).toBe(true);
+    if (isReportRunError(caught)) {
+      expect(caught.code).toBe("REPORT_GENERATION_FAILED");
+      expect(caught.message).not.toContain("boom");
+    }
+
+    const updateCall = dbMocks.runUpdate.mock.calls.find((c) => c[0].data.status === "FAILED");
+    expect(updateCall).toBeDefined();
+    expect(updateCall![0].data.errorCode).toBe("REPORT_GENERATION_FAILED");
+
+    // The run must never be left RUNNING or become COMPLETED.
+    const statuses = dbMocks.runUpdate.mock.calls.map((c) => c[0].data.status);
+    expect(statuses).not.toContain("COMPLETED");
+    expect(statuses).toContain("FAILED");
+
+    // The cleanup failure is captured as audit metadata, not silently dropped.
+    const failedAudit = dbMocks.auditLogCreate.mock.calls.find((c) => c[0].data.action === "REPORT_RUN_FAILED");
+    expect(failedAudit).toBeDefined();
+    expect(failedAudit![0].data.metadata.cleanupFailures).toEqual([
+      { step: "artifact_rows", message: "db connection lost" },
+    ]);
+  });
+
+  it("still deletes rows and marks FAILED when file deletion fails but row deletion succeeds", async () => {
+    dbMocks.runCreate.mockResolvedValue({ id: "run_4" });
+    dataMocks.buildReportData.mockResolvedValue({
+      type: ReportType.EXECUTIVE_SUMMARY, title: "t", generatedAt: new Date().toISOString(),
+      period: { from: "2026-07-01", to: "2026-07-31" }, filters: VALID_FILTERS,
+      kpis: {}, sections: [], warnings: [], rowCount: 0,
+    });
+    pdfMocks.renderReportPdf.mockResolvedValue({ buffer: Buffer.from("pdf"), warnings: [] });
+    storageMocks.storeReportArtifact.mockResolvedValue({ storageKey: "abc.pdf", fileSize: 3, sha256: "hash" });
+    dbMocks.artifactCreate.mockResolvedValue({ id: "art_1", format: ReportFormat.PDF, fileName: "x.pdf", fileSize: 3, sha256: "hash" });
+    storageMocks.deleteReportArtifact.mockRejectedValue(new Error("ENOENT-like disk error"));
+    dbMocks.artifactDeleteMany.mockResolvedValue({ count: 1 });
+    xlsxMocks.renderReportXlsx.mockRejectedValue(new Error("boom"));
+    dbMocks.runUpdate.mockResolvedValue({ id: "run_4" });
+
+    const { runReport, isReportRunError } = await import("./report-export-service");
+    let caught: unknown;
+    try {
+      await runReport(
+        { request: buildRequest(), formats: [ReportFormat.PDF, ReportFormat.XLSX], requestedBy: "admin" },
+        new Date("2026-08-01T00:00:00Z")
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(isReportRunError(caught)).toBe(true);
+    // Row deletion still runs and succeeds even though file deletion failed.
+    expect(dbMocks.artifactDeleteMany).toHaveBeenCalledWith({ where: { id: { in: ["art_1"] } } });
+    const updateCall = dbMocks.runUpdate.mock.calls.find((c) => c[0].data.status === "FAILED");
+    expect(updateCall).toBeDefined();
+  });
+
+  it("marks FAILED when both file deletion and row deletion fail", async () => {
+    dbMocks.runCreate.mockResolvedValue({ id: "run_5" });
+    dataMocks.buildReportData.mockResolvedValue({
+      type: ReportType.EXECUTIVE_SUMMARY, title: "t", generatedAt: new Date().toISOString(),
+      period: { from: "2026-07-01", to: "2026-07-31" }, filters: VALID_FILTERS,
+      kpis: {}, sections: [], warnings: [], rowCount: 0,
+    });
+    pdfMocks.renderReportPdf.mockResolvedValue({ buffer: Buffer.from("pdf"), warnings: [] });
+    storageMocks.storeReportArtifact.mockResolvedValue({ storageKey: "abc.pdf", fileSize: 3, sha256: "hash" });
+    dbMocks.artifactCreate.mockResolvedValue({ id: "art_1", format: ReportFormat.PDF, fileName: "x.pdf", fileSize: 3, sha256: "hash" });
+    storageMocks.deleteReportArtifact.mockRejectedValue(new Error("disk error"));
+    dbMocks.artifactDeleteMany.mockRejectedValue(new Error("db error"));
+    xlsxMocks.renderReportXlsx.mockRejectedValue(new Error("boom"));
+    dbMocks.runUpdate.mockResolvedValue({ id: "run_5" });
+
+    const { runReport, isReportRunError } = await import("./report-export-service");
+    let caught: unknown;
+    try {
+      await runReport(
+        { request: buildRequest(), formats: [ReportFormat.PDF, ReportFormat.XLSX], requestedBy: "admin" },
+        new Date("2026-08-01T00:00:00Z")
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(isReportRunError(caught)).toBe(true);
+    const updateCall = dbMocks.runUpdate.mock.calls.find((c) => c[0].data.status === "FAILED");
+    expect(updateCall).toBeDefined();
+    const statuses = dbMocks.runUpdate.mock.calls.map((c) => c[0].data.status);
+    expect(statuses).not.toContain("COMPLETED");
+
+    const failedAudit = dbMocks.auditLogCreate.mock.calls.find((c) => c[0].data.action === "REPORT_RUN_FAILED");
+    expect(failedAudit![0].data.metadata.cleanupFailures).toEqual(
+      expect.arrayContaining([
+        { step: "artifact_files", message: "disk error" },
+        { step: "artifact_rows", message: "db error" },
+      ])
+    );
+  });
+
+  it("throws a critical composite error without losing the original errorCode when the FAILED-state update itself fails", async () => {
+    dbMocks.runCreate.mockResolvedValue({ id: "run_6" });
+    dataMocks.buildReportData.mockResolvedValue({
+      type: ReportType.EXECUTIVE_SUMMARY, title: "t", generatedAt: new Date().toISOString(),
+      period: { from: "2026-07-01", to: "2026-07-31" }, filters: VALID_FILTERS,
+      kpis: {}, sections: [], warnings: [], rowCount: 0,
+    });
+    pdfMocks.renderReportPdf.mockResolvedValue({ buffer: Buffer.from("pdf"), warnings: [] });
+    storageMocks.storeReportArtifact.mockResolvedValue({ storageKey: "abc.pdf", fileSize: 3, sha256: "hash" });
+    dbMocks.artifactCreate.mockResolvedValue({ id: "art_1", format: ReportFormat.PDF, fileName: "x.pdf", fileSize: 3, sha256: "hash" });
+    storageMocks.deleteReportArtifact.mockResolvedValue(undefined);
+    dbMocks.artifactDeleteMany.mockResolvedValue({ count: 1 });
+    xlsxMocks.renderReportXlsx.mockRejectedValue(new Error("boom"));
+    dbMocks.runUpdate.mockRejectedValue(new Error("db unreachable"));
+
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const { runReport, isReportRunError } = await import("./report-export-service");
+    let caught: unknown;
+    try {
+      await runReport(
+        { request: buildRequest(), formats: [ReportFormat.PDF, ReportFormat.XLSX], requestedBy: "admin" },
+        new Date("2026-08-01T00:00:00Z")
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(isReportRunError(caught)).toBe(true);
+    if (isReportRunError(caught)) {
+      // The original error's classification must survive even though the
+      // FAILED-state persistence itself failed.
+      expect(caught.code).toBe("REPORT_GENERATION_FAILED");
+      expect(caught.cause).toBeDefined();
+    }
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Critical"),
+      "run_6",
+      expect.any(Error)
+    );
+    // No failure audit log can be written since the run row update failed first.
+    const auditActions = dbMocks.auditLogCreate.mock.calls.map((c) => c[0].data.action);
+    expect(auditActions).not.toContain("REPORT_RUN_FAILED");
+
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("never writes a REPORT_RUN_COMPLETED audit log after an export failure", async () => {
+    dbMocks.runCreate.mockResolvedValue({ id: "run_7" });
+    dataMocks.buildReportData.mockResolvedValue({
+      type: ReportType.EXECUTIVE_SUMMARY, title: "t", generatedAt: new Date().toISOString(),
+      period: { from: "2026-07-01", to: "2026-07-31" }, filters: VALID_FILTERS,
+      kpis: {}, sections: [], warnings: [], rowCount: 0,
+    });
+    pdfMocks.renderReportPdf.mockRejectedValue(new Error("boom"));
+    dbMocks.runUpdate.mockResolvedValue({ id: "run_7" });
+
+    const { runReport, isReportRunError } = await import("./report-export-service");
+    let caught: unknown;
+    try {
+      await runReport({ request: buildRequest(), formats: [ReportFormat.PDF], requestedBy: "admin" }, new Date("2026-08-01T00:00:00Z"));
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(isReportRunError(caught)).toBe(true);
+    const auditActions = dbMocks.auditLogCreate.mock.calls.map((c) => c[0].data.action);
+    expect(auditActions).not.toContain("REPORT_RUN_COMPLETED");
+    expect(auditActions).toContain("REPORT_RUN_FAILED");
+  });
+
+  it("does not attempt any cleanup when the export fails before any artifact is created", async () => {
+    dbMocks.runCreate.mockResolvedValue({ id: "run_8" });
+    dataMocks.buildReportData.mockRejectedValue(new Error("boom before render"));
+    dbMocks.runUpdate.mockResolvedValue({ id: "run_8" });
+
+    const { runReport, isReportRunError } = await import("./report-export-service");
+    let caught: unknown;
+    try {
+      await runReport({ request: buildRequest(), formats: [ReportFormat.PDF], requestedBy: "admin" }, new Date("2026-08-01T00:00:00Z"));
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(isReportRunError(caught)).toBe(true);
+    expect(storageMocks.deleteReportArtifact).not.toHaveBeenCalled();
+    expect(dbMocks.artifactDeleteMany).not.toHaveBeenCalled();
+
+    const updateCall = dbMocks.runUpdate.mock.calls.find((c) => c[0].data.status === "FAILED");
+    expect(updateCall).toBeDefined();
+  });
+
   it("rejects a PDF export request for a report type that does not support PDF", async () => {
     const { runReport, isReportRunError } = await import("./report-export-service");
     let caught: unknown;

@@ -12,13 +12,15 @@ export class ReportRunError extends Error {
   readonly code: string;
   readonly status: number;
 
-  constructor(code: string, message: string, status: number) {
-    super(message);
+  constructor(code: string, message: string, status: number, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = "ReportRunError";
     this.code = code;
     this.status = status;
   }
 }
+
+type CleanupFailure = { step: "artifact_files" | "artifact_rows"; message: string };
 
 export function isReportRunError(error: unknown): error is ReportRunError {
   return error instanceof ReportRunError;
@@ -200,35 +202,83 @@ export async function runReport(input: RunReportInput, now: Date = new Date()): 
       rowCount: data.rowCount,
     };
   } catch (error) {
-    for (const key of storedKeys) {
-      await deleteReportArtifact(key);
-    }
-    if (createdArtifactIds.length > 0) {
-      await db.reportArtifact.deleteMany({ where: { id: { in: createdArtifactIds } } });
-    }
-
+    // Classify the ORIGINAL failure before touching anything else. Whatever
+    // happens during cleanup below must never overwrite this classification —
+    // the run's terminal state has to reflect why the export actually failed.
     const { errorCode, errorMessage, status } = describeRunFailure(error);
 
-    await db.reportRun.update({
-      where: { id: run.id },
-      data: {
-        status: ReportRunStatus.FAILED,
-        failedAt: new Date(),
-        errorCode,
-        errorMessage,
-      },
-    });
+    const cleanupFailures = await cleanupFailedRunArtifacts(storedKeys, createdArtifactIds);
 
-    await writeAuditLog(db, {
-      action: "REPORT_RUN_FAILED",
-      entityType: "ReportRun",
-      entityId: run.id,
-      actor: requestedBy,
-      metadata: { reportType: request.type, templateId: reportTemplateId, errorCode },
-    });
+    try {
+      await db.reportRun.update({
+        where: { id: run.id },
+        data: {
+          status: ReportRunStatus.FAILED,
+          failedAt: new Date(),
+          errorCode,
+          errorMessage,
+        },
+      });
+    } catch (persistError) {
+      // Persisting the FAILED state itself failed — this is more critical than
+      // the original export error, since the run can now be stuck in RUNNING.
+      // There's no centralized logger in this project, so console.error is the
+      // established convention (see the post-completion housekeeping catch above).
+      console.error("Critical: failed to persist FAILED state for report run", run.id, persistError);
+      throw new ReportRunError(errorCode, errorMessage, status, {
+        cause: { originalError: error, persistError },
+      });
+    }
+
+    try {
+      await writeAuditLog(db, {
+        action: "REPORT_RUN_FAILED",
+        entityType: "ReportRun",
+        entityId: run.id,
+        actor: requestedBy,
+        metadata: { reportType: request.type, templateId: reportTemplateId, errorCode, cleanupFailures },
+      });
+    } catch (auditError) {
+      console.error("Report run marked FAILED but failure audit log could not be written:", run.id, auditError);
+    }
 
     throw new ReportRunError(errorCode, errorMessage, status);
   }
+}
+
+// Best-effort cleanup of partially-created artifacts. Every step is
+// independently try/caught so a cleanup failure (e.g. deleteMany rejecting)
+// can never prevent the caller from classifying the original error and
+// persisting the run's FAILED state. Failures are returned, never thrown.
+async function cleanupFailedRunArtifacts(
+  storedKeys: string[],
+  createdArtifactIds: string[]
+): Promise<CleanupFailure[]> {
+  const failures: CleanupFailure[] = [];
+
+  for (const key of storedKeys) {
+    try {
+      await deleteReportArtifact(key);
+    } catch (cleanupError) {
+      failures.push({
+        step: "artifact_files",
+        message: cleanupError instanceof Error ? cleanupError.message : "تعذر حذف ملف المرفق",
+      });
+    }
+  }
+
+  if (createdArtifactIds.length > 0) {
+    try {
+      await db.reportArtifact.deleteMany({ where: { id: { in: createdArtifactIds } } });
+    } catch (cleanupError) {
+      failures.push({
+        step: "artifact_rows",
+        message: cleanupError instanceof Error ? cleanupError.message : "تعذر حذف سجلات المرفقات",
+      });
+    }
+  }
+
+  return failures;
 }
 
 function describeRunFailure(error: unknown): { errorCode: string; errorMessage: string; status: number } {
