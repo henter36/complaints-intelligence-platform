@@ -96,6 +96,8 @@ export type ComplaintGroupMetrics = {
   withinDueDate: number;
   complianceRate: number | null;
   averageResolutionDays: number;
+  highPriorityOpen: number;
+  unclassified: number;
 };
 
 export type ComplaintKpiResult = {
@@ -198,15 +200,20 @@ export async function getComplaintKpis(params: URLSearchParams, now = new Date()
   return buildKpiResult(current, previous, now, query);
 }
 
+export function getPreviousPeriodRange(from: Date, to: Date): { from: Date; to: Date } | null {
+  const duration = to.getTime() - from.getTime();
+  if (duration < 0) return null;
+  return {
+    from: new Date(from.getTime() - duration - DAY_MS),
+    to: new Date(from.getTime() - DAY_MS),
+  };
+}
+
 function buildPreviousWhere(query: ComplaintQuery, now: Date): Prisma.ComplaintWhereInput | null {
   if (!query.from || !query.to) return null;
-  const duration = query.to.getTime() - query.from.getTime();
-  if (duration < 0) return null;
-  const previousQuery = {
-    ...query,
-    from: new Date(query.from.getTime() - duration - DAY_MS),
-    to: new Date(query.from.getTime() - DAY_MS),
-  };
+  const previousRange = getPreviousPeriodRange(query.from, query.to);
+  if (!previousRange) return null;
+  const previousQuery = { ...query, from: previousRange.from, to: previousRange.to };
   return buildComplaintWhere(previousQuery, now);
 }
 
@@ -435,6 +442,8 @@ function groupMetrics(
         withinDueDate: raw.closedWithinDueDate,
         complianceRate: raw.dueDateComplianceRate,
         averageResolutionDays: raw.averageResolutionDays,
+        highPriorityOpen: raw.highPriorityOpenComplaints,
+        unclassified: raw.unclassifiedComplaints,
       };
     })
     .sort((a, b) => b.total - a.total || a.name.localeCompare(b.name, "ar"));

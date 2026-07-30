@@ -1,209 +1,117 @@
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  assertReportPaginationWithinLimit,
-  fetchAllComplaintsForReport,
-} from "@/lib/report-complaints";
+import { ReportsCenter } from "./reports-center";
 
-function complaint(id: string) {
-  return {
-    id,
-    complaintNumber: id,
-    receivedDate: "2026-07-01T00:00:00.000Z",
-    channel: "الهاتف",
-    regionId: null,
-    locationId: null,
-    departmentId: null,
-    classificationId: null,
-    subject: `شكوى ${id}`,
-    description: "",
-    status: "open",
-    priority: "medium",
-    severity: "medium",
-    referralDate: null,
-    firstActionDate: null,
-    closureDate: null,
-    dueDate: null,
-    resolution: null,
-    delayReason: null,
-    isRepeated: false,
-    isValidated: false,
-    beneficiarySatisfaction: null,
-    isPotentialDuplicate: false,
-  };
+function jsonResponse(body: unknown): Response {
+  return { ok: true, json: () => Promise.resolve(body) } as Response;
 }
 
-function mockPagedComplaints(total: number) {
-  const records = Array.from({ length: total }, (_, index) => complaint(`cmp-${index + 1}`));
-  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-    const url = new URL(String(input), "http://localhost");
-    const page = Number(url.searchParams.get("page"));
-    const pageSize = Number(url.searchParams.get("pageSize"));
-    const start = (page - 1) * pageSize;
-    const data = records.slice(start, start + pageSize);
+const DEFINITIONS = [
+  {
+    type: "EXECUTIVE_SUMMARY", title: "التقرير التنفيذي الشامل", description: "وصف",
+    supportedFilters: ["from", "to"], sections: [], defaultColumns: [], maxRows: 500,
+    supportsPdf: true, supportsXlsx: true, requiresPeriod: true,
+  },
+];
 
-    return Response.json({
-      data,
-      total,
-      page,
-      pageSize,
-      totalPages: Math.ceil(total / pageSize),
-    });
+const FILTERS_DATA = { regions: [], departments: [], facilities: [], classifications: [], channels: [] };
+
+function routedFetch(overrides: Record<string, () => Response> = {}) {
+  return vi.fn((input: RequestInfo | URL) => {
+    const url = String(input);
+    const overrideKey = Object.keys(overrides).find((key) => url.includes(key));
+    if (overrideKey) return Promise.resolve(overrides[overrideKey]());
+    if (url.includes("/api/reports/definitions")) return Promise.resolve(jsonResponse({ definitions: DEFINITIONS }));
+    if (url.includes("/api/filters")) return Promise.resolve(jsonResponse(FILTERS_DATA));
+    if (url.includes("/api/reports/templates")) return Promise.resolve(jsonResponse({ templates: [] }));
+    if (url.includes("/api/reports/schedules")) return Promise.resolve(jsonResponse({ schedules: [] }));
+    if (url.includes("/api/reports/runs")) return Promise.resolve(jsonResponse({ runs: [] }));
+    return Promise.resolve(jsonResponse({}));
   });
-  vi.stubGlobal("fetch", fetchMock);
-  return fetchMock;
 }
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
-describe("fetchAllComplaintsForReport", () => {
-  it.each([
-    [50, 1],
-    [100, 1],
-    [101, 2],
-    [250, 3],
-  ])("loads %i report complaints using paged requests", async (total, expectedRequests) => {
-    const fetchMock = mockPagedComplaints(total);
-    const query = new URLSearchParams("regionId=riyadh&departmentId=er");
+describe("ReportsCenter", () => {
+  it("renders available report type cards from the definitions API", async () => {
+    vi.stubGlobal("fetch", routedFetch());
+    render(<ReportsCenter />);
 
-    const result = await fetchAllComplaintsForReport(query);
-
-    expect(result).toHaveLength(total);
-    expect(fetchMock).toHaveBeenCalledTimes(expectedRequests);
-    for (const [input] of fetchMock.mock.calls) {
-      const url = new URL(String(input), "http://localhost");
-      expect(url.searchParams.get("pageSize")).toBe("100");
-      expect(url.searchParams.get("regionId")).toBe("riyadh");
-      expect(url.searchParams.get("departmentId")).toBe("er");
-      expect(url.searchParams.get("sortBy")).toBe("receivedDate");
-      expect(url.searchParams.get("sortOrder")).toBe("desc");
-      expect(url.searchParams.get("pageSize")).not.toBe(String(10 ** 3));
-    }
+    expect(await screen.findByText("التقرير التنفيذي الشامل")).toBeInTheDocument();
   });
 
-  it("preserves page order and removes duplicate records defensively", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = new URL(String(input), "http://localhost");
-      const page = Number(url.searchParams.get("page"));
+  it("reveals the settings form and export buttons after selecting a report type", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", routedFetch());
+    render(<ReportsCenter />);
 
-      return Response.json({
-        data: page === 1
-          ? [complaint("cmp-1"), complaint("cmp-2")]
-          : [complaint("cmp-2"), complaint("cmp-3")],
-        total: 4,
-        page,
-        pageSize: 100,
-        totalPages: 2,
-      });
-    });
-    vi.stubGlobal("fetch", fetchMock);
+    const card = await screen.findByText("التقرير التنفيذي الشامل");
+    await user.click(card);
 
-    await expect(fetchAllComplaintsForReport(new URLSearchParams())).resolves.toEqual([
-      complaint("cmp-1"),
-      complaint("cmp-2"),
-      complaint("cmp-3"),
-    ]);
+    expect(await screen.findByText(/إعدادات التقرير/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /معاينة/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /تصدير PDF/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /تصدير XLSX/ })).toBeInTheDocument();
   });
 
-  it("fails the whole report when a later page fails", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = new URL(String(input), "http://localhost");
-      const page = Number(url.searchParams.get("page"));
-      if (page === 2) {
-        return new Response(null, { status: 500 });
-      }
-
-      return Response.json({
-        data: Array.from({ length: 100 }, (_, index) => complaint(`cmp-${index + 1}`)),
-        total: 101,
-        page,
-        pageSize: 100,
-        totalPages: 2,
-      });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(fetchAllComplaintsForReport(new URLSearchParams())).rejects.toThrow(
-      "Failed to load report complaints"
+  it("shows a report preview after clicking Preview", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      routedFetch({
+        "/api/reports/preview": () =>
+          jsonResponse({
+            report: {
+              type: "EXECUTIVE_SUMMARY",
+              title: "التقرير التنفيذي الشامل",
+              generatedAt: new Date().toISOString(),
+              period: { from: "2026-07-01", to: "2026-07-31" },
+              filters: { from: "2026-07-01", to: "2026-07-31" },
+              sections: [
+                {
+                  id: "kpi_overview", kind: "kpi", title: "المؤشرات الرئيسية",
+                  cards: [{ key: "total", label: "إجمالي الشكاوى", value: 1240, format: "number" }],
+                },
+              ],
+              warnings: [],
+              rowCount: 0,
+            },
+          }),
+      })
     );
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    render(<ReportsCenter />);
+
+    const card = await screen.findByText("التقرير التنفيذي الشامل");
+    await user.click(card);
+    const previewButton = screen.getByRole("button", { name: /معاينة/ });
+    await user.click(previewButton);
+
+    await waitFor(() => expect(screen.getByText("إجمالي الشكاوى")).toBeInTheDocument());
   });
 
-  it("throws TypeError when the complaints response has no data array", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ total: 1 })));
+  it("shows an empty state on the Templates tab when none exist", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", routedFetch());
+    render(<ReportsCenter />);
 
-    await expect(fetchAllComplaintsForReport(new URLSearchParams())).rejects.toThrow(TypeError);
-    await expect(fetchAllComplaintsForReport(new URLSearchParams())).rejects.toThrow(
-      "Invalid report complaints response"
-    );
+    const templatesTab = await screen.findByRole("tab", { name: /القوالب/ });
+    await user.click(templatesTab);
+
+    expect(await screen.findByText("لا توجد قوالب محفوظة بعد")).toBeInTheDocument();
   });
 
-  it("throws TypeError when the complaints response data is not an array", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ data: { id: "cmp-1" } })));
+  it("shows an empty state on the Run History tab when none exist", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", routedFetch());
+    render(<ReportsCenter />);
 
-    await expect(fetchAllComplaintsForReport(new URLSearchParams())).rejects.toThrow(TypeError);
-  });
+    const historyTab = await screen.findByRole("tab", { name: /سجل التشغيلات/ });
+    await user.click(historyTab);
 
-  it("loads multiple pages when only total metadata is available", async () => {
-    const records = Array.from({ length: 101 }, (_, index) => complaint(`cmp-${index + 1}`));
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = new URL(String(input), "http://localhost");
-      const page = Number(url.searchParams.get("page"));
-      const pageSize = Number(url.searchParams.get("pageSize"));
-      const start = (page - 1) * pageSize;
-
-      return Response.json({
-        data: records.slice(start, start + pageSize),
-        total: records.length,
-        pageSize,
-      });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(fetchAllComplaintsForReport(new URLSearchParams())).resolves.toHaveLength(101);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
-
-  it("continues without pagination metadata until an empty page terminates loading", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = new URL(String(input), "http://localhost");
-      const page = Number(url.searchParams.get("page"));
-
-      return Response.json({
-        data: page === 1 ? [complaint("cmp-1")] : [],
-      });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(fetchAllComplaintsForReport(new URLSearchParams())).resolves.toEqual([
-      complaint("cmp-1"),
-    ]);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
-
-  it("throws RangeError when report pagination exceeds the hard page limit", () => {
-    expect(() => assertReportPaginationWithinLimit(10_000)).not.toThrow();
-    expect(() => assertReportPaginationWithinLimit(10_001)).toThrow(RangeError);
-  });
-
-  it("stops before requesting another page when aborted", async () => {
-    const controller = new AbortController();
-    const fetchMock = vi.fn(async () => {
-      controller.abort();
-      return Response.json({
-        data: [complaint("cmp-1")],
-        total: 250,
-        page: 1,
-        pageSize: 100,
-        totalPages: 3,
-      });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-
-    await expect(fetchAllComplaintsForReport(new URLSearchParams(), controller.signal)).rejects.toThrow(
-      "Report complaints request was aborted"
-    );
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText("لا توجد تشغيلات بعد")).toBeInTheDocument();
   });
 });

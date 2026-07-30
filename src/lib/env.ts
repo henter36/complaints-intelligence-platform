@@ -13,6 +13,11 @@ const envSchema = z.object({
   IMPORT_MAX_SHEETS: z.coerce.number().int().positive().optional(),
   IMPORT_STORAGE_PATH: z.string().min(1).optional(),
   IMPORT_RETENTION_DAYS: z.coerce.number().int().positive().optional(),
+  REPORT_STORAGE_PATH: z.string().min(1).optional(),
+  REPORT_RETENTION_DAYS: z.coerce.number().int().positive().optional(),
+  REPORT_MAX_ROWS: z.coerce.number().int().positive().optional(),
+  REPORT_MAX_FILE_SIZE_MB: z.coerce.number().positive().optional(),
+  INTERNAL_SCHEDULER_SECRET: z.string().min(1).optional(),
   NEXTAUTH_URL: z.string().url().optional(),
   OPENAI_API_KEY: z.string().min(1).optional(),
 });
@@ -36,6 +41,9 @@ if (isProductionRuntime) {
   if (!parsed.data.AUTH_SECRET || parsed.data.AUTH_SECRET.length < 32) {
     throw new Error("AUTH_SECRET must be at least 32 characters in production.");
   }
+  if (!parsed.data.INTERNAL_SCHEDULER_SECRET || parsed.data.INTERNAL_SCHEDULER_SECRET.length < 32) {
+    throw new Error("INTERNAL_SCHEDULER_SECRET must be at least 32 characters in production.");
+  }
 }
 
 export const env = {
@@ -51,6 +59,11 @@ export const env = {
   importMaxSheets: parsed.data.IMPORT_MAX_SHEETS ?? 5,
   importStoragePath: parsed.data.IMPORT_STORAGE_PATH ?? "./storage/imports",
   importRetentionDays: parsed.data.IMPORT_RETENTION_DAYS ?? 30,
+  reportStoragePath: parsed.data.REPORT_STORAGE_PATH ?? "./storage/reports",
+  reportRetentionDays: parsed.data.REPORT_RETENTION_DAYS ?? 90,
+  reportMaxRows: parsed.data.REPORT_MAX_ROWS ?? 10_000,
+  reportMaxFileSizeMb: parsed.data.REPORT_MAX_FILE_SIZE_MB ?? 25,
+  internalSchedulerSecret: parsed.data.INTERNAL_SCHEDULER_SECRET,
   nextAuthUrl: parsed.data.NEXTAUTH_URL,
   openAiApiKey: parsed.data.OPENAI_API_KEY,
 };

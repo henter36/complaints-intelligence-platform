@@ -24,9 +24,9 @@ Apply validated import batches transactionally, record every change, support rol
 
 Harden search, filters, KPI definitions, SLA calculations, quality metrics, pagination, sorting, and export-ready query contracts.
 
-## 7. Reports and Scheduling
+## 7. Reports and Scheduling - Completed
 
-Implement governed report templates, PDF/Excel generation, scheduled delivery, and recipient/audit controls.
+Implemented six governed report types (executive summary, department performance, region/facility performance, classification analysis, complaint detail, overdue complaints) backed by a central report engine that reuses `ComplaintKpiService`/`ComplaintQueryService` for parity with the Dashboard/Analytics/Explorer. Added preview, PDF export (pdfkit + Amiri Arabic font, RTL, page numbers), XLSX export (exceljs, formula-injection safe, no macros/external links), saved report templates, internal daily/weekly/monthly scheduling (Asia/Riyadh, idempotent, secret-protected `run-due` endpoint), artifact storage/download, and a 90-day retention cleanup script. See `docs/phase-7-reporting-design.md` and `docs/phase-7-completion-report.md`.
 
 ## 8. Governed AI
 

@@ -472,7 +472,7 @@ describe("Seed data", () => {
     await expect(prisma.reportTemplate.count()).resolves.toBe(1);
     await expect(prisma.reportTemplate.findFirstOrThrow()).resolves.toMatchObject({
       name: "ملخص الشكاوى الشهري التجريبي",
-      type: "monthly-summary",
+      reportType: "EXECUTIVE_SUMMARY",
       createdBy: "single-admin",
     });
   });

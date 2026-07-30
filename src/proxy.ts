@@ -19,8 +19,15 @@ const PUBLIC_PATH_PREFIXES = [
 
 const PUBLIC_API_PATHS = new Set(["/api", "/api/auth/login", "/api/auth/logout"]);
 
+// The internal scheduler endpoint is intentionally not session-cookie based —
+// it authenticates every request itself via a constant-time-compared
+// INTERNAL_SCHEDULER_SECRET header, so a local cron job never needs an
+// interactive admin session. Let it through here; it is not otherwise public.
+const PUBLIC_API_PREFIXES = ["/api/internal/"];
+
 function isPublicPath(pathname: string): boolean {
   if (PUBLIC_API_PATHS.has(pathname)) return true;
+  if (PUBLIC_API_PREFIXES.some((prefix) => pathname.startsWith(prefix))) return true;
   return PUBLIC_PATH_PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));
 }
 
