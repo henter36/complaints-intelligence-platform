@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PageHeader } from "@/components/shared/page-header";
 import {
   Card, CardContent, CardHeader, CardTitle, CardDescription,
@@ -169,6 +169,12 @@ const PRIORITY_LABELS_AR: Record<string, string> = {
 const RUN_STATUS_LABELS: Record<string, string> = {
   PENDING: "قيد الانتظار", RUNNING: "قيد التنفيذ", COMPLETED: "مكتمل", FAILED: "فشل",
 };
+
+function runStatusBadgeVariant(status: ReportRunRow["status"]): "secondary" | "destructive" | "outline" {
+  if (status === "COMPLETED") return "secondary";
+  if (status === "FAILED") return "destructive";
+  return "outline";
+}
 const FREQUENCY_LABELS: Record<string, string> = { DAILY: "يومي", WEEKLY: "أسبوعي", MONTHLY: "شهري" };
 const WEEKDAY_LABELS = ["الأحد", "الاثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
 
@@ -180,25 +186,38 @@ function formatKpiValue(card: ReportKpiCard): string {
   return `${formatNumber(card.value)}${KPI_FORMAT_SUFFIX[card.format]}`;
 }
 
+function toDisplayText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value instanceof Date) return value.toISOString();
+  return JSON.stringify(value);
+}
+
 function formatCell(value: unknown, format?: ReportTableColumn["format"]): string {
   if (value === null || value === undefined || value === "") return "—";
-  if (format === "percent") return `${value}%`;
+  if (format === "percent") return `${toDisplayText(value)}%`;
   if (format === "date") {
-    const date = new Date(String(value));
+    const date = new Date(toDisplayText(value));
     return Number.isNaN(date.getTime()) ? "—" : formatDate(date);
   }
   if (typeof value === "boolean") return value ? "نعم" : "لا";
   if (format === "number" && typeof value === "number") return formatNumber(value);
-  return String(value);
+  return toDisplayText(value);
+}
+
+function toLocalDateString(d: Date): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function defaultFilters(): FiltersForm {
   const to = new Date();
   const from = new Date();
   from.setDate(from.getDate() - 30);
-  const iso = (d: Date) => d.toISOString().slice(0, 10);
   return {
-    from: iso(from), to: iso(to), region: "all", department: "all", facility: "all",
+    from: toLocalDateString(from), to: toLocalDateString(to), region: "all", department: "all", facility: "all",
     classificationId: "all", priority: "all", severity: "all", channel: "all", status: "all",
   };
 }
@@ -243,6 +262,7 @@ export function ReportsCenter() {
   const [previewing, setPreviewing] = useState(false);
   const [previewData, setPreviewData] = useState<ReportData | null>(null);
   const [exportingFormat, setExportingFormat] = useState<"PDF" | "XLSX" | null>(null);
+  const previewRequestRef = useRef(0);
 
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
   const [templateName, setTemplateName] = useState("");
@@ -269,20 +289,35 @@ export function ReportsCenter() {
   const loadTemplates = useCallback(async () => {
     const res = await fetch("/api/reports/templates?includeInactive=true");
     const body = await parseJsonSafe(res);
+    if (!res.ok) {
+      toast({ title: "خطأ", description: errorMessageFrom(body, "تعذر جلب القوالب"), variant: "destructive" });
+      setTemplates([]);
+      return;
+    }
     setTemplates(body.templates ?? []);
-  }, []);
+  }, [toast]);
 
   const loadSchedules = useCallback(async () => {
     const res = await fetch("/api/reports/schedules");
     const body = await parseJsonSafe(res);
+    if (!res.ok) {
+      toast({ title: "خطأ", description: errorMessageFrom(body, "تعذر جلب الجداول"), variant: "destructive" });
+      setSchedules([]);
+      return;
+    }
     setSchedules(body.schedules ?? []);
-  }, []);
+  }, [toast]);
 
   const loadRuns = useCallback(async () => {
     const res = await fetch("/api/reports/runs");
     const body = await parseJsonSafe(res);
+    if (!res.ok) {
+      toast({ title: "خطأ", description: errorMessageFrom(body, "تعذر جلب سجل التشغيلات"), variant: "destructive" });
+      setRuns([]);
+      return;
+    }
     setRuns(body.runs ?? []);
-  }, []);
+  }, [toast]);
 
   useEffect(() => {
     const run = async () => {
@@ -308,6 +343,7 @@ export function ReportsCenter() {
 
   const handlePreview = async () => {
     if (!selectedType) return;
+    const requestId = ++previewRequestRef.current;
     setPreviewing(true);
     setPreviewData(null);
     try {
@@ -317,17 +353,22 @@ export function ReportsCenter() {
         body: JSON.stringify(buildRequestBody()),
       });
       const body = await parseJsonSafe(res);
+      if (previewRequestRef.current !== requestId) return; // a newer preview request superseded this one
       if (!res.ok) throw new Error(errorMessageFrom(body, "فشل في معاينة التقرير"));
       setPreviewData(body.report);
     } catch (error) {
+      if (previewRequestRef.current !== requestId) return;
       toast({ title: "خطأ", description: error instanceof Error ? error.message : "فشل في المعاينة", variant: "destructive" });
     } finally {
-      setPreviewing(false);
+      if (previewRequestRef.current === requestId) setPreviewing(false);
     }
   };
 
   const downloadArtifact = (artifactId: string) => {
-    window.open(`/api/reports/artifacts/${artifactId}/download`, "_blank");
+    // Same-tab navigation to an `attachment` response triggers a download
+    // without leaving the page, and (unlike window.open) is never blocked by
+    // popup blockers even when called after an awaited fetch.
+    window.location.href = `/api/reports/artifacts/${artifactId}/download`;
   };
 
   const handleExport = async (format: "PDF" | "XLSX") => {
@@ -342,7 +383,8 @@ export function ReportsCenter() {
       const body = await parseJsonSafe(res);
       if (!res.ok) throw new Error(errorMessageFrom(body, "فشل في تصدير التقرير"));
       const artifact = body.run?.artifacts?.[0];
-      if (artifact) downloadArtifact(artifact.id);
+      if (!artifact) throw new Error("لم يتم إنشاء ملف التصدير");
+      downloadArtifact(artifact.id);
       toast({ title: "تم التصدير", description: `تم إنشاء ملف ${format} بنجاح` });
     } catch (error) {
       toast({ title: "خطأ", description: error instanceof Error ? error.message : "فشل في التصدير", variant: "destructive" });
@@ -660,7 +702,10 @@ export function ReportsCenter() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {templates.map((tpl) => (
+                    {templates.map((tpl) => {
+                      const hasActiveSchedule = tpl.schedules.some((s) => s.isEnabled);
+                      const activeScheduleCount = tpl.schedules.filter((s) => s.isEnabled).length;
+                      return (
                       <TableRow key={tpl.id}>
                         <TableCell className="font-medium">{tpl.name}</TableCell>
                         <TableCell>{definitions?.find((d) => d.type === tpl.reportType)?.title ?? tpl.reportType}</TableCell>
@@ -669,9 +714,7 @@ export function ReportsCenter() {
                           <Badge variant={tpl.isActive ? "secondary" : "outline"}>{tpl.isActive ? "مفعّل" : "معطّل"}</Badge>
                         </TableCell>
                         <TableCell className="text-sm text-muted-foreground">
-                          {tpl.schedules.filter((s) => s.isEnabled).length > 0
-                            ? `${tpl.schedules.filter((s) => s.isEnabled).length} جدولة نشطة`
-                            : "بدون جدولة"}
+                          {hasActiveSchedule ? `${activeScheduleCount} جدولة نشطة` : "بدون جدولة"}
                         </TableCell>
                         <TableCell>
                           <div className="flex items-center gap-1.5 justify-end">
@@ -689,7 +732,8 @@ export function ReportsCenter() {
                           </div>
                         </TableCell>
                       </TableRow>
-                    ))}
+                      );
+                    })}
                   </TableBody>
                 </Table>
               )}
@@ -781,7 +825,7 @@ export function ReportsCenter() {
                           {run.reportTemplate && <div className="text-xs text-muted-foreground">قالب: {run.reportTemplate.name}</div>}
                         </TableCell>
                         <TableCell>
-                          <Badge variant={run.status === "COMPLETED" ? "secondary" : run.status === "FAILED" ? "destructive" : "outline"}>
+                          <Badge variant={runStatusBadgeVariant(run.status)}>
                             {RUN_STATUS_LABELS[run.status]}
                           </Badge>
                         </TableCell>
@@ -856,7 +900,7 @@ export function ReportsCenter() {
                 <Select value={scheduleDayOfWeek} onValueChange={setScheduleDayOfWeek}>
                   <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    {WEEKDAY_LABELS.map((label, idx) => <SelectItem key={idx} value={String(idx)}>{label}</SelectItem>)}
+                    {WEEKDAY_LABELS.map((label, idx) => <SelectItem key={label} value={String(idx)}>{label}</SelectItem>)}
                   </SelectContent>
                 </Select>
               </div>
@@ -881,7 +925,7 @@ export function ReportsCenter() {
   );
 }
 
-function EmptyState({ icon: Icon, text }: { icon: typeof FileText; text: string }) {
+function EmptyState({ icon: Icon, text }: Readonly<{ icon: typeof FileText; text: string }>) {
   return (
     <div className="flex flex-col items-center justify-center py-12 text-center">
       <div className="flex h-14 w-14 items-center justify-center rounded-full bg-muted mb-3">
@@ -896,7 +940,7 @@ function EmptyState({ icon: Icon, text }: { icon: typeof FileText; text: string 
 // Preview
 // =========================================================================
 
-function ReportPreview({ data }: { data: ReportData }) {
+function ReportPreview({ data }: Readonly<{ data: ReportData }>) {
   return (
     <Card id="report-preview">
       <CardHeader className="border-b bg-muted/30">
@@ -908,8 +952,8 @@ function ReportPreview({ data }: { data: ReportData }) {
       <CardContent className="p-6 space-y-6">
         {data.warnings.length > 0 && (
           <div className="rounded-lg border border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30 p-3 space-y-1">
-            {data.warnings.map((w, i) => (
-              <div key={i} className="flex items-start gap-2 text-xs text-amber-800 dark:text-amber-300">
+            {data.warnings.map((w) => (
+              <div key={w} className="flex items-start gap-2 text-xs text-amber-800 dark:text-amber-300">
                 <AlertTriangle className="h-3.5 w-3.5 shrink-0 mt-0.5" />{w}
               </div>
             ))}
@@ -938,8 +982,8 @@ function ReportPreview({ data }: { data: ReportData }) {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {section.table.rows.map((row, idx) => (
-                      <TableRow key={idx}>
+                    {section.table.rows.map((row) => (
+                      <TableRow key={section.table.columns.map((col) => toDisplayText(row[col.key])).join("|")}>
                         {section.table.columns.map((col) => (
                           <TableCell key={col.key} className="text-sm">{formatCell(row[col.key], col.format)}</TableCell>
                         ))}

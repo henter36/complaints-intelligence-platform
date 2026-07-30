@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReportsCenter } from "./reports-center";
@@ -18,7 +18,7 @@ const DEFINITIONS = [
 const FILTERS_DATA = { regions: [], departments: [], facilities: [], classifications: [], channels: [] };
 
 function routedFetch(overrides: Record<string, () => Response> = {}) {
-  return vi.fn((input: RequestInfo | URL) => {
+  return vi.fn((input: RequestInfo | URL, _init?: RequestInit) => {
     const url = String(input);
     const overrideKey = Object.keys(overrides).find((key) => url.includes(key));
     if (overrideKey) return Promise.resolve(overrides[overrideKey]());
@@ -58,31 +58,29 @@ describe("ReportsCenter", () => {
     expect(screen.getByRole("button", { name: /تصدير XLSX/ })).toBeInTheDocument();
   });
 
-  it("shows a report preview after clicking Preview", async () => {
+  it("shows a report preview after clicking Preview, using a correctly-shaped POST request", async () => {
     const user = userEvent.setup();
-    vi.stubGlobal(
-      "fetch",
-      routedFetch({
-        "/api/reports/preview": () =>
-          jsonResponse({
-            report: {
-              type: "EXECUTIVE_SUMMARY",
-              title: "التقرير التنفيذي الشامل",
-              generatedAt: new Date().toISOString(),
-              period: { from: "2026-07-01", to: "2026-07-31" },
-              filters: { from: "2026-07-01", to: "2026-07-31" },
-              sections: [
-                {
-                  id: "kpi_overview", kind: "kpi", title: "المؤشرات الرئيسية",
-                  cards: [{ key: "total", label: "إجمالي الشكاوى", value: 1240, format: "number" }],
-                },
-              ],
-              warnings: [],
-              rowCount: 0,
-            },
-          }),
-      })
-    );
+    const fetchMock = routedFetch({
+      "/api/reports/preview": () =>
+        jsonResponse({
+          report: {
+            type: "EXECUTIVE_SUMMARY",
+            title: "التقرير التنفيذي الشامل",
+            generatedAt: new Date().toISOString(),
+            period: { from: "2026-07-01", to: "2026-07-31" },
+            filters: { from: "2026-07-01", to: "2026-07-31" },
+            sections: [
+              {
+                id: "kpi_overview", kind: "kpi", title: "المؤشرات الرئيسية",
+                cards: [{ key: "total", label: "إجمالي الشكاوى", value: 1240, format: "number" }],
+              },
+            ],
+            warnings: [],
+            rowCount: 0,
+          },
+        }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
     render(<ReportsCenter />);
 
     const card = await screen.findByText("التقرير التنفيذي الشامل");
@@ -90,7 +88,19 @@ describe("ReportsCenter", () => {
     const previewButton = screen.getByRole("button", { name: /معاينة/ });
     await user.click(previewButton);
 
-    await waitFor(() => expect(screen.getByText("إجمالي الشكاوى")).toBeInTheDocument());
+    expect(await screen.findByText("إجمالي الشكاوى")).toBeInTheDocument();
+
+    const previewCall = fetchMock.mock.calls.find(([input]) => String(input).includes("/api/reports/preview"));
+    expect(previewCall).toBeDefined();
+    const [, init] = previewCall!;
+    expect(init?.method).toBe("POST");
+    expect((init?.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
+    const requestBody = JSON.parse(init?.body as string);
+    expect(requestBody).toMatchObject({
+      type: "EXECUTIVE_SUMMARY",
+      filters: expect.objectContaining({ from: expect.any(String), to: expect.any(String) }),
+      options: expect.any(Object),
+    });
   });
 
   it("shows an empty state on the Templates tab when none exist", async () => {

@@ -9,7 +9,7 @@ import {
 import { isReportRunError, runReport } from "@/server/reports/report-export-service";
 
 const runRequestSchema = z.object({
-  formats: z.array(z.nativeEnum(ReportFormat)).min(1).max(2),
+  formats: z.array(z.enum(ReportFormat)).min(1).max(2),
 });
 
 export async function POST(req: NextRequest) {

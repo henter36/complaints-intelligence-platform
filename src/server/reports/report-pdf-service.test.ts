@@ -62,7 +62,7 @@ describe("PDF report rendering", () => {
   it("embeds the document title in the PDF Info dictionary", async () => {
     const { buffer } = await renderReportPdf(baseReport());
     const text = buffer.toString("latin1");
-    expect(text.includes("/Title")).toBe(true);
+    expect(text).toContain("/Title");
   });
 
   it("spans multiple pages when the table has many rows", async () => {

@@ -44,7 +44,7 @@ describe("reports:cleanup — 90-day retention policy", () => {
     await runReportsCleanup({ dryRun: false }, NOW);
 
     const whereClause = dbMocks.findMany.mock.calls[0][0].where;
-    expect(whereClause.deletedAt).toBe(null);
+    expect(whereClause.deletedAt).toBeNull();
     expect(whereClause.expiresAt.lt).toEqual(NOW);
   });
 

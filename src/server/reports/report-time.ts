@@ -39,7 +39,10 @@ function formatPartsMap(date: Date, timeZone: string): Record<string, string> {
   return map;
 }
 
-/** Timezone offset in minutes (UTC - local) for the zone at the given instant. Computed live, never hardcoded, so it stays correct for zones that observe DST. */
+/** Timezone offset in minutes (local wall-clock time minus UTC) for the zone
+ * at the given instant — positive for zones ahead of UTC (e.g. +180 for
+ * Asia/Riyadh). Computed live, never hardcoded, so it stays correct for
+ * zones that observe DST. */
 export function getTimeZoneOffsetMinutes(date: Date, timeZone: string): number {
   const parts = formatPartsMap(date, timeZone);
   const asUtc = Date.UTC(
@@ -67,7 +70,13 @@ export function getZonedDateParts(date: Date, timeZone: string): ZonedParts {
   };
 }
 
-/** Converts a wall-clock date/time in the given IANA timezone to the correct UTC instant. */
+/** Converts a wall-clock date/time in the given IANA timezone to the correct
+ * UTC instant. Takes a single pass: computes the offset at a first guess and
+ * applies it once, which is exact for Asia/Riyadh (this module's only
+ * consumer — a fixed +03:00 offset with no DST) but can be off by the DST
+ * delta for a wall-clock time that falls within a DST transition in a zone
+ * that observes it. Re-verify this function before reusing it for another
+ * timezone. */
 export function zonedWallTimeToUtc(
   parts: { year: number; month: number; day: number; hour: number; minute: number; second?: number },
   timeZone: string

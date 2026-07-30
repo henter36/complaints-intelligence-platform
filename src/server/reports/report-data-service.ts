@@ -233,25 +233,25 @@ async function buildExecutiveSummary(request: ReportRequest, mode: "preview" | "
     });
   }
 
-  sections.push({
+  const topRegionsSection: ReportSection = {
     id: "top_regions",
     kind: "table",
     title: "أعلى المناطق",
     table: groupTable("top_regions", "أعلى المناطق", topGroups(result.distributions.byRegion)),
-  });
-  sections.push({
+  };
+  const topDepartmentsSection: ReportSection = {
     id: "top_departments",
     kind: "table",
     title: "أعلى الإدارات",
     table: groupTable("top_departments", "أعلى الإدارات", topGroups(result.distributions.byDepartment)),
-  });
-  sections.push({
+  };
+  const topClassificationsSection: ReportSection = {
     id: "top_classifications",
     kind: "table",
     title: "أعلى التصنيفات",
     table: groupTable("top_classifications", "أعلى التصنيفات", topGroups(result.distributions.byClassification)),
-  });
-  sections.push({
+  };
+  const channelDistributionSection: ReportSection = {
     id: "channel_distribution",
     kind: "table",
     title: "توزيع القنوات",
@@ -266,7 +266,8 @@ async function buildExecutiveSummary(request: ReportRequest, mode: "preview" | "
       truncated: false,
       totalMatched: result.distributions.byChannel.length,
     },
-  });
+  };
+  sections.push(topRegionsSection, topDepartmentsSection, topClassificationsSection, channelDistributionSection);
 
   if (options.includeDetailedRows) {
     const overdueLimit = Math.min(options.maxRows ?? 50, 50);
@@ -293,11 +294,10 @@ async function buildExecutiveSummary(request: ReportRequest, mode: "preview" | "
 async function buildGroupPerformanceReport(
   request: ReportRequest,
   now: Date,
+  result: Awaited<ReturnType<typeof getComplaintKpis>>,
   groups: { id: string; title: string; groups: ComplaintGroupMetrics[] }[]
 ): Promise<ReportData> {
   const { filters } = request;
-  const params = buildComplaintQueryParams(filters);
-  const result = await getComplaintKpis(params, now);
 
   const sections: ReportSection[] = [
     {
@@ -478,7 +478,7 @@ async function buildOverdueComplaintsReport(
   const warnings: string[] = [];
 
   const limit = options.maxRows ?? definition.maxRows;
-  const table = await fetchOverdueTable(filters, mode === "run" ? limit : limit, mode);
+  const table = await fetchOverdueTable(filters, limit, mode);
 
   if (mode === "run" && table.totalMatched > definition.maxRows) {
     throw new ReportRowLimitExceededError(table.totalMatched, definition.maxRows);
@@ -528,14 +528,14 @@ export async function buildReportData(
     case ReportType.DEPARTMENT_PERFORMANCE: {
       const params = buildComplaintQueryParams(request.filters);
       const result = await getComplaintKpis(params, now);
-      return buildGroupPerformanceReport(request, now, [
+      return buildGroupPerformanceReport(request, now, result, [
         { id: "group_breakdown", title: "أداء الإدارات", groups: result.distributions.byDepartment },
       ]);
     }
     case ReportType.REGION_FACILITY_PERFORMANCE: {
       const params = buildComplaintQueryParams(request.filters);
       const result = await getComplaintKpis(params, now);
-      return buildGroupPerformanceReport(request, now, [
+      return buildGroupPerformanceReport(request, now, result, [
         { id: "group_breakdown_region", title: "أداء المناطق", groups: result.distributions.byRegion },
         { id: "group_breakdown_facility", title: "أداء المواقع", groups: result.distributions.byFacility },
       ]);

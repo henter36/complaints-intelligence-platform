@@ -11,7 +11,7 @@ type RouteContext = {
 };
 
 const runTemplateSchema = z.object({
-  formats: z.array(z.nativeEnum(ReportFormat)).min(1).max(2).optional(),
+  formats: z.array(z.enum(ReportFormat)).min(1).max(2).optional(),
 });
 
 export async function POST(req: NextRequest, context: RouteContext) {

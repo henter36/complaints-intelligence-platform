@@ -118,6 +118,7 @@ export async function runReport(input: RunReportInput, now: Date = new Date()): 
   });
 
   const storedKeys: string[] = [];
+  const createdArtifactIds: string[] = [];
 
   try {
     const data = await buildReportData(request, "run", now);
@@ -146,6 +147,7 @@ export async function runReport(input: RunReportInput, now: Date = new Date()): 
         },
         select: { id: true, format: true, fileName: true, fileSize: true, sha256: true },
       });
+      createdArtifactIds.push(artifact.id);
       artifacts.push(artifact);
     }
 
@@ -162,25 +164,33 @@ export async function runReport(input: RunReportInput, now: Date = new Date()): 
       },
     });
 
-    if (reportTemplateId) {
-      await db.reportTemplate.update({
-        where: { id: reportTemplateId },
-        data: { lastRunAt: new Date() },
-      });
-    }
+    // The run is now durably COMPLETED with valid artifacts. The two steps
+    // below are best-effort housekeeping — their failure must not roll back
+    // the run or delete artifacts that were already successfully created,
+    // so they get their own try/catch instead of falling into the outer one.
+    try {
+      if (reportTemplateId) {
+        await db.reportTemplate.update({
+          where: { id: reportTemplateId },
+          data: { lastRunAt: new Date() },
+        });
+      }
 
-    await writeAuditLog(db, {
-      action: "REPORT_RUN_COMPLETED",
-      entityType: "ReportRun",
-      entityId: run.id,
-      actor: requestedBy,
-      metadata: {
-        reportType: request.type,
-        templateId: reportTemplateId,
-        formats,
-        rowCount: data.rowCount,
-      },
-    });
+      await writeAuditLog(db, {
+        action: "REPORT_RUN_COMPLETED",
+        entityType: "ReportRun",
+        entityId: run.id,
+        actor: requestedBy,
+        metadata: {
+          reportType: request.type,
+          templateId: reportTemplateId,
+          formats,
+          rowCount: data.rowCount,
+        },
+      });
+    } catch (postCompletionError) {
+      console.error("Report run completed but post-completion housekeeping failed:", postCompletionError);
+    }
 
     return {
       runId: run.id,
@@ -192,6 +202,9 @@ export async function runReport(input: RunReportInput, now: Date = new Date()): 
   } catch (error) {
     for (const key of storedKeys) {
       await deleteReportArtifact(key);
+    }
+    if (createdArtifactIds.length > 0) {
+      await db.reportArtifact.deleteMany({ where: { id: { in: createdArtifactIds } } });
     }
 
     const { errorCode, errorMessage, status } = describeRunFailure(error);

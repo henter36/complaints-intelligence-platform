@@ -27,7 +27,7 @@ const TIME_OF_DAY_PATTERN = /^([01]\d|2[0-3]):([0-5]\d)$/;
 export const scheduleInputSchema = z
   .object({
     reportTemplateId: z.string().trim().min(1),
-    frequency: z.nativeEnum(ReportFrequency),
+    frequency: z.enum(ReportFrequency),
     timeOfDay: z.string().regex(TIME_OF_DAY_PATTERN, "صيغة الوقت يجب أن تكون HH:MM"),
     dayOfWeek: z.number().int().min(0).max(6).optional(),
     dayOfMonth: z.number().int().min(1).max(31).optional(),
@@ -45,7 +45,7 @@ export const scheduleInputSchema = z
 
 export const scheduleUpdateSchema = z
   .object({
-    frequency: z.nativeEnum(ReportFrequency).optional(),
+    frequency: z.enum(ReportFrequency).optional(),
     timeOfDay: z.string().regex(TIME_OF_DAY_PATTERN).optional(),
     dayOfWeek: z.number().int().min(0).max(6).optional(),
     dayOfMonth: z.number().int().min(1).max(31).optional(),

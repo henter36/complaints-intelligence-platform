@@ -179,6 +179,18 @@ const isoDateOnly = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}$/, "صيغة التاريخ يجب أن تكون YYYY-MM-DD");
 
+/** `new Date("2026-02-30")` silently rolls over to March 2 instead of
+ * failing, so a regex-valid but calendar-invalid date must be caught
+ * separately by comparing the parsed UTC components back to the input. */
+function isCalendarValidIsoDate(input: string, parsed: Date): boolean {
+  const [year, month, day] = input.split("-").map(Number);
+  return (
+    parsed.getUTCFullYear() === year
+    && parsed.getUTCMonth() + 1 === month
+    && parsed.getUTCDate() === day
+  );
+}
+
 export const reportFiltersSchema = z
   .object({
     from: isoDateOnly,
@@ -199,7 +211,10 @@ export const reportFiltersSchema = z
   .superRefine((value, ctx) => {
     const from = new Date(value.from);
     const to = new Date(value.to);
-    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+    if (
+      Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())
+      || !isCalendarValidIsoDate(value.from, from) || !isCalendarValidIsoDate(value.to, to)
+    ) {
       ctx.addIssue({ code: "custom", message: "تاريخ غير صالح" });
       return;
     }
@@ -231,7 +246,7 @@ const DEFAULT_REPORT_OPTIONS = reportOptionsSchema.parse({});
 
 export const reportRequestSchema = z
   .object({
-    type: z.nativeEnum(ReportType, { error: () => "نوع التقرير غير معروف" }),
+    type: z.enum(ReportType, { error: () => "نوع التقرير غير معروف" }),
     title: z
       .string()
       .trim()

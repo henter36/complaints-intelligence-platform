@@ -6,7 +6,10 @@ export async function GET(req: NextRequest) {
   try {
     await requireAdminApiSession(req);
     const url = new URL(req.url);
-    const limit = Math.min(Number(url.searchParams.get("limit") ?? 50) || 50, 100);
+    const requestedLimit = Number(url.searchParams.get("limit"));
+    const limit = Number.isFinite(requestedLimit) && requestedLimit > 0
+      ? Math.min(Math.floor(requestedLimit), 100)
+      : 50;
 
     const runs = await db.reportRun.findMany({
       orderBy: { createdAt: "desc" },

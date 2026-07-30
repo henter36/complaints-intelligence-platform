@@ -49,16 +49,25 @@ function formatKpiValue(card: ReportKpiCard): string {
   return `${value}${KPI_FORMAT_SUFFIX[card.format]}`;
 }
 
+/** Renders any value to text, without relying on the default
+ * `[object Object]` stringification of a bare template-literal/String() call. */
+function toDisplayText(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value instanceof Date) return value.toISOString();
+  return JSON.stringify(value);
+}
+
 function formatCellValue(value: unknown, format?: "number" | "percent" | "date" | "text"): string {
   if (value === null || value === undefined || value === "") return "-";
-  if (format === "percent") return `${value}%`;
+  if (format === "percent") return `${toDisplayText(value)}%`;
   if (format === "date") {
-    const date = new Date(String(value));
+    const date = new Date(toDisplayText(value));
     if (Number.isNaN(date.getTime())) return "-";
     return date.toISOString().slice(0, 10);
   }
   if (typeof value === "boolean") return value ? "نعم" : "لا";
-  return String(value);
+  return toDisplayText(value);
 }
 
 export type PdfRenderResult = {
@@ -96,9 +105,6 @@ export async function renderReportPdf(data: ReportData): Promise<PdfRenderResult
 
   renderHeader(doc, data, logo);
   renderFilters(doc, data);
-  if (warnings.length > 0) {
-    renderWarnings(doc, warnings);
-  }
 
   for (const section of data.sections) {
     ensureSpace(doc, 60);
@@ -123,6 +129,12 @@ export async function renderReportPdf(data: ReportData): Promise<PdfRenderResult
       }
     }
     doc.moveDown(0.8);
+  }
+
+  // Rendered last, so it reflects any render-time failures collected while
+  // walking the sections above, not just the warnings the report started with.
+  if (warnings.length > 0) {
+    renderWarnings(doc, warnings);
   }
 
   drawFooters(doc, data.title);

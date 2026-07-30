@@ -2,6 +2,7 @@ import { ReportFormat, type Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { writeAuditLog } from "@/server/audit/audit-log-service";
 import {
+  getReportDefinition,
   parseReportRequest,
   reportFiltersSchema,
   reportOptionsSchema,
@@ -29,26 +30,22 @@ export function isReportTemplateError(error: unknown): error is ReportTemplateEr
   return error instanceof ReportTemplateError;
 }
 
-export const createTemplateSchema = z
-  .object({
-    name: z.string().trim().min(1).max(200),
-    description: z.string().trim().max(500).optional(),
-    reportType: z.nativeEnum(ReportType),
-    filters: reportFiltersSchema,
-    options: reportOptionsSchema.optional(),
-  })
-  .strict();
+export const createTemplateSchema = z.strictObject({
+  name: z.string().trim().min(1).max(200),
+  description: z.string().trim().max(500).optional(),
+  reportType: z.enum(ReportType),
+  filters: reportFiltersSchema,
+  options: reportOptionsSchema.optional(),
+});
 
-export const updateTemplateSchema = z
-  .object({
-    name: z.string().trim().min(1).max(200).optional(),
-    description: z.string().trim().max(500).nullable().optional(),
-    reportType: z.nativeEnum(ReportType).optional(),
-    filters: reportFiltersSchema.optional(),
-    options: reportOptionsSchema.optional(),
-    isActive: z.boolean().optional(),
-  })
-  .strict();
+export const updateTemplateSchema = z.strictObject({
+  name: z.string().trim().min(1).max(200).optional(),
+  description: z.string().trim().max(500).nullable().optional(),
+  reportType: z.enum(ReportType).optional(),
+  filters: reportFiltersSchema.optional(),
+  options: reportOptionsSchema.optional(),
+  isActive: z.boolean().optional(),
+});
 
 export type CreateTemplateInput = z.infer<typeof createTemplateSchema>;
 export type UpdateTemplateInput = z.infer<typeof updateTemplateSchema>;
@@ -204,10 +201,11 @@ export async function runReportTemplate(
     options: template.options as ReportOptions,
   });
 
-  const formats = options?.formats ?? [ReportFormat.PDF, ReportFormat.XLSX].filter((format) => {
-    const supportsPdf = request.type !== ReportType.COMPLAINT_DETAIL;
-    return format === ReportFormat.XLSX || supportsPdf;
-  });
+  const definition = getReportDefinition(request.type);
+  const formats = options?.formats ?? [
+    ...(definition.supportsPdf ? [ReportFormat.PDF] : []),
+    ...(definition.supportsXlsx ? [ReportFormat.XLSX] : []),
+  ];
 
   return runReport(
     {

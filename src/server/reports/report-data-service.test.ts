@@ -190,10 +190,18 @@ describe("report data service — OVERDUE_COMPLAINTS", () => {
     const request = parseReportRequest({ type: "OVERDUE_COMPLAINTS", filters: VALID_FILTERS });
     await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
 
-    // listComplaints -> db.complaint.findMany is called at least once for the
-    // overdue table; we can't inspect the URLSearchParams directly here, but
-    // we can assert the KPI call and detail call both ran without throwing
-    // and that the mocked DB layer was actually exercised.
-    expect(dbMocks.findMany).toHaveBeenCalled();
+    // Among the findMany calls (one for the KPI aggregation, one for the
+    // overdue detail table), at least one must carry the isLate=true where
+    // clause (dueDate < now AND status in the open-status set) that
+    // complaint-query-service.ts's applyBooleanFilters produces for
+    // isLate=true — proving the report actually constrains to late
+    // complaints rather than just calling the DB layer with any filter.
+    const isLateWhereApplied = dbMocks.findMany.mock.calls.some(([args]) => {
+      const andClauses: unknown[] = Array.isArray(args?.where?.AND) ? args.where.AND : [];
+      return andClauses.some(
+        (clause: any) => clause?.dueDate?.lt !== undefined && Array.isArray(clause?.status?.in)
+      );
+    });
+    expect(isLateWhereApplied).toBe(true);
   });
 });

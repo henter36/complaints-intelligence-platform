@@ -6,6 +6,12 @@ if (!secret) {
 
 const baseUrl = process.env.APP_BASE_URL ?? "http://localhost:3000";
 
+/** Strips CR/LF from externally-sourced text before logging, so a crafted
+ * response body cannot forge additional log lines (log injection). */
+function sanitizeForLog(value: unknown): string {
+  return JSON.stringify(value).replace(/[\r\n]/g, " ");
+}
+
 async function main() {
   const response = await fetch(`${baseUrl}/api/internal/reports/run-due`, {
     method: "POST",
@@ -15,11 +21,11 @@ async function main() {
   const body = await response.json().catch(() => null);
 
   if (!response.ok) {
-    console.error(`reports:run-due failed with status ${response.status}:`, body);
+    console.error(`reports:run-due failed with status ${response.status}: ${sanitizeForLog(body)}`);
     process.exit(1);
   }
 
-  console.log("reports:run-due result:", JSON.stringify(body));
+  console.log(`reports:run-due result: ${sanitizeForLog(body)}`);
 }
 
 main().catch((error) => {

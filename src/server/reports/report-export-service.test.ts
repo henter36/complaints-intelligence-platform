@@ -5,6 +5,7 @@ const dbMocks = vi.hoisted(() => ({
   runCreate: vi.fn(),
   runUpdate: vi.fn(),
   artifactCreate: vi.fn(),
+  artifactDeleteMany: vi.fn(),
   templateUpdate: vi.fn(),
   auditLogCreate: vi.fn(),
 }));
@@ -12,7 +13,7 @@ const dbMocks = vi.hoisted(() => ({
 vi.mock("@/lib/db", () => ({
   db: {
     reportRun: { create: dbMocks.runCreate, update: dbMocks.runUpdate },
-    reportArtifact: { create: dbMocks.artifactCreate },
+    reportArtifact: { create: dbMocks.artifactCreate, deleteMany: dbMocks.artifactDeleteMany },
     reportTemplate: { update: dbMocks.templateUpdate },
     auditLog: { create: dbMocks.auditLogCreate },
   },
@@ -108,6 +109,7 @@ describe("runReport orchestration", () => {
     pdfMocks.renderReportPdf.mockResolvedValue({ buffer: Buffer.from("pdf"), warnings: [] });
     storageMocks.storeReportArtifact.mockResolvedValue({ storageKey: "abc.pdf", fileSize: 3, sha256: "hash" });
     dbMocks.artifactCreate.mockResolvedValue({ id: "art_1", format: ReportFormat.PDF, fileName: "x.pdf", fileSize: 3, sha256: "hash" });
+    dbMocks.artifactDeleteMany.mockResolvedValue({ count: 1 });
     xlsxMocks.renderReportXlsx.mockRejectedValue(new Error("internal exceljs boom with a stack trace"));
     dbMocks.runUpdate.mockResolvedValue({ id: "run_2" });
 
@@ -128,8 +130,10 @@ describe("runReport orchestration", () => {
       expect(caught.code).toBe("REPORT_GENERATION_FAILED");
     }
 
-    // The PDF artifact that WAS stored before the XLSX failure must be cleaned up.
+    // The PDF artifact that WAS stored before the XLSX failure must be cleaned up,
+    // both the file on disk and the orphaned ReportArtifact row.
     expect(storageMocks.deleteReportArtifact).toHaveBeenCalledWith("abc.pdf");
+    expect(dbMocks.artifactDeleteMany).toHaveBeenCalledWith({ where: { id: { in: ["art_1"] } } });
 
     const updateCall = dbMocks.runUpdate.mock.calls.find((c) => c[0].data.status === "FAILED");
     expect(updateCall).toBeDefined();

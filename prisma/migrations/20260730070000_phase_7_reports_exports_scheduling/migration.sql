@@ -53,6 +53,12 @@ CREATE TABLE "ReportArtifact" (
 );
 
 -- RedefineTables
+-- Pre-Phase-7 ReportTemplate rows have no reportType/filters/options and
+-- cannot be losslessly migrated into the new schema (those columns are
+-- NOT NULL with no default); delete them before the redefinition below so
+-- this migration succeeds against a database that already has legacy rows,
+-- not only against an empty one.
+DELETE FROM "ReportTemplate";
 PRAGMA defer_foreign_keys=ON;
 PRAGMA foreign_keys=OFF;
 CREATE TABLE "new_ReportTemplate" (

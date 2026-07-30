@@ -36,7 +36,7 @@ export async function GET(req: NextRequest, context: RouteContext) {
       },
     });
 
-    if (!artifact || !artifact.reportRun) {
+    if (!artifact?.reportRun) {
       return notFound();
     }
 

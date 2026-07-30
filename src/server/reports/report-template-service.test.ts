@@ -28,7 +28,7 @@ vi.mock("@/lib/db", () => ({
 describe("resolveTemplateRunFilters", () => {
   it("re-anchors a stored date span to end today, preserving its length", async () => {
     const { resolveTemplateRunFilters } = await import("./report-template-service");
-    const now = new Date("2026-08-15T10:00:00Z"); // 07:00 Riyadh, still Aug 15 local
+    const now = new Date("2026-08-15T10:00:00Z"); // 13:00 Riyadh, still Aug 15 local
     const resolved = resolveTemplateRunFilters({ from: "2026-07-01", to: "2026-07-31" }, now);
     // span was 30 days; anchored to end "today" in Riyadh (2026-08-15)
     expect(resolved.to).toBe("2026-08-15");

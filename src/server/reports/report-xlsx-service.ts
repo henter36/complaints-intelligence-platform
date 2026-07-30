@@ -58,7 +58,7 @@ function applyRtlView(worksheet: ExcelJS.Worksheet): void {
   worksheet.views = [{ rightToLeft: true, state: "frozen", ySplit: 1 }];
 }
 
-function buildSummarySheet(workbook: ExcelJS.Workbook, data: ReportData, warnings: string[]): void {
+function buildSummarySheet(workbook: ExcelJS.Workbook, data: ReportData): ExcelJS.Worksheet {
   const sheet = workbook.addWorksheet("الملخص");
   applyRtlView(sheet);
   sheet.columns = [
@@ -88,12 +88,18 @@ function buildSummarySheet(workbook: ExcelJS.Workbook, data: ReportData, warning
     sheet.addRow({ field: sanitizeText(field), value: sanitizeText(value) });
   }
 
-  if (warnings.length > 0) {
-    sheet.addRow({ field: "", value: "" });
-    sheet.addRow({ field: "تنبيهات", value: "" }).font = { bold: true };
-    for (const warning of warnings) {
-      sheet.addRow({ field: "", value: sanitizeText(warning) });
-    }
+  return sheet;
+}
+
+/** Appended after every table sheet has been built, so failures collected
+ * while building them are reflected here too, not just the warnings the
+ * report started with. */
+function appendWarningsToSummarySheet(sheet: ExcelJS.Worksheet, warnings: string[]): void {
+  if (warnings.length === 0) return;
+  sheet.addRow({ field: "", value: "" });
+  sheet.addRow({ field: "تنبيهات", value: "" }).font = { bold: true };
+  for (const warning of warnings) {
+    sheet.addRow({ field: "", value: sanitizeText(warning) });
   }
 }
 
@@ -128,6 +134,59 @@ function columnNumFmt(format: ReportTable["columns"][number]["format"]): string 
   return undefined;
 }
 
+/** Renders any value to text for display, without relying on the default
+ * `[object Object]` stringification of a bare `String(value)` call. */
+function toDisplayText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (value instanceof Date) return value.toISOString();
+  return JSON.stringify(value);
+}
+
+function parseDateCell(raw: unknown): Date | null {
+  if (!raw) return null;
+  const date = new Date(toDisplayText(raw));
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function parseNumericCell(raw: unknown): number | null {
+  if (typeof raw === "number") return raw;
+  if (raw === null || raw === undefined) return null;
+  const parsed = Number(raw);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+function toCellValue(column: ReportTable["columns"][number], raw: unknown): unknown {
+  if (column.format === "date") return parseDateCell(raw);
+  if (column.format === "number" || column.format === "percent") return parseNumericCell(raw);
+  return sanitizeText(toDisplayText(raw));
+}
+
+function buildTableRowData(table: ReportTable, row: Record<string, unknown>): Record<string, unknown> {
+  const rowData: Record<string, unknown> = {};
+  for (const column of table.columns) {
+    rowData[column.key] = toCellValue(column, row[column.key]);
+  }
+  return rowData;
+}
+
+function applyRowNumberFormats(table: ReportTable, addedRow: ExcelJS.Row): void {
+  for (const column of table.columns) {
+    const numFmt = columnNumFmt(column.format);
+    if (numFmt) addedRow.getCell(column.key).numFmt = numFmt;
+  }
+}
+
+function appendTruncationNote(sheet: ExcelJS.Worksheet, table: ReportTable): void {
+  if (!table.truncated) return;
+  const noteRow = sheet.addRow({});
+  noteRow.getCell(1).value = sanitizeText(
+    `تم عرض ${table.rows.length} من أصل ${table.totalMatched} صفاً وفق الحد الأقصى المسموح.`
+  );
+  noteRow.getCell(1).font = { italic: true, color: { argb: "FFB45309" } };
+}
+
 function buildTableSheet(
   workbook: ExcelJS.Workbook,
   table: ReportTable,
@@ -147,32 +206,11 @@ function buildTableSheet(
   };
 
   for (const row of table.rows) {
-    const rowData: Record<string, unknown> = {};
-    for (const column of table.columns) {
-      const raw = row[column.key];
-      if (column.format === "date") {
-        const date = raw ? new Date(String(raw)) : null;
-        rowData[column.key] = date && !Number.isNaN(date.getTime()) ? date : null;
-      } else if (column.format === "number" || column.format === "percent") {
-        rowData[column.key] = typeof raw === "number" ? raw : raw === null || raw === undefined ? null : Number(raw);
-      } else {
-        rowData[column.key] = raw === null || raw === undefined ? "" : sanitizeText(String(raw));
-      }
-    }
-    const addedRow = sheet.addRow(rowData);
-    for (const column of table.columns) {
-      const numFmt = columnNumFmt(column.format);
-      if (numFmt) addedRow.getCell(column.key).numFmt = numFmt;
-    }
+    const addedRow = sheet.addRow(buildTableRowData(table, row));
+    applyRowNumberFormats(table, addedRow);
   }
 
-  if (table.truncated) {
-    const noteRow = sheet.addRow({});
-    noteRow.getCell(1).value = sanitizeText(
-      `تم عرض ${table.rows.length} من أصل ${table.totalMatched} صفاً وفق الحد الأقصى المسموح.`
-    );
-    noteRow.getCell(1).font = { italic: true, color: { argb: "FFB45309" } };
-  }
+  appendTruncationNote(sheet, table);
 }
 
 export type XlsxRenderResult = {
@@ -187,7 +225,7 @@ export async function renderReportXlsx(data: ReportData): Promise<XlsxRenderResu
   workbook.created = new Date();
   workbook.calcProperties.fullCalcOnLoad = false;
 
-  buildSummarySheet(workbook, data, warnings);
+  const summarySheet = buildSummarySheet(workbook, data);
   buildKpiSheet(workbook, data);
 
   const usedNames = new Set<string>(["الملخص", "المؤشرات"]);
@@ -199,6 +237,8 @@ export async function renderReportXlsx(data: ReportData): Promise<XlsxRenderResu
       warnings.push(`تعذر إنشاء ورقة بيانات لقسم "${section.title}".`);
     }
   }
+
+  appendWarningsToSummarySheet(summarySheet, warnings);
 
   const arrayBuffer = await workbook.xlsx.writeBuffer();
   return { buffer: Buffer.from(arrayBuffer), warnings };
