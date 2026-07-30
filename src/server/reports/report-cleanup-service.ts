@@ -31,7 +31,14 @@ export async function runReportsCleanup(options: { dryRun: boolean }, now: Date 
 
   let removedCount = 0;
   for (const artifact of expired) {
-    await deleteReportArtifact(artifact.storageKey);
+    const deletion = await deleteReportArtifact(artifact.storageKey);
+    if (!deletion.deleted) {
+      // Leave deletedAt unset so this artifact stays in the same
+      // deletedAt:null / expiresAt<now query and is retried on the next run.
+      console.error("Report artifact cleanup: failed to delete file, will retry on next run:", artifact.id, deletion.error);
+      continue;
+    }
+
     await db.reportArtifact.update({ where: { id: artifact.id }, data: { deletedAt: now } });
     await writeAuditLog(db, {
       action: "REPORT_ARTIFACT_DELETED",

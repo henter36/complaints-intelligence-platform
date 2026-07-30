@@ -90,13 +90,26 @@ export async function readReportArtifact(storageKey: string): Promise<Buffer> {
   }
 }
 
-export async function deleteReportArtifact(storageKey: string | null | undefined): Promise<void> {
-  if (!storageKey) return;
+export type ArtifactDeleteResult = { deleted: true } | { deleted: false; reason: "DELETE_FAILED"; error: Error };
+
+function isEnoentError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && "code" in error && (error as { code?: string }).code === "ENOENT";
+}
+
+export async function deleteReportArtifact(storageKey: string | null | undefined): Promise<ArtifactDeleteResult> {
+  if (!storageKey) return { deleted: true };
   try {
     const filePath = resolveSafePath(storageKey);
     await unlink(filePath);
-  } catch {
-    // Best-effort cleanup only; callers should not expose filesystem details
-    // and a missing file must not block the surrounding operation.
+    return { deleted: true };
+  } catch (error) {
+    // A file that is already gone counts as a successful deletion — there is
+    // nothing left to clean up and the caller's row-level tracking can proceed.
+    if (isEnoentError(error)) return { deleted: true };
+    return {
+      deleted: false,
+      reason: "DELETE_FAILED",
+      error: error instanceof Error ? error : new Error("Unknown artifact deletion failure"),
+    };
   }
 }

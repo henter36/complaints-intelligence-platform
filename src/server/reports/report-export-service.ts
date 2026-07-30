@@ -20,7 +20,20 @@ export class ReportRunError extends Error {
   }
 }
 
-type CleanupFailure = { step: "artifact_files" | "artifact_rows"; message: string };
+type CreatedArtifactReference = { id: string; storageKey: string };
+
+type CleanupFailure = {
+  artifactId: string;
+  storageKey: string;
+  step: "artifact_file" | "artifact_row";
+  message: string;
+};
+
+type CleanupResult = {
+  deletedArtifactIds: string[];
+  retainedArtifactIds: string[];
+  failures: CleanupFailure[];
+};
 
 export function isReportRunError(error: unknown): error is ReportRunError {
   return error instanceof ReportRunError;
@@ -120,7 +133,7 @@ export async function runReport(input: RunReportInput, now: Date = new Date()): 
   });
 
   const storedKeys: string[] = [];
-  const createdArtifactIds: string[] = [];
+  const createdArtifacts: CreatedArtifactReference[] = [];
 
   try {
     const data = await buildReportData(request, "run", now);
@@ -149,7 +162,7 @@ export async function runReport(input: RunReportInput, now: Date = new Date()): 
         },
         select: { id: true, format: true, fileName: true, fileSize: true, sha256: true },
       });
-      createdArtifactIds.push(artifact.id);
+      createdArtifacts.push({ id: artifact.id, storageKey: stored.storageKey });
       artifacts.push(artifact);
     }
 
@@ -207,7 +220,13 @@ export async function runReport(input: RunReportInput, now: Date = new Date()): 
     // the run's terminal state has to reflect why the export actually failed.
     const { errorCode, errorMessage, status } = describeRunFailure(error);
 
-    const cleanupFailures = await cleanupFailedRunArtifacts(storedKeys, createdArtifactIds);
+    // A storage key can exist without a linked artifact row only when
+    // storeReportArtifact succeeded but the immediately-following
+    // db.reportArtifact.create() itself threw — there is no row to protect
+    // for that key, so it is cleaned up separately from the row-linked ones.
+    const linkedKeys = new Set(createdArtifacts.map((artifact) => artifact.storageKey));
+    const orphanStorageKeys = storedKeys.filter((key) => !linkedKeys.has(key));
+    const cleanupResult = await cleanupFailedRunArtifacts(createdArtifacts, orphanStorageKeys);
 
     try {
       await db.reportRun.update({
@@ -236,7 +255,14 @@ export async function runReport(input: RunReportInput, now: Date = new Date()): 
         entityType: "ReportRun",
         entityId: run.id,
         actor: requestedBy,
-        metadata: { reportType: request.type, templateId: reportTemplateId, errorCode, cleanupFailures },
+        metadata: {
+          reportType: request.type,
+          templateId: reportTemplateId,
+          errorCode,
+          deletedArtifactIds: cleanupResult.deletedArtifactIds,
+          retainedArtifactIds: cleanupResult.retainedArtifactIds,
+          cleanupFailures: cleanupResult.failures.map(({ artifactId, step, message }) => ({ artifactId, step, message })),
+        },
       });
     } catch (auditError) {
       console.error("Report run marked FAILED but failure audit log could not be written:", run.id, auditError);
@@ -247,38 +273,66 @@ export async function runReport(input: RunReportInput, now: Date = new Date()): 
 }
 
 // Best-effort cleanup of partially-created artifacts. Every step is
-// independently try/caught so a cleanup failure (e.g. deleteMany rejecting)
-// can never prevent the caller from classifying the original error and
-// persisting the run's FAILED state. Failures are returned, never thrown.
+// independently try/caught so a cleanup failure can never prevent the caller
+// from classifying the original error and persisting the run's FAILED state.
+// A ReportArtifact row is only ever deleted once its file has been confirmed
+// deleted (or was already gone) — deleting the row first and letting the file
+// deletion fail silently would leave an orphaned file with no database row,
+// undiscoverable and unretryable by the retention job.
 async function cleanupFailedRunArtifacts(
-  storedKeys: string[],
-  createdArtifactIds: string[]
-): Promise<CleanupFailure[]> {
+  createdArtifacts: CreatedArtifactReference[],
+  orphanStorageKeys: string[]
+): Promise<CleanupResult> {
+  for (const key of orphanStorageKeys) {
+    const deletion = await deleteReportArtifact(key);
+    if (!deletion.deleted) {
+      console.error("Failed to delete an orphaned report artifact file with no database row:", key, deletion.error);
+    }
+  }
+
+  const deletedArtifactIds: string[] = [];
+  const retainedArtifactIds: string[] = [];
   const failures: CleanupFailure[] = [];
 
-  for (const key of storedKeys) {
-    try {
-      await deleteReportArtifact(key);
-    } catch (cleanupError) {
+  for (const artifact of createdArtifacts) {
+    const deletion = await deleteReportArtifact(artifact.storageKey);
+
+    if (!deletion.deleted) {
+      retainedArtifactIds.push(artifact.id);
       failures.push({
-        step: "artifact_files",
-        message: cleanupError instanceof Error ? cleanupError.message : "تعذر حذف ملف المرفق",
+        artifactId: artifact.id,
+        storageKey: artifact.storageKey,
+        step: "artifact_file",
+        message: deletion.error.message,
+      });
+      continue;
+    }
+
+    try {
+      const result = await db.reportArtifact.deleteMany({ where: { id: artifact.id } });
+      if (result.count !== 1) {
+        retainedArtifactIds.push(artifact.id);
+        failures.push({
+          artifactId: artifact.id,
+          storageKey: artifact.storageKey,
+          step: "artifact_row",
+          message: "تعذر حذف سجل المرفق بعد حذف الملف",
+        });
+        continue;
+      }
+      deletedArtifactIds.push(artifact.id);
+    } catch (cleanupError) {
+      retainedArtifactIds.push(artifact.id);
+      failures.push({
+        artifactId: artifact.id,
+        storageKey: artifact.storageKey,
+        step: "artifact_row",
+        message: cleanupError instanceof Error ? cleanupError.message : "تعذر حذف سجل المرفق",
       });
     }
   }
 
-  if (createdArtifactIds.length > 0) {
-    try {
-      await db.reportArtifact.deleteMany({ where: { id: { in: createdArtifactIds } } });
-    } catch (cleanupError) {
-      failures.push({
-        step: "artifact_rows",
-        message: cleanupError instanceof Error ? cleanupError.message : "تعذر حذف سجلات المرفقات",
-      });
-    }
-  }
-
-  return failures;
+  return { deletedArtifactIds, retainedArtifactIds, failures };
 }
 
 function describeRunFailure(error: unknown): { errorCode: string; errorMessage: string; status: number } {

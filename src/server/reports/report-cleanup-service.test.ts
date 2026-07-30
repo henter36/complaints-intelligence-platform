@@ -35,7 +35,7 @@ describe("reports:cleanup — 90-day retention policy", () => {
     dbMocks.findMany.mockReset();
     dbMocks.update.mockReset();
     dbMocks.auditLogCreate.mockReset().mockResolvedValue({ id: "audit_1" });
-    storageMocks.deleteReportArtifact.mockReset().mockResolvedValue(undefined);
+    storageMocks.deleteReportArtifact.mockReset().mockResolvedValue({ deleted: true });
   });
 
   it("only queries artifacts whose expiresAt has already passed (never removes before expiry)", async () => {
@@ -80,14 +80,34 @@ describe("reports:cleanup — 90-day retention policy", () => {
     expect(dbMocks.auditLogCreate).not.toHaveBeenCalled();
   });
 
-  it("handles a missing on-disk file safely (storage layer is best-effort) and still marks it deleted", async () => {
+  it("handles a missing on-disk file safely (ENOENT is folded into deleted:true) and still marks it deleted", async () => {
     dbMocks.findMany.mockResolvedValue([artifact()]);
-    storageMocks.deleteReportArtifact.mockResolvedValue(undefined); // report-storage swallows ENOENT internally
+    storageMocks.deleteReportArtifact.mockResolvedValue({ deleted: true }); // report-storage folds ENOENT into success
     const { runReportsCleanup } = await import("./report-cleanup-service");
     const result = await runReportsCleanup({ dryRun: false }, NOW);
 
     expect(result.removedCount).toBe(1);
     expect(dbMocks.update).toHaveBeenCalled();
+  });
+
+  it("leaves deletedAt unset and writes no audit log when file deletion fails, so the artifact is retried next run", async () => {
+    dbMocks.findMany.mockResolvedValue([artifact()]);
+    storageMocks.deleteReportArtifact.mockResolvedValue({
+      deleted: false,
+      reason: "DELETE_FAILED",
+      error: new Error("disk unavailable"),
+    });
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const { runReportsCleanup } = await import("./report-cleanup-service");
+    const result = await runReportsCleanup({ dryRun: false }, NOW);
+
+    expect(result.removedCount).toBe(0);
+    expect(dbMocks.update).not.toHaveBeenCalled();
+    expect(dbMocks.auditLogCreate).not.toHaveBeenCalled();
+    expect(consoleErrorSpy).toHaveBeenCalled();
+
+    consoleErrorSpy.mockRestore();
   });
 
   it("never touches ReportRun or AuditLog rows directly (no db.reportRun access)", async () => {

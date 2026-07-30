@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -62,14 +62,34 @@ describe("report storage", () => {
     });
   });
 
-  it("deleteReportArtifact is a safe no-op for a missing file", async () => {
+  it("deleteReportArtifact treats a missing file (ENOENT) as a successful deletion", async () => {
     const { deleteReportArtifact } = await import("./report-storage");
-    await expect(deleteReportArtifact("does-not-exist.pdf")).resolves.toBeUndefined();
+    await expect(deleteReportArtifact("does-not-exist.pdf")).resolves.toEqual({ deleted: true });
   });
 
   it("deleteReportArtifact is a safe no-op when given null/undefined", async () => {
     const { deleteReportArtifact } = await import("./report-storage");
-    await expect(deleteReportArtifact(null)).resolves.toBeUndefined();
-    await expect(deleteReportArtifact(undefined)).resolves.toBeUndefined();
+    await expect(deleteReportArtifact(null)).resolves.toEqual({ deleted: true });
+    await expect(deleteReportArtifact(undefined)).resolves.toEqual({ deleted: true });
+  });
+
+  it("deleteReportArtifact reports an explicit failure when unlink fails for a reason other than ENOENT", async () => {
+    const { storeReportArtifact, deleteReportArtifact } = await import("./report-storage");
+    const stored = await storeReportArtifact(Buffer.from("locked"), "PDF");
+
+    // Removing write permission on the storage directory makes the subsequent
+    // unlink fail with EACCES/EPERM — a real non-ENOENT failure — which must
+    // NOT be folded into the "treat as already deleted" success path.
+    chmodSync(storageDir, 0o500);
+    try {
+      const result = await deleteReportArtifact(stored.storageKey);
+      if (result.deleted) {
+        throw new Error("expected deletion to fail while the storage directory is read-only");
+      }
+      expect(result.reason).toBe("DELETE_FAILED");
+      expect(result.error).toBeInstanceOf(Error);
+    } finally {
+      chmodSync(storageDir, 0o700);
+    }
   });
 });
