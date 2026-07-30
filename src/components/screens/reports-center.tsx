@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { PageHeader } from "@/components/shared/page-header";
 import {
   Card, CardContent, CardHeader, CardTitle, CardDescription,
@@ -135,11 +135,18 @@ type FiltersForm = {
   status: string;
 };
 
+type ReportFilterKey = Exclude<keyof FiltersForm, "from" | "to">;
+const FILTER_KEYS: ReportFilterKey[] = [
+  "region", "department", "facility", "classificationId", "priority", "severity", "channel", "status",
+];
+
 type OptionsForm = {
   includeComparison: boolean;
   includeCharts: boolean;
   includeDetailedRows: boolean;
 };
+
+type InitialData = { definitions: ReportDefinition[]; filtersData: FiltersData };
 
 const REPORT_ICONS: Record<ReportType, typeof FileText> = {
   EXECUTIVE_SUMMARY: FileText,
@@ -222,25 +229,138 @@ function defaultFilters(): FiltersForm {
   };
 }
 
-function buildFiltersPayload(filters: FiltersForm): Record<string, string> {
-  const payload: Record<string, string> = { from: filters.from, to: filters.to };
-  if (filters.region !== "all") payload.region = filters.region;
-  if (filters.department !== "all") payload.department = filters.department;
-  if (filters.facility !== "all") payload.facility = filters.facility;
-  if (filters.classificationId !== "all") payload.classificationId = filters.classificationId;
-  if (filters.priority !== "all") payload.priority = filters.priority;
-  if (filters.severity !== "all") payload.severity = filters.severity;
-  if (filters.channel !== "all") payload.channel = filters.channel;
-  if (filters.status !== "all") payload.status = filters.status;
+function supportsFilter(definition: ReportDefinition | null, filter: ReportFilterKey): boolean {
+  return Boolean(definition?.supportedFilters.includes(filter));
+}
+
+function requiresReportPeriod(definition: ReportDefinition | null): boolean {
+  return definition?.requiresPeriod === true;
+}
+
+/** Only the filters the selected report type actually supports are ever sent
+ * — an unsupported field is dropped even if it holds a non-"all" value in
+ * local form state, and from/to are omitted entirely when the report type
+ * doesn't require a period. */
+function buildSupportedFiltersPayload(filters: FiltersForm, definition: ReportDefinition): Record<string, string> {
+  const payload: Record<string, string> = {};
+  if (requiresReportPeriod(definition)) {
+    payload.from = filters.from;
+    payload.to = filters.to;
+  }
+  for (const key of FILTER_KEYS) {
+    if (supportsFilter(definition, key) && filters[key] !== "all") {
+      payload[key] = filters[key];
+    }
+  }
   return payload;
+}
+
+/** Called when switching report types: clears any filter value the newly
+ * selected type doesn't support, and clears/restores the period fields
+ * depending on whether the new type requires one, so a stale hidden filter
+ * from the previous type can never reach the request payload. */
+function resetUnsupportedFilters(current: FiltersForm, definition: ReportDefinition): FiltersForm {
+  const next = { ...current };
+  if (!requiresReportPeriod(definition)) {
+    next.from = "";
+    next.to = "";
+  } else if (!next.from || !next.to) {
+    const defaults = defaultFilters();
+    next.from = next.from || defaults.from;
+    next.to = next.to || defaults.to;
+  }
+  for (const key of FILTER_KEYS) {
+    if (!supportsFilter(definition, key)) {
+      next[key] = "all";
+    }
+  }
+  return next;
+}
+
+function validatePeriod(definition: ReportDefinition, filtersForm: FiltersForm): string | null {
+  if (!requiresReportPeriod(definition)) return null;
+  if (!filtersForm.from || !filtersForm.to) return "يجب تحديد الفترة الزمنية لهذا التقرير";
+  if (filtersForm.from > filtersForm.to) return "يجب أن يكون تاريخ البداية قبل أو يساوي تاريخ النهاية";
+  return null;
+}
+
+// =========================================================================
+// Fetch helpers: never collapse a non-ok response into an empty/null value
+// =========================================================================
+
+class ReportApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+
+  constructor(message: string, status: number, code?: string) {
+    super(message);
+    this.name = "ReportApiError";
+    this.status = status;
+    this.code = code;
+  }
 }
 
 async function parseJsonSafe(res: Response): Promise<any> {
   return res.json().catch(() => ({}));
 }
 
-function errorMessageFrom(body: any, fallback: string): string {
-  return body?.error?.message ?? fallback;
+async function fetchReportJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
+  const response = await fetch(input, init);
+  const body = await parseJsonSafe(response);
+
+  if (!response.ok) {
+    const message = body?.error?.message ?? body?.message ?? "تعذر تحميل بيانات التقارير";
+    throw new ReportApiError(message, response.status, body?.error?.code);
+  }
+
+  return body as T;
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+function messageFromError(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
+// =========================================================================
+// Resource loading state: distinguishes loading / error / empty / populated
+// without nested ternaries at the render call site.
+// =========================================================================
+
+type ResourceState<T> =
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "ready"; data: T };
+
+function ResourceSection<T>({
+  state, emptyIcon, emptyText, onRetry, children,
+}: Readonly<{
+  state: ResourceState<T[]>;
+  emptyIcon: typeof FileText;
+  emptyText: string;
+  onRetry: () => void;
+  children: (data: T[]) => ReactNode;
+}>) {
+  if (state.status === "loading") {
+    return <div className="flex justify-center py-10"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>;
+  }
+  if (state.status === "error") {
+    return (
+      <div className="flex flex-col items-center justify-center py-12 text-center gap-3">
+        <AlertTriangle className="h-8 w-8 text-destructive" />
+        <p className="text-sm text-destructive max-w-md">{state.message}</p>
+        <Button size="sm" variant="outline" onClick={onRetry}>
+          <RefreshCw className="h-4 w-4" />إعادة المحاولة
+        </Button>
+      </div>
+    );
+  }
+  if (state.data.length === 0) {
+    return <EmptyState icon={emptyIcon} text={emptyText} />;
+  }
+  return <>{children(state.data)}</>;
 }
 
 // =========================================================================
@@ -251,8 +371,7 @@ export function ReportsCenter() {
   const { toast } = useToast();
   const [activeTab, setActiveTab] = useState("new");
 
-  const [definitions, setDefinitions] = useState<ReportDefinition[] | null>(null);
-  const [filtersData, setFiltersData] = useState<FiltersData | null>(null);
+  const [initialState, setInitialState] = useState<ResourceState<InitialData>>({ status: "loading" });
   const [selectedType, setSelectedType] = useState<ReportType | null>(null);
   const [filters, setFilters] = useState<FiltersForm>(defaultFilters());
   const [options, setOptions] = useState<OptionsForm>({
@@ -268,9 +387,9 @@ export function ReportsCenter() {
   const [templateName, setTemplateName] = useState("");
   const [savingTemplate, setSavingTemplate] = useState(false);
 
-  const [templates, setTemplates] = useState<ReportTemplate[] | null>(null);
-  const [schedules, setSchedules] = useState<ReportSchedule[] | null>(null);
-  const [runs, setRuns] = useState<ReportRunRow[] | null>(null);
+  const [templatesState, setTemplatesState] = useState<ResourceState<ReportTemplate[]>>({ status: "loading" });
+  const [schedulesState, setSchedulesState] = useState<ResourceState<ReportSchedule[]>>({ status: "loading" });
+  const [runsState, setRunsState] = useState<ResourceState<ReportRunRow[]>>({ status: "loading" });
 
   const [scheduleDialogOpen, setScheduleDialogOpen] = useState(false);
   const [scheduleTemplateId, setScheduleTemplateId] = useState<string | null>(null);
@@ -280,85 +399,122 @@ export function ReportsCenter() {
   const [scheduleDayOfMonth, setScheduleDayOfMonth] = useState("1");
   const [creatingSchedule, setCreatingSchedule] = useState(false);
 
-  useEffect(() => {
-    fetch("/api/reports/definitions").then((r) => r.json()).then((d) => setDefinitions(d.definitions ?? []))
-      .catch(() => setDefinitions([]));
-    fetch("/api/filters").then((r) => r.json()).then((d) => setFiltersData(d)).catch(() => setFiltersData(null));
+  const definitions = initialState.status === "ready" ? initialState.data.definitions : null;
+  const filtersData = initialState.status === "ready" ? initialState.data.filtersData : null;
+
+  const loadInitialData = useCallback(async (signal?: AbortSignal) => {
+    setInitialState({ status: "loading" });
+    try {
+      const [filtersBody, definitionsBody] = await Promise.all([
+        fetchReportJson<FiltersData>("/api/filters", { signal }),
+        fetchReportJson<{ definitions: ReportDefinition[] }>("/api/reports/definitions", { signal }),
+      ]);
+      setInitialState({ status: "ready", data: { filtersData: filtersBody, definitions: definitionsBody.definitions ?? [] } });
+    } catch (error) {
+      if (isAbortError(error)) return;
+      setInitialState({ status: "error", message: messageFromError(error, "تعذر تحميل مركز التقارير") });
+    }
   }, []);
 
-  const loadTemplates = useCallback(async () => {
-    const res = await fetch("/api/reports/templates?includeInactive=true");
-    const body = await parseJsonSafe(res);
-    if (!res.ok) {
-      toast({ title: "خطأ", description: errorMessageFrom(body, "تعذر جلب القوالب"), variant: "destructive" });
-      setTemplates([]);
-      return;
+  useEffect(() => {
+    const controller = new AbortController();
+    async function run(): Promise<void> {
+      await loadInitialData(controller.signal);
     }
-    setTemplates(body.templates ?? []);
-  }, [toast]);
+    void run();
+    return () => controller.abort();
+  }, [loadInitialData]);
 
-  const loadSchedules = useCallback(async () => {
-    const res = await fetch("/api/reports/schedules");
-    const body = await parseJsonSafe(res);
-    if (!res.ok) {
-      toast({ title: "خطأ", description: errorMessageFrom(body, "تعذر جلب الجداول"), variant: "destructive" });
-      setSchedules([]);
-      return;
+  const loadTemplates = useCallback(async (signal?: AbortSignal) => {
+    setTemplatesState({ status: "loading" });
+    try {
+      const body = await fetchReportJson<{ templates: ReportTemplate[] }>(
+        "/api/reports/templates?includeInactive=true",
+        { signal }
+      );
+      setTemplatesState({ status: "ready", data: body.templates ?? [] });
+    } catch (error) {
+      if (isAbortError(error)) return;
+      setTemplatesState({ status: "error", message: messageFromError(error, "تعذر جلب القوالب") });
     }
-    setSchedules(body.schedules ?? []);
-  }, [toast]);
+  }, []);
 
-  const loadRuns = useCallback(async () => {
-    const res = await fetch("/api/reports/runs");
-    const body = await parseJsonSafe(res);
-    if (!res.ok) {
-      toast({ title: "خطأ", description: errorMessageFrom(body, "تعذر جلب سجل التشغيلات"), variant: "destructive" });
-      setRuns([]);
-      return;
+  const loadSchedules = useCallback(async (signal?: AbortSignal) => {
+    setSchedulesState({ status: "loading" });
+    try {
+      const body = await fetchReportJson<{ schedules: ReportSchedule[] }>("/api/reports/schedules", { signal });
+      setSchedulesState({ status: "ready", data: body.schedules ?? [] });
+    } catch (error) {
+      if (isAbortError(error)) return;
+      setSchedulesState({ status: "error", message: messageFromError(error, "تعذر جلب الجداول") });
     }
-    setRuns(body.runs ?? []);
-  }, [toast]);
+  }, []);
+
+  const loadRuns = useCallback(async (signal?: AbortSignal) => {
+    setRunsState({ status: "loading" });
+    try {
+      const body = await fetchReportJson<{ runs: ReportRunRow[] }>("/api/reports/runs", { signal });
+      setRunsState({ status: "ready", data: body.runs ?? [] });
+    } catch (error) {
+      if (isAbortError(error)) return;
+      setRunsState({ status: "error", message: messageFromError(error, "تعذر جلب سجل التشغيلات") });
+    }
+  }, []);
 
   useEffect(() => {
-    const run = async () => {
-      if (activeTab === "templates") await loadTemplates();
-      if (activeTab === "schedules") await Promise.all([loadSchedules(), loadTemplates()]);
-      if (activeTab === "history") await loadRuns();
-    };
-    run();
+    const controller = new AbortController();
+    async function loadActiveTab(): Promise<void> {
+      if (activeTab === "templates") {
+        await loadTemplates(controller.signal);
+      } else if (activeTab === "schedules") {
+        await Promise.all([loadSchedules(controller.signal), loadTemplates(controller.signal)]);
+      } else if (activeTab === "history") {
+        await loadRuns(controller.signal);
+      }
+    }
+    void loadActiveTab();
+    return () => controller.abort();
   }, [activeTab, loadTemplates, loadSchedules, loadRuns]);
 
   const selectedDefinition = definitions?.find((d) => d.type === selectedType) ?? null;
 
   const selectReportType = (type: ReportType) => {
+    const definition = definitions?.find((d) => d.type === type) ?? null;
     setSelectedType(type);
     setPreviewData(null);
+    setOptions({ includeComparison: true, includeCharts: true, includeDetailedRows: false });
+    if (definition) {
+      setFilters((prev) => resetUnsupportedFilters(prev, definition));
+    }
   };
 
   const buildRequestBody = () => ({
     type: selectedType,
-    filters: buildFiltersPayload(filters),
+    filters: selectedDefinition ? buildSupportedFiltersPayload(filters, selectedDefinition) : {},
     options,
   });
 
   const handlePreview = async () => {
-    if (!selectedType) return;
+    if (!selectedType || !selectedDefinition) return;
+    const periodError = validatePeriod(selectedDefinition, filters);
+    if (periodError) {
+      toast({ title: "تنبيه", description: periodError, variant: "destructive" });
+      return;
+    }
     const requestId = ++previewRequestRef.current;
     setPreviewing(true);
     setPreviewData(null);
     try {
-      const res = await fetch("/api/reports/preview", {
+      const body = await fetchReportJson<{ report: ReportData }>("/api/reports/preview", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(buildRequestBody()),
       });
-      const body = await parseJsonSafe(res);
       if (previewRequestRef.current !== requestId) return; // a newer preview request superseded this one
-      if (!res.ok) throw new Error(errorMessageFrom(body, "فشل في معاينة التقرير"));
       setPreviewData(body.report);
     } catch (error) {
       if (previewRequestRef.current !== requestId) return;
-      toast({ title: "خطأ", description: error instanceof Error ? error.message : "فشل في المعاينة", variant: "destructive" });
+      toast({ title: "خطأ", description: messageFromError(error, "فشل في المعاينة"), variant: "destructive" });
     } finally {
       if (previewRequestRef.current === requestId) setPreviewing(false);
     }
@@ -368,52 +524,53 @@ export function ReportsCenter() {
     // Same-tab navigation to an `attachment` response triggers a download
     // without leaving the page, and (unlike window.open) is never blocked by
     // popup blockers even when called after an awaited fetch.
-    window.location.href = `/api/reports/artifacts/${artifactId}/download`;
+    window.location.assign(`/api/reports/artifacts/${artifactId}/download`);
   };
 
   const handleExport = async (format: "PDF" | "XLSX") => {
-    if (!selectedType) return;
+    if (!selectedType || !selectedDefinition) return;
+    const periodError = validatePeriod(selectedDefinition, filters);
+    if (periodError) {
+      toast({ title: "تنبيه", description: periodError, variant: "destructive" });
+      return;
+    }
     setExportingFormat(format);
     try {
-      const res = await fetch("/api/reports/run", {
+      const body = await fetchReportJson<{ run: { artifacts: { id: string }[] } }>("/api/reports/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...buildRequestBody(), formats: [format] }),
       });
-      const body = await parseJsonSafe(res);
-      if (!res.ok) throw new Error(errorMessageFrom(body, "فشل في تصدير التقرير"));
       const artifact = body.run?.artifacts?.[0];
       if (!artifact) throw new Error("لم يتم إنشاء ملف التصدير");
       downloadArtifact(artifact.id);
       toast({ title: "تم التصدير", description: `تم إنشاء ملف ${format} بنجاح` });
     } catch (error) {
-      toast({ title: "خطأ", description: error instanceof Error ? error.message : "فشل في التصدير", variant: "destructive" });
+      toast({ title: "خطأ", description: messageFromError(error, "فشل في التصدير"), variant: "destructive" });
     } finally {
       setExportingFormat(null);
     }
   };
 
   const handleSaveTemplate = async () => {
-    if (!selectedType || !templateName.trim()) return;
+    if (!selectedType || !templateName.trim() || !selectedDefinition) return;
     setSavingTemplate(true);
     try {
-      const res = await fetch("/api/reports/templates", {
+      await fetchReportJson("/api/reports/templates", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: templateName.trim(),
           reportType: selectedType,
-          filters: buildFiltersPayload(filters),
+          filters: buildSupportedFiltersPayload(filters, selectedDefinition),
           options,
         }),
       });
-      const body = await parseJsonSafe(res);
-      if (!res.ok) throw new Error(errorMessageFrom(body, "فشل في حفظ القالب"));
       toast({ title: "تم الحفظ", description: `تم حفظ القالب "${templateName.trim()}"` });
       setSaveDialogOpen(false);
       setTemplateName("");
     } catch (error) {
-      toast({ title: "خطأ", description: error instanceof Error ? error.message : "فشل في الحفظ", variant: "destructive" });
+      toast({ title: "خطأ", description: messageFromError(error, "فشل في الحفظ"), variant: "destructive" });
     } finally {
       setSavingTemplate(false);
     }
@@ -421,29 +578,26 @@ export function ReportsCenter() {
 
   const handleRunTemplate = async (template: ReportTemplate) => {
     try {
-      const res = await fetch(`/api/reports/templates/${template.id}/run`, {
+      await fetchReportJson(`/api/reports/templates/${template.id}/run`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),
       });
-      const body = await parseJsonSafe(res);
-      if (!res.ok) throw new Error(errorMessageFrom(body, "فشل في تشغيل القالب"));
       toast({ title: "تم التشغيل", description: `تم تشغيل قالب "${template.name}" بنجاح` });
-      loadTemplates();
-      if (activeTab === "history") loadRuns();
+      void loadTemplates();
+      if (activeTab === "history") void loadRuns();
     } catch (error) {
-      toast({ title: "خطأ", description: error instanceof Error ? error.message : "فشل في التشغيل", variant: "destructive" });
+      toast({ title: "خطأ", description: messageFromError(error, "فشل في التشغيل"), variant: "destructive" });
     }
   };
 
   const handleDisableTemplate = async (template: ReportTemplate) => {
     try {
-      const res = await fetch(`/api/reports/templates/${template.id}`, { method: "DELETE" });
-      if (!res.ok) throw new Error(errorMessageFrom(await parseJsonSafe(res), "فشل في تعطيل القالب"));
+      await fetchReportJson(`/api/reports/templates/${template.id}`, { method: "DELETE" });
       toast({ title: "تم التعطيل", description: `تم تعطيل القالب "${template.name}"` });
-      loadTemplates();
+      void loadTemplates();
     } catch (error) {
-      toast({ title: "خطأ", description: error instanceof Error ? error.message : "فشل في التعطيل", variant: "destructive" });
+      toast({ title: "خطأ", description: messageFromError(error, "فشل في التعطيل"), variant: "destructive" });
     }
   };
 
@@ -460,7 +614,7 @@ export function ReportsCenter() {
     if (!scheduleTemplateId) return;
     setCreatingSchedule(true);
     try {
-      const res = await fetch("/api/reports/schedules", {
+      await fetchReportJson("/api/reports/schedules", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -471,14 +625,12 @@ export function ReportsCenter() {
           dayOfMonth: scheduleFrequency === "MONTHLY" ? Number(scheduleDayOfMonth) : undefined,
         }),
       });
-      const body = await parseJsonSafe(res);
-      if (!res.ok) throw new Error(errorMessageFrom(body, "فشل في إنشاء الجدولة"));
       toast({ title: "تمت الجدولة", description: "تم إنشاء الجدولة بنجاح" });
       setScheduleDialogOpen(false);
-      loadSchedules();
-      loadTemplates();
+      void loadSchedules();
+      void loadTemplates();
     } catch (error) {
-      toast({ title: "خطأ", description: error instanceof Error ? error.message : "فشل في الجدولة", variant: "destructive" });
+      toast({ title: "خطأ", description: messageFromError(error, "فشل في الجدولة"), variant: "destructive" });
     } finally {
       setCreatingSchedule(false);
     }
@@ -486,12 +638,11 @@ export function ReportsCenter() {
 
   const handleDisableSchedule = async (schedule: ReportSchedule) => {
     try {
-      const res = await fetch(`/api/reports/schedules/${schedule.id}`, { method: "DELETE" });
-      if (!res.ok) throw new Error(errorMessageFrom(await parseJsonSafe(res), "فشل في تعطيل الجدولة"));
+      await fetchReportJson(`/api/reports/schedules/${schedule.id}`, { method: "DELETE" });
       toast({ title: "تم التعطيل", description: "تم تعطيل الجدولة" });
-      loadSchedules();
+      void loadSchedules();
     } catch (error) {
-      toast({ title: "خطأ", description: error instanceof Error ? error.message : "فشل في التعطيل", variant: "destructive" });
+      toast({ title: "خطأ", description: messageFromError(error, "فشل في التعطيل"), variant: "destructive" });
     }
   };
 
@@ -523,31 +674,45 @@ export function ReportsCenter() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {(definitions ?? []).map((def) => {
-                  const Icon = REPORT_ICONS[def.type];
-                  const isActive = selectedType === def.type;
-                  return (
-                    <button
-                      key={def.type}
-                      onClick={() => selectReportType(def.type)}
-                      className={`text-right rounded-xl border-2 p-4 transition-all hover:shadow-md ${
-                        isActive ? "border-primary bg-primary/5 shadow-sm" : "border-border hover:border-primary/40"
-                      }`}
-                    >
-                      <div className="flex items-start gap-3">
-                        <div className={`flex h-11 w-11 items-center justify-center rounded-lg bg-gradient-to-br ${REPORT_COLORS[def.type]} text-white shadow-sm shrink-0`}>
-                          <Icon className="h-6 w-6" />
+              {initialState.status === "loading" && (
+                <div className="flex justify-center py-10"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>
+              )}
+              {initialState.status === "error" && (
+                <div className="flex flex-col items-center justify-center py-12 text-center gap-3">
+                  <AlertTriangle className="h-8 w-8 text-destructive" />
+                  <p className="text-sm text-destructive max-w-md">{initialState.message}</p>
+                  <Button size="sm" variant="outline" onClick={() => loadInitialData()}>
+                    <RefreshCw className="h-4 w-4" />إعادة المحاولة
+                  </Button>
+                </div>
+              )}
+              {initialState.status === "ready" && (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {initialState.data.definitions.map((def) => {
+                    const Icon = REPORT_ICONS[def.type];
+                    const isActive = selectedType === def.type;
+                    return (
+                      <button
+                        key={def.type}
+                        onClick={() => selectReportType(def.type)}
+                        className={`text-right rounded-xl border-2 p-4 transition-all hover:shadow-md ${
+                          isActive ? "border-primary bg-primary/5 shadow-sm" : "border-border hover:border-primary/40"
+                        }`}
+                      >
+                        <div className="flex items-start gap-3">
+                          <div className={`flex h-11 w-11 items-center justify-center rounded-lg bg-gradient-to-br ${REPORT_COLORS[def.type]} text-white shadow-sm shrink-0`}>
+                            <Icon className="h-6 w-6" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <h3 className="font-semibold text-base">{def.title}</h3>
+                            <p className="text-xs text-muted-foreground mt-1 leading-relaxed">{def.description}</p>
+                          </div>
                         </div>
-                        <div className="flex-1 min-w-0">
-                          <h3 className="font-semibold text-base">{def.title}</h3>
-                          <p className="text-xs text-muted-foreground mt-1 leading-relaxed">{def.description}</p>
-                        </div>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </CardContent>
           </Card>
 
@@ -562,74 +727,90 @@ export function ReportsCenter() {
               </CardHeader>
               <CardContent className="space-y-6">
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                  <div className="space-y-2">
-                    <Label>من تاريخ</Label>
-                    <Input type="date" value={filters.from} onChange={(e) => setFilters((p) => ({ ...p, from: e.target.value }))} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>إلى تاريخ</Label>
-                    <Input type="date" value={filters.to} onChange={(e) => setFilters((p) => ({ ...p, to: e.target.value }))} />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>المنطقة</Label>
-                    <Select value={filters.region} onValueChange={(v) => setFilters((p) => ({ ...p, region: v }))}>
-                      <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="all">الكل</SelectItem>
-                        {filtersData?.regions.map((r) => <SelectItem key={r.id} value={r.id}>{r.name}</SelectItem>)}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label>الإدارة</Label>
-                    <Select value={filters.department} onValueChange={(v) => setFilters((p) => ({ ...p, department: v }))}>
-                      <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="all">الكل</SelectItem>
-                        {filtersData?.departments.map((d) => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label>الموقع</Label>
-                    <Select value={filters.facility} onValueChange={(v) => setFilters((p) => ({ ...p, facility: v }))}>
-                      <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="all">الكل</SelectItem>
-                        {filtersData?.facilities.map((f) => <SelectItem key={f.id} value={f.id}>{f.name}</SelectItem>)}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label>التصنيف</Label>
-                    <Select value={filters.classificationId} onValueChange={(v) => setFilters((p) => ({ ...p, classificationId: v }))}>
-                      <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="all">الكل</SelectItem>
-                        {flatClassifications.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label>الأولوية</Label>
-                    <Select value={filters.priority} onValueChange={(v) => setFilters((p) => ({ ...p, priority: v }))}>
-                      <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="all">الكل</SelectItem>
-                        {Object.entries(PRIORITY_LABELS_AR).map(([k, label]) => <SelectItem key={k} value={k}>{label}</SelectItem>)}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label>الحالة</Label>
-                    <Select value={filters.status} onValueChange={(v) => setFilters((p) => ({ ...p, status: v }))}>
-                      <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="all">الكل</SelectItem>
-                        {Object.entries(STATUS_LABELS_AR).map(([k, label]) => <SelectItem key={k} value={k}>{label}</SelectItem>)}
-                      </SelectContent>
-                    </Select>
-                  </div>
+                  {requiresReportPeriod(selectedDefinition) && (
+                    <>
+                      <div className="space-y-2">
+                        <Label>من تاريخ</Label>
+                        <Input type="date" value={filters.from} onChange={(e) => setFilters((p) => ({ ...p, from: e.target.value }))} />
+                      </div>
+                      <div className="space-y-2">
+                        <Label>إلى تاريخ</Label>
+                        <Input type="date" value={filters.to} onChange={(e) => setFilters((p) => ({ ...p, to: e.target.value }))} />
+                      </div>
+                    </>
+                  )}
+                  {supportsFilter(selectedDefinition, "region") && (
+                    <div className="space-y-2">
+                      <Label>المنطقة</Label>
+                      <Select value={filters.region} onValueChange={(v) => setFilters((p) => ({ ...p, region: v }))}>
+                        <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">الكل</SelectItem>
+                          {filtersData?.regions.map((r) => <SelectItem key={r.id} value={r.id}>{r.name}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+                  {supportsFilter(selectedDefinition, "department") && (
+                    <div className="space-y-2">
+                      <Label>الإدارة</Label>
+                      <Select value={filters.department} onValueChange={(v) => setFilters((p) => ({ ...p, department: v }))}>
+                        <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">الكل</SelectItem>
+                          {filtersData?.departments.map((d) => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+                  {supportsFilter(selectedDefinition, "facility") && (
+                    <div className="space-y-2">
+                      <Label>الموقع</Label>
+                      <Select value={filters.facility} onValueChange={(v) => setFilters((p) => ({ ...p, facility: v }))}>
+                        <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">الكل</SelectItem>
+                          {filtersData?.facilities.map((f) => <SelectItem key={f.id} value={f.id}>{f.name}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+                  {supportsFilter(selectedDefinition, "classificationId") && (
+                    <div className="space-y-2">
+                      <Label>التصنيف</Label>
+                      <Select value={filters.classificationId} onValueChange={(v) => setFilters((p) => ({ ...p, classificationId: v }))}>
+                        <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">الكل</SelectItem>
+                          {flatClassifications.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+                  {supportsFilter(selectedDefinition, "priority") && (
+                    <div className="space-y-2">
+                      <Label>الأولوية</Label>
+                      <Select value={filters.priority} onValueChange={(v) => setFilters((p) => ({ ...p, priority: v }))}>
+                        <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">الكل</SelectItem>
+                          {Object.entries(PRIORITY_LABELS_AR).map(([k, label]) => <SelectItem key={k} value={k}>{label}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
+                  {supportsFilter(selectedDefinition, "status") && (
+                    <div className="space-y-2">
+                      <Label>الحالة</Label>
+                      <Select value={filters.status} onValueChange={(v) => setFilters((p) => ({ ...p, status: v }))}>
+                        <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="all">الكل</SelectItem>
+                          {Object.entries(STATUS_LABELS_AR).map(([k, label]) => <SelectItem key={k} value={k}>{label}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  )}
                 </div>
 
                 <Separator />
@@ -685,58 +866,61 @@ export function ReportsCenter() {
               <CardDescription>القوالب المحفوظة مع إمكانية التشغيل الفوري أو الجدولة أو التعطيل</CardDescription>
             </CardHeader>
             <CardContent>
-              {templates === null ? (
-                <div className="flex justify-center py-10"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>
-              ) : templates.length === 0 ? (
-                <EmptyState icon={Save} text="لا توجد قوالب محفوظة بعد" />
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>الاسم</TableHead>
-                      <TableHead>النوع</TableHead>
-                      <TableHead>آخر تشغيل</TableHead>
-                      <TableHead>الحالة</TableHead>
-                      <TableHead>الجدولة</TableHead>
-                      <TableHead className="text-left">إجراءات</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {templates.map((tpl) => {
-                      const hasActiveSchedule = tpl.schedules.some((s) => s.isEnabled);
-                      const activeScheduleCount = tpl.schedules.filter((s) => s.isEnabled).length;
-                      return (
-                      <TableRow key={tpl.id}>
-                        <TableCell className="font-medium">{tpl.name}</TableCell>
-                        <TableCell>{definitions?.find((d) => d.type === tpl.reportType)?.title ?? tpl.reportType}</TableCell>
-                        <TableCell className="text-sm text-muted-foreground">{tpl.lastRunAt ? formatDateTime(tpl.lastRunAt) : "لم يُشغَّل بعد"}</TableCell>
-                        <TableCell>
-                          <Badge variant={tpl.isActive ? "secondary" : "outline"}>{tpl.isActive ? "مفعّل" : "معطّل"}</Badge>
-                        </TableCell>
-                        <TableCell className="text-sm text-muted-foreground">
-                          {hasActiveSchedule ? `${activeScheduleCount} جدولة نشطة` : "بدون جدولة"}
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex items-center gap-1.5 justify-end">
-                            <Button size="sm" variant="ghost" onClick={() => handleRunTemplate(tpl)} disabled={!tpl.isActive}>
-                              <PlayCircle className="h-4 w-4" />تشغيل الآن
-                            </Button>
-                            <Button size="sm" variant="ghost" onClick={() => openScheduleDialog(tpl.id)} disabled={!tpl.isActive}>
-                              <Calendar className="h-4 w-4" />جدولة
-                            </Button>
-                            {tpl.isActive && (
-                              <Button size="sm" variant="ghost" onClick={() => handleDisableTemplate(tpl)}>
-                                <XCircle className="h-4 w-4 text-destructive" />تعطيل
-                              </Button>
-                            )}
-                          </div>
-                        </TableCell>
+              <ResourceSection
+                state={templatesState}
+                emptyIcon={Save}
+                emptyText="لا توجد قوالب محفوظة بعد"
+                onRetry={() => loadTemplates()}
+              >
+                {(templates) => (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>الاسم</TableHead>
+                        <TableHead>النوع</TableHead>
+                        <TableHead>آخر تشغيل</TableHead>
+                        <TableHead>الحالة</TableHead>
+                        <TableHead>الجدولة</TableHead>
+                        <TableHead className="text-left">إجراءات</TableHead>
                       </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
-              )}
+                    </TableHeader>
+                    <TableBody>
+                      {templates.map((tpl) => {
+                        const hasActiveSchedule = tpl.schedules.some((s) => s.isEnabled);
+                        const activeScheduleCount = tpl.schedules.filter((s) => s.isEnabled).length;
+                        return (
+                          <TableRow key={tpl.id}>
+                            <TableCell className="font-medium">{tpl.name}</TableCell>
+                            <TableCell>{definitions?.find((d) => d.type === tpl.reportType)?.title ?? tpl.reportType}</TableCell>
+                            <TableCell className="text-sm text-muted-foreground">{tpl.lastRunAt ? formatDateTime(tpl.lastRunAt) : "لم يُشغَّل بعد"}</TableCell>
+                            <TableCell>
+                              <Badge variant={tpl.isActive ? "secondary" : "outline"}>{tpl.isActive ? "مفعّل" : "معطّل"}</Badge>
+                            </TableCell>
+                            <TableCell className="text-sm text-muted-foreground">
+                              {hasActiveSchedule ? `${activeScheduleCount} جدولة نشطة` : "بدون جدولة"}
+                            </TableCell>
+                            <TableCell>
+                              <div className="flex items-center gap-1.5 justify-end">
+                                <Button size="sm" variant="ghost" onClick={() => handleRunTemplate(tpl)} disabled={!tpl.isActive}>
+                                  <PlayCircle className="h-4 w-4" />تشغيل الآن
+                                </Button>
+                                <Button size="sm" variant="ghost" onClick={() => openScheduleDialog(tpl.id)} disabled={!tpl.isActive}>
+                                  <Calendar className="h-4 w-4" />جدولة
+                                </Button>
+                                {tpl.isActive && (
+                                  <Button size="sm" variant="ghost" onClick={() => handleDisableTemplate(tpl)}>
+                                    <XCircle className="h-4 w-4 text-destructive" />تعطيل
+                                  </Button>
+                                )}
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                )}
+              </ResourceSection>
             </CardContent>
           </Card>
         </TabsContent>
@@ -749,46 +933,49 @@ export function ReportsCenter() {
               <CardDescription>الجداول الداخلية لتشغيل القوالب تلقائياً وفق التكرار المحدد</CardDescription>
             </CardHeader>
             <CardContent>
-              {schedules === null ? (
-                <div className="flex justify-center py-10"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>
-              ) : schedules.length === 0 ? (
-                <EmptyState icon={CalendarClock} text="لا توجد جداول تشغيل بعد" />
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>القالب</TableHead>
-                      <TableHead>التكرار</TableHead>
-                      <TableHead>الموعد القادم</TableHead>
-                      <TableHead>آخر تشغيل</TableHead>
-                      <TableHead>الحالة</TableHead>
-                      <TableHead className="text-left">إجراءات</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {schedules.map((s) => (
-                      <TableRow key={s.id}>
-                        <TableCell className="font-medium">{s.reportTemplate?.name ?? "—"}</TableCell>
-                        <TableCell>
-                          {FREQUENCY_LABELS[s.frequency]} {s.timeOfDay}
-                          {s.frequency === "WEEKLY" && s.dayOfWeek !== null ? ` (${WEEKDAY_LABELS[s.dayOfWeek]})` : ""}
-                          {s.frequency === "MONTHLY" && s.dayOfMonth !== null ? ` (يوم ${s.dayOfMonth})` : ""}
-                        </TableCell>
-                        <TableCell className="text-sm text-muted-foreground">{formatDateTime(s.nextRunAt)}</TableCell>
-                        <TableCell className="text-sm text-muted-foreground">{s.lastRunAt ? formatDateTime(s.lastRunAt) : "—"}</TableCell>
-                        <TableCell><Badge variant={s.isEnabled ? "secondary" : "outline"}>{s.isEnabled ? "مفعّلة" : "متوقفة"}</Badge></TableCell>
-                        <TableCell className="text-left">
-                          {s.isEnabled && (
-                            <Button size="sm" variant="ghost" onClick={() => handleDisableSchedule(s)}>
-                              <XCircle className="h-4 w-4 text-destructive" />إيقاف
-                            </Button>
-                          )}
-                        </TableCell>
+              <ResourceSection
+                state={schedulesState}
+                emptyIcon={CalendarClock}
+                emptyText="لا توجد جداول تشغيل بعد"
+                onRetry={() => loadSchedules()}
+              >
+                {(schedules) => (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>القالب</TableHead>
+                        <TableHead>التكرار</TableHead>
+                        <TableHead>الموعد القادم</TableHead>
+                        <TableHead>آخر تشغيل</TableHead>
+                        <TableHead>الحالة</TableHead>
+                        <TableHead className="text-left">إجراءات</TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              )}
+                    </TableHeader>
+                    <TableBody>
+                      {schedules.map((s) => (
+                        <TableRow key={s.id}>
+                          <TableCell className="font-medium">{s.reportTemplate?.name ?? "—"}</TableCell>
+                          <TableCell>
+                            {FREQUENCY_LABELS[s.frequency]} {s.timeOfDay}
+                            {s.frequency === "WEEKLY" && s.dayOfWeek !== null ? ` (${WEEKDAY_LABELS[s.dayOfWeek]})` : ""}
+                            {s.frequency === "MONTHLY" && s.dayOfMonth !== null ? ` (يوم ${s.dayOfMonth})` : ""}
+                          </TableCell>
+                          <TableCell className="text-sm text-muted-foreground">{formatDateTime(s.nextRunAt)}</TableCell>
+                          <TableCell className="text-sm text-muted-foreground">{s.lastRunAt ? formatDateTime(s.lastRunAt) : "—"}</TableCell>
+                          <TableCell><Badge variant={s.isEnabled ? "secondary" : "outline"}>{s.isEnabled ? "مفعّلة" : "متوقفة"}</Badge></TableCell>
+                          <TableCell className="text-left">
+                            {s.isEnabled && (
+                              <Button size="sm" variant="ghost" onClick={() => handleDisableSchedule(s)}>
+                                <XCircle className="h-4 w-4 text-destructive" />إيقاف
+                              </Button>
+                            )}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+              </ResourceSection>
             </CardContent>
           </Card>
         </TabsContent>
@@ -801,52 +988,55 @@ export function ReportsCenter() {
               <CardDescription>آخر عمليات توليد التقارير مع حالتها وملفاتها</CardDescription>
             </CardHeader>
             <CardContent>
-              {runs === null ? (
-                <div className="flex justify-center py-10"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>
-              ) : runs.length === 0 ? (
-                <EmptyState icon={History} text="لا توجد تشغيلات بعد" />
-              ) : (
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>التقرير</TableHead>
-                      <TableHead>الحالة</TableHead>
-                      <TableHead>البدء</TableHead>
-                      <TableHead>الانتهاء</TableHead>
-                      <TableHead>الملفات</TableHead>
-                      <TableHead>سبب الفشل</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {runs.map((run) => (
-                      <TableRow key={run.id}>
-                        <TableCell className="font-medium">
-                          {definitions?.find((d) => d.type === run.reportType)?.title ?? run.reportType}
-                          {run.reportTemplate && <div className="text-xs text-muted-foreground">قالب: {run.reportTemplate.name}</div>}
-                        </TableCell>
-                        <TableCell>
-                          <Badge variant={runStatusBadgeVariant(run.status)}>
-                            {RUN_STATUS_LABELS[run.status]}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-sm text-muted-foreground">{run.startedAt ? formatDateTime(run.startedAt) : "—"}</TableCell>
-                        <TableCell className="text-sm text-muted-foreground">{run.completedAt ? formatDateTime(run.completedAt) : "—"}</TableCell>
-                        <TableCell>
-                          <div className="flex flex-wrap gap-1.5">
-                            {run.artifacts.map((a) => (
-                              <Button key={a.id} size="sm" variant="outline" onClick={() => downloadArtifact(a.id)}>
-                                <Download className="h-3.5 w-3.5" />
-                                {a.format} ({Math.round(a.fileSize / 1024)} كيلوبايت)
-                              </Button>
-                            ))}
-                          </div>
-                        </TableCell>
-                        <TableCell className="text-xs text-destructive max-w-[240px] truncate">{run.errorMessage ?? ""}</TableCell>
+              <ResourceSection
+                state={runsState}
+                emptyIcon={History}
+                emptyText="لا توجد تشغيلات بعد"
+                onRetry={() => loadRuns()}
+              >
+                {(runs) => (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>التقرير</TableHead>
+                        <TableHead>الحالة</TableHead>
+                        <TableHead>البدء</TableHead>
+                        <TableHead>الانتهاء</TableHead>
+                        <TableHead>الملفات</TableHead>
+                        <TableHead>سبب الفشل</TableHead>
                       </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              )}
+                    </TableHeader>
+                    <TableBody>
+                      {runs.map((run) => (
+                        <TableRow key={run.id}>
+                          <TableCell className="font-medium">
+                            {definitions?.find((d) => d.type === run.reportType)?.title ?? run.reportType}
+                            {run.reportTemplate && <div className="text-xs text-muted-foreground">قالب: {run.reportTemplate.name}</div>}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant={runStatusBadgeVariant(run.status)}>
+                              {RUN_STATUS_LABELS[run.status]}
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-sm text-muted-foreground">{run.startedAt ? formatDateTime(run.startedAt) : "—"}</TableCell>
+                          <TableCell className="text-sm text-muted-foreground">{run.completedAt ? formatDateTime(run.completedAt) : "—"}</TableCell>
+                          <TableCell>
+                            <div className="flex flex-wrap gap-1.5">
+                              {run.artifacts.map((a) => (
+                                <Button key={a.id} size="sm" variant="outline" onClick={() => downloadArtifact(a.id)}>
+                                  <Download className="h-3.5 w-3.5" />
+                                  {a.format} ({Math.round(a.fileSize / 1024)} كيلوبايت)
+                                </Button>
+                              ))}
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-xs text-destructive max-w-[240px] truncate">{run.errorMessage ?? ""}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                )}
+              </ResourceSection>
             </CardContent>
           </Card>
         </TabsContent>
@@ -940,6 +1130,51 @@ function EmptyState({ icon: Icon, text }: Readonly<{ icon: typeof FileText; text
 // Preview
 // =========================================================================
 
+function SectionBody({ section }: Readonly<{ section: ReportSection }>) {
+  if (section.kind === "kpi") {
+    return (
+      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+        {section.cards.map((card) => (
+          <div key={card.key} className="rounded-lg border bg-muted/40 p-3">
+            <div className="text-xs text-muted-foreground">{card.label}</div>
+            <div className="text-xl font-bold mt-1 tabular-nums">{formatKpiValue(card)}</div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (section.table.rows.length === 0) {
+    return <p className="text-sm text-muted-foreground">لا توجد بيانات لعرضها.</p>;
+  }
+
+  return (
+    <div className="overflow-x-auto rounded-lg border">
+      <Table>
+        <TableHeader>
+          <TableRow>
+            {section.table.columns.map((col) => <TableHead key={col.key}>{col.label}</TableHead>)}
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {section.table.rows.map((row) => (
+            <TableRow key={section.table.columns.map((col) => toDisplayText(row[col.key])).join("|")}>
+              {section.table.columns.map((col) => (
+                <TableCell key={col.key} className="text-sm">{formatCell(row[col.key], col.format)}</TableCell>
+              ))}
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+      {section.table.truncated && (
+        <div className="p-2 text-xs text-muted-foreground border-t">
+          تم عرض {section.table.rows.length} من أصل {formatNumber(section.table.totalMatched)} صفاً.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ReportPreview({ data }: Readonly<{ data: ReportData }>) {
   return (
     <Card id="report-preview">
@@ -962,45 +1197,12 @@ function ReportPreview({ data }: Readonly<{ data: ReportData }>) {
         {data.sections.map((section) => (
           <div key={section.id} className="space-y-3">
             <h3 className="font-semibold text-base">{section.title}</h3>
-            {section.kind === "kpi" ? (
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-                {section.cards.map((card) => (
-                  <div key={card.key} className="rounded-lg border bg-muted/40 p-3">
-                    <div className="text-xs text-muted-foreground">{card.label}</div>
-                    <div className="text-xl font-bold mt-1 tabular-nums">{formatKpiValue(card)}</div>
-                  </div>
-                ))}
-              </div>
-            ) : section.table.rows.length === 0 ? (
-              <p className="text-sm text-muted-foreground">لا توجد بيانات لعرضها.</p>
-            ) : (
-              <div className="overflow-x-auto rounded-lg border">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      {section.table.columns.map((col) => <TableHead key={col.key}>{col.label}</TableHead>)}
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {section.table.rows.map((row) => (
-                      <TableRow key={section.table.columns.map((col) => toDisplayText(row[col.key])).join("|")}>
-                        {section.table.columns.map((col) => (
-                          <TableCell key={col.key} className="text-sm">{formatCell(row[col.key], col.format)}</TableCell>
-                        ))}
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-                {section.table.truncated && (
-                  <div className="p-2 text-xs text-muted-foreground border-t">
-                    تم عرض {section.table.rows.length} من أصل {formatNumber(section.table.totalMatched)} صفاً.
-                  </div>
-                )}
-              </div>
-            )}
+            <SectionBody section={section} />
           </div>
         ))}
       </CardContent>
     </Card>
   );
 }
+
+export { ReportApiError, fetchReportJson, supportsFilter, requiresReportPeriod, resetUnsupportedFilters, buildSupportedFiltersPayload, validatePeriod };

@@ -1,21 +1,56 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ReportsCenter } from "./reports-center";
+import {
+  ReportsCenter,
+  buildSupportedFiltersPayload,
+  requiresReportPeriod,
+  resetUnsupportedFilters,
+  supportsFilter,
+  validatePeriod,
+} from "./reports-center";
 
 function jsonResponse(body: unknown): Response {
   return { ok: true, json: () => Promise.resolve(body) } as Response;
 }
 
-const DEFINITIONS = [
-  {
-    type: "EXECUTIVE_SUMMARY", title: "التقرير التنفيذي الشامل", description: "وصف",
-    supportedFilters: ["from", "to"], sections: [], defaultColumns: [], maxRows: 500,
-    supportsPdf: true, supportsXlsx: true, requiresPeriod: true,
-  },
-];
+function errorResponse(status: number, message: string, code?: string): Response {
+  return {
+    ok: false,
+    status,
+    json: () => Promise.resolve({ error: { message, code } }),
+  } as Response;
+}
 
-const FILTERS_DATA = { regions: [], departments: [], facilities: [], classifications: [], channels: [] };
+const EXECUTIVE_SUMMARY_DEFINITION = {
+  type: "EXECUTIVE_SUMMARY", title: "التقرير التنفيذي الشامل", description: "وصف",
+  supportedFilters: ["from", "to"], sections: [], defaultColumns: [], maxRows: 500,
+  supportsPdf: true, supportsXlsx: true, requiresPeriod: true,
+};
+
+const DEPARTMENT_PERFORMANCE_DEFINITION = {
+  type: "DEPARTMENT_PERFORMANCE", title: "تقرير أداء الإدارات", description: "وصف",
+  // Deliberately supports "region" but not "department", to test that an
+  // unsupported filter never renders and never reaches the request payload.
+  supportedFilters: ["from", "to", "region"], sections: [], defaultColumns: [], maxRows: 1000,
+  supportsPdf: true, supportsXlsx: true, requiresPeriod: true,
+};
+
+const CLASSIFICATION_DEFINITION = {
+  type: "CLASSIFICATION_ANALYSIS", title: "تقرير التصنيفات", description: "وصف",
+  supportedFilters: ["region"], sections: [], defaultColumns: [], maxRows: 1000,
+  supportsPdf: true, supportsXlsx: true, requiresPeriod: false,
+};
+
+const DEFINITIONS = [EXECUTIVE_SUMMARY_DEFINITION, DEPARTMENT_PERFORMANCE_DEFINITION, CLASSIFICATION_DEFINITION];
+
+const FILTERS_DATA = {
+  regions: [{ id: "riyadh", name: "الرياض" }],
+  departments: [{ id: "support", name: "الدعم الفني" }],
+  facilities: [],
+  classifications: [],
+  channels: [],
+};
 
 function routedFetch(overrides: Record<string, () => Response> = {}) {
   return vi.fn((input: RequestInfo | URL, _init?: RequestInit) => {
@@ -123,5 +158,230 @@ describe("ReportsCenter", () => {
     await user.click(historyTab);
 
     expect(await screen.findByText("لا توجد تشغيلات بعد")).toBeInTheDocument();
+  });
+
+  it("shows an explicit error state (not an empty list) when the templates request fails with 401", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      routedFetch({ "/api/reports/templates": () => errorResponse(401, "يلزم تسجيل الدخول") })
+    );
+    render(<ReportsCenter />);
+
+    const templatesTab = await screen.findByRole("tab", { name: /القوالب/ });
+    await user.click(templatesTab);
+
+    expect(await screen.findByText("يلزم تسجيل الدخول")).toBeInTheDocument();
+    expect(screen.queryByText("لا توجد قوالب محفوظة بعد")).not.toBeInTheDocument();
+  });
+
+  it("shows an explicit error state when the schedules request fails with 500", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      routedFetch({ "/api/reports/schedules": () => errorResponse(500, "خطأ داخلي في الخادم") })
+    );
+    render(<ReportsCenter />);
+
+    const schedulesTab = await screen.findByRole("tab", { name: /الجداول/ });
+    await user.click(schedulesTab);
+
+    expect(await screen.findByText("خطأ داخلي في الخادم")).toBeInTheDocument();
+  });
+
+  it("retrying after a failed load successfully repopulates the list", async () => {
+    const user = userEvent.setup();
+    let templatesCallCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      routedFetch({
+        "/api/reports/templates": () => {
+          templatesCallCount += 1;
+          return templatesCallCount === 1 ? errorResponse(500, "خطأ داخلي") : jsonResponse({ templates: [] });
+        },
+      })
+    );
+    render(<ReportsCenter />);
+
+    const templatesTab = await screen.findByRole("tab", { name: /القوالب/ });
+    await user.click(templatesTab);
+    expect(await screen.findByText("خطأ داخلي")).toBeInTheDocument();
+
+    const retryButton = screen.getByRole("button", { name: /إعادة المحاولة/ });
+    await user.click(retryButton);
+
+    expect(await screen.findByText("لا توجد قوالب محفوظة بعد")).toBeInTheDocument();
+    expect(templatesCallCount).toBe(2);
+  });
+
+  it("shows an error state (not empty definitions) when the initial load fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      routedFetch({ "/api/reports/definitions": () => errorResponse(500, "تعذر تحميل الأنواع") })
+    );
+    render(<ReportsCenter />);
+
+    expect(await screen.findByText("تعذر تحميل الأنواع")).toBeInTheDocument();
+  });
+
+  it("aborts in-flight initial requests on unmount (never surfaced as an error)", async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/reports/definitions")) {
+        capturedSignal = init?.signal ?? undefined;
+        return new Promise(() => {
+          // never resolves — simulates a slow request outlived by the component
+        });
+      }
+      if (url.includes("/api/filters")) return Promise.resolve(jsonResponse(FILTERS_DATA));
+      return Promise.resolve(jsonResponse({}));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { unmount } = render(<ReportsCenter />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(capturedSignal?.aborted).toBe(false);
+
+    unmount();
+    expect(capturedSignal?.aborted).toBe(true);
+  });
+
+  it("only shows filters supported by the selected report type (region shown, department hidden)", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", routedFetch());
+    render(<ReportsCenter />);
+
+    const card = await screen.findByText("تقرير أداء الإدارات");
+    await user.click(card);
+
+    expect(await screen.findByText(/إعدادات التقرير/)).toBeInTheDocument();
+    expect(screen.getByText("المنطقة")).toBeInTheDocument();
+    expect(screen.queryByText("الإدارة")).not.toBeInTheDocument();
+  });
+
+  it("does not render date filters for a report type that does not require a period", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", routedFetch());
+    const { container } = render(<ReportsCenter />);
+    const card = await screen.findByText("تقرير التصنيفات");
+    await user.click(card);
+
+    expect(await screen.findByText(/إعدادات التقرير/)).toBeInTheDocument();
+    expect(container.querySelectorAll('input[type="date"]')).toHaveLength(0);
+  });
+
+  it("blocks preview when a required period is missing, without calling the preview API", async () => {
+    const user = userEvent.setup();
+    const fetchMock = routedFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const { container } = render(<ReportsCenter />);
+
+    const card = await screen.findByText("التقرير التنفيذي الشامل");
+    await user.click(card);
+
+    const fromInput = container.querySelector('input[type="date"]') as HTMLInputElement;
+    expect(fromInput).toBeTruthy();
+    await user.clear(fromInput);
+
+    const previewButton = screen.getByRole("button", { name: /معاينة/ });
+    await user.click(previewButton);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const previewCalls = fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/reports/preview"));
+    expect(previewCalls).toHaveLength(0);
+  });
+});
+
+describe("supportsFilter / requiresReportPeriod", () => {
+  it("reports false for a null definition", () => {
+    expect(supportsFilter(null, "region")).toBe(false);
+    expect(requiresReportPeriod(null)).toBe(false);
+  });
+
+  it("reflects the definition's supportedFilters and requiresPeriod", () => {
+    expect(supportsFilter(DEPARTMENT_PERFORMANCE_DEFINITION as any, "region")).toBe(true);
+    expect(supportsFilter(DEPARTMENT_PERFORMANCE_DEFINITION as any, "department")).toBe(false);
+    expect(requiresReportPeriod(CLASSIFICATION_DEFINITION as any)).toBe(false);
+    expect(requiresReportPeriod(EXECUTIVE_SUMMARY_DEFINITION as any)).toBe(true);
+  });
+});
+
+describe("resetUnsupportedFilters", () => {
+  const baseFilters = {
+    from: "2026-07-01", to: "2026-07-31", region: "riyadh", department: "support", facility: "all",
+    classificationId: "all", priority: "all", severity: "all", channel: "all", status: "all",
+  };
+
+  it("clears a filter the new report type does not support", () => {
+    const next = resetUnsupportedFilters(baseFilters, DEPARTMENT_PERFORMANCE_DEFINITION as any);
+    expect(next.region).toBe("riyadh"); // supported, preserved
+    expect(next.department).toBe("all"); // not supported, cleared
+  });
+
+  it("clears the period when switching to a type that doesn't require one", () => {
+    const next = resetUnsupportedFilters(baseFilters, CLASSIFICATION_DEFINITION as any);
+    expect(next.from).toBe("");
+    expect(next.to).toBe("");
+  });
+
+  it("keeps or restores a sane period when switching to a type that requires one", () => {
+    const next = resetUnsupportedFilters({ ...baseFilters, from: "", to: "" }, EXECUTIVE_SUMMARY_DEFINITION as any);
+    expect(next.from).not.toBe("");
+    expect(next.to).not.toBe("");
+  });
+});
+
+describe("buildSupportedFiltersPayload", () => {
+  const filters = {
+    from: "2026-07-01", to: "2026-07-31", region: "riyadh", department: "support", facility: "all",
+    classificationId: "all", priority: "all", severity: "all", channel: "all", status: "all",
+  };
+
+  it("omits an unsupported filter from the payload even though it holds a real value", () => {
+    const payload = buildSupportedFiltersPayload(filters, DEPARTMENT_PERFORMANCE_DEFINITION as any);
+    expect(payload.region).toBe("riyadh");
+    expect(payload).not.toHaveProperty("department");
+  });
+
+  it("omits from/to entirely when the report type does not require a period", () => {
+    const payload = buildSupportedFiltersPayload(filters, CLASSIFICATION_DEFINITION as any);
+    expect(payload).not.toHaveProperty("from");
+    expect(payload).not.toHaveProperty("to");
+  });
+
+  it("includes from/to when the report type requires a period", () => {
+    const payload = buildSupportedFiltersPayload(filters, EXECUTIVE_SUMMARY_DEFINITION as any);
+    expect(payload.from).toBe("2026-07-01");
+    expect(payload.to).toBe("2026-07-31");
+  });
+});
+
+describe("validatePeriod", () => {
+  const filters = {
+    from: "2026-07-01", to: "2026-07-31", region: "all", department: "all", facility: "all",
+    classificationId: "all", priority: "all", severity: "all", channel: "all", status: "all",
+  };
+
+  it("requires from/to for a report type that needs a period", () => {
+    expect(validatePeriod(EXECUTIVE_SUMMARY_DEFINITION as any, { ...filters, from: "" })).toMatch(/الفترة/);
+  });
+
+  it("rejects from > to", () => {
+    expect(
+      validatePeriod(EXECUTIVE_SUMMARY_DEFINITION as any, { ...filters, from: "2026-08-01", to: "2026-07-01" })
+    ).toMatch(/تاريخ البداية/);
+  });
+
+  it("does not require a period for a report type that doesn't need one", () => {
+    expect(validatePeriod(CLASSIFICATION_DEFINITION as any, { ...filters, from: "", to: "" })).toBeNull();
+  });
+
+  it("passes for a valid period", () => {
+    expect(validatePeriod(EXECUTIVE_SUMMARY_DEFINITION as any, filters)).toBeNull();
   });
 });

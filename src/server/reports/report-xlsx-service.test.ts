@@ -123,7 +123,7 @@ describe("XLSX report rendering", () => {
     const dataSheet = workbook.getWorksheet("أعلى المناطق")!;
     const firstDataRow = dataSheet.getRow(2);
     const dateCell = firstDataRow.getCell(4);
-    expect(dateCell.value instanceof Date).toBe(true);
+    expect(dateCell.value).toBeInstanceOf(Date);
     expect(dateCell.numFmt).toBe("yyyy-mm-dd");
   });
 

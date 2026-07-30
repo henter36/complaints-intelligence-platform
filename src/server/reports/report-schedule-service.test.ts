@@ -64,6 +64,8 @@ describe("computeNextRunAt", () => {
 
 const dbMocks = vi.hoisted(() => ({
   findFirst: vi.fn(),
+  findUnique: vi.fn(),
+  update: vi.fn(),
   count: vi.fn(),
   updateMany: vi.fn(),
   auditLogCreate: vi.fn(),
@@ -73,6 +75,8 @@ vi.mock("@/lib/db", () => ({
   db: {
     reportSchedule: {
       findFirst: dbMocks.findFirst,
+      findUnique: dbMocks.findUnique,
+      update: dbMocks.update,
       updateMany: dbMocks.updateMany,
     },
     reportRun: {
@@ -130,5 +134,93 @@ describe("runDueSchedule", () => {
     const { runDueSchedule } = await import("./report-schedule-service");
     const result = await runDueSchedule(new Date("2026-07-30T05:00:00Z"));
     expect(result).toEqual({ ran: false, reason: "contended", scheduleId: "sch_1" });
+  });
+});
+
+describe("updateReportSchedule — re-enable policy", () => {
+  beforeEach(() => {
+    dbMocks.findUnique.mockReset();
+    dbMocks.update.mockReset();
+    dbMocks.auditLogCreate.mockReset().mockResolvedValue({ id: "audit_1" });
+  });
+
+  function existingSchedule(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "sch_1",
+      reportTemplateId: "tpl_1",
+      frequency: ReportFrequency.DAILY,
+      timeOfDay: "07:00",
+      dayOfWeek: null,
+      dayOfMonth: null,
+      timezone: "Asia/Riyadh",
+      isEnabled: false,
+      nextRunAt: new Date("2026-07-20T04:00:00Z"), // stale (in the past relative to `now` used below)
+      lastRunAt: null,
+      ...overrides,
+    };
+  }
+
+  it("recomputes nextRunAt when re-enabling a schedule whose nextRunAt is stale", async () => {
+    dbMocks.findUnique.mockResolvedValue(existingSchedule());
+    dbMocks.update.mockImplementation(({ data }) => Promise.resolve({ id: "sch_1", ...data }));
+
+    const { updateReportSchedule } = await import("./report-schedule-service");
+    const now = new Date("2026-07-30T03:00:00Z");
+    await updateReportSchedule("sch_1", { isEnabled: true }, "admin", now);
+
+    const updateArgs = dbMocks.update.mock.calls[0][0];
+    expect(updateArgs.data.nextRunAt.getTime()).toBeGreaterThan(now.getTime());
+    expect(updateArgs.data.nextRunAt.getTime()).not.toBe(existingSchedule().nextRunAt.getTime());
+  });
+
+  it("recomputes nextRunAt when re-enabling even if the stored nextRunAt is still in the future", async () => {
+    const futureNextRunAt = new Date("2026-08-15T04:00:00Z");
+    dbMocks.findUnique.mockResolvedValue(existingSchedule({ nextRunAt: futureNextRunAt }));
+    dbMocks.update.mockImplementation(({ data }) => Promise.resolve({ id: "sch_1", ...data }));
+
+    const { updateReportSchedule } = await import("./report-schedule-service");
+    const now = new Date("2026-07-30T03:00:00Z");
+    await updateReportSchedule("sch_1", { isEnabled: true }, "admin", now);
+
+    const updateArgs = dbMocks.update.mock.calls[0][0];
+    // Recomputed relative to `now`, not left as the old future value — proves
+    // resumption starts from a slot anchored to the activation time.
+    expect(updateArgs.data.nextRunAt.getTime()).not.toBe(futureNextRunAt.getTime());
+  });
+
+  it("does not recompute nextRunAt for an unrelated update on an already-enabled schedule", async () => {
+    const stableNextRunAt = new Date("2026-08-01T04:00:00Z");
+    dbMocks.findUnique.mockResolvedValue(existingSchedule({ isEnabled: true, nextRunAt: stableNextRunAt }));
+    dbMocks.update.mockImplementation(({ data }) => Promise.resolve({ id: "sch_1", ...data }));
+
+    const { updateReportSchedule } = await import("./report-schedule-service");
+    await updateReportSchedule("sch_1", {}, "admin", new Date("2026-07-30T03:00:00Z"));
+
+    const updateArgs = dbMocks.update.mock.calls[0][0];
+    expect(updateArgs.data.nextRunAt.getTime()).toBe(stableNextRunAt.getTime());
+  });
+
+  it("still recomputes nextRunAt when only the timing changes, regardless of enabled state", async () => {
+    dbMocks.findUnique.mockResolvedValue(existingSchedule({ isEnabled: true, nextRunAt: new Date("2026-08-01T04:00:00Z") }));
+    dbMocks.update.mockImplementation(({ data }) => Promise.resolve({ id: "sch_1", ...data }));
+
+    const { updateReportSchedule } = await import("./report-schedule-service");
+    const now = new Date("2026-07-30T03:00:00Z");
+    await updateReportSchedule("sch_1", { timeOfDay: "09:00" }, "admin", now);
+
+    const updateArgs = dbMocks.update.mock.calls[0][0];
+    expect(updateArgs.data.nextRunAt.getTime()).toBeGreaterThan(now.getTime());
+  });
+
+  it("does not treat disabling a schedule as a re-enable (no recompute needed)", async () => {
+    const stableNextRunAt = new Date("2026-08-01T04:00:00Z");
+    dbMocks.findUnique.mockResolvedValue(existingSchedule({ isEnabled: true, nextRunAt: stableNextRunAt }));
+    dbMocks.update.mockImplementation(({ data }) => Promise.resolve({ id: "sch_1", ...data }));
+
+    const { updateReportSchedule } = await import("./report-schedule-service");
+    await updateReportSchedule("sch_1", { isEnabled: false }, "admin", new Date("2026-07-30T03:00:00Z"));
+
+    const updateArgs = dbMocks.update.mock.calls[0][0];
+    expect(updateArgs.data.nextRunAt.getTime()).toBe(stableNextRunAt.getTime());
   });
 });

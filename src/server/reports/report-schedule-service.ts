@@ -205,7 +205,12 @@ export async function updateReportSchedule(id: string, input: ScheduleUpdateInpu
 
   const timingChanged = input.frequency !== undefined || input.timeOfDay !== undefined
     || input.dayOfWeek !== undefined || input.dayOfMonth !== undefined;
-  const nextRunAt = timingChanged ? computeNextRunAt(merged, now) : existing.nextRunAt;
+  // Re-enabling a previously-disabled schedule always recomputes nextRunAt
+  // (even if it's still in the future), so resumption starts from a slot
+  // computed relative to the activation time rather than a schedule the
+  // admin may have paused a long time ago.
+  const isBeingReEnabled = input.isEnabled === true && !existing.isEnabled;
+  const nextRunAt = (timingChanged || isBeingReEnabled) ? computeNextRunAt(merged, now) : existing.nextRunAt;
 
   const updated = await db.reportSchedule.update({
     where: { id },
