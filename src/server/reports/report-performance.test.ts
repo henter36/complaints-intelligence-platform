@@ -93,18 +93,17 @@ describe("report engine performance (10,000 complaints)", () => {
     console.log(`[perf] buildReportData EXECUTIVE_SUMMARY over 10k complaints: ${execMs.toFixed(1)}ms`);
     expect(execMs).toBeLessThan(8000);
 
-    // PDF generation cost here is dominated by embedding/subsetting the two
-    // full-Unicode-coverage Amiri TTFs (~800KB combined) into a fresh
-    // PDFDocument, not by the (small) executive-summary content itself; a
-    // few seconds is expected and acceptable for an on-demand export action.
-    // Consistently ~7-9s on an unloaded machine — the bound below is set
-    // generously to absorb CI/shared-machine contention while still catching
-    // a genuine regression (e.g. an accidental per-row re-embed).
+    // PDF generation cost includes: embedding Amiri TTFs (~800KB each),
+    // SVG→PNG chart rendering via sharp, and laying out the new comparative
+    // sections. The chart adds ~5–10s on an unloaded machine over the old
+    // 7–9s baseline; the bound is set to 45s to absorb CI/shared-machine
+    // contention while still catching genuine regressions (e.g. an accidental
+    // per-row chart re-render).
     const pdfStart = performance.now();
     const execPdf = await renderReportPdf(execData);
     const pdfMs = performance.now() - pdfStart;
     console.log(`[perf] renderReportPdf EXECUTIVE_SUMMARY: ${pdfMs.toFixed(1)}ms, size=${(execPdf.buffer.length / 1024).toFixed(1)}KB`);
-    expect(pdfMs).toBeLessThan(30_000);
+    expect(pdfMs).toBeLessThan(45_000);
     expect(execPdf.buffer.length).toBeLessThan(5 * 1024 * 1024);
 
     const detailRequest = parseReportRequest({
