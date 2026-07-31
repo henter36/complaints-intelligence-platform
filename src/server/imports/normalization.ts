@@ -1,4 +1,5 @@
 import { ComplaintPriority, ComplaintStatus } from "@prisma/client";
+import { normalizeArabic } from "./arabic-normalize";
 import {
   normalizeColumnHeader,
   type ComplaintImportField,
@@ -6,6 +7,8 @@ import {
 } from "./complaint-column-schema";
 import { parseExcelSerialDate } from "./excel-date-parser";
 import { deriveSubject } from "./subject-derive";
+
+export { normalizeArabic };
 
 export type RawImportRow = {
   rowNumber: number;
@@ -70,13 +73,7 @@ const DATE_FIELD_LABELS: Partial<Record<ComplaintImportField, string>> = {
 };
 
 function normalizeArabicToken(value: string): string {
-  return value
-    .trim()
-    .replaceAll(/[\u064B-\u065F\u0670]/g, "")
-    .replaceAll("\u0640", "")
-    .replaceAll(/[إأآا]/g, "ا")
-    .replaceAll("ى", "ي")
-    .replaceAll("ة", "ه")
+  return normalizeArabic(value)
     .replaceAll(/\s+/g, " ")
     .toLocaleLowerCase("ar-SA");
 }

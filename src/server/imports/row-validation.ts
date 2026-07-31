@@ -1,4 +1,5 @@
 import { ComplaintStatus, type Category, type Classification } from "@prisma/client";
+import { normalizeArabic } from "./arabic-normalize";
 import type { NormalizedComplaintRow, RowMessage } from "./normalization";
 
 type TaxonomyLookup = {
@@ -22,13 +23,7 @@ const OPEN_STATUSES = new Set<ComplaintStatus>([
 ]);
 
 function normalizeLookup(value?: string): string {
-  return (value ?? "")
-    .trim()
-    .replaceAll(/[\u064B-\u065F\u0670]/g, "")
-    .replaceAll("\u0640", "")
-    .replaceAll(/[إأآا]/g, "ا")
-    .replaceAll("ى", "ي")
-    .replaceAll("ة", "ه")
+  return normalizeArabic(value ?? "")
     .replaceAll(/\s+/g, " ")
     .toLocaleLowerCase("ar-SA");
 }

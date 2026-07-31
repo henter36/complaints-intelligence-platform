@@ -1,4 +1,5 @@
 import { ImportValidationError } from "./import-errors";
+import { normalizeArabic } from "./arabic-normalize";
 
 export const COMPLAINT_IMPORT_FIELDS = [
   "externalId",
@@ -162,13 +163,7 @@ const SYNONYMS: Record<ComplaintImportField, string[]> = {
 };
 
 export function normalizeColumnHeader(value: string): string {
-  return value
-    .trim()
-    .replaceAll(/[\u064B-\u065F\u0670]/g, "")
-    .replaceAll("\u0640", "")
-    .replaceAll(/[إأآا]/g, "ا")
-    .replaceAll("ى", "ي")
-    .replaceAll("ة", "ه")
+  return normalizeArabic(value)
     .replaceAll(/\s+/g, " ")
     .toLocaleLowerCase("ar-SA");
 }
@@ -248,6 +243,66 @@ export function matchComplaintColumns(headers: string[]): {
   return { mapping, conflicts };
 }
 
+function classifyHeaderMappingEntry(input: {
+  trimmed: string;
+  header: string;
+  mapping: ColumnMapping;
+  conflictHeaders: Set<string>;
+  manuallyMapped?: boolean;
+}): ColumnMappingEntry {
+  const normalizedHeader = normalizeColumnHeader(input.trimmed);
+  const field = input.mapping[input.trimmed] ?? input.mapping[input.header] ?? null;
+  const suggested = SYNONYM_INDEX.get(normalizedHeader);
+
+  if (input.conflictHeaders.has(input.trimmed) || input.conflictHeaders.has(input.header)) {
+    return {
+      header: input.trimmed,
+      normalizedHeader,
+      field: null,
+      status: "CONFLICT",
+      suggestedField: suggested,
+    };
+  }
+
+  if (field) {
+    return {
+      header: input.trimmed,
+      normalizedHeader,
+      field,
+      status: input.manuallyMapped ? "MANUALLY_MAPPED" : "AUTO_MAPPED",
+      suggestedField: suggested,
+    };
+  }
+
+  return {
+    header: input.trimmed,
+    normalizedHeader,
+    field: null,
+    status: "UNMAPPED_PRESERVED",
+    suggestedField: suggested,
+  };
+}
+
+function collectMissingRequiredFields(mappedFields: Set<ComplaintImportField>): string[] {
+  const missingRequiredFields: string[] = [];
+
+  if (!mappedFields.has("externalId") && !mappedFields.has("sourceReference")) {
+    missingRequiredFields.push("externalId|sourceReference");
+  }
+  if (!mappedFields.has("complaintDate") && !mappedFields.has("receivedAt")) {
+    missingRequiredFields.push("complaintDate|receivedAt");
+  }
+  if (!mappedFields.has("subject") && !mappedFields.has("description")) {
+    missingRequiredFields.push("subject|description");
+  }
+
+  return missingRequiredFields;
+}
+
+function countEntriesByStatus(entries: ColumnMappingEntry[], status: ColumnMappingStatus): number {
+  return entries.filter((entry) => entry.status === status).length;
+}
+
 export function analyzeColumnMapping(
   headers: string[],
   mapping: ColumnMapping,
@@ -260,58 +315,24 @@ export function analyzeColumnMapping(
   const conflictHeaders = new Set(conflicts.map((item) => item.header));
   const mappedHeaders = new Set(Object.keys(mapping));
   const mappedFields = new Set(Object.values(mapping));
-  const entries: ColumnMappingEntry[] = [];
 
+  const entries: ColumnMappingEntry[] = [];
   for (const header of headers) {
     const trimmed = header.trim();
     if (!trimmed) continue;
 
-    const normalizedHeader = normalizeColumnHeader(trimmed);
-    const field = mapping[trimmed] ?? mapping[header] ?? null;
-    const suggested = SYNONYM_INDEX.get(normalizedHeader);
-
-    if (conflictHeaders.has(trimmed) || conflictHeaders.has(header)) {
-      entries.push({
-        header: trimmed,
-        normalizedHeader,
-        field: null,
-        status: "CONFLICT",
-        suggestedField: suggested,
-      });
-      continue;
-    }
-
-    if (field) {
-      entries.push({
-        header: trimmed,
-        normalizedHeader,
-        field,
-        status: options?.manuallyMapped ? "MANUALLY_MAPPED" : "AUTO_MAPPED",
-        suggestedField: suggested,
-      });
-      continue;
-    }
-
-    entries.push({
-      header: trimmed,
-      normalizedHeader,
-      field: null,
-      status: "UNMAPPED_PRESERVED",
-      suggestedField: suggested,
-    });
+    entries.push(
+      classifyHeaderMappingEntry({
+        trimmed,
+        header,
+        mapping,
+        conflictHeaders,
+        manuallyMapped: options?.manuallyMapped,
+      })
+    );
   }
 
-  const missingRequiredFields: string[] = [];
-  if (!mappedFields.has("externalId") && !mappedFields.has("sourceReference")) {
-    missingRequiredFields.push("externalId|sourceReference");
-  }
-  if (!mappedFields.has("complaintDate") && !mappedFields.has("receivedAt")) {
-    missingRequiredFields.push("complaintDate|receivedAt");
-  }
-  if (!mappedFields.has("subject") && !mappedFields.has("description")) {
-    missingRequiredFields.push("subject|description");
-  }
-
+  const missingRequiredFields = collectMissingRequiredFields(mappedFields);
   for (const key of missingRequiredFields) {
     entries.push({
       header: key,
@@ -321,10 +342,10 @@ export function analyzeColumnMapping(
     });
   }
 
-  const autoMappedCount = entries.filter((entry) => entry.status === "AUTO_MAPPED").length;
-  const manuallyMappedCount = entries.filter((entry) => entry.status === "MANUALLY_MAPPED").length;
-  const unmappedPreservedCount = entries.filter((entry) => entry.status === "UNMAPPED_PRESERVED").length;
-  const conflictCount = entries.filter((entry) => entry.status === "CONFLICT").length;
+  const autoMappedCount = countEntriesByStatus(entries, "AUTO_MAPPED");
+  const manuallyMappedCount = countEntriesByStatus(entries, "MANUALLY_MAPPED");
+  const unmappedPreservedCount = countEntriesByStatus(entries, "UNMAPPED_PRESERVED");
+  const conflictCount = countEntriesByStatus(entries, "CONFLICT");
   const mappedCount = autoMappedCount + manuallyMappedCount;
 
   return {
