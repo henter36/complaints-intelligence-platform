@@ -128,7 +128,17 @@ Synthetic example only:
 الوصف = وصف صناعي لا يحتوي بيانات تشغيلية
 ```
 
-## Import Confirmation
+## Import data quality
+
+Import validation distinguishes:
+
+- **Blocking errors** (reject row): missing identity, missing/invalid required dates, formulas, hard taxonomy conflicts.
+- **Warnings** (import allowed): missing description (nullable), terminal status without `closedAt`.
+- **Derived values**: description filled from `subject` or a neutral classification label when the original description is empty.
+
+Terminal statuses (`RESOLVED`, `CLOSED`, `CANCELLED`) without `closedAt` are imported with a warning. No invented close dates (not today, not import time, not received date). Timing KPIs that need `closedAt` exclude those rows (`resolutionDays` stays null).
+
+Error CSV includes complaint number (from matched `externalId`, raw headers, or `غير متوفر`), message level, original/used values, and whether the row can be imported.
 
 Phase 5 confirms batches only from `READY_FOR_CONFIRMATION`. Confirmation runs transactionally, creates `NEW` complaints, updates `UPDATE` complaints with optimistic preview-version checks, skips `NO_CHANGE` and `DUPLICATE`, and blocks any batch containing rejected or invalid rows. Rollback uses immutable `ImportChangeSnapshot` records and refuses to proceed if complaints changed after confirmation.
 

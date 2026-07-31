@@ -65,8 +65,10 @@ export type PeriodType = "daily" | "weekly" | "monthly" | "custom";
 interface ImportError {
   row: number;
   complaintNumber?: string;
-  errors: Array<{ message: string }>;
-  warnings: Array<{ message: string }>;
+  errors: Array<{ message: string; level?: string; code?: string; field?: string }>;
+  warnings: Array<{ message: string; level?: string; code?: string; field?: string }>;
+  validationStatus?: string;
+  imported?: string;
 }
 
 interface ImportPreviewRow {
@@ -141,6 +143,44 @@ const COLUMN_MAPPING_STATUS_LABELS: Record<string, string> = {
 
 export function toColumnMappingStatusLabel(status: string): string {
   return COLUMN_MAPPING_STATUS_LABELS[status] ?? "حالة مطابقة غير معروفة";
+}
+
+export type ImportDisplayResult =
+  | "REJECTED"
+  | "IMPORTED_WITH_WARNINGS"
+  | "IMPORTED";
+
+export function getImportResultLabel(result?: string): string {
+  switch (result) {
+    case "REJECTED":
+      return "مرفوض";
+    case "IMPORTED_WITH_WARNINGS":
+      return "مستورد مع تحذيرات";
+    case "IMPORTED":
+      return "مستورد";
+    default:
+      return "غير محدد";
+  }
+}
+
+export function buildImportMessageKey(
+  prefix: "error" | "warning",
+  row: number,
+  message: {
+    code?: string;
+    field?: string;
+    level?: string;
+    message: string;
+  }
+): string {
+  return [
+    prefix,
+    row,
+    message.code ?? "no-code",
+    message.field ?? "no-field",
+    message.level ?? "no-level",
+    message.message,
+  ].join(":");
 }
 
 export function normalizeUploadResultPayload(json: UploadResult): UploadResult {
@@ -329,7 +369,7 @@ const STAT_CARDS = [
   },
   {
     key: "rejected",
-    label: "مرفوضة",
+    label: "مرفوضة (أخطاء مانعة)",
     icon: XCircle,
     color: "text-rose-700 dark:text-rose-300",
     bg: "bg-rose-50 dark:bg-rose-900/30",
@@ -337,8 +377,17 @@ const STAT_CARDS = [
     get: (r: UploadResult) => r.rejectedRecords,
   },
   {
+    key: "warnings",
+    label: "مستوردة مع تحذيرات",
+    icon: AlertTriangle,
+    color: "text-amber-700 dark:text-amber-300",
+    bg: "bg-amber-50 dark:bg-amber-900/30",
+    ring: "ring-amber-200 dark:ring-amber-800",
+    get: (r: UploadResult) => r.warningRecords,
+  },
+  {
     key: "incomplete",
-    label: "ناقصة",
+    label: "غير صالحة",
     icon: FileWarning,
     color: "text-orange-700 dark:text-orange-300",
     bg: "bg-orange-50 dark:bg-orange-900/30",
@@ -1008,10 +1057,10 @@ export function ImportCenter() {
                         </TabsTrigger>
                         <TabsTrigger value="errors">
                           <AlertTriangle className="h-4 w-4" />
-                          الأخطاء
+                          التحقق والجودة
                           <Badge
                             variant={
-                              result.errors.length > 0
+                              result.rejectedRecords > 0 || result.incompleteRecords > 0
                                 ? "destructive"
                                 : "secondary"
                             }
@@ -1192,13 +1241,13 @@ export function ImportCenter() {
                         </p>
                       </TabsContent>
 
-                      {/* Errors tab */}
+                      {/* Errors / warnings tab */}
                       <TabsContent value="errors" className="mt-4">
                         {result.errors.length === 0 ? (
                           <div className="flex flex-col items-center py-10 text-center">
                             <CheckCircle2 className="h-12 w-12 text-emerald-500 mb-3" />
                             <p className="text-sm font-medium">
-                              لا توجد أخطاء — جميع السجلات صالحة
+                              لا توجد أخطاء مانعة أو تحذيرات — جميع السجلات صالحة
                             </p>
                           </div>
                         ) : (
@@ -1210,7 +1259,8 @@ export function ImportCenter() {
                                   <TableHead className="w-40">
                                     رقم الشكوى
                                   </TableHead>
-                                  <TableHead>رسائل الخطأ</TableHead>
+                                  <TableHead className="w-36">النتيجة</TableHead>
+                                  <TableHead>الرسائل</TableHead>
                                 </TableRow>
                               </TableHeader>
                               <TableBody>
@@ -1220,17 +1270,34 @@ export function ImportCenter() {
                                       {err.row}
                                     </TableCell>
                                     <TableCell className="font-mono text-xs">
-                                      {err.complaintNumber}
+                                      {err.complaintNumber || "غير متوفر"}
+                                    </TableCell>
+                                    <TableCell className="text-xs">
+                                      {getImportResultLabel(err.imported)}
                                     </TableCell>
                                     <TableCell>
                                       <ul className="flex flex-wrap gap-1.5">
-                                        {err.errors.map((msg, mi) => (
-                                          <li key={mi}>
+                                        {err.errors.map((msg) => (
+                                          <li key={buildImportMessageKey("error", err.row, msg)}>
                                             <Badge
                                               variant="outline"
                                               className="bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/30 dark:text-rose-300 dark:border-rose-900 text-[11px] font-normal"
                                             >
                                               <XCircle className="h-3 w-3" />
+                                              خطأ مانع: {msg.message}
+                                            </Badge>
+                                          </li>
+                                        ))}
+                                        {(err.warnings ?? []).map((msg) => (
+                                          <li key={buildImportMessageKey("warning", err.row, msg)}>
+                                            <Badge
+                                              variant="outline"
+                                              className="bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/30 dark:text-amber-300 dark:border-amber-900 text-[11px] font-normal"
+                                            >
+                                              <AlertTriangle className="h-3 w-3" />
+                                              {msg.level === "derived"
+                                                ? "قيمة مشتقة: "
+                                                : "تحذير جودة بيانات: "}
                                               {msg.message}
                                             </Badge>
                                           </li>
@@ -1245,8 +1312,8 @@ export function ImportCenter() {
                         )}
                         {result.errors.length >= 50 && (
                           <p className="text-xs text-amber-600 dark:text-amber-400 mt-2 text-center">
-                            يتم عرض أول 50 خطأ — نزّل التقرير الكامل للاطلاع على
-                            جميع الأخطاء
+                            يتم عرض أول السجلات — نزّل التقرير الكامل للاطلاع على
+                            الأخطاء المانعة وتحذيرات جودة البيانات
                           </p>
                         )}
                       </TabsContent>

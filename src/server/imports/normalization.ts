@@ -42,6 +42,10 @@ export type RowMessage = {
   field: string;
   code: string;
   message: string;
+  level?: "error" | "warning" | "derived";
+  originalValue?: string;
+  usedValue?: string;
+  source?: string;
 };
 
 const STATUS_LABELS = new Map<string, ComplaintStatus>([
@@ -350,6 +354,52 @@ function applyDerivedSubject(target: NormalizedComplaintRow): void {
   target.subject = deriveSubject(target.description);
 }
 
+function applyDescriptionQualityFallbacks(
+  target: NormalizedComplaintRow,
+  warnings: RowMessage[]
+): void {
+  if (target.description?.trim()) return;
+
+  if (target.subject?.trim()) {
+    target.description = target.subject.trim();
+    warnings.push({
+      field: "description",
+      code: "DESCRIPTION_DERIVED_FROM_SUBJECT",
+      message: "الوصف الأصلي غير موجود، وتم استخدام الموضوع كوصف بديل.",
+      level: "derived",
+      originalValue: "",
+      usedValue: target.description,
+      source: "subject",
+    });
+    return;
+  }
+
+  if (target.classification?.trim()) {
+    target.description = `الوصف غير متوفر في المصدر — التصنيف: ${target.classification.trim()}`;
+    warnings.push({
+      field: "description",
+      code: "DESCRIPTION_DERIVED_FROM_CLASSIFICATION",
+      message: "الوصف الأصلي غير موجود، وتم اشتقاق وصف محايد من التصنيف.",
+      level: "derived",
+      originalValue: "",
+      usedValue: target.description,
+      source: "classification",
+    });
+    applyDerivedSubject(target);
+    return;
+  }
+
+  warnings.push({
+    field: "description",
+    code: "DESCRIPTION_MISSING",
+    message: "الوصف غير موجود في المصدر، وسيُستورد الصف دون وصف.",
+    level: "warning",
+    originalValue: "",
+    usedValue: "",
+    source: "none",
+  });
+}
+
 export function normalizeImportRow(
   rawRow: RawImportRow,
   mapping: ColumnMapping
@@ -374,6 +424,7 @@ export function normalizeImportRow(
   }
 
   applyResolutionFallback(normalized, rawRow, errors);
+  applyDescriptionQualityFallbacks(normalized, warnings);
   applyDerivedSubject(normalized);
 
   if (!normalized.status) normalized.status = ComplaintStatus.NEW;

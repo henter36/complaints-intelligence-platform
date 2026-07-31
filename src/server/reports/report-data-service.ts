@@ -113,7 +113,7 @@ function complaintRows(items: ComplaintListItem[]): Record<string, unknown>[] {
     closedAt: item.closedAt,
     isLate: item.isLate,
     latenessDays: item.latenessDays ?? 0,
-    resolutionDays: item.resolutionDays ?? 0,
+    resolutionDays: item.resolutionDays,
   }));
 }
 

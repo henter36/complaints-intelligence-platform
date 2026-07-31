@@ -66,13 +66,15 @@ export function assertComplaintStatusTransition(
 
 export function assertClosedAtMatchesStatus(
   status: ComplaintStatus,
-  closedAt?: Date | null
+  closedAt?: Date | null,
+  options: { requireClosedAtForClosedStatuses?: boolean } = {}
 ) {
   if (closedAt && !isClosedStatus(status)) {
     throw new Error("closedAt cannot be set unless the complaint is terminal.");
   }
 
-  if (isClosedComplaintStatus(status) && !closedAt) {
+  const requireClosedAt = options.requireClosedAtForClosedStatuses !== false;
+  if (requireClosedAt && isClosedComplaintStatus(status) && !closedAt) {
     throw new Error("closedAt is required when closing or resolving a complaint.");
   }
 }

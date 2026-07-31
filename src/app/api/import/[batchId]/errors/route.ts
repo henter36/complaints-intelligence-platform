@@ -41,6 +41,9 @@ export async function GET(request: NextRequest, context: RouteContext) {
         validationStatus: true,
         validationErrors: true,
         validationWarnings: true,
+        externalId: true,
+        rawData: true,
+        normalizedData: true,
       },
       orderBy: { rowNumber: "asc" },
     });

@@ -254,8 +254,9 @@ describe("subject derivation and description-only rows", () => {
       new Date("2026-04-14T00:00:00Z")
     );
 
-    expect(validation.errors).toEqual(
-      expect.arrayContaining([expect.objectContaining({ code: "MISSING_TEXT" })])
+    expect(validation.errors.some((item) => item.code === "MISSING_TEXT")).toBe(false);
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "DESCRIPTION_MISSING" })])
     );
   });
 });

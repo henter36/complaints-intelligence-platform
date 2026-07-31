@@ -33,6 +33,7 @@ import { normalizeImportRow, type NormalizedComplaintRow, type RawImportRow, typ
 import { maskIdentifier } from "./privacy";
 import { validateNormalizedComplaintRow } from "./row-validation";
 import { parseXlsxWorkbook } from "./xlsx-parser";
+import { resolveImportRowReference } from "./error-report";
 
 const WRITE_CHUNK_SIZE = 500;
 export const DUPLICATE_BLOCKING_IMPORT_STATUSES = [
@@ -221,6 +222,31 @@ function resolveValidationStatus(
   if (errors.length > 0) return ImportRowValidationStatus.INVALID;
   if (warnings.length > 0) return ImportRowValidationStatus.WARNING;
   return ImportRowValidationStatus.VALID;
+}
+
+export type ImportRowOutcome =
+  | "REJECTED"
+  | "IMPORTED_WITH_WARNINGS"
+  | "IMPORTED";
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled import validation status: ${String(value)}`);
+}
+
+export function getImportRowOutcome(
+  validationStatus: ImportRowValidationStatus
+): ImportRowOutcome {
+  switch (validationStatus) {
+    case ImportRowValidationStatus.INVALID:
+      return "REJECTED";
+    case ImportRowValidationStatus.WARNING:
+      return "IMPORTED_WITH_WARNINGS";
+    case ImportRowValidationStatus.VALID:
+    case ImportRowValidationStatus.PENDING:
+      return "IMPORTED";
+    default:
+      return assertNever(validationStatus);
+  }
 }
 
 function addComplaintIndexEntry(
@@ -695,8 +721,15 @@ function toImportUploadResult(
       .slice(0, 100)
       .map((row) => ({
         row: row.rowNumber,
+        complaintNumber: resolveImportRowReference({
+          externalId: row.externalId,
+          rawData: row.rawData,
+          normalizedData: row.normalizedData,
+        }),
         errors: (row.validationErrors as unknown as RowMessage[]) ?? [],
         warnings: (row.validationWarnings as unknown as RowMessage[]) ?? [],
+        validationStatus: row.validationStatus,
+        imported: getImportRowOutcome(row.validationStatus),
       })),
     preview: processed.processedRows.slice(0, 50).map((row) => {
       const normalized = row.normalizedData as Record<string, unknown> | null;
