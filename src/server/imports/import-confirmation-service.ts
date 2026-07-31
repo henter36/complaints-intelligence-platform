@@ -340,7 +340,7 @@ async function applyNewRow(
   const taxonomy = await resolveTaxonomy(tx, normalized);
   const status = normalized.status ?? ComplaintStatus.NEW;
   const closedAt = normalized.closedAt ?? null;
-  assertClosedAtMatchesStatus(status, closedAt);
+  assertClosedAtMatchesStatus(status, closedAt, { requireClosedAtForClosedStatuses: false });
 
   const complaint = await tx.complaint.create({
     data: {
@@ -461,7 +461,11 @@ function buildUpdateData(
 
   assignImportUpdateFields(data, current, normalized, taxonomy);
 
-  assertClosedAtMatchesStatus((data.status as ComplaintStatus | undefined) ?? current.status, (data.closedAt as Date | null | undefined) ?? current.closedAt);
+  assertClosedAtMatchesStatus(
+    (data.status as ComplaintStatus | undefined) ?? current.status,
+    (data.closedAt as Date | null | undefined) ?? current.closedAt,
+    { requireClosedAtForClosedStatuses: false }
+  );
   return data;
 }
 

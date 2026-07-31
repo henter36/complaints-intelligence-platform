@@ -1,4 +1,7 @@
 import { ComplaintStatus, type Category, type Classification } from "@prisma/client";
+import {
+  isTerminalComplaintStatus,
+} from "@/server/complaints/status";
 import { normalizeArabic } from "./arabic-normalize";
 import type { NormalizedComplaintRow, RowMessage } from "./normalization";
 
@@ -14,28 +17,25 @@ export type TaxonomyValidationResult = {
   apply: (row: NormalizedComplaintRow) => void;
 };
 
-const OPEN_STATUSES = new Set<ComplaintStatus>([
-  ComplaintStatus.NEW,
-  ComplaintStatus.OPEN,
-  ComplaintStatus.IN_PROGRESS,
-  ComplaintStatus.AWAITING_RESPONSE,
-  ComplaintStatus.RESOLVED,
-]);
-
 function normalizeLookup(value?: string): string {
   return normalizeArabic(value ?? "")
     .replaceAll(/\s+/g, " ")
     .toLocaleLowerCase("ar-SA");
 }
 
-function validateRequiredFields(row: NormalizedComplaintRow): RowMessage[] {
+function validateRequiredFields(row: NormalizedComplaintRow): {
+  errors: RowMessage[];
+  warnings: RowMessage[];
+} {
   const errors: RowMessage[] = [];
+  const warnings: RowMessage[] = [];
 
   if (!row.externalId?.trim() && !row.sourceReference?.trim()) {
     errors.push({
       field: "externalId",
       code: "MISSING_IDENTITY",
       message: "رقم الشكوى أو الرقم المرجعي غير موجود.",
+      level: "error",
     });
   }
 
@@ -44,18 +44,14 @@ function validateRequiredFields(row: NormalizedComplaintRow): RowMessage[] {
       field: "complaintDate",
       code: "MISSING_COMPLAINT_DATE",
       message: "يجب توفير تاريخ الشكوى أو تاريخ الورود",
+      level: "error",
     });
   }
 
-  if (!row.subject?.trim() && !row.description?.trim()) {
-    errors.push({
-      field: "description",
-      code: "MISSING_TEXT",
-      message: "الوصف غير موجود.",
-    });
-  }
+  // Missing description/subject is handled as warning/derived in normalization,
+  // not as a blocking import error (description is optional in Prisma).
 
-  return errors;
+  return { errors, warnings };
 }
 
 function validateDates(row: NormalizedComplaintRow, now: Date): RowMessage[] {
@@ -66,43 +62,54 @@ function validateDates(row: NormalizedComplaintRow, now: Date): RowMessage[] {
       field: "complaintDate",
       code: "COMPLAINT_DATE_IN_FUTURE",
       message: "تاريخ الشكوى مستقبلي بصورة غير مقبولة",
+      level: "error",
     });
   }
 
   return errors;
 }
 
-function validateLifecycleConsistency(row: NormalizedComplaintRow): RowMessage[] {
+function validateLifecycleConsistency(row: NormalizedComplaintRow): {
+  errors: RowMessage[];
+  warnings: RowMessage[];
+} {
   const errors: RowMessage[] = [];
+  const warnings: RowMessage[] = [];
+  const status = row.status ?? ComplaintStatus.NEW;
 
-  if (row.closedAt && OPEN_STATUSES.has(row.status ?? ComplaintStatus.NEW)) {
+  if (row.closedAt && !isTerminalComplaintStatus(status)) {
     errors.push({
       field: "closedAt",
       code: "CLOSED_AT_FOR_OPEN_STATUS",
       message: "لا يمكن وضع تاريخ إغلاق لشكوى غير مغلقة",
+      level: "error",
     });
   }
 
-  if ((row.status === ComplaintStatus.CLOSED || row.status === ComplaintStatus.CANCELLED) && !row.closedAt) {
-    errors.push({
+  if (isTerminalComplaintStatus(status) && !row.closedAt) {
+    warnings.push({
       field: "closedAt",
-      code: "CLOSED_STATUS_REQUIRES_CLOSED_AT",
-      message: "الحالة النهائية تتطلب تاريخ إغلاق",
+      code: "TERMINAL_STATUS_WITHOUT_CLOSED_AT",
+      message: "الحالة نهائية ولكن تاريخ الإغلاق غير متوفر في المصدر",
+      level: "warning",
+      originalValue: "",
+      usedValue: "",
+      source: "none",
     });
   }
 
-  return errors;
+  return { errors, warnings };
 }
 
 function validateFieldLengths(row: NormalizedComplaintRow): RowMessage[] {
   const errors: RowMessage[] = [];
 
   if (row.subject && row.subject.length > 300) {
-    errors.push({ field: "subject", code: "SUBJECT_TOO_LONG", message: "الموضوع يتجاوز الطول المسموح" });
+    errors.push({ field: "subject", code: "SUBJECT_TOO_LONG", message: "الموضوع يتجاوز الطول المسموح", level: "error" });
   }
 
   if (row.description && row.description.length > 5_000) {
-    errors.push({ field: "description", code: "DESCRIPTION_TOO_LONG", message: "الوصف يتجاوز الطول المسموح" });
+    errors.push({ field: "description", code: "DESCRIPTION_TOO_LONG", message: "الوصف يتجاوز الطول المسموح", level: "error" });
   }
 
   return errors;
@@ -139,6 +146,7 @@ function validateTaxonomy(row: NormalizedComplaintRow, lookup: TaxonomyLookup): 
       field: "category",
       code: "CATEGORY_NOT_FOUND",
       message: "الفئة غير موجودة أو غير فعالة، وتم الاحتفاظ بالقيمة ضمن البيانات الأصلية.",
+      level: "warning",
     });
     clearCategory = true;
   } else if (categories.length > 1) {
@@ -146,6 +154,7 @@ function validateTaxonomy(row: NormalizedComplaintRow, lookup: TaxonomyLookup): 
       field: "category",
       code: "CATEGORY_AMBIGUOUS",
       message: "وجد أكثر من فئة مطابقة للاسم المصدر، وتم الاحتفاظ بالقيمة ضمن البيانات الأصلية.",
+      level: "warning",
     });
     clearCategory = true;
   }
@@ -155,6 +164,7 @@ function validateTaxonomy(row: NormalizedComplaintRow, lookup: TaxonomyLookup): 
       field: "classification",
       code: "CLASSIFICATION_NOT_FOUND",
       message: "التصنيف غير موجود أو غير فعال، وتم الاحتفاظ بالقيمة ضمن البيانات الأصلية.",
+      level: "warning",
     });
     clearClassification = true;
   } else if (classifications.length > 1) {
@@ -162,6 +172,7 @@ function validateTaxonomy(row: NormalizedComplaintRow, lookup: TaxonomyLookup): 
       field: "classification",
       code: "CLASSIFICATION_AMBIGUOUS",
       message: "وجد أكثر من تصنيف مطابق للاسم المصدر، وتم الاحتفاظ بالقيمة ضمن البيانات الأصلية.",
+      level: "warning",
     });
     clearClassification = true;
   }
@@ -170,13 +181,12 @@ function validateTaxonomy(row: NormalizedComplaintRow, lookup: TaxonomyLookup): 
   const category = !clearCategory && categories.length === 1 ? categories[0] : null;
   const classification = !clearClassification && classifications.length === 1 ? classifications[0] : null;
 
-  // When a source category exists but is unresolved, do not adopt a lone classification
-  // (avoids silently attaching a different parent category).
   if (categoryUnresolved && classificationPresent && !clearClassification) {
     warnings.push({
       field: "classification",
       code: "CLASSIFICATION_PARENT_UNRESOLVED",
       message: "تعذر اعتماد التصنيف لأن الفئة المصدرية غير محسومة، وتم الاحتفاظ بالقيمة ضمن البيانات الأصلية.",
+      level: "warning",
     });
     clearClassification = true;
   }
@@ -186,6 +196,7 @@ function validateTaxonomy(row: NormalizedComplaintRow, lookup: TaxonomyLookup): 
       field: "classification",
       code: "CLASSIFICATION_CATEGORY_MISMATCH",
       message: "التصنيف لا يتبع الفئة المحددة",
+      level: "error",
     });
     clearClassification = true;
   }
@@ -207,15 +218,21 @@ export function validateNormalizedComplaintRow(
 ): { errors: RowMessage[]; warnings: RowMessage[] } {
   const taxonomy = validateTaxonomy(row, lookup);
   taxonomy.apply(row);
+  const required = validateRequiredFields(row);
+  const lifecycle = validateLifecycleConsistency(row);
 
   return {
     errors: [
-      ...validateRequiredFields(row),
+      ...required.errors,
       ...validateDates(row, now),
-      ...validateLifecycleConsistency(row),
+      ...lifecycle.errors,
       ...validateFieldLengths(row),
       ...taxonomy.errors,
     ],
-    warnings: taxonomy.warnings,
+    warnings: [
+      ...required.warnings,
+      ...lifecycle.warnings,
+      ...taxonomy.warnings,
+    ],
   };
 }

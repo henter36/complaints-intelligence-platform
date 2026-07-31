@@ -33,6 +33,7 @@ import { normalizeImportRow, type NormalizedComplaintRow, type RawImportRow, typ
 import { maskIdentifier } from "./privacy";
 import { validateNormalizedComplaintRow } from "./row-validation";
 import { parseXlsxWorkbook } from "./xlsx-parser";
+import { resolveImportRowReference } from "./error-report";
 
 const WRITE_CHUNK_SIZE = 500;
 export const DUPLICATE_BLOCKING_IMPORT_STATUSES = [
@@ -695,8 +696,20 @@ function toImportUploadResult(
       .slice(0, 100)
       .map((row) => ({
         row: row.rowNumber,
+        complaintNumber: resolveImportRowReference({
+          externalId: row.externalId,
+          rawData: row.rawData,
+          normalizedData: row.normalizedData,
+        }),
         errors: (row.validationErrors as unknown as RowMessage[]) ?? [],
         warnings: (row.validationWarnings as unknown as RowMessage[]) ?? [],
+        validationStatus: row.validationStatus,
+        imported:
+          row.validationStatus === ImportRowValidationStatus.INVALID
+            ? "REJECTED"
+            : row.validationStatus === ImportRowValidationStatus.WARNING
+              ? "IMPORTED_WITH_WARNINGS"
+              : "IMPORTED",
       })),
     preview: processed.processedRows.slice(0, 50).map((row) => {
       const normalized = row.normalizedData as Record<string, unknown> | null;
