@@ -67,7 +67,11 @@ Regex patterns applied to text:
 - Input limit: AI_MAX_INPUT_COMPLAINTS (default 500)
 - Character limit: AI_MAX_INPUT_CHARS (default 120,000)
 - Timeout: AI_REQUEST_TIMEOUT_SECONDS (default 60)
-- Retry: single retry only on transient provider errors (not implemented in v1)
+- Current behavior: provider requests are not retried in v1.
+
+### Planned retry policy
+
+A future version may implement one bounded retry for transient provider errors such as temporary 429 and 5xx responses. Authentication, validation, and timeout failures will not be retried.
 
 ## Prompt Governance
 

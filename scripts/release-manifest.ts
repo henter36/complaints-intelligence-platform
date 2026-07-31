@@ -6,6 +6,7 @@ import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { resolveCommitSha, listMigrationDirectories } from "./lib/release-utils";
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -30,26 +31,36 @@ function countFiles(dir: string, ext: string): number {
   return count;
 }
 
-// Returns migration directories only (excludes files like migration_lock.toml).
-function listMigrationDirectories(migrationsRoot: string): string[] {
-  if (!fs.existsSync(migrationsRoot)) return [];
-  return fs.readdirSync(migrationsRoot, { withFileTypes: true })
-    .filter(entry => entry.isDirectory())
-    .map(entry => entry.name)
-    .sort();
+// Detects the Prisma version from devDependencies first, then dependencies,
+// then @prisma/client. Warns (but does not fail) when it cannot be determined.
+function resolvePrismaVersion(pkg: {
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+}): string {
+  const version =
+    pkg.devDependencies?.prisma ??
+    pkg.dependencies?.prisma ??
+    pkg.devDependencies?.["@prisma/client"] ??
+    pkg.dependencies?.["@prisma/client"] ??
+    "unknown";
+  if (version === "unknown") {
+    console.warn("Warning: unable to determine Prisma version from package.json");
+  }
+  return version;
 }
 
 async function main() {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")) as {
     version: string;
-    dependencies: Record<string, string>;
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
   };
 
-  const commitSha = run("git rev-parse HEAD");
+  const commitSha = resolveCommitSha();
   const buildTime = new Date().toISOString();
   const nodeVersion = process.version;
   const npmVersion = run("npm --version", "unknown");
-  const prismaVersion = pkg.dependencies?.prisma ?? pkg.dependencies?.["@prisma/client"] ?? "unknown";
+  const prismaVersion = resolvePrismaVersion(pkg);
 
   const migrationsDir = path.join(ROOT, "prisma", "migrations");
   const migrationDirs = listMigrationDirectories(migrationsDir);

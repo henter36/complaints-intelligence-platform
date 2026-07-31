@@ -49,6 +49,11 @@ async function processExpiredRun(
         errorMessage: null,
       },
     }),
+    // Redact feedback comments in the same transaction so every mutation is atomic.
+    db.aiFeedback.updateMany({
+      where: { analysisRunId: run.id, comment: { not: null } },
+      data: { comment: null },
+    }),
     db.auditLog.create({
       data: {
         action: "AI_RESULT_EXPIRED_CLEANED",
@@ -62,14 +67,6 @@ async function processExpiredRun(
       },
     }),
   ]);
-
-  // Redact feedback comments separately (feedback IDs are independent records)
-  if (run.feedbacks.length > 0) {
-    await db.aiFeedback.updateMany({
-      where: { analysisRunId: run.id, comment: { not: null } },
-      data: { comment: null },
-    });
-  }
 
   console.log(`Expired result and redacted content for run ${run.id}`);
 }

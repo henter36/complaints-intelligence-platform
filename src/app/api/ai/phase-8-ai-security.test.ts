@@ -2,6 +2,7 @@
 // These tests verify no fake/mock responses are returned and security controls work.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { NextRequest } from "next/server";
 
 // Mock auth guard
 vi.mock("@/server/auth/auth-guard", () => ({
@@ -125,6 +126,50 @@ describe("GET /api/ai/analyses — strict pagination parsing", () => {
       expect(json.error).toBe("INVALID_PAGINATION");
     });
   }
+});
+
+// Test that invalid AI analysis type returns 400 with no internal info leaked,
+// even when AI is enabled (env overridden per-test via doMock + resetModules).
+describe("POST /api/ai/analyses — invalid type with AI enabled", () => {
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it("returns 400 INVALID_REQUEST for an unknown analysisType", async () => {
+    vi.doMock("@/lib/env", () => ({
+      env: {
+        aiEnabled: true,
+        aiDailyRunLimit: 20,
+        aiMaxInputComplaints: 500,
+        aiMaxInputChars: 100000,
+        aiRequestTimeoutSeconds: 30,
+        aiRetentionDays: 30,
+        aiProvider: "openai",
+        aiModel: "gpt-4o-mini",
+        getOpenAiApiKey: () => "sk-test-key",
+        openAiApiKey: "sk-test-key",
+      },
+    }));
+
+    const { POST } = await import("@/app/api/ai/analyses/route");
+
+    const request = new NextRequest("http://localhost/api/ai/analyses", {
+      method: "POST",
+      body: JSON.stringify({ analysisType: "INVALID_TYPE" }),
+      headers: { "Content-Type": "application/json" },
+    });
+
+    const response = await POST(request);
+    const body = await response.json() as Record<string, unknown>;
+
+    expect(response.status).toBe(400);
+    expect(body.error).toBe("INVALID_REQUEST");
+    // Must not leak internal paths, stack traces, or schema details
+    const bodyStr = JSON.stringify(body);
+    expect(bodyStr).not.toContain("node_modules");
+    expect(bodyStr).not.toContain("at Object.");
+    expect(bodyStr).not.toContain("/Users/");
+  });
 });
 
 describe("No stub responses", () => {

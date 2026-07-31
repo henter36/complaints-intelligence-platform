@@ -19,6 +19,10 @@ import * as improvementOpportunitiesPrompt from "./prompts/improvement-opportuni
 // A run stuck in PENDING/RUNNING past this window is considered dead.
 const ACTIVE_RUN_STALE_AFTER_MS = 30 * 60 * 1000; // 30 minutes
 
+// Pre-provider failure codes that don't consume API budget. Runs that fail with
+// these codes are excluded from the daily run limit count.
+const PRE_PROVIDER_ERROR_CODES = ["AI_KEY_MISSING", "STALE_RUN", "INVALID_REQUEST", "AI_NO_DATA"];
+
 export interface AnalysisFilters {
   dateFrom?: string;
   dateTo?: string;
@@ -39,6 +43,9 @@ export class AiRunConflictError extends Error {
 }
 export class AiValidationError extends Error {
   constructor(public detail: string) { super(detail); this.name = "AiValidationError"; }
+}
+export class AiNoDataError extends Error {
+  constructor() { super("AI_NO_DATA"); this.name = "AiNoDataError"; }
 }
 
 // ─── Filter normalization ────────────────────────────────────────────────────
@@ -183,11 +190,20 @@ async function checkRateLimits(type: AiAnalysisType, filtersSnapshot: Record<str
     throw new AiRunConflictError();
   }
 
-  // Check daily limit
+  // Check daily limit. Only pre-provider failures (which never spent API budget)
+  // are excluded from the count; any run that reached the provider still counts.
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const todayCount = await db.aiAnalysisRun.count({
-    where: { createdAt: { gte: today }, status: { not: "FAILED" } },
+    where: {
+      createdAt: { gte: today },
+      NOT: {
+        AND: [
+          { status: "FAILED" },
+          { errorCode: { in: PRE_PROVIDER_ERROR_CODES } },
+        ],
+      },
+    },
   });
   if (todayCount >= env.aiDailyRunLimit) {
     throw new AiRateLimitError(`Daily AI run limit (${env.aiDailyRunLimit}) reached.`);
@@ -359,7 +375,7 @@ export async function runAiAnalysis(
   }));
 
   if (totalMatching === 0) {
-    throw new AiValidationError("No complaints found matching the specified filters.");
+    throw new AiNoDataError();
   }
 
   const { records, truncated } = sanitizeComplaintsForAi(
@@ -371,15 +387,20 @@ export async function runAiAnalysis(
   // Build stats from all loaded complaints (not just the sanitized sample)
   // so totals are accurate even when the sample is capped by char budget.
   const stats = buildAggregateStats(mapped);
-  // Override totalComplaints with the true DB count (may exceed the loaded cap)
+  // stats.totalComplaints reflects the full matching population (may exceed the
+  // loaded cap), while the sample sent to the model is only `records`.
   stats.totalComplaints = totalMatching;
 
   const statsJson = JSON.stringify(stats, null, 2);
   const sampleJson = JSON.stringify(records.slice(0, 50), null, 2);
   const inputSummary = {
+    // totalMatching is the full population count; sentToAi is the analyzed sample.
     totalMatching,
     sentToAi: records.length,
     truncated: truncated || totalMatching > env.aiMaxInputComplaints,
+    note: totalMatching > records.length
+      ? "stats.totalComplaints reflects the full population; the sample sent to the model is a subset"
+      : "stats.totalComplaints and the sample sent to the model cover the same population",
   };
 
   const promptVersion = getPromptVersion(type);
@@ -444,6 +465,9 @@ export async function runAiAnalysis(
     } else if (err instanceof AiValidationError) {
       errorCode = "VALIDATION_ERROR";
       errorMessage = err.detail;
+    } else if (err instanceof AiNoDataError) {
+      errorCode = "AI_NO_DATA";
+      errorMessage = "No complaints matched the filters.";
     } else if (err instanceof Error) {
       errorMessage = err.message;
     }

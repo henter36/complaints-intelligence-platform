@@ -29,21 +29,11 @@ Create a local `.env` from `.env.example`:
 
 ```env
 DATABASE_URL="file:./dev.db"
-AUTH_SECRET="CHANGE_ME_WITH_AT_LEAST_32_RANDOM_BYTES"
-SESSION_TTL_HOURS="8"
-IMPORT_MAX_FILE_SIZE_MB="10"
-IMPORT_MAX_ROWS="10000"
-IMPORT_MAX_COLUMNS="100"
-IMPORT_MAX_SHEETS="5"
-IMPORT_STORAGE_PATH="./storage/imports"
-IMPORT_RETENTION_DAYS="30"
-REPORT_STORAGE_PATH="./storage/reports"
-REPORT_RETENTION_DAYS="90"
-REPORT_MAX_ROWS="10000"
-REPORT_MAX_FILE_SIZE_MB="25"
-INTERNAL_SCHEDULER_SECRET="CHANGE_ME_WITH_AT_LEAST_32_RANDOM_BYTES"
-OPENAI_API_KEY="CHANGE_ME"
+AUTH_SECRET="<generate-a-strong-random-value>"
+AI_ENABLED="false"
 ```
+
+The example above shows only the essentials. AI is optional and **disabled by default** (`AI_ENABLED="false"`). When `AI_ENABLED="true"`, a valid, non-placeholder `OPENAI_API_KEY` is required — placeholder values such as `CHANGE_ME` are rejected at startup. All `AI_*` and `BACKUP_*` variables (and every other supported setting) are documented in `.env.example`; copy from there rather than pasting credentials here. Do not pass credentials or password hashes directly in shell commands.
 
 Generate and initialize the administrator credential:
 
@@ -116,7 +106,7 @@ Phase 7 adds a central report engine on top of the Phase 6 `ComplaintQueryServic
 
 See `docs/phase-7-reporting-design.md` and `docs/phase-7-completion-report.md` for the full design and results.
 
-## Verification
+## Phase 8 Release Verification
 
 ```bash
 npm run integrity:check        # database consistency (10 checks)

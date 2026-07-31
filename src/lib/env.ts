@@ -1,11 +1,19 @@
 import { z } from "zod";
 
-const PLACEHOLDER_PATTERNS = ["CHANGE_ME", "your-secret", "replace-me", "placeholder"];
+const PLACEHOLDER_PATTERNS = [
+  "change_me",
+  "your-secret",
+  "replace-me",
+  "placeholder",
+] as const;
 
 // Centralized: returns true when a value is absent, empty, or a placeholder.
+// Matching is case-insensitive so "CHANGE_ME", "Placeholder", "YOUR-SECRET" all match.
 export function isMissingOrPlaceholderSecret(value: string | undefined): boolean {
-  if (!value || value.trim() === "") return true;
-  return PLACEHOLDER_PATTERNS.some(p => value.includes(p) || value.startsWith("CHANGE"));
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return true;
+  if (normalized.startsWith("change")) return true;
+  return PLACEHOLDER_PATTERNS.some(p => normalized.includes(p));
 }
 
 // Accept AI_ENABLED as true/false (any case), 1/0, or absent (defaults false)
@@ -111,14 +119,14 @@ const envBase = {
   internalSchedulerSecret: parsed.data.INTERNAL_SCHEDULER_SECRET,
   nextAuthUrl: parsed.data.NEXTAUTH_URL,
   aiEnabled,
-  aiProvider: parsed.data.AI_PROVIDER ?? "openai",
+  aiProvider: parsed.data.AI_PROVIDER || "openai",
   aiModel: parsed.data.AI_MODEL || "gpt-4o-mini",
   aiMaxInputComplaints: parsed.data.AI_MAX_INPUT_COMPLAINTS ?? 500,
   aiMaxInputChars: parsed.data.AI_MAX_INPUT_CHARS ?? 120_000,
   aiRequestTimeoutSeconds: parsed.data.AI_REQUEST_TIMEOUT_SECONDS ?? 60,
   aiRetentionDays: parsed.data.AI_RETENTION_DAYS ?? 90,
   aiDailyRunLimit: parsed.data.AI_DAILY_RUN_LIMIT ?? 20,
-  backupPath: parsed.data.BACKUP_PATH ?? "./backups",
+  backupPath: parsed.data.BACKUP_PATH || "./backups",
   backupRetentionDays: parsed.data.BACKUP_RETENTION_DAYS ?? 30,
   // getOpenAiApiKey() — safe accessor that never appears in JSON.stringify or spread
   getOpenAiApiKey(): string | undefined { return resolvedAiKey; },

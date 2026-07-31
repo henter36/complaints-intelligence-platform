@@ -37,18 +37,27 @@ function safeDisplayName(filePath: string): string {
   return path.basename(filePath);
 }
 
-function sanitizeVerificationError(err: unknown): string {
-  if (!(err instanceof Error)) return "Unknown verification error";
+function backupDisplayName(p: string): string {
+  return path.basename(p);
+}
+
+// Redacts every known sensitive absolute path or connection string from a string.
+// Order matters: longer/more specific paths are replaced before shorter ones so a
+// longer path is never partially consumed by a shorter replacement.
+function redactKnownPaths(value: string): string {
   const dbUrl = process.env.DATABASE_URL ?? "";
   const dbPath = dbUrl.replace(/^file:/, "");
-  // Replace the more specific (longer) path first so it is not
-  // partially consumed by the shorter ROOT replacement.
-  let msg = err.message
+  let msg = value
     .replaceAll(BACKUPS_ROOT, "<backups>")
     .replaceAll(ROOT, "<project>");
   if (dbUrl) msg = msg.replaceAll(dbUrl, "<database-url>");
   if (dbPath && dbPath !== dbUrl) msg = msg.replaceAll(dbPath, "<database>");
   return msg;
+}
+
+function sanitizeVerificationError(err: unknown): string {
+  if (!(err instanceof Error)) return "Unknown verification error";
+  return redactKnownPaths(err.message);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -171,7 +180,7 @@ function main() {
   }
 
   console.log("Backup verification started");
-  console.log(`Backup name: ${safeDisplayName(verifiedPath)}`);
+  console.log(`Backup name: ${backupDisplayName(verifiedPath)}`);
 
   let manifest: BackupManifest;
   try {

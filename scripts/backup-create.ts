@@ -6,28 +6,22 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
+import {
+  resolvePrismaSqlitePath,
+  resolveSqliteDatabaseFiles,
+  escapeSqliteDotCommandPath,
+  isValidSqliteSnapshot,
+} from "./lib/backup-utils";
 
 const ROOT = path.resolve(__dirname, "..");
-const DB_PATH = process.env.DATABASE_URL?.replace("file:", "") ?? "./prisma/dev.db";
+// Resolve the SQLite file relative to the prisma schema directory (Prisma semantics).
+const DB_PATH = resolvePrismaSqlitePath(
+  process.env.DATABASE_URL ?? "file:./dev.db",
+  path.resolve(ROOT, "prisma")
+);
 const BACKUP_PATH = process.env.BACKUP_PATH ?? "./backups";
 const IMPORT_STORAGE = process.env.IMPORT_STORAGE_PATH ?? "./storage/imports";
 const REPORT_STORAGE = process.env.REPORT_STORAGE_PATH ?? "./storage/reports";
-
-// SQLite WAL-mode databases can have up to three files.
-// All three must be backed up together to avoid a corrupt restore.
-interface SqliteDatabaseFiles {
-  readonly main: string;
-  readonly wal: string;
-  readonly shm: string;
-}
-
-function resolveSqliteDatabaseFiles(databasePath: string): SqliteDatabaseFiles {
-  return {
-    main: databasePath,
-    wal: `${databasePath}-wal`,
-    shm: `${databasePath}-shm`,
-  };
-}
 
 function sha256File(filePath: string): string {
   const hash = crypto.createHash("sha256");
@@ -81,18 +75,25 @@ function backupDatabaseAtomic(dbSrc: string, dbDest: string): void {
 
   // Attempt WAL checkpoint so the hot journal is flushed before the .backup snapshot.
   const sqlite3Bin = process.platform === "win32" ? "sqlite3.exe" : "sqlite3";
+  const escapedDest = escapeSqliteDotCommandPath(dbDest);
   const backupResult = spawnSync(
     sqlite3Bin,
-    [dbSrc, `.backup '${dbDest}'`],
+    [dbSrc, `.backup '${escapedDest}'`],
     { shell: false, encoding: "utf8" }
   );
 
-  if (backupResult.status === 0) {
+  // Only trust the snapshot when the CLI succeeded AND the destination is a
+  // valid, non-empty regular file with no failure text on stderr. Otherwise
+  // fall back to a raw copy so a truncated/corrupt snapshot is never kept.
+  if (backupResult.status === 0 && isValidSqliteSnapshot(dbDest, backupResult.stderr ?? "")) {
     console.log("Database backup via sqlite3 .backup (WAL-safe snapshot)");
     return;
   }
 
-  // sqlite3 CLI unavailable — fallback to raw copy.
+  // sqlite3 CLI unavailable or produced an invalid snapshot — fallback to raw copy.
+  // Remove any partial snapshot before copying.
+  if (fs.existsSync(dbDest)) fs.rmSync(dbDest, { force: true });
+
   // Attempt WAL checkpoint first to minimise open transactions.
   const files = resolveSqliteDatabaseFiles(dbSrc);
   tryCheckpointWal(dbSrc);
@@ -118,8 +119,9 @@ function backupDatabaseAtomic(dbSrc: string, dbDest: string): void {
 
 function backupDatabase(dbSrc: string, dbDest: string): void {
   if (!fs.existsSync(dbSrc)) {
-    console.warn("Database file not found — skipping database backup");
-    return;
+    // A missing database is a hard failure: never produce a partial backup or
+    // print a success message for a backup that omits the database.
+    throw new Error("Database file not found — aborting backup");
   }
   backupDatabaseAtomic(dbSrc, dbDest);
 }
@@ -164,7 +166,8 @@ async function main() {
     backupName,
     createdAt: new Date().toISOString(),
     nodeVersion: process.version,
-    dbPath: DB_PATH,
+    // Store only the basename so the manifest never embeds an absolute path.
+    dbPath: path.basename(DB_PATH),
     checksums,
     note: "Does not include .env, secrets, or node_modules.",
   };

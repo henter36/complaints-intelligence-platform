@@ -8,14 +8,21 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
+import {
+  resolveSqliteDatabaseFiles,
+  buildAllowedEnv,
+  type SqliteDatabaseFiles,
+} from "./lib/backup-utils";
 
 const args = process.argv.slice(2);
 const backupArg = args.find(a => !a.startsWith("--"));
 const confirmed = args.includes("--confirm");
+const allowWithoutSafetyBackup = args.includes("--allow-without-safety-backup");
 
 if (!backupArg) {
-  console.error("Usage: tsx scripts/backup-restore.ts <backup-path> --confirm");
-  console.error("  --confirm  Required to proceed with restore");
+  console.error("Usage: tsx scripts/backup-restore.ts <backup-path> --confirm [--allow-without-safety-backup]");
+  console.error("  --confirm                       Required to proceed with restore");
+  console.error("  --allow-without-safety-backup   Continue even if the pre-restore safety backup fails");
   process.exit(1);
 }
 
@@ -30,21 +37,6 @@ const DB_PATH = process.env.DATABASE_URL?.replace("file:", "") ?? "./prisma/dev.
 const IMPORT_STORAGE = process.env.IMPORT_STORAGE_PATH ?? "./storage/imports";
 const REPORT_STORAGE = process.env.REPORT_STORAGE_PATH ?? "./storage/reports";
 const BACKUP_PATH = process.env.BACKUP_PATH ?? "./backups";
-
-// SQLite WAL-mode databases can have up to three files.
-interface SqliteDatabaseFiles {
-  readonly main: string;
-  readonly wal: string;
-  readonly shm: string;
-}
-
-function resolveSqliteDatabaseFiles(databasePath: string): SqliteDatabaseFiles {
-  return {
-    main: databasePath,
-    wal: `${databasePath}-wal`,
-    shm: `${databasePath}-shm`,
-  };
-}
 
 // Resolve the backup dir and validate it stays inside the backups root.
 const BACKUPS_ROOT = path.resolve(ROOT, BACKUP_PATH);
@@ -97,22 +89,6 @@ const tsxBin = path.resolve(
   ".bin",
   process.platform === "win32" ? "tsx.cmd" : "tsx"
 );
-
-const SAFE_PATH = process.platform === "win32"
-  ? (process.env.PATH ?? "")
-  : "/usr/local/bin:/usr/bin:/bin";
-
-function buildAllowedEnv(): Record<string, string | undefined> {
-  return {
-    PATH: SAFE_PATH,
-    DATABASE_URL: process.env.DATABASE_URL,
-    BACKUP_PATH: process.env.BACKUP_PATH,
-    IMPORT_STORAGE_PATH: process.env.IMPORT_STORAGE_PATH,
-    REPORT_STORAGE_PATH: process.env.REPORT_STORAGE_PATH,
-    HOME: process.env.HOME,
-    NODE_ENV: process.env.NODE_ENV,
-  };
-}
 
 interface BackupManifest {
   readonly checksums: Record<string, string>;
@@ -218,7 +194,10 @@ async function main() {
     }
   );
   if (backupResult.status !== 0) {
-    console.warn("Pre-restore backup failed — proceeding (manual backup recommended).");
+    if (!allowWithoutSafetyBackup) {
+      throw new Error("Pre-restore safety backup failed. Restore aborted. Use --allow-without-safety-backup to override.");
+    }
+    console.warn("Proceeding without a safety backup because the explicit override flag was provided.");
   }
 
   restoreDatabase(backupDir, path.resolve(ROOT, DB_PATH));

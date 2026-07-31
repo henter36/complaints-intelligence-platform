@@ -85,6 +85,7 @@ export function AiAnalysis() {
   const [loadingStatus, setLoadingStatus] = useState(true);
   const [runs, setRuns] = useState<AnalysisRun[]>([]);
   const [loadingRuns, setLoadingRuns] = useState(true);
+  const [runsError, setRunsError] = useState<string | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<AnalysisDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
 
@@ -110,6 +111,7 @@ export function AiAnalysis() {
 
   const loadRuns = useCallback(async (signal?: AbortSignal) => {
     setLoadingRuns(true);
+    setRunsError(null);
     try {
       const res = await fetch("/api/ai/analyses?pageSize=20", { signal });
       if (!res.ok) throw new Error("Failed");
@@ -117,10 +119,14 @@ export function AiAnalysis() {
       if (!signal?.aborted) setRuns(json.items ?? []);
     } catch (err) {
       if (isAbortError(err)) return;
+      if (!signal?.aborted) {
+        setRunsError("تعذّر تحميل سجل التحليلات");
+        toast({ variant: "destructive", title: "خطأ", description: "تعذّر تحميل سجل التحليلات" });
+      }
     } finally {
       if (!signal?.aborted) setLoadingRuns(false);
     }
-  }, []);
+  }, [toast]);
 
   useEffect(() => {
     const c = new AbortController();
@@ -245,6 +251,14 @@ export function AiAnalysis() {
         <div className="space-y-2">
           {[1, 2, 3].map(n => <Skeleton key={n} className="h-14 w-full" />)}
         </div>
+      );
+    }
+    if (runsError !== null) {
+      return (
+        <Alert variant="destructive">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertDescription>{runsError}</AlertDescription>
+        </Alert>
       );
     }
     if (runs.length === 0) {

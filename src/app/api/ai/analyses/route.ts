@@ -10,6 +10,7 @@ import {
   AiRateLimitError,
   AiRunConflictError,
   AiValidationError,
+  AiNoDataError,
 } from "@/server/ai/ai-service";
 import { AiProviderError } from "@/server/ai/openai-provider";
 
@@ -58,6 +59,9 @@ function mapAiError(error: unknown): NextResponse | null {
   }
   if (error instanceof AiRateLimitError) {
     return NextResponse.json({ error: "AI_RATE_LIMITED", message: error.reason }, { status: 429 });
+  }
+  if (error instanceof AiNoDataError) {
+    return NextResponse.json({ error: "AI_NO_DATA" }, { status: 400 });
   }
   if (error instanceof AiValidationError) {
     return NextResponse.json({ error: "AI_VALIDATION_ERROR", message: error.detail }, { status: 502 });

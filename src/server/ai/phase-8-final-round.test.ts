@@ -19,6 +19,10 @@ describe("isMissingOrPlaceholderSecret", () => {
     ["empty string", ""],
     ["CHANGE_ME", "CHANGE_ME"],
     ["CHANGE_prefixed value", "CHANGE_THIS"],
+    ["lowercase change_me", "change_me"],
+    ["Placeholder mixed case", "Placeholder"],
+    ["YOUR-SECRET uppercase", "YOUR-SECRET"],
+    ["replace-me lowercase", "replace-me"],
   ])("returns true for %s", async (_, input) => {
     const { isMissingOrPlaceholderSecret } = await import("@/lib/env");
     expect(isMissingOrPlaceholderSecret(input)).toBe(true);
