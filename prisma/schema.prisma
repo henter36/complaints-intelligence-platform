@@ -446,3 +446,69 @@ model ReportArtifact {
   @@index([expiresAt])
   @@index([deletedAt])
 }
+
+// ─── Phase 8: Governed AI ───────────────────────────────────────────────────
+
+enum AiAnalysisType {
+  EXECUTIVE_SUMMARY
+  RECURRING_TOPICS
+  POSSIBLE_ROOT_CAUSES
+  ANOMALY_ANALYSIS
+  IMPROVEMENT_OPPORTUNITIES
+}
+
+enum AiRunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+model AiAnalysisRun {
+  id                  String         @id @default(cuid())
+  analysisType        AiAnalysisType
+  status              AiRunStatus    @default(PENDING)
+  requestedBy         String         @default("single-admin")
+  filtersSnapshot     Json
+  inputSummary        Json
+  model               String?
+  provider            String?
+  promptVersion       String?
+  startedAt           DateTime?
+  completedAt         DateTime?
+  failedAt            DateTime?
+  errorCode           String?
+  errorMessage        String?
+  createdAt           DateTime       @default(now())
+  expiresAt           DateTime?
+  result              AiAnalysisResult?
+  feedbacks           AiFeedback[]
+
+  @@index([status])
+  @@index([analysisType])
+  @@index([createdAt])
+  @@index([expiresAt])
+}
+
+model AiAnalysisResult {
+  id            String         @id @default(cuid())
+  analysisRunId String         @unique
+  analysisRun   AiAnalysisRun  @relation(fields: [analysisRunId], references: [id], onDelete: Cascade)
+  resultJson    Json
+  resultText    String?
+  createdAt     DateTime       @default(now())
+  deletedAt     DateTime?
+
+  @@index([deletedAt])
+}
+
+model AiFeedback {
+  id            String         @id @default(cuid())
+  analysisRunId String
+  analysisRun   AiAnalysisRun  @relation(fields: [analysisRunId], references: [id], onDelete: Cascade)
+  rating        String
+  comment       String?
+  createdAt     DateTime       @default(now())
+
+  @@index([analysisRunId])
+}

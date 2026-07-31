@@ -1,19 +1,19 @@
 # Complaints Intelligence Platform
 
-Arabic complaints intelligence prototype with a Phase 7 reports, exports, and scheduling engine.
+Arabic complaints intelligence platform — v0.2.1, Phase 8 complete, ready for v1.0.0 release.
 
-This repository is not production ready. Phase 1 made the codebase buildable and testable. Phase 2 added a normalized single-user complaint/import schema, migration, seed, and domain services. Phase 3 adds single-user administrator login, database-backed sessions, logout, password change, rate limiting, security headers, and API/page protection. Phase 4 adds secure `.xlsx` upload, OOXML parsing, validation, duplicate detection, preview rows, and CSV error reports. Phase 5 adds transactional import confirmation and rollback. Phase 6 adds a central complaint query service, KPI engine, complaint detail/update/status APIs, and safe CSV list export. Phase 7 adds a central report engine (six governed report types), PDF/XLSX export, saved templates, internal scheduling, and a 90-day artifact retention policy. Governed AI remains out of scope.
+Phase 1 made the codebase buildable and testable. Phase 2 normalized the data model. Phase 3 added single-user authentication. Phase 4 added Excel import. Phase 5 added transactional confirmation/rollback. Phase 6 added the complaint explorer and KPIs. Phase 7 added the reports and scheduling engine. Phase 8 added governed AI analysis, backup/restore, health checks, database integrity, security hardening (CSP), and release tooling.
 
 ## Current Status
 
-- Working: dashboard read APIs, complaints listing, filters, classification/category basics, import history, UI navigation, Phase 2 Prisma migration, synthetic Prisma seed, and Phase 3 single-user authentication.
-- Working foundation: `Complaint`, `ComplaintStatusHistory`, `ImportBatch`, `ImportBatchRow`, `AuditLog`, duplicate identity service, and import batch transition guards.
-- Security: one administrator credential, bcrypt password hashes, hashed session tokens in `AdminSession`, `cip_session` HttpOnly cookie, login rate limiting, logout, password change, and operational API guards.
-- Working: import center can upload `.xlsx`, validate rows, store preview rows, confirm eligible batches, and roll back confirmed batches.
-- Working: complaint explorer can query confirmed active complaints with validated filters, deterministic sorting, pagination, detail APIs, status/update APIs, central KPIs, and safe CSV export.
-- Working: reports center can preview, export PDF/XLSX, save/run templates, schedule recurring runs (daily/weekly/monthly, Asia/Riyadh), browse run history, and download artifacts — all backed by the same KPI/query services as the Dashboard and Analytics screens.
-- Stubbed: AI approval/execution endpoints return `501` until their later phases.
-- Missing: scoped permissions, production database architecture, email delivery of reports, MFA, and external identity providers.
+- **Authentication**: Single administrator credential, bcrypt hashes, HttpOnly session cookie, login rate limiting, logout, password change.
+- **Import**: `.xlsx` upload, validation, duplicate detection, preview, transactional confirmation and rollback.
+- **Complaints**: Explorer with validated filters, deterministic sorting, pagination, detail/status APIs, KPIs, safe CSV export.
+- **Reports**: Six report types (executive, department, region/facility, classification, detail, overdue), PDF/XLSX export, saved templates, internal scheduling (Asia/Riyadh), 90-day artifact retention.
+- **Governed AI**: 5 analysis types (executive summary, recurring topics, root causes, anomaly analysis, improvement opportunities). AI is **disabled by default** (`AI_ENABLED=false`). When enabled: read-only, PII-free, fully audited, rate-limited, with a daily run limit and 5-minute dedup window. No chatbot, no NL-to-SQL, no scheduled AI runs.
+- **Operations**: Backup/restore with SHA-256 checksums (`npm run backup:create/verify/restore`), health endpoints (`/api/health/live`, `/api/health/ready`), database integrity check (`npm run integrity:check`), release manifest (`npm run release:manifest`), release check (`npm run release:check`).
+- **Security**: CSP on all routes, centralized logger (no PII in logs), AI key never returned via API or stored in database, placeholder secrets rejected at startup when AI is enabled.
+- Missing: scoped permissions, email delivery, MFA, external identity providers (planned post-v1.0).
 
 ## Requirements
 
@@ -29,21 +29,11 @@ Create a local `.env` from `.env.example`:
 
 ```env
 DATABASE_URL="file:./dev.db"
-AUTH_SECRET="CHANGE_ME_WITH_AT_LEAST_32_RANDOM_BYTES"
-SESSION_TTL_HOURS="8"
-IMPORT_MAX_FILE_SIZE_MB="10"
-IMPORT_MAX_ROWS="10000"
-IMPORT_MAX_COLUMNS="100"
-IMPORT_MAX_SHEETS="5"
-IMPORT_STORAGE_PATH="./storage/imports"
-IMPORT_RETENTION_DAYS="30"
-REPORT_STORAGE_PATH="./storage/reports"
-REPORT_RETENTION_DAYS="90"
-REPORT_MAX_ROWS="10000"
-REPORT_MAX_FILE_SIZE_MB="25"
-INTERNAL_SCHEDULER_SECRET="CHANGE_ME_WITH_AT_LEAST_32_RANDOM_BYTES"
-OPENAI_API_KEY="CHANGE_ME"
+AUTH_SECRET="<generate-a-strong-random-value>"
+AI_ENABLED="false"
 ```
+
+The example above shows only the essentials. AI is optional and **disabled by default** (`AI_ENABLED="false"`). When `AI_ENABLED="true"`, a valid, non-placeholder `OPENAI_API_KEY` is required — placeholder values such as `CHANGE_ME` are rejected at startup. All `AI_*` and `BACKUP_*` variables (and every other supported setting) are documented in `.env.example`; copy from there rather than pasting credentials here. Do not pass credentials or password hashes directly in shell commands.
 
 Generate and initialize the administrator credential:
 
@@ -54,7 +44,7 @@ npm run auth:init-admin -- --env-file .env.admin
 
 `auth:hash-password` reads from a hidden prompt when run interactively, or protected stdin in automation. Store `ADMIN_USERNAME` and `ADMIN_PASSWORD_HASH` in a protected local env file such as `.env.admin`; do not pass reusable administrator credentials or password hashes inline in shell commands.
 
-`DATABASE_URL`, `AUTH_SECRET`, and the initialized admin credential are required for authenticated operation. `OPENAI_API_KEY` remains a placeholder until governed AI is implemented.
+`DATABASE_URL`, `AUTH_SECRET`, and the initialized admin credential are required for authenticated operation. `OPENAI_API_KEY` is optional — AI is disabled by default (`AI_ENABLED=false`). Set `AI_ENABLED=true` and provide a valid `OPENAI_API_KEY` only if you want to enable governed AI analysis.
 
 ## Local Setup
 
@@ -116,20 +106,26 @@ Phase 7 adds a central report engine on top of the Phase 6 `ComplaintQueryServic
 
 See `docs/phase-7-reporting-design.md` and `docs/phase-7-completion-report.md` for the full design and results.
 
+## Phase 8 Release Verification
+
+```bash
+npm run integrity:check        # database consistency (10 checks)
+npm run release:manifest       # generate release-manifest.json
+npm run release:check          # 11 pre-release validations
+```
+
 ## Documentation
 
-- `docs/current-state-assessment.md`
-- `docs/foundation-hardening-report.md`
-- `docs/phase-2-data-model-design.md`
-- `docs/phase-2-completion-report.md`
-- `docs/phase-3-single-user-security-design.md`
-- `docs/phase-3-completion-report.md`
-- `docs/phase-4-excel-import-design.md`
-- `docs/phase-4-completion-report.md`
-- `docs/phase-5-import-confirmation-design.md`
-- `docs/phase-5-completion-report.md`
-- `docs/phase-6-explorer-kpi-design.md`
-- `docs/phase-6-completion-report.md`
+- `docs/production-deployment-guide.md` — step-by-step production setup
+- `docs/backup-restore-guide.md` — backup creation, verification, restore
+- `docs/operations-runbook.md` — daily/weekly ops and troubleshooting
+- `docs/release-checklist.md` — v1.0.0 release checklist
+- `docs/phase-8-governed-ai-design.md` — AI architecture and governance
+- `docs/phase-8-security-review.md` — security controls summary
+- `docs/phase-8-performance-report.md` — performance baselines
+- `docs/phase-8-e2e-report.md` — E2E test scope and manual coverage
+- `docs/phase-8-final-gap-analysis.md` — what's in scope and out
+- `docs/phase-8-completion-report.md` — Phase 8 delivery summary
 - `docs/phase-7-reporting-design.md`
 - `docs/phase-7-completion-report.md`
 - `docs/roadmap.md`

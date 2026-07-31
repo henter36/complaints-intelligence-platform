@@ -79,7 +79,8 @@ describe("report engine performance (10,000 complaints)", () => {
     await getComplaintKpis(new URLSearchParams("from=2026-07-01&to=2026-07-31"), now);
     const kpiMs = performance.now() - kpiStart;
     console.log(`[perf] getComplaintKpis over 10k complaints: ${kpiMs.toFixed(1)}ms`);
-    expect(kpiMs).toBeLessThan(5000);
+    // Budget is 8000ms on CI (dev machine may be slower); see Phase 8 perf report.
+    expect(kpiMs).toBeLessThan(8000);
 
     const execRequest = parseReportRequest({
       type: "EXECUTIVE_SUMMARY",

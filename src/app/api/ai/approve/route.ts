@@ -1,3 +1,5 @@
+// The "approve" workflow (per-complaint AI suggestion) is not part of Phase 8.
+// The new governed AI provides batch analysis only (read-only, no data mutation).
 import { NextRequest, NextResponse } from "next/server";
 import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 
@@ -6,12 +8,12 @@ export async function POST(req: NextRequest) {
     await requireAdminApiSession(req);
     return NextResponse.json(
       {
-        error: "AI_NOT_CONFIGURED",
-        message: "AI approval is outside this phase and requires governed AI workflow configuration.",
+        error: "GONE",
+        message: "Per-complaint AI approval is not available. Use /api/ai/analyses for governed batch analysis.",
       },
-      { status: 501 }
+      { status: 410 }
     );
   } catch (error) {
-    return mapAuthError(error) ?? NextResponse.json({ error: "AI approval failed" }, { status: 500 });
+    return mapAuthError(error) ?? NextResponse.json({ error: "Internal error" }, { status: 500 });
   }
 }

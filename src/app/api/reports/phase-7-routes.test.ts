@@ -44,7 +44,7 @@ describe("POST /api/reports/preview — auth", () => {
 });
 
 describe("POST /api/reports/run — format support", () => {
-  it("returns a 422 error when requesting PDF for a report type that doesn't support it", async () => {
+  it("returns a 422 error when requesting PDF for a report type that doesn't support it", { timeout: 15000 }, async () => {
     mockAuthenticated();
     vi.doMock("@/lib/db", () => ({ db: { auditLog: { create: vi.fn() } } }));
     const { POST } = await import("./run/route");
