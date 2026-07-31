@@ -77,7 +77,7 @@ export const SHA256_PATTERN = /\b[a-f0-9]{64}\b/gi;
 
 // Control characters (newline, carriage return, tab, null bytes, DEL) and secret-assignment
 // patterns that must never appear in log output derived from untrusted manifest values.
-const LOG_CONTROL_CHARACTERS = /[\r\n\t\u0000-\u001f\u007f]/g;
+const LOG_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/g;
 const SECRET_ASSIGNMENT_PATTERN =
   /\b(?:AUTH_SECRET|DATABASE_URL|OPENAI_API_KEY|TOKEN|PASSWORD)\s*=\s*\S+/gi;
 
