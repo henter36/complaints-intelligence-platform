@@ -1,5 +1,22 @@
 import { z } from "zod";
 
+const PLACEHOLDER_PATTERNS = ["CHANGE_ME", "your-secret", "replace-me", "placeholder"];
+
+// Centralized: returns true when a value is absent, empty, or a placeholder.
+export function isMissingOrPlaceholderSecret(value: string | undefined): boolean {
+  if (!value || value.trim() === "") return true;
+  return PLACEHOLDER_PATTERNS.some(p => value.includes(p) || value.startsWith("CHANGE"));
+}
+
+// Accept AI_ENABLED as true/false (any case), 1/0, or absent (defaults false)
+function parseAiEnabled(raw: string | undefined): boolean {
+  if (!raw || raw.trim() === "") return false;
+  const lower = raw.trim().toLowerCase();
+  if (lower === "true" || lower === "1") return true;
+  if (lower === "false" || lower === "0") return false;
+  return false;
+}
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   DATABASE_URL: z.string().min(1).optional(),
@@ -19,7 +36,19 @@ const envSchema = z.object({
   REPORT_MAX_FILE_SIZE_MB: z.coerce.number().positive().optional(),
   INTERNAL_SCHEDULER_SECRET: z.string().min(1).optional(),
   NEXTAUTH_URL: z.string().url().optional(),
-  OPENAI_API_KEY: z.string().min(1).optional(),
+  // AI settings — all optional; key only validated when AI_ENABLED=true
+  OPENAI_API_KEY: z.string().optional(),
+  AI_ENABLED: z.string().optional(),
+  AI_PROVIDER: z.string().optional(),
+  AI_MODEL: z.string().optional(),
+  AI_MAX_INPUT_COMPLAINTS: z.coerce.number().int().positive().optional(),
+  AI_MAX_INPUT_CHARS: z.coerce.number().int().positive().optional(),
+  AI_REQUEST_TIMEOUT_SECONDS: z.coerce.number().int().positive().optional(),
+  AI_RETENTION_DAYS: z.coerce.number().int().positive().optional(),
+  AI_DAILY_RUN_LIMIT: z.coerce.number().int().positive().optional(),
+  // Backup
+  BACKUP_PATH: z.string().optional(),
+  BACKUP_RETENTION_DAYS: z.coerce.number().int().positive().optional(),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -37,6 +66,8 @@ if (isProductionRuntime && !parsed.data.DATABASE_URL) {
   throw new Error("DATABASE_URL is required in production.");
 }
 
+const aiEnabled = parseAiEnabled(parsed.data.AI_ENABLED);
+
 if (isProductionRuntime) {
   if (!parsed.data.AUTH_SECRET || parsed.data.AUTH_SECRET.length < 32) {
     throw new Error("AUTH_SECRET must be at least 32 characters in production.");
@@ -44,9 +75,23 @@ if (isProductionRuntime) {
   if (!parsed.data.INTERNAL_SCHEDULER_SECRET || parsed.data.INTERNAL_SCHEDULER_SECRET.length < 32) {
     throw new Error("INTERNAL_SCHEDULER_SECRET must be at least 32 characters in production.");
   }
+  if (aiEnabled) {
+    const key = parsed.data.OPENAI_API_KEY;
+    if (isMissingOrPlaceholderSecret(key)) {
+      throw new Error("OPENAI_API_KEY must be a valid key when AI_ENABLED=true in production.");
+    }
+  }
 }
 
-export const env = {
+// Resolved key — undefined when absent or placeholder
+const resolvedAiKey = (() => {
+  const k = parsed.data.OPENAI_API_KEY;
+  return isMissingOrPlaceholderSecret(k) ? undefined : k;
+})();
+
+// Build the env object with openAiApiKey as a non-enumerable getter.
+// This prevents JSON.stringify(env) and object spread from exposing the key.
+const envBase = {
   nodeEnv: parsed.data.NODE_ENV,
   databaseUrl,
   authSecret: parsed.data.AUTH_SECRET,
@@ -65,5 +110,28 @@ export const env = {
   reportMaxFileSizeMb: parsed.data.REPORT_MAX_FILE_SIZE_MB ?? 25,
   internalSchedulerSecret: parsed.data.INTERNAL_SCHEDULER_SECRET,
   nextAuthUrl: parsed.data.NEXTAUTH_URL,
-  openAiApiKey: parsed.data.OPENAI_API_KEY,
+  aiEnabled,
+  aiProvider: parsed.data.AI_PROVIDER ?? "openai",
+  aiModel: parsed.data.AI_MODEL || "gpt-4o-mini",
+  aiMaxInputComplaints: parsed.data.AI_MAX_INPUT_COMPLAINTS ?? 500,
+  aiMaxInputChars: parsed.data.AI_MAX_INPUT_CHARS ?? 120_000,
+  aiRequestTimeoutSeconds: parsed.data.AI_REQUEST_TIMEOUT_SECONDS ?? 60,
+  aiRetentionDays: parsed.data.AI_RETENTION_DAYS ?? 90,
+  aiDailyRunLimit: parsed.data.AI_DAILY_RUN_LIMIT ?? 20,
+  backupPath: parsed.data.BACKUP_PATH ?? "./backups",
+  backupRetentionDays: parsed.data.BACKUP_RETENTION_DAYS ?? 30,
+  // getOpenAiApiKey() — safe accessor that never appears in JSON.stringify or spread
+  getOpenAiApiKey(): string | undefined { return resolvedAiKey; },
 };
+
+// Add openAiApiKey as a non-enumerable getter so it never appears in
+// JSON.stringify(env) or { ...env } object spread.
+export const env: typeof envBase & { readonly openAiApiKey: string | undefined } = Object.defineProperty(
+  envBase,
+  "openAiApiKey",
+  {
+    get() { return resolvedAiKey; },
+    enumerable: false,
+    configurable: false,
+  }
+) as typeof envBase & { readonly openAiApiKey: string | undefined };
