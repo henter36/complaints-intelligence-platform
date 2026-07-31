@@ -6,6 +6,13 @@ type TaxonomyLookup = {
   classifications: Array<Classification & { category: Category }>;
 };
 
+export type TaxonomyValidationResult = {
+  errors: RowMessage[];
+  warnings: RowMessage[];
+  /** Mutates row by clearing unresolved taxonomy names so confirm does not create them. */
+  apply: (row: NormalizedComplaintRow) => void;
+};
+
 const OPEN_STATUSES = new Set<ComplaintStatus>([
   ComplaintStatus.NEW,
   ComplaintStatus.OPEN,
@@ -15,17 +22,25 @@ const OPEN_STATUSES = new Set<ComplaintStatus>([
 ]);
 
 function normalizeLookup(value?: string): string {
-  return (value ?? "").trim().replaceAll(/\s+/g, " ").toLocaleLowerCase("ar-SA");
+  return (value ?? "")
+    .trim()
+    .replaceAll(/[\u064B-\u065F\u0670]/g, "")
+    .replaceAll("\u0640", "")
+    .replaceAll(/[إأآا]/g, "ا")
+    .replaceAll("ى", "ي")
+    .replaceAll("ة", "ه")
+    .replaceAll(/\s+/g, " ")
+    .toLocaleLowerCase("ar-SA");
 }
 
 function validateRequiredFields(row: NormalizedComplaintRow): RowMessage[] {
   const errors: RowMessage[] = [];
 
-  if (!row.externalId && !row.sourceReference) {
+  if (!row.externalId?.trim() && !row.sourceReference?.trim()) {
     errors.push({
       field: "externalId",
       code: "MISSING_IDENTITY",
-      message: "يجب توفير رقم الشكوى أو الرقم المرجعي",
+      message: "رقم الشكوى أو الرقم المرجعي غير موجود.",
     });
   }
 
@@ -37,11 +52,11 @@ function validateRequiredFields(row: NormalizedComplaintRow): RowMessage[] {
     });
   }
 
-  if (!row.subject && !row.description) {
+  if (!row.subject?.trim() && !row.description?.trim()) {
     errors.push({
-      field: "subject",
+      field: "description",
       code: "MISSING_TEXT",
-      message: "يجب توفير الموضوع أو وصف الشكوى",
+      message: "الوصف غير موجود.",
     });
   }
 
@@ -98,40 +113,63 @@ function validateFieldLengths(row: NormalizedComplaintRow): RowMessage[] {
   return errors;
 }
 
-function findCategory(row: NormalizedComplaintRow, lookup: TaxonomyLookup): Category | null {
-  return row.category
-    ? lookup.categories.find((item) => normalizeLookup(item.nameAr) === normalizeLookup(row.category)) ?? null
-    : null;
+function findCategories(row: NormalizedComplaintRow, lookup: TaxonomyLookup): Category[] {
+  if (!row.category) return [];
+  const needle = normalizeLookup(row.category);
+  return lookup.categories.filter((item) => normalizeLookup(item.nameAr) === needle);
 }
 
-function findClassification(
+function findClassifications(
   row: NormalizedComplaintRow,
   lookup: TaxonomyLookup
-): (Classification & { category: Category }) | null {
-  return row.classification
-    ? lookup.classifications.find((item) => normalizeLookup(item.nameAr) === normalizeLookup(row.classification)) ?? null
-    : null;
+): Array<Classification & { category: Category }> {
+  if (!row.classification) return [];
+  const needle = normalizeLookup(row.classification);
+  return lookup.classifications.filter((item) => normalizeLookup(item.nameAr) === needle);
 }
 
-function validateTaxonomy(row: NormalizedComplaintRow, lookup: TaxonomyLookup): RowMessage[] {
+function validateTaxonomy(row: NormalizedComplaintRow, lookup: TaxonomyLookup): TaxonomyValidationResult {
   const errors: RowMessage[] = [];
-  const category = row.category
-    ? findCategory(row, lookup)
-    : null;
-  if (row.category && !category) {
-    errors.push({ field: "category", code: "CATEGORY_NOT_FOUND", message: "الفئة غير موجودة أو غير فعالة" });
+  const warnings: RowMessage[] = [];
+  let clearCategory = false;
+  let clearClassification = false;
+
+  const categories = findCategories(row, lookup);
+  if (row.category && categories.length === 0) {
+    warnings.push({
+      field: "category",
+      code: "CATEGORY_NOT_FOUND",
+      message: "الفئة غير موجودة أو غير فعالة، وتم الاحتفاظ بالقيمة ضمن البيانات الأصلية.",
+    });
+    clearCategory = true;
+  } else if (categories.length > 1) {
+    warnings.push({
+      field: "category",
+      code: "CATEGORY_AMBIGUOUS",
+      message: "وجد أكثر من فئة مطابقة للاسم المصدر، وتم الاحتفاظ بالقيمة ضمن البيانات الأصلية.",
+    });
+    clearCategory = true;
   }
 
-  const classification = row.classification
-    ? findClassification(row, lookup)
-    : null;
-  if (row.classification && !classification) {
-    errors.push({
+  const classifications = findClassifications(row, lookup);
+  if (row.classification && classifications.length === 0) {
+    warnings.push({
       field: "classification",
       code: "CLASSIFICATION_NOT_FOUND",
-      message: "التصنيف غير موجود أو غير فعال",
+      message: "التصنيف غير موجود أو غير فعال، وتم الاحتفاظ بالقيمة ضمن البيانات الأصلية.",
     });
+    clearClassification = true;
+  } else if (classifications.length > 1) {
+    warnings.push({
+      field: "classification",
+      code: "CLASSIFICATION_AMBIGUOUS",
+      message: "وجد أكثر من تصنيف مطابق للاسم المصدر، وتم الاحتفاظ بالقيمة ضمن البيانات الأصلية.",
+    });
+    clearClassification = true;
   }
+
+  const category = categories.length === 1 ? categories[0] : null;
+  const classification = classifications.length === 1 ? classifications[0] : null;
 
   if (category && classification && classification.categoryId !== category.id) {
     errors.push({
@@ -141,19 +179,32 @@ function validateTaxonomy(row: NormalizedComplaintRow, lookup: TaxonomyLookup): 
     });
   }
 
-  return errors;
+  return {
+    errors,
+    warnings,
+    apply(target) {
+      if (clearCategory) delete target.category;
+      if (clearClassification) delete target.classification;
+    },
+  };
 }
 
 export function validateNormalizedComplaintRow(
   row: NormalizedComplaintRow,
   lookup: TaxonomyLookup,
   now = new Date()
-): RowMessage[] {
-  return [
-    ...validateRequiredFields(row),
-    ...validateDates(row, now),
-    ...validateLifecycleConsistency(row),
-    ...validateFieldLengths(row),
-    ...validateTaxonomy(row, lookup),
-  ];
+): { errors: RowMessage[]; warnings: RowMessage[] } {
+  const taxonomy = validateTaxonomy(row, lookup);
+  taxonomy.apply(row);
+
+  return {
+    errors: [
+      ...validateRequiredFields(row),
+      ...validateDates(row, now),
+      ...validateLifecycleConsistency(row),
+      ...validateFieldLengths(row),
+      ...taxonomy.errors,
+    ],
+    warnings: taxonomy.warnings,
+  };
 }

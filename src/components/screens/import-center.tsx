@@ -100,6 +100,23 @@ interface UploadResult {
   selectedSheet: string | null;
   hasComplaintNumber: boolean;
   unmappedColumns: string[];
+  columnCount?: number;
+  mappingAnalysis?: {
+    autoMappedCount: number;
+    manuallyMappedCount: number;
+    unmappedPreservedCount: number;
+    conflictCount: number;
+    missingRequiredFields: string[];
+    summary: string;
+    unmappedColumns: string[];
+    entries?: Array<{
+      header: string;
+      normalizedHeader: string;
+      field: string | null;
+      status: string;
+      suggestedField?: string;
+    }>;
+  };
   columnMapping: Record<string, string>;
   errors: ImportError[];
   preview: ImportPreviewRow[];
@@ -118,7 +135,8 @@ export function normalizeUploadResultPayload(json: UploadResult): UploadResult {
   return {
     ...json,
     hasComplaintNumber: mappingContainsComplaintNumber(json.columnMapping),
-    unmappedColumns: json.unmappedColumns ?? [],
+    unmappedColumns: json.unmappedColumns ?? json.mappingAnalysis?.unmappedColumns ?? [],
+    mappingAnalysis: json.mappingAnalysis,
   };
 }
 
@@ -994,15 +1012,29 @@ export function ImportCenter() {
 
                       {/* Mapping tab */}
                       <TabsContent value="mapping" className="mt-4">
+                        {result.mappingAnalysis?.summary && (
+                          <Alert className="mb-3">
+                            <AlertTitle>ملخص الربط</AlertTitle>
+                            <AlertDescription>
+                              {result.mappingAnalysis.summary}
+                              {result.mappingAnalysis.conflictCount > 0 && (
+                                <span className="block mt-1 text-amber-700 dark:text-amber-300">
+                                  تعارضات الربط:{" "}
+                                  {formatNumber(result.mappingAnalysis.conflictCount)}
+                                </span>
+                              )}
+                            </AlertDescription>
+                          </Alert>
+                        )}
                         {result.unmappedColumns.length > 0 && (
                           <Alert className="mb-3 border-amber-200 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-900/50">
                             <FileWarning className="h-4 w-4 text-amber-600" />
-                            <AlertTitle>أعمدة غير معيّنة</AlertTitle>
+                            <AlertTitle>أعمدة محفوظة دون ربط مباشر</AlertTitle>
                             <AlertDescription className="text-amber-800 dark:text-amber-300">
-                              لم يتم التعرف التلقائي على{" "}
+                              احتفظ النظام بـ{" "}
                               {formatNumber(result.unmappedColumns.length)}{" "}
-                              عمود. يرجى مراجعة التسميات أو إعادة تسمية الأعمدة
-                              في الملف الأصلي.
+                              عمودًا ضمن البيانات الأصلية. يمكن تعديل الربط ثم
+                              إعادة المعالجة.
                             </AlertDescription>
                           </Alert>
                         )}
@@ -1010,62 +1042,77 @@ export function ImportCenter() {
                           <Table>
                             <TableHeader>
                               <TableRow className="bg-muted/50">
-                                <TableHead className="w-1/2">
+                                <TableHead className="w-1/3">
                                   العمود في الملف
                                 </TableHead>
-                                <TableHead className="w-1/2">
+                                <TableHead className="w-1/3">
                                   الحقل المعتمد
                                 </TableHead>
-                                <TableHead className="w-24 text-center">
+                                <TableHead className="w-1/3 text-center">
                                   الحالة
                                 </TableHead>
                               </TableRow>
                             </TableHeader>
                             <TableBody>
-                              {Object.entries(result.columnMapping).map(
-                                ([src, target]) => {
-                                  const unmapped =
-                                    result.unmappedColumns.includes(src);
-                                  return (
-                                    <TableRow
-                                      key={src}
-                                      className={
-                                        unmapped
-                                          ? "bg-amber-50/50 dark:bg-amber-950/20"
-                                          : ""
-                                      }
-                                    >
-                                      <TableCell className="font-medium">
-                                        {src}
-                                      </TableCell>
-                                      <TableCell>
-                                        {unmapped ? (
-                                          <span className="text-amber-600 dark:text-amber-400 text-sm">
-                                            غير معيّن
-                                          </span>
-                                        ) : (
-                                          <div className="flex items-center gap-1.5">
-                                            <ArrowLeft className="h-3 w-3 text-muted-foreground" />
-                                            <Badge
-                                              variant="outline"
-                                              className="bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 dark:border-emerald-800"
-                                            >
-                                              {FIELD_LABELS[target] || target}
-                                            </Badge>
+                              {(
+                                result.mappingAnalysis?.entries?.filter(
+                                  (entry) => entry.status !== "MISSING_REQUIRED"
+                                ) ??
+                                Object.entries(result.columnMapping).map(
+                                  ([header, field]) => ({
+                                    header,
+                                    normalizedHeader: header,
+                                    field,
+                                    status: "AUTO_MAPPED",
+                                  })
+                                )
+                              ).map((entry) => {
+                                const unmapped =
+                                  entry.status === "UNMAPPED_PRESERVED" ||
+                                  entry.status === "CONFLICT";
+                                return (
+                                  <TableRow
+                                    key={entry.header}
+                                    className={
+                                      unmapped
+                                        ? "bg-amber-50/50 dark:bg-amber-950/20"
+                                        : ""
+                                    }
+                                  >
+                                    <TableCell className="font-medium">
+                                      <div>{entry.header}</div>
+                                      {"normalizedHeader" in entry &&
+                                        entry.normalizedHeader !==
+                                          entry.header && (
+                                          <div className="text-xs text-muted-foreground mt-0.5">
+                                            {entry.normalizedHeader}
                                           </div>
                                         )}
-                                      </TableCell>
-                                      <TableCell className="text-center">
-                                        {unmapped ? (
-                                          <XCircle className="h-4 w-4 text-amber-500 mx-auto" />
-                                        ) : (
-                                          <CheckCircle2 className="h-4 w-4 text-emerald-500 mx-auto" />
-                                        )}
-                                      </TableCell>
-                                    </TableRow>
-                                  );
-                                }
-                              )}
+                                    </TableCell>
+                                    <TableCell>
+                                      {entry.field ? (
+                                        <div className="flex items-center gap-1.5">
+                                          <ArrowLeft className="h-3 w-3 text-muted-foreground" />
+                                          <Badge
+                                            variant="outline"
+                                            className="bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 dark:border-emerald-800"
+                                          >
+                                            {FIELD_LABELS[entry.field] ||
+                                              entry.field}
+                                          </Badge>
+                                        </div>
+                                      ) : (
+                                        <span className="text-amber-600 dark:text-amber-400 text-sm">
+                                          محفوظ في البيانات الأصلية
+                                        </span>
+                                      )}
+                                    </TableCell>
+                                    <TableCell className="text-center text-xs">
+                                      {entry.status}
+                                    </TableCell>
+                                  </TableRow>
+                                );
+                              })}
                             </TableBody>
                           </Table>
                         </div>
@@ -1089,6 +1136,7 @@ export function ImportCenter() {
                                   <TableHead>الموضوع</TableHead>
                                   <TableHead>الحالة</TableHead>
                                   <TableHead>الأولوية</TableHead>
+                                  <TableHead>هوية مقدم الشكوى</TableHead>
                                 </TableRow>
                               </TableHeader>
                               <TableBody>
@@ -1108,24 +1156,17 @@ export function ImportCenter() {
                                     <TableCell className="text-xs">
                                       {row.channel || "-"}
                                     </TableCell>
-                                    <TableCell className="max-w-[240px] truncate text-xs">
+                                    <TableCell className="text-xs max-w-[200px] truncate">
                                       {row.subject || "-"}
                                     </TableCell>
-                                    <TableCell>
-                                      <Badge
-                                        variant="outline"
-                                        className="text-[10px]"
-                                      >
-                                        {row.status || "-"}
-                                      </Badge>
+                                    <TableCell className="text-xs">
+                                      {row.status || "-"}
                                     </TableCell>
-                                    <TableCell>
-                                      <Badge
-                                        variant="outline"
-                                        className="text-[10px]"
-                                      >
-                                        {row.priority || "-"}
-                                      </Badge>
+                                    <TableCell className="text-xs">
+                                      {row.priority || "-"}
+                                    </TableCell>
+                                    <TableCell className="font-mono text-xs">
+                                      {row.complainantIdentifierMasked || "-"}
                                     </TableCell>
                                   </TableRow>
                                 ))}

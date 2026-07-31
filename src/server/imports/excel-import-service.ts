@@ -22,12 +22,15 @@ import {
 import { ImportValidationError } from "./import-errors";
 import { calculateRowCounters } from "./import-batch-service";
 import {
+  analyzeColumnMapping,
   matchComplaintColumns,
   parseColumnMapping,
   validateColumnMapping,
   type ColumnMapping,
+  type ColumnMappingAnalysis,
 } from "./complaint-column-schema";
 import { normalizeImportRow, type NormalizedComplaintRow, type RawImportRow, type RowMessage } from "./normalization";
+import { maskIdentifier } from "./privacy";
 import { validateNormalizedComplaintRow } from "./row-validation";
 import { parseXlsxWorkbook } from "./xlsx-parser";
 
@@ -87,6 +90,9 @@ export type ImportUploadResult = {
   warningRecords: number;
   noChangeRecords: number;
   columnMapping: ColumnMapping;
+  unmappedColumns: string[];
+  mappingAnalysis: ColumnMappingAnalysis;
+  columnCount: number;
   errors: Array<{ row: number; errors: RowMessage[]; warnings: RowMessage[] }>;
   preview: Array<Record<string, unknown>>;
   canApprove: boolean;
@@ -196,6 +202,9 @@ export function hasMeaningfulChange(row: NormalizedComplaintRow, complaint: Comp
     [row.department, complaint.department],
     [row.channel, complaint.channel],
     [row.resolution, complaint.resolution],
+    [row.complainantIdentifier, complaint.complainantIdentifier],
+    [row.complainantName, complaint.complainantName],
+    [row.complainantPhone, complaint.complainantPhone],
     [toOptionalDateKey(row.complaintDate), toOptionalDateKey(complaint.complaintDate)],
     [toOptionalDateKey(row.receivedAt), toOptionalDateKey(complaint.receivedAt)],
     [toOptionalDateKey(row.dueDate), toOptionalDateKey(complaint.dueDate)],
@@ -288,11 +297,12 @@ type RowClassification = {
   matchedComplaintVersion: number | null;
 };
 
-function duplicateRowError(firstRow: number): RowMessage {
+function duplicateRowError(firstRow: number, currentRow: number, externalId?: string): RowMessage {
+  const identityLabel = externalId?.trim() ? `رقم الشكوى ${externalId.trim()} ` : "";
   return {
     field: "externalId",
     code: "DUPLICATE_ROW_IN_FILE",
-    message: `الصف يكرر صفًا سابقًا في الملف: ${firstRow}`,
+    message: `${identityLabel}مكرر في الصفين ${firstRow} و${currentRow}.`,
   };
 }
 
@@ -316,11 +326,12 @@ function isDuplicateImportIdentity(
   identity: string,
   rowNumber: number,
   context: RowClassificationContext,
-  errors: RowMessage[]
+  errors: RowMessage[],
+  externalId?: string
 ): boolean {
   const firstRow = context.seenImportIdentities.get(identity);
   if (firstRow) {
-    errors.push(duplicateRowError(firstRow));
+    errors.push(duplicateRowError(firstRow, rowNumber, externalId));
     return true;
   }
 
@@ -368,7 +379,7 @@ function classifyValidImportRow(
   errors: RowMessage[]
 ): RowClassification {
   const identity = normalizedCandidateIdentityKeys(normalized)[0];
-  if (isDuplicateImportIdentity(identity, rowNumber, context, errors)) {
+  if (isDuplicateImportIdentity(identity, rowNumber, context, errors, normalized.externalId)) {
     return { action: ImportRowAction.DUPLICATE, matchedComplaintId: null, matchedComplaintVersion: null };
   }
 
@@ -437,6 +448,8 @@ function classifyRows(input: {
 type ProcessedWorkbook = {
   selectedSheet: string;
   columnMapping: ColumnMapping;
+  mappingAnalysis: ColumnMappingAnalysis;
+  columnCount: number;
   processedRows: ProcessedImportRow[];
   counters: ReturnType<typeof calculateRowCounters>;
 };
@@ -445,13 +458,34 @@ export function resolveEffectiveColumnMapping(input: {
   headers: readonly string[];
   callerMapping?: unknown;
   storedMapping?: unknown;
-}): ColumnMapping {
+}): {
+  columnMapping: ColumnMapping;
+  mappingAnalysis: ColumnMappingAnalysis;
+  manuallyMapped: boolean;
+} {
   const callerMapping = parseColumnMapping(input.callerMapping);
   const storedMapping = parseColumnMapping(input.storedMapping);
-  const columnMapping = callerMapping ?? storedMapping ?? matchComplaintColumns([...input.headers]);
+  const manuallyMapped = Boolean(callerMapping ?? storedMapping);
+  let columnMapping: ColumnMapping;
+  let conflicts: ColumnMappingAnalysis["conflicts"] = [];
+
+  if (callerMapping) {
+    columnMapping = callerMapping;
+  } else if (storedMapping) {
+    columnMapping = storedMapping;
+  } else {
+    const matched = matchComplaintColumns([...input.headers]);
+    columnMapping = matched.mapping;
+    conflicts = matched.conflicts;
+  }
 
   validateColumnMapping(columnMapping, input.headers);
-  return columnMapping;
+  const mappingAnalysis = analyzeColumnMapping([...input.headers], columnMapping, {
+    conflicts,
+    manuallyMapped,
+  });
+
+  return { columnMapping, mappingAnalysis, manuallyMapped };
 }
 
 async function processWorkbookPreview(
@@ -460,7 +494,7 @@ async function processWorkbookPreview(
   storedMapping?: unknown
 ): Promise<ProcessedWorkbook> {
   const workbook = await parseXlsxWorkbook(buffer);
-  const columnMapping = resolveEffectiveColumnMapping({
+  const { columnMapping, mappingAnalysis } = resolveEffectiveColumnMapping({
     headers: workbook.headers,
     callerMapping,
     storedMapping,
@@ -474,15 +508,28 @@ async function processWorkbookPreview(
     }),
   };
 
+  const preservedColumnWarnings: RowMessage[] =
+    mappingAnalysis.unmappedPreservedCount > 0
+      ? [
+          {
+            field: "rawData",
+            code: "UNMAPPED_COLUMNS_PRESERVED",
+            message: mappingAnalysis.summary,
+          },
+        ]
+      : [];
+
   const normalizedRows = workbook.rows.map((row) => {
     const normalized = normalizeImportRow(row, columnMapping);
+    const validation = validateNormalizedComplaintRow(normalized.normalized, taxonomy);
     return {
       row: normalized.normalized,
-      warnings: normalized.warnings,
-      errors: [
-        ...normalized.errors,
-        ...validateNormalizedComplaintRow(normalized.normalized, taxonomy),
+      warnings: [
+        ...normalized.warnings,
+        ...validation.warnings,
+        ...(row.rowNumber === workbook.rows[0]?.rowNumber ? preservedColumnWarnings : []),
       ],
+      errors: [...normalized.errors, ...validation.errors],
     };
   });
 
@@ -498,6 +545,8 @@ async function processWorkbookPreview(
   return {
     selectedSheet: workbook.selectedSheet,
     columnMapping,
+    mappingAnalysis,
+    columnCount: workbook.headers.filter(Boolean).length,
     processedRows,
     counters: calculateRowCounters(processedRows),
   };
@@ -623,6 +672,9 @@ function toImportUploadResult(
     warningRecords: processed.counters.warningRows,
     noChangeRecords: processed.counters.noChangeRows,
     columnMapping: processed.columnMapping,
+    unmappedColumns: processed.mappingAnalysis.unmappedColumns,
+    mappingAnalysis: processed.mappingAnalysis,
+    columnCount: processed.columnCount,
     errors: processed.processedRows
       .filter((row) => row.validationErrors || row.validationWarnings)
       .slice(0, 100)
@@ -633,6 +685,10 @@ function toImportUploadResult(
       })),
     preview: processed.processedRows.slice(0, 50).map((row) => {
       const normalized = row.normalizedData as Record<string, unknown> | null;
+      const identifier =
+        typeof normalized?.complainantIdentifier === "string"
+          ? normalized.complainantIdentifier
+          : null;
       return {
         row: row.rowNumber,
         action: row.action,
@@ -646,6 +702,8 @@ function toImportUploadResult(
         priority: normalized?.priority ?? null,
         region: normalized?.region ?? null,
         department: normalized?.department ?? null,
+        facility: normalized?.facility ?? null,
+        complainantIdentifierMasked: identifier ? maskIdentifier(identifier) : null,
       };
     }),
     canApprove: processed.counters.invalidRows === 0 && processed.counters.rejectedRows === 0,

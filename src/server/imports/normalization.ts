@@ -1,5 +1,11 @@
 import { ComplaintPriority, ComplaintStatus } from "@prisma/client";
-import type { ComplaintImportField, ColumnMapping } from "./complaint-column-schema";
+import {
+  normalizeColumnHeader,
+  type ComplaintImportField,
+  type ColumnMapping,
+} from "./complaint-column-schema";
+import { parseExcelSerialDate } from "./excel-date-parser";
+import { deriveSubject } from "./subject-derive";
 
 export type RawImportRow = {
   rowNumber: number;
@@ -54,9 +60,20 @@ const PRIORITY_LABELS = new Map<string, ComplaintPriority>([
   ["حرجه", ComplaintPriority.CRITICAL],
 ]);
 
+const RESOLUTION_FALLBACK_HEADERS = ["وصف الإجراء", "وصف الاجراء"];
+
+const DATE_FIELD_LABELS: Partial<Record<ComplaintImportField, string>> = {
+  complaintDate: "تاريخ الشكوى",
+  receivedAt: "تاريخ التسجيل",
+  dueDate: "تاريخ الاستحقاق",
+  closedAt: "تاريخ الإغلاق",
+};
+
 function normalizeArabicToken(value: string): string {
   return value
     .trim()
+    .replaceAll(/[\u064B-\u065F\u0670]/g, "")
+    .replaceAll("\u0640", "")
     .replaceAll(/[إأآا]/g, "ا")
     .replaceAll("ى", "ي")
     .replaceAll("ة", "ه")
@@ -99,12 +116,7 @@ export function isFormulaLikeValue(value: unknown): boolean {
 }
 
 export function normalizeExcelSerialDate(serial: number): Date | null {
-  if (!Number.isFinite(serial) || serial <= 0) return null;
-
-  const wholeDays = Math.floor(serial);
-  const milliseconds = Math.round((serial - wholeDays) * 86_400_000);
-  const excelEpoch = Date.UTC(1899, 11, 30);
-  return new Date(excelEpoch + wholeDays * 86_400_000 + milliseconds);
+  return parseExcelSerialDate(serial);
 }
 
 export function parseUtcCalendarDate(text: string): Date | undefined {
@@ -136,18 +148,30 @@ function parseExplicitIsoDateTime(text: string): Date | undefined {
   return Number.isNaN(parsed.getTime()) ? undefined : parsed;
 }
 
+function parseNumericStringAsExcelSerial(text: string): Date | undefined {
+  if (!/^\d+(\.\d+)?$/.test(text.trim())) {
+    return undefined;
+  }
+
+  return parseExcelSerialDate(Number(text)) ?? undefined;
+}
+
 export function normalizeDateCell(value: unknown): Date | undefined {
   if (value === null || value === undefined || value === "") return undefined;
   if (value instanceof Date) return Number.isNaN(value.getTime()) ? undefined : value;
 
   if (typeof value === "number") {
-    return normalizeExcelSerialDate(value) ?? undefined;
+    return parseExcelSerialDate(value) ?? undefined;
   }
 
   const text = normalizeTextCell(value);
   if (!text) return undefined;
 
-  return parseExplicitIsoDateTime(text) ?? parseUtcCalendarDate(text);
+  return (
+    parseExplicitIsoDateTime(text) ??
+    parseUtcCalendarDate(text) ??
+    parseNumericStringAsExcelSerial(text)
+  );
 }
 
 function normalizeStatus(value: unknown): ComplaintStatus | undefined {
@@ -200,15 +224,25 @@ function assignTextField(target: NormalizedComplaintRow, field: TextImportField,
   target[field] = value;
 }
 
+function invalidDateMessage(field: ComplaintImportField, rowNumber: number): string {
+  const label = DATE_FIELD_LABELS[field] ?? "التاريخ";
+  return `الصف ${rowNumber}: ${label} غير صالح.`;
+}
+
 function normalizeDateField(
   target: NormalizedComplaintRow,
   field: ComplaintImportField,
   value: unknown,
-  errors: RowMessage[]
+  errors: RowMessage[],
+  rowNumber: number
 ): void {
   const date = normalizeDateCell(value);
   if (value !== undefined && value !== null && value !== "" && !date) {
-    errors.push({ field, code: "INVALID_DATE", message: "التاريخ غير صالح أو ملتبس" });
+    errors.push({
+      field,
+      code: "INVALID_DATE",
+      message: invalidDateMessage(field, rowNumber),
+    });
     return;
   }
 
@@ -219,12 +253,18 @@ function normalizeEnumField(
   target: NormalizedComplaintRow,
   field: ComplaintImportField,
   value: unknown,
-  errors: RowMessage[]
+  errors: RowMessage[],
+  warnings: RowMessage[]
 ): void {
   if (field === "status") {
+    const text = normalizeTextCell(value);
     const status = normalizeStatus(value);
     if (value !== undefined && value !== null && value !== "" && !status) {
-      errors.push({ field, code: "INVALID_STATUS", message: "حالة الشكوى غير مدعومة" });
+      warnings.push({
+        field,
+        code: "UNKNOWN_SOURCE_STATUS",
+        message: `تعذر مطابقة الحالة المصدرية "${text ?? ""}"، وتم استخدام الحالة الابتدائية الافتراضية.`,
+      });
     } else if (status) {
       target.status = status;
     }
@@ -244,15 +284,17 @@ function normalizeMappedField(
   target: NormalizedComplaintRow,
   field: ComplaintImportField,
   value: unknown,
-  errors: RowMessage[]
+  errors: RowMessage[],
+  warnings: RowMessage[],
+  rowNumber: number
 ): void {
   if (DATE_FIELDS.has(field)) {
-    normalizeDateField(target, field, value, errors);
+    normalizeDateField(target, field, value, errors, rowNumber);
     return;
   }
 
   if (ENUM_FIELDS.has(field)) {
-    normalizeEnumField(target, field, value, errors);
+    normalizeEnumField(target, field, value, errors, warnings);
     return;
   }
 
@@ -272,6 +314,33 @@ function collectCrossFieldWarnings(normalized: NormalizedComplaintRow): RowMessa
     code: "DUE_DATE_BEFORE_RECEIVED_AT",
     message: "تاريخ الاستحقاق يسبق تاريخ الورود",
   }];
+}
+
+function applyResolutionFallback(
+  target: NormalizedComplaintRow,
+  rawRow: RawImportRow
+): void {
+  if (target.resolution) return;
+
+  for (const [header, value] of Object.entries(rawRow.values)) {
+    const normalizedHeader = normalizeColumnHeader(header);
+    const isFallback = RESOLUTION_FALLBACK_HEADERS.some(
+      (candidate) => normalizeColumnHeader(candidate) === normalizedHeader
+    );
+    if (!isFallback) continue;
+
+    const text = normalizeTextCell(value);
+    if (text) {
+      target.resolution = text;
+      return;
+    }
+  }
+}
+
+function applyDerivedSubject(target: NormalizedComplaintRow): void {
+  if (target.subject?.trim()) return;
+  if (!target.description?.trim()) return;
+  target.subject = deriveSubject(target.description);
 }
 
 export function normalizeImportRow(
@@ -294,8 +363,11 @@ export function normalizeImportRow(
       continue;
     }
 
-    normalizeMappedField(normalized, field, value, errors);
+    normalizeMappedField(normalized, field, value, errors, warnings, rawRow.rowNumber);
   }
+
+  applyResolutionFallback(normalized, rawRow);
+  applyDerivedSubject(normalized);
 
   if (!normalized.status) normalized.status = ComplaintStatus.NEW;
   if (!normalized.priority) normalized.priority = ComplaintPriority.MEDIUM;
