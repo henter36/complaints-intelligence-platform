@@ -361,6 +361,150 @@ describe("buildSupportedFiltersPayload", () => {
   });
 });
 
+describe("SectionBody — all section kinds via preview", () => {
+  const BASE_REPORT = {
+    type: "EXECUTIVE_SUMMARY",
+    title: "التقرير التنفيذي الشامل",
+    generatedAt: new Date().toISOString(),
+    period: { from: "2026-07-01", to: "2026-07-31" },
+    filters: {},
+    warnings: [],
+    rowCount: 0,
+  };
+
+  async function renderPreviewWithSections(sections: unknown[]) {
+    const user = userEvent.setup();
+    const fetchMock = routedFetch({
+      "/api/reports/preview": () => jsonResponse({ report: { ...BASE_REPORT, sections } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ReportsCenter />);
+    const card = await screen.findByText("التقرير التنفيذي الشامل");
+    await user.click(card);
+    await user.click(screen.getByRole("button", { name: /معاينة/ }));
+  }
+
+  it("renders kpi cards", async () => {
+    await renderPreviewWithSections([
+      {
+        id: "kpi_overview", kind: "kpi", title: "المؤشرات الرئيسية",
+        cards: [
+          { key: "total", label: "إجمالي الشكاوى", value: 1240, format: "number" },
+          { key: "pct", label: "نسبة الحل", value: 85, format: "percent" },
+        ],
+      },
+    ]);
+    expect(await screen.findByText("إجمالي الشكاوى")).toBeInTheDocument();
+    expect(screen.getByText("نسبة الحل")).toBeInTheDocument();
+  });
+
+  it("renders table section rows without crashing", async () => {
+    await renderPreviewWithSections([
+      {
+        id: "top_regions", kind: "table", title: "المناطق الأعلى",
+        table: {
+          id: "top_regions", title: "المناطق الأعلى",
+          columns: [{ key: "region", label: "المنطقة" }, { key: "count", label: "العدد", format: "number" }],
+          rows: [{ region: "الرياض", count: 320 }, { region: "جدة", count: 210 }],
+          truncated: false, totalMatched: 2,
+        },
+      },
+    ]);
+    expect(await screen.findByText("الرياض")).toBeInTheDocument();
+    expect(screen.getByText("جدة")).toBeInTheDocument();
+  });
+
+  it("renders text section as a bullet list — crash regression for kind='text'", async () => {
+    // Before the fix, section.table.rows.length threw when kind was "text".
+    await renderPreviewWithSections([
+      {
+        id: "exec_summary", kind: "text", title: "الملخص التنفيذي",
+        points: ["إجمالي الشكاوى ارتفع بنسبة 12٪", "أعلى منطقة هي الرياض"],
+      },
+    ]);
+    expect(await screen.findByText("الملخص التنفيذي")).toBeInTheDocument();
+    expect(screen.getByText("إجمالي الشكاوى ارتفع بنسبة 12٪")).toBeInTheDocument();
+    expect(screen.getByText("أعلى منطقة هي الرياض")).toBeInTheDocument();
+  });
+
+  it("renders chart section as aggregated totals per series — crash regression for kind='chart'", async () => {
+    // Before the fix, section.table.rows.length threw when kind was "chart".
+    await renderPreviewWithSections([
+      {
+        id: "region_trend", kind: "chart", chartType: "line", title: "اتجاه المناطق",
+        series: [
+          { name: "الرياض", points: [{ x: "2026-07-01", y: 50 }, { x: "2026-07-02", y: 70 }] },
+          { name: "جدة", points: [{ x: "2026-07-01", y: 30 }, { x: "2026-07-02", y: 40 }] },
+        ],
+      },
+    ]);
+    // Proves the section rendered without crashing and that both series names are visible.
+    expect(await screen.findByText("اتجاه المناطق")).toBeInTheDocument();
+    expect(screen.getByText("الرياض")).toBeInTheDocument();
+    expect(screen.getByText("جدة")).toBeInTheDocument();
+  });
+
+  it("renders chart section empty state when series array is empty", async () => {
+    await renderPreviewWithSections([
+      {
+        id: "region_trend", kind: "chart", chartType: "line", title: "اتجاه المناطق",
+        series: [], emptyState: "لا توجد بيانات كافية لرسم المخطط",
+      },
+    ]);
+    expect(await screen.findByText("اتجاه المناطق")).toBeInTheDocument();
+    expect(screen.getByText("لا توجد بيانات كافية لرسم المخطط")).toBeInTheDocument();
+  });
+
+  it("renders text section empty state when points array is empty", async () => {
+    await renderPreviewWithSections([
+      { id: "exec_summary", kind: "text", title: "الملخص التنفيذي", points: [] },
+    ]);
+    expect(await screen.findByText("الملخص التنفيذي")).toBeInTheDocument();
+    expect(screen.getByText("لا توجد بيانات لعرضها.")).toBeInTheDocument();
+  });
+
+  it("renders table section empty state when rows array is empty", async () => {
+    await renderPreviewWithSections([
+      {
+        id: "top_regions", kind: "table", title: "المناطق الأعلى",
+        table: {
+          id: "top_regions", title: "المناطق الأعلى",
+          columns: [{ key: "region", label: "المنطقة" }],
+          rows: [], truncated: false, totalMatched: 0,
+        },
+      },
+    ]);
+    expect(await screen.findByText("المناطق الأعلى")).toBeInTheDocument();
+    expect(screen.getByText("لا توجد بيانات لعرضها.")).toBeInTheDocument();
+  });
+
+  it("renders a mixed report with kpi, table, text, and chart sections — no crash", async () => {
+    await renderPreviewWithSections([
+      {
+        id: "kpi_overview", kind: "kpi", title: "المؤشرات الرئيسية",
+        cards: [{ key: "total", label: "إجمالي", value: 100, format: "number" }],
+      },
+      {
+        id: "top_regions", kind: "table", title: "المناطق",
+        table: {
+          id: "top_regions", title: "المناطق",
+          columns: [{ key: "region", label: "المنطقة" }],
+          rows: [{ region: "الرياض" }], truncated: false, totalMatched: 1,
+        },
+      },
+      { id: "exec_summary", kind: "text", title: "الملخص", points: ["نقطة مهمة"] },
+      {
+        id: "region_trend", kind: "chart", chartType: "line", title: "الرسم البياني",
+        series: [{ name: "الرياض", points: [{ x: "2026-07-01", y: 10 }] }],
+      },
+    ]);
+    expect(await screen.findByText("المؤشرات الرئيسية")).toBeInTheDocument();
+    expect(screen.getByText("المناطق")).toBeInTheDocument();
+    expect(screen.getByText("الملخص")).toBeInTheDocument();
+    expect(screen.getByText("الرسم البياني")).toBeInTheDocument();
+  });
+});
+
 describe("validatePeriod", () => {
   const filters = {
     from: "2026-07-01", to: "2026-07-31", region: "all", department: "all", facility: "all",

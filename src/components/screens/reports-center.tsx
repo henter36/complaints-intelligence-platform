@@ -69,9 +69,12 @@ type ReportTable = {
   id: string; title: string; columns: ReportTableColumn[];
   rows: Record<string, unknown>[]; truncated: boolean; totalMatched: number;
 };
+type ChartSeries = { name: string; points: { x: string; y: number }[]; isOther?: boolean };
 type ReportSection =
   | { id: string; kind: "kpi"; title: string; cards: ReportKpiCard[] }
-  | { id: string; kind: "table"; title: string; table: ReportTable };
+  | { id: string; kind: "table"; title: string; table: ReportTable }
+  | { id: string; kind: "text"; title: string; points: string[] }
+  | { id: string; kind: "chart"; chartType: "line"; title: string; series: ChartSeries[]; description?: string; emptyState?: string; unit?: string; truncated?: boolean; truncatedMessage?: string };
 
 type ReportData = {
   type: ReportType;
@@ -1130,46 +1133,95 @@ function EmptyState({ icon: Icon, text }: Readonly<{ icon: typeof FileText; text
 // Preview
 // =========================================================================
 
+function assertNeverReportSection(section: never): never {
+  throw new Error(`نوع قسم التقرير غير معروف: ${JSON.stringify((section as ReportSection).kind)}`);
+}
+
 function SectionBody({ section }: Readonly<{ section: ReportSection }>) {
-  if (section.kind === "kpi") {
-    return (
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
-        {section.cards.map((card) => (
-          <div key={card.key} className="rounded-lg border bg-muted/40 p-3">
-            <div className="text-xs text-muted-foreground">{card.label}</div>
-            <div className="text-xl font-bold mt-1 tabular-nums">{formatKpiValue(card)}</div>
-          </div>
-        ))}
-      </div>
-    );
-  }
-
-  if (section.table.rows.length === 0) {
-    return <p className="text-sm text-muted-foreground">لا توجد بيانات لعرضها.</p>;
-  }
-
-  return (
-    <div className="overflow-x-auto rounded-lg border">
-      <Table>
-        <TableHeader>
-          <TableRow>
-            {section.table.columns.map((col) => <TableHead key={col.key}>{col.label}</TableHead>)}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {section.table.rows.map((row) => (
-            <TableRow key={section.table.columns.map((col) => toDisplayText(row[col.key])).join("|")}>
-              {section.table.columns.map((col) => (
-                <TableCell key={col.key} className="text-sm">{formatCell(row[col.key], col.format)}</TableCell>
-              ))}
-            </TableRow>
+  switch (section.kind) {
+    case "kpi":
+      return (
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+          {section.cards.map((card) => (
+            <div key={card.key} className="rounded-lg border bg-muted/40 p-3">
+              <div className="text-xs text-muted-foreground">{card.label}</div>
+              <div className="text-xl font-bold mt-1 tabular-nums">{formatKpiValue(card)}</div>
+            </div>
           ))}
-        </TableBody>
-      </Table>
-      {section.table.truncated && (
-        <div className="p-2 text-xs text-muted-foreground border-t">
-          تم عرض {section.table.rows.length} من أصل {formatNumber(section.table.totalMatched)} صفاً.
         </div>
+      );
+
+    case "table":
+      if (section.table.rows.length === 0) {
+        return <p className="text-sm text-muted-foreground">لا توجد بيانات لعرضها.</p>;
+      }
+      return (
+        <div className="overflow-x-auto rounded-lg border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                {section.table.columns.map((col) => <TableHead key={col.key}>{col.label}</TableHead>)}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {section.table.rows.map((row) => (
+                <TableRow key={section.table.columns.map((col) => toDisplayText(row[col.key])).join("|")}>
+                  {section.table.columns.map((col) => (
+                    <TableCell key={col.key} className="text-sm">{formatCell(row[col.key], col.format)}</TableCell>
+                  ))}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+          {section.table.truncated && (
+            <div className="p-2 text-xs text-muted-foreground border-t">
+              تم عرض {section.table.rows.length} من أصل {formatNumber(section.table.totalMatched)} صفاً.
+            </div>
+          )}
+        </div>
+      );
+
+    case "text":
+      if (section.points.length === 0) {
+        return <p className="text-sm text-muted-foreground">لا توجد بيانات لعرضها.</p>;
+      }
+      return (
+        <ul className="space-y-1.5 list-disc list-inside">
+          {section.points.map((point, i) => (
+            <li key={i} className="text-sm">{point}</li>
+          ))}
+        </ul>
+      );
+
+    case "chart":
+      return <ReportChartPreview section={section} />;
+
+    default:
+      return assertNeverReportSection(section);
+  }
+}
+
+function ReportChartPreview({ section }: Readonly<{ section: Extract<ReportSection, { kind: "chart" }> }>) {
+  if (section.series.length === 0) {
+    return <p className="text-sm text-muted-foreground">{section.emptyState ?? "لا توجد بيانات لعرضها."}</p>;
+  }
+  const unit = section.unit ? ` ${section.unit}` : "";
+  return (
+    <div className="rounded-lg border bg-muted/20 p-3 space-y-2">
+      {section.description && <p className="text-xs text-muted-foreground">{section.description}</p>}
+      <div className="space-y-1">
+        {section.series.map((series) => {
+          const total = series.points.reduce((sum, pt) => sum + pt.y, 0);
+          return (
+            <div key={series.name} className="flex items-center justify-between text-sm py-0.5 border-b last:border-b-0">
+              <span className="text-muted-foreground">{series.name}</span>
+              <span className="font-medium tabular-nums">{formatNumber(total)}{unit}</span>
+            </div>
+          );
+        })}
+      </div>
+      {section.truncated && section.truncatedMessage && (
+        <p className="text-xs text-muted-foreground">{section.truncatedMessage}</p>
       )}
     </div>
   );
