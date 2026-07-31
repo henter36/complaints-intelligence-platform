@@ -56,44 +56,90 @@ function isArabicLetter(ch: string): boolean {
   return ARABIC_SCRIPT_RE.test(ch);
 }
 
+type ArabicWordScan = Readonly<{
+  endIndex: number;
+  valid: boolean;
+}>;
+
+function resolveArabicWordStart(
+  input: string,
+  currentIndex: number,
+  wordsRead: number
+): number | null {
+  if (wordsRead === 0) {
+    return currentIndex;
+  }
+
+  return input[currentIndex] === " "
+    ? currentIndex + 1
+    : null;
+}
+
+function scanArabicWord(
+  input: string,
+  startIndex: number
+): ArabicWordScan {
+  let index = startIndex;
+  let length = 0;
+
+  while (
+    index < input.length &&
+    length < MAX_ARABIC_WORD_LENGTH &&
+    isArabicLetter(input[index])
+  ) {
+    index += 1;
+    length += 1;
+  }
+
+  return {
+    endIndex: index,
+    valid:
+      length >= MIN_ARABIC_WORD_LENGTH,
+  };
+}
+
 // Scans forward from startIndex consuming between MIN and MAX Arabic words.
-// Returns the index past the last consumed character, or startIndex if < MIN words found.
-function consumeArabicName(input: string, startIndex: number): number {
+// Returns the index past the last consumed character, or startIndex if fewer
+// than MIN_ARABIC_WORD_LENGTH valid words are found.
+function consumeArabicName(
+  input: string,
+  startIndex: number
+): number {
   let index = startIndex;
   let words = 0;
 
-  while (index < input.length && words < MAX_ARABIC_NAME_WORDS) {
-    // skip a single space separator between words (not \s+ to avoid ambiguity)
-    if (words > 0) {
-      if (index < input.length && input[index] === " ") {
-        index += 1;
-      } else {
-        break;
-      }
-    }
+  while (
+    index < input.length &&
+    words < MAX_ARABIC_NAME_WORDS
+  ) {
+    const wordStart =
+      resolveArabicWordStart(
+        input,
+        index,
+        words
+      );
 
-    const wordStart = index;
-    let length = 0;
-
-    while (
-      index < input.length &&
-      length < MAX_ARABIC_WORD_LENGTH &&
-      isArabicLetter(input[index])
-    ) {
-      index += 1;
-      length += 1;
-    }
-
-    if (length < MIN_ARABIC_WORD_LENGTH) {
-      // Not enough Arabic chars — undo the space we may have consumed and stop
-      index = wordStart > startIndex ? wordStart - 1 : wordStart;
+    if (wordStart === null) {
       break;
     }
 
+    const word =
+      scanArabicWord(
+        input,
+        wordStart
+      );
+
+    if (!word.valid) {
+      break;
+    }
+
+    index = word.endIndex;
     words += 1;
   }
 
-  return words >= MIN_ARABIC_WORD_LENGTH ? index : startIndex;
+  return words >= MIN_ARABIC_WORD_LENGTH
+    ? index
+    : startIndex;
 }
 
 function redactArabicNames(input: string): string {
