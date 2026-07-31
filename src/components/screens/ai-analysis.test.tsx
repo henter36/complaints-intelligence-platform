@@ -1,7 +1,7 @@
 // Tests for ai-analysis.tsx fetch error-handling paths.
 // Focuses on sendFeedback and deleteResult response.ok checks.
 
-import { act, render } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ─── Shared toast spy ─────────────────────────────────────────────────────────
@@ -220,6 +220,17 @@ describe("AiAnalysis — renders without crashing", () => {
     );
 
     const { unmount } = await mountWithDisabledAi();
+
+    // Component must render the AI-disabled state message
+    expect(
+      screen.getByText(/الذكاء الاصطناعي غير مفعّل/i)
+    ).toBeInTheDocument();
+
+    // The run button must not be present when AI is disabled
+    expect(
+      screen.queryByRole("button", { name: /تشغيل التحليل/i })
+    ).not.toBeInTheDocument();
+
     unmount();
   });
 });

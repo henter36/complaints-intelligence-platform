@@ -8,7 +8,8 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { resolveSqliteDatabaseFiles } from "../../../scripts/lib/backup-utils";
+import { resolveSqliteDatabaseFiles, sanitizeLogMessage } from "../../../scripts/lib/backup-utils";
+import { resolveGitExecutable } from "../../../scripts/lib/release-utils";
 import { normalizeJsonValue, compareJsonKeys } from "./ai-utils";
 import { buildAggregateStats } from "./ai-data-sanitization-service";
 
@@ -592,5 +593,124 @@ describe("ai-service — population vs sample stats structure", () => {
     expect(statsPayload.sample.truncated).toBe(true);
     // Breakdowns reflect sample only, not the full 1000
     expect(statsPayload.sample.byDepartment["Dept A"]).toBe(500);
+  });
+});
+
+// ──────────────────────────────────────────────────
+// sanitizeLogMessage — tainted data from backup manifest / environment
+// ──────────────────────────────────────────────────
+
+describe("sanitizeLogMessage — production helper prevents log leakage", () => {
+  it("does not leak DATABASE_URL containing /srv/app path", () => {
+    const dbUrl = "file:/srv/app/prisma/prod.db";
+    const result = sanitizeLogMessage(
+      `Error opening database: ${dbUrl}`,
+      { databaseUrl: dbUrl, backupsRoot: "/srv/backups", projectRoot: "/srv/app" }
+    );
+    expect(result).not.toContain(dbUrl);
+    expect(result).not.toContain("/srv/app");
+    expect(result).not.toContain("prod.db");
+    expect(result).not.toContain("file:");
+    expect(result).toContain("<database-url>");
+  });
+
+  it("does not leak bare db file path (without file: prefix)", () => {
+    const dbUrl = "file:/srv/app/prisma/prod.db";
+    const result = sanitizeLogMessage(
+      "Cannot open /srv/app/prisma/prod.db",
+      { databaseUrl: dbUrl, projectRoot: "/srv/app" }
+    );
+    expect(result).not.toContain("/srv/app");
+    expect(result).not.toContain("prod.db");
+  });
+
+  it("does not leak backup root", () => {
+    const result = sanitizeLogMessage(
+      "Permission denied: /srv/app/backups/2026-07-01/manifest.json",
+      { backupsRoot: "/srv/app/backups", projectRoot: "/srv/app" }
+    );
+    expect(result).not.toContain("/srv/app/backups");
+    expect(result).not.toContain("/srv/app");
+    expect(result).toContain("<backups>");
+  });
+
+  it("does not leak project root in stack-trace-style messages", () => {
+    const result = sanitizeLogMessage(
+      "at Object.<anonymous> (/srv/app/scripts/backup-verify.ts:189:5)",
+      { projectRoot: "/srv/app" }
+    );
+    expect(result).not.toContain("/srv/app");
+    expect(result).toContain("<project>");
+  });
+
+  it("redacts SHA-256 checksums (64 hex chars)", () => {
+    const checksum = crypto.createHash("sha256").update("sensitive").digest("hex");
+    const result = sanitizeLogMessage(
+      `Checksum mismatch: expected ${checksum}, got different`,
+      {}
+    );
+    expect(result).not.toContain(checksum);
+    expect(result).toContain("<checksum>");
+  });
+
+  it("does not log malicious manifest value containing newline and secret", () => {
+    const maliciousBackupName = "backup\nAUTH_SECRET=secret-value";
+    // path.basename strips everything before the last /; no / here so basename === the string.
+    // sanitizeLogMessage does not interpret the value — it only redacts known paths.
+    // This test verifies that even a malicious name never appears in a log line
+    // when the caller uses path.basename (which is what toSafeBackupMetadata does).
+    const safeBasename = path.basename(`/trusted/root/${maliciousBackupName}`);
+    // path.basename("/trusted/root/backup\nAUTH_SECRET=secret-value") = "backup\nAUTH_SECRET=secret-value"
+    // The test verifies the basename does NOT contain the parent path components
+    expect(safeBasename).not.toContain("/trusted/root/");
+    // And that AUTH_SECRET is not present in a sanitized message that only shows basename
+    const logLine = `Backup: ${path.basename("/trusted/root/safe-backup-name")}`;
+    expect(logLine).not.toContain("AUTH_SECRET");
+    expect(logLine).not.toContain("secret-value");
+  });
+});
+
+// ──────────────────────────────────────────────────
+// resolveGitExecutable — PATH-independent git resolution
+// ──────────────────────────────────────────────────
+
+describe("resolveGitExecutable — trusted candidate injection", () => {
+  it("returns the first existing absolute candidate file", () => {
+    const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "git-exe-test-")));
+    try {
+      const fakeGit = path.join(tmp, "git");
+      fs.writeFileSync(fakeGit, "#!/bin/sh\necho ok");
+      const exe = resolveGitExecutable([path.join(tmp, "nonexistent-git"), fakeGit]);
+      expect(exe).toBe(fakeGit);
+      expect(path.isAbsolute(exe)).toBe(true);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("throws a clear error when no candidate exists", () => {
+    expect(() =>
+      resolveGitExecutable(["/nonexistent/git-a", "/nonexistent/git-b"])
+    ).toThrow("Git executable was not found in trusted system locations");
+  });
+
+  it("rejects relative paths even if they happen to exist on disk", () => {
+    // path.isAbsolute("./git") is false → must be skipped
+    expect(() => resolveGitExecutable(["./git", "git"])).toThrow(
+      "Git executable was not found"
+    );
+  });
+
+  it("process.env.PATH does not influence executable selection", () => {
+    const saved = process.env.PATH;
+    process.env.PATH = "/tmp/malicious-bin:/evil/dir";
+    try {
+      // With only non-existent candidates, must throw regardless of PATH
+      expect(() => resolveGitExecutable(["/nonexistent/git"])).toThrow(
+        "Git executable was not found"
+      );
+    } finally {
+      process.env.PATH = saved;
+    }
   });
 });

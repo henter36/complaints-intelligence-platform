@@ -7,7 +7,7 @@ import { env } from "@/lib/env";
 import { logger } from "@/server/logger";
 import { writeAuditLog, AUDIT_ACTOR_SINGLE_ADMIN } from "@/server/audit/audit-log-service";
 import { sanitizeComplaintsForAi, buildAggregateStats } from "./ai-data-sanitization-service";
-import { compareJsonKeys, normalizeJsonValue } from "./ai-utils";
+import { normalizeJsonValue } from "./ai-utils";
 import { callOpenAI, AiProviderError } from "./openai-provider";
 import { ANALYSIS_SCHEMAS } from "./ai-contracts";
 import * as executiveSummaryPrompt from "./prompts/executive-summary";

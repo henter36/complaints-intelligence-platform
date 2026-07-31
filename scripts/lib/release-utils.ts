@@ -2,8 +2,55 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import fs from "node:fs";
 
-export function runGitCommand(args: string[]): string {
-  return execFileSync("git", args, { encoding: "utf8" }).trim();
+const UNIX_GIT_CANDIDATES = [
+  "/usr/bin/git",
+  "/usr/local/bin/git",
+  "/opt/homebrew/bin/git",
+] as const;
+
+const WINDOWS_GIT_CANDIDATES = [
+  "C:\\Program Files\\Git\\cmd\\git.exe",
+  "C:\\Program Files\\Git\\bin\\git.exe",
+] as const;
+
+export function resolveGitExecutable(
+  candidates?: readonly string[]
+): string {
+  const list =
+    candidates ??
+    (process.platform === "win32"
+      ? WINDOWS_GIT_CANDIDATES
+      : UNIX_GIT_CANDIDATES);
+
+  const executable = list.find(
+    (candidate) =>
+      path.isAbsolute(candidate) &&
+      fs.existsSync(candidate) &&
+      fs.statSync(candidate).isFile()
+  );
+
+  if (!executable) {
+    throw new Error(
+      "Git executable was not found in trusted system locations"
+    );
+  }
+
+  return executable;
+}
+
+export function runGitCommand(args: readonly string[]): string {
+  return execFileSync(
+    resolveGitExecutable(),
+    [...args],
+    {
+      encoding: "utf8",
+      shell: false,
+      env: {
+        HOME: process.env.HOME,
+        LANG: process.env.LANG || "C.UTF-8",
+      } as unknown as NodeJS.ProcessEnv,
+    }
+  ).trim();
 }
 
 export function resolveCommitSha(): string {
@@ -22,7 +69,6 @@ export function listMigrationDirectories(migrationsDir: string): string[] {
     .sort();
 }
 
-// Keeps a reference to path so shared release consumers can normalize dirs.
 export function resolveMigrationsDir(root: string): string {
   return path.join(root, "prisma", "migrations");
 }

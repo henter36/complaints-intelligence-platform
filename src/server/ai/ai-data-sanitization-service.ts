@@ -33,7 +33,7 @@ const PII_PATTERNS: { label: string; pattern: RegExp }[] = [
   { label: "PHONE", pattern: /(?:\+966|00966|0)[0-9 -]{8,10}/g },
   { label: "PHONE", pattern: /\b05\d{8}\b/g },
   // Secrets / API keys — keyword followed by bounded alphanumeric suffix
-  { label: "SECRET", pattern: /(?:sk|pk|api|key|token|secret|password)[-_]?[a-zA-Z0-9]{8,}/gi },
+  { label: "SECRET", pattern: /(?:sk|pk|api|key|token|secret|password)[-_]?[a-z0-9]{8,}/gi },
   // Credit card — four explicit fixed-length groups avoids range-quantifier backtracking
   { label: "CARD", pattern: /\b\d{4}[ -]?\d{4}[ -]?\d{4}[ -]?\d{1,4}\b/g },
   // Generic long numeric sequences that may be identifiers
@@ -48,7 +48,7 @@ const PII_PATTERNS: { label: string; pattern: RegExp }[] = [
 // a quantifier-inside-quantifier that would flag as potentially super-linear.
 // [-] at end of character class avoids unnecessary \- escape.
 const ARABIC_NAME_PREFIX =
-  /(?:اسم المواطن|اسم المستفيد|اسم مقدم الشكوى|المواطن|المستفيد|الاسم)\s*[:：-]?\s*[\p{Script=Arabic}]{2,30}(?:\s[\p{Script=Arabic}]{2,30}){1,5}/gu;
+  /(?:اسم المواطن|اسم المستفيد|اسم مقدم الشكوى|المواطن|المستفيد|الاسم)\s*[:：-]?\s*\p{Script=Arabic}{2,30}(?:\s\p{Script=Arabic}{2,30}){1,5}/gu;
 
 export function sanitizeText(text: string): string {
   if (!text) return text;

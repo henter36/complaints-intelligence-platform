@@ -162,6 +162,25 @@ function formatVerificationSummary(result: VerificationResult): string[] {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Safe metadata — only derived, allowlisted values reach the log
+// ──────────────────────────────────────────────────────────────────────────────
+
+type SafeBackupMetadata = Readonly<{
+  backupName: string;
+  fileCount: number;
+}>;
+
+function toSafeBackupMetadata(
+  verifiedPath: string,
+  manifest: BackupManifest
+): SafeBackupMetadata {
+  return {
+    backupName: path.basename(verifiedPath),
+    fileCount: Object.keys(manifest.checksums).length,
+  };
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Entry point
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -175,7 +194,6 @@ function main() {
   }
 
   console.log("Backup verification started");
-  console.log(`Backup name: ${backupDisplayName(verifiedPath)}`);
 
   let manifest: BackupManifest;
   try {
@@ -185,8 +203,9 @@ function main() {
     process.exit(1);
   }
 
-  // Log only safe metadata — never log absolute paths or checksums
-  console.log(`Created: ${manifest.createdAt}`);
+  const safeMetadata = toSafeBackupMetadata(verifiedPath, manifest);
+  console.log(`Backup: ${safeMetadata.backupName}`);
+  console.log(`Files to verify: ${safeMetadata.fileCount}`);
 
   const result = verifyBackupContents(verifiedPath, manifest);
 
