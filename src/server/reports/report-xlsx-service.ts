@@ -132,6 +132,7 @@ function columnNumFmt(format: ReportTable["columns"][number]["format"]): string 
   if (format === "percent") return '0.0"%"';
   if (format === "date") return "yyyy-mm-dd";
   if (format === "number") return "#,##0.##";
+  if (format === "signed-number") return '+#,##0;-#,##0;0';
   return undefined;
 }
 
@@ -160,7 +161,7 @@ function parseNumericCell(raw: unknown): number | null {
 
 function toCellValue(column: ReportTable["columns"][number], raw: unknown): unknown {
   if (column.format === "date") return parseDateCell(raw);
-  if (column.format === "number" || column.format === "percent") return parseNumericCell(raw);
+  if (column.format === "number" || column.format === "percent" || column.format === "signed-number") return parseNumericCell(raw);
   return sanitizeText(toDisplayText(raw));
 }
 

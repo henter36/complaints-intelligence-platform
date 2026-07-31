@@ -1,37 +1,10 @@
 import type { NextConfig } from "next";
 
-// Content Security Policy.
-// unsafe-inline is required by Next.js for its own inline scripts/styles.
-// We document this explicitly and scope it tightly.
-const isDevelopment = process.env.NODE_ENV === "development";
-
-const scriptSrc = [
-  "'self'",
-  "'unsafe-inline'",
-  ...(isDevelopment ? ["'unsafe-eval'"] : []),
-].join(" ");
-
-const csp = [
-  "default-src 'self'",
-  // React and Turbopack require unsafe-eval for development diagnostics only.
-  // Production keeps unsafe-eval disabled.
-  `script-src ${scriptSrc}`,
-  "style-src 'self' 'unsafe-inline'",
-  "script-src-elem 'self' 'unsafe-inline'",
-  "connect-src 'self'",
-  "img-src 'self' data: blob:",
-  "font-src 'self' data:",
-  "object-src 'none'",
-  "base-uri 'self'",
-  "form-action 'self'",
-  "frame-ancestors 'none'",
-  "frame-src 'none'",
-  "worker-src 'self' blob:",
-  "manifest-src 'self'",
-].join("; ");
-
+// Content Security Policy is handled entirely by the edge middleware in
+// src/proxy.ts, which attaches a per-request nonce. next.config.ts must NOT
+// set a CSP header because the static header cannot carry the nonce — doing so
+// would result in two conflicting CSP headers on every response.
 const securityHeaders = [
-  { key: "Content-Security-Policy", value: csp },
   { key: "X-Frame-Options", value: "DENY" },
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
@@ -52,8 +25,12 @@ const nextConfig: NextConfig = {
   // they must run as plain, un-bundled Node requires at runtime.
   serverExternalPackages: ["pdfkit", "fontkit"],
   outputFileTracingIncludes: {
-    "/api/reports/**": ["./src/server/reports/assets/**"],
-    "/api/internal/reports/**": ["./src/server/reports/assets/**"],
+    "/api/reports/**": [
+      "./src/server/reports/assets/**",
+    ],
+    "/api/internal/reports/**": [
+      "./src/server/reports/assets/**",
+    ],
   },
   async headers() {
     return [

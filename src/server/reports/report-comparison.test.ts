@@ -308,6 +308,37 @@ describe("DeptClassRiseRow", () => {
     expect(result.deptClassRises).toHaveLength(DEPT_CLASS_RISES_LIMIT);
     expect(result.warnings.some((w) => w.code === "RISES_TRUNCATED")).toBe(true);
   });
+
+  it("deptClassRisesTotal equals rows.length when results fit within the limit", async () => {
+    const { buildComparisonResult, DEPT_CLASS_RISES_LIMIT } = await loadModule();
+    const current: Row[] = [];
+    const count = Math.floor(DEPT_CLASS_RISES_LIMIT / 2);
+    for (let i = 0; i < count; i++) {
+      current.push(row({ department: `إدارة ${i}`, classificationId: `cls_${i}`, classification: { id: `cls_${i}`, nameAr: `تصنيف ${i}` } }));
+    }
+    mockPeriods(current, []);
+    const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
+    expect(result.deptClassRisesTotal).toBe(result.deptClassRises.length);
+    expect(result.warnings.some((w) => w.code === "RISES_TRUNCATED")).toBe(false);
+  });
+
+  it("deptClassRisesTotal exceeds DEPT_CLASS_RISES_LIMIT when truncated, warning total matches", async () => {
+    const { buildComparisonResult, DEPT_CLASS_RISES_LIMIT } = await loadModule();
+    const current: Row[] = [];
+    const extraCount = 5;
+    for (let i = 0; i < DEPT_CLASS_RISES_LIMIT + extraCount; i++) {
+      current.push(row({ department: `إدارة ${i}`, classificationId: `cls_${i}`, classification: { id: `cls_${i}`, nameAr: `تصنيف ${i}` } }));
+    }
+    mockPeriods(current, []);
+    const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
+    expect(result.deptClassRises).toHaveLength(DEPT_CLASS_RISES_LIMIT);
+    expect(result.deptClassRisesTotal).toBeGreaterThan(DEPT_CLASS_RISES_LIMIT);
+    const truncWarning = result.warnings.find((w) => w.code === "RISES_TRUNCATED");
+    expect(truncWarning).toBeDefined();
+    if (truncWarning && "total" in truncWarning) {
+      expect(truncWarning.total).toBe(result.deptClassRisesTotal);
+    }
+  });
 });
 
 describe("RegionTrendData", () => {

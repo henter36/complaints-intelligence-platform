@@ -201,6 +201,7 @@ describe("XLSX report rendering", () => {
             classificationContribution: 100,
           },
         ],
+        deptClassRisesTotal: 1,
         executiveSummaryPoints: ["نقطة"],
         warnings: [],
       },

@@ -98,9 +98,17 @@ function toDisplayText(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function formatSignedNumber(value: unknown): string {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "";
+  if (n > 0) return `+${n}`;
+  return String(n);
+}
+
 function formatCellValue(value: unknown, format?: ReportTableColumn["format"]): string {
   if (value === null || value === undefined || value === "") return "-";
   if (format === "percent") return `${toDisplayText(value)}%`;
+  if (format === "signed-number") return formatSignedNumber(value);
   if (format === "date") {
     const date = new Date(toDisplayText(value));
     if (Number.isNaN(date.getTime())) return "-";
@@ -446,6 +454,7 @@ function drawKpiGrid(doc: PDFKit.PDFDocument, cards: ReportKpiCard[], columns = 
 function columnFixedWidth(column: ReportTableColumn): number | null {
   switch (column.format) {
     case "number":
+    case "signed-number":
       return COL_NUMBER_WIDTH;
     case "percent":
       return COL_PERCENT_WIDTH;

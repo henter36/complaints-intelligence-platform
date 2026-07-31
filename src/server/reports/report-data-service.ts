@@ -51,7 +51,7 @@ export type ReportKpiCard = {
 export type ReportTableColumn = {
   key: string;
   label: string;
-  format?: "number" | "percent" | "date" | "text";
+  format?: "number" | "signed-number" | "percent" | "date" | "text";
 };
 
 export type ReportTable = {
@@ -176,11 +176,6 @@ const DIRECTION_SYMBOL: Record<string, string> = {
   "دون شكاوى": "○ دون شكاوى",
 };
 
-function formatSignedDifference(value: number): string {
-  if (value > 0) return `+${value}`;
-  return String(value);
-}
-
 function regionTrendChartSection(trend: RegionTrendData): ReportChartSection {
   return {
     id: "region_trend_chart",
@@ -212,7 +207,7 @@ function regionChangesTable(rows: RegionChangeRow[]): ReportTable {
       { key: "regionName", label: "المنطقة", format: "text" },
       { key: "currentCount", label: "الحالي", format: "number" },
       { key: "previousCount", label: "السابق", format: "number" },
-      { key: "difference", label: "الفرق", format: "text" },
+      { key: "difference", label: "الفرق", format: "signed-number" },
       { key: "changeRate", label: "نسبة التغير%", format: "percent" },
       { key: "direction", label: "الاتجاه", format: "text" },
     ],
@@ -220,7 +215,7 @@ function regionChangesTable(rows: RegionChangeRow[]): ReportTable {
       regionName: row.regionName,
       currentCount: row.currentCount,
       previousCount: row.previousCount,
-      difference: formatSignedDifference(row.difference),
+      difference: row.difference,
       changeRate: row.changeRate,
       direction: DIRECTION_SYMBOL[row.direction] ?? row.direction,
     })),
@@ -238,7 +233,7 @@ function deptClassRisesTable(rows: DeptClassRiseRow[], totalMatched: number): Re
       { key: "classificationName", label: "التصنيف", format: "text" },
       { key: "currentCount", label: "الحالي", format: "number" },
       { key: "previousCount", label: "السابق", format: "number" },
-      { key: "difference", label: "الفرق", format: "text" },
+      { key: "difference", label: "الفرق", format: "signed-number" },
       { key: "changeRate", label: "نسبة التغير%", format: "percent" },
       { key: "classificationContribution", label: "مساهمة التصنيف%", format: "percent" },
     ],
@@ -247,7 +242,7 @@ function deptClassRisesTable(rows: DeptClassRiseRow[], totalMatched: number): Re
       classificationName: row.classificationName,
       currentCount: row.currentCount,
       previousCount: row.previousCount,
-      difference: formatSignedDifference(row.difference),
+      difference: row.difference,
       changeRate: row.changeRate,
       classificationContribution: row.classificationContribution,
     })),
@@ -422,7 +417,7 @@ async function buildExecutiveSummary(request: ReportRequest, mode: "preview" | "
       id: "dept_class_rises",
       kind: "table" as const,
       title: "الإدارات والتصنيفات التي شهدت ارتفاعًا عن الأسبوع السابق",
-      table: deptClassRisesTable(comparison.deptClassRises, comparison.deptClassRises.length),
+      table: deptClassRisesTable(comparison.deptClassRises, comparison.deptClassRisesTotal),
     },
     {
       id: "top_regions",

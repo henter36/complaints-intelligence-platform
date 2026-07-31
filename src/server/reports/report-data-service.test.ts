@@ -224,3 +224,84 @@ describe("report data service — OVERDUE_COMPLAINTS", () => {
     expect(isLateWhereApplied).toBe(true);
   });
 });
+
+describe("report data service — signed-number format and deptClassRisesTotal", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    dbMocks.findMany.mockReset();
+    dbMocks.count.mockReset();
+  });
+
+  it("difference column in regionChangesTable uses signed-number format (not text)", async () => {
+    dbMocks.findMany.mockResolvedValue([complaint()]);
+    dbMocks.count.mockResolvedValue(1);
+
+    const { buildReportData } = await import("./report-data-service");
+    const { parseReportRequest } = await import("./report-definition-service");
+
+    const request = parseReportRequest({ type: "EXECUTIVE_SUMMARY", filters: VALID_FILTERS });
+    const report = await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+
+    const regionChangesSection = report.sections.find((s) => s.id === "region_changes");
+    expect(regionChangesSection?.kind).toBe("table");
+    if (regionChangesSection?.kind === "table") {
+      const diffColumn = regionChangesSection.table.columns.find((c) => c.key === "difference");
+      expect(diffColumn?.format).toBe("signed-number");
+    }
+  });
+
+  it("difference values in regionChangesTable rows are numbers, not strings", async () => {
+    dbMocks.findMany.mockResolvedValue([complaint()]);
+    dbMocks.count.mockResolvedValue(1);
+
+    const { buildReportData } = await import("./report-data-service");
+    const { parseReportRequest } = await import("./report-definition-service");
+
+    const request = parseReportRequest({ type: "EXECUTIVE_SUMMARY", filters: VALID_FILTERS });
+    const report = await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+
+    const regionChangesSection = report.sections.find((s) => s.id === "region_changes");
+    if (regionChangesSection?.kind === "table") {
+      for (const row of regionChangesSection.table.rows) {
+        expect(typeof row.difference).toBe("number");
+      }
+    }
+  });
+
+  it("difference column in deptClassRisesTable uses signed-number format (not text)", async () => {
+    dbMocks.findMany.mockResolvedValue([complaint()]);
+    dbMocks.count.mockResolvedValue(1);
+
+    const { buildReportData } = await import("./report-data-service");
+    const { parseReportRequest } = await import("./report-definition-service");
+
+    const request = parseReportRequest({ type: "EXECUTIVE_SUMMARY", filters: VALID_FILTERS });
+    const report = await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+
+    const risesSection = report.sections.find((s) => s.id === "dept_class_rises");
+    expect(risesSection?.kind).toBe("table");
+    if (risesSection?.kind === "table") {
+      const diffColumn = risesSection.table.columns.find((c) => c.key === "difference");
+      expect(diffColumn?.format).toBe("signed-number");
+    }
+  });
+
+  it("deptClassRisesTotal in comparisonData matches total before slicing", async () => {
+    dbMocks.findMany.mockResolvedValue([complaint()]);
+    dbMocks.count.mockResolvedValue(1);
+
+    const { buildReportData } = await import("./report-data-service");
+    const { parseReportRequest } = await import("./report-definition-service");
+
+    const request = parseReportRequest({ type: "EXECUTIVE_SUMMARY", filters: VALID_FILTERS });
+    const report = await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+
+    expect(report.comparisonData).toBeDefined();
+    if (report.comparisonData) {
+      expect(typeof report.comparisonData.deptClassRisesTotal).toBe("number");
+      expect(report.comparisonData.deptClassRisesTotal).toBeGreaterThanOrEqual(
+        report.comparisonData.deptClassRises.length
+      );
+    }
+  });
+});

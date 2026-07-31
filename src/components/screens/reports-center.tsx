@@ -64,7 +64,7 @@ type FiltersData = {
 };
 
 type ReportKpiCard = { key: string; label: string; value: number; format: "number" | "percent" | "days" | "hours" };
-type ReportTableColumn = { key: string; label: string; format?: "number" | "percent" | "date" | "text" };
+type ReportTableColumn = { key: string; label: string; format?: "number" | "signed-number" | "percent" | "date" | "text" };
 type ReportTable = {
   id: string; title: string; columns: ReportTableColumn[];
   rows: Record<string, unknown>[]; truncated: boolean; totalMatched: number;
@@ -203,9 +203,17 @@ function toDisplayText(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function formatSignedNumber(value: unknown): string {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "";
+  if (n > 0) return `+${n}`;
+  return String(n);
+}
+
 function formatCell(value: unknown, format?: ReportTableColumn["format"]): string {
   if (value === null || value === undefined || value === "") return "—";
   if (format === "percent") return `${toDisplayText(value)}%`;
+  if (format === "signed-number") return formatSignedNumber(value);
   if (format === "date") {
     const date = new Date(toDisplayText(value));
     return Number.isNaN(date.getTime()) ? "—" : formatDate(date);
@@ -213,6 +221,18 @@ function formatCell(value: unknown, format?: ReportTableColumn["format"]): strin
   if (typeof value === "boolean") return value ? "نعم" : "لا";
   if (format === "number" && typeof value === "number") return formatNumber(value);
   return toDisplayText(value);
+}
+
+function textPointsWithKeys(
+  sectionId: string,
+  points: readonly string[]
+): Array<{ key: string; text: string }> {
+  const occurrences = new Map<string, number>();
+  return points.map((text) => {
+    const occurrence = occurrences.get(text) ?? 0;
+    occurrences.set(text, occurrence + 1);
+    return { key: `${sectionId}:${text}:${occurrence}`, text };
+  });
 }
 
 function toLocalDateString(d: Date): string {
@@ -1187,8 +1207,8 @@ function SectionBody({ section }: Readonly<{ section: ReportSection }>) {
       }
       return (
         <ul className="space-y-1.5 list-disc list-inside">
-          {section.points.map((point, i) => (
-            <li key={i} className="text-sm">{point}</li>
+          {textPointsWithKeys(section.id, section.points).map((point) => (
+            <li key={point.key} className="text-sm">{point.text}</li>
           ))}
         </ul>
       );

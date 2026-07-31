@@ -83,6 +83,7 @@ export type ComparisonResult = {
   regionTrend: RegionTrendData;
   regionChanges: RegionChangeRow[];
   deptClassRises: DeptClassRiseRow[];
+  deptClassRisesTotal: number;
   executiveSummaryPoints: string[];
   warnings: ComparisonWarning[];
 };
@@ -369,7 +370,7 @@ function buildDeptClassRises(
   current: ComparisonComplaint[],
   previous: ComparisonComplaint[],
   minimumIncreaseCount: number
-): { rows: DeptClassRiseRow[]; warnings: ComparisonWarning[] } {
+): { rows: DeptClassRiseRow[]; total: number; warnings: ComparisonWarning[] } {
   const warnings: ComparisonWarning[] = [];
   const map = new Map<string, DeptClassAccumulator>();
   accumulateDeptClass(map, current, "currentCount");
@@ -429,16 +430,18 @@ function buildDeptClassRises(
       a.classificationName.localeCompare(b.classificationName, "ar")
   );
 
+  const total = rows.length;
+
   if (rows.length > DEPT_CLASS_RISES_LIMIT) {
     warnings.push({
       code: "RISES_TRUNCATED",
-      message: `تم عرض أعلى ${DEPT_CLASS_RISES_LIMIT} صفاً من أصل ${rows.length} صفاً في جدول الارتفاعات.`,
+      message: `تم عرض أعلى ${DEPT_CLASS_RISES_LIMIT} صفاً من أصل ${total} صفاً في جدول الارتفاعات.`,
       shown: DEPT_CLASS_RISES_LIMIT,
-      total: rows.length,
+      total: total,
     });
   }
 
-  return { rows: rows.slice(0, DEPT_CLASS_RISES_LIMIT), warnings };
+  return { rows: rows.slice(0, DEPT_CLASS_RISES_LIMIT), total, warnings };
 }
 
 // ---------------------------------------------------------------------------
@@ -578,6 +581,7 @@ export async function buildComparisonResult(
     regionTrend: trend.data,
     regionChanges,
     deptClassRises: rises.rows,
+    deptClassRisesTotal: rises.total,
     executiveSummaryPoints,
     warnings,
   };
