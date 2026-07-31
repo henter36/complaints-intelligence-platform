@@ -224,6 +224,31 @@ function resolveValidationStatus(
   return ImportRowValidationStatus.VALID;
 }
 
+export type ImportRowOutcome =
+  | "REJECTED"
+  | "IMPORTED_WITH_WARNINGS"
+  | "IMPORTED";
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled import validation status: ${String(value)}`);
+}
+
+export function getImportRowOutcome(
+  validationStatus: ImportRowValidationStatus
+): ImportRowOutcome {
+  switch (validationStatus) {
+    case ImportRowValidationStatus.INVALID:
+      return "REJECTED";
+    case ImportRowValidationStatus.WARNING:
+      return "IMPORTED_WITH_WARNINGS";
+    case ImportRowValidationStatus.VALID:
+    case ImportRowValidationStatus.PENDING:
+      return "IMPORTED";
+    default:
+      return assertNever(validationStatus);
+  }
+}
+
 function addComplaintIndexEntry(
   index: Map<string, ComplaintIndexEntry>,
   key: string,
@@ -704,12 +729,7 @@ function toImportUploadResult(
         errors: (row.validationErrors as unknown as RowMessage[]) ?? [],
         warnings: (row.validationWarnings as unknown as RowMessage[]) ?? [],
         validationStatus: row.validationStatus,
-        imported:
-          row.validationStatus === ImportRowValidationStatus.INVALID
-            ? "REJECTED"
-            : row.validationStatus === ImportRowValidationStatus.WARNING
-              ? "IMPORTED_WITH_WARNINGS"
-              : "IMPORTED",
+        imported: getImportRowOutcome(row.validationStatus),
       })),
     preview: processed.processedRows.slice(0, 50).map((row) => {
       const normalized = row.normalizedData as Record<string, unknown> | null;

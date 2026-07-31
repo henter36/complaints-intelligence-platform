@@ -13,6 +13,7 @@ import { parseXlsxWorkbook } from "./xlsx-parser";
 import {
   DUPLICATE_BLOCKING_IMPORT_STATUSES,
   complaintCandidateIdentityKeys,
+  getImportRowOutcome,
   hasMeaningfulChange,
   normalizedCandidateIdentityKeys,
   persistPreviewRows,
@@ -539,5 +540,15 @@ describe("secure xlsx import parsing", () => {
       "CATEGORY_NOT_FOUND",
       "CLASSIFICATION_NOT_FOUND",
     ]));
+  });
+});
+
+describe("getImportRowOutcome", () => {
+  it("maps validation statuses to upload outcomes", () => {
+    expect(getImportRowOutcome(ImportRowValidationStatus.INVALID)).toBe("REJECTED");
+    expect(getImportRowOutcome(ImportRowValidationStatus.WARNING)).toBe(
+      "IMPORTED_WITH_WARNINGS"
+    );
+    expect(getImportRowOutcome(ImportRowValidationStatus.VALID)).toBe("IMPORTED");
   });
 });

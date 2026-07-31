@@ -168,14 +168,67 @@ describe("terminal status without closedAt", () => {
 });
 
 describe("error report complaint number", () => {
-  it("resolves complaint number from externalId, raw headers, or غير متوفر", () => {
+  it("resolves complaint number from externalId first", () => {
     expect(resolveImportRowReference({ externalId: "COMP/1" })).toBe("COMP/1");
+  });
+
+  it("resolves from normalizedData.externalId", () => {
+    expect(
+      resolveImportRowReference({
+        externalId: null,
+        normalizedData: { externalId: "COMP/NORM-1" },
+        rawData: { "رقم الشكوى": "COMP/RAW-1" },
+      })
+    ).toBe("COMP/NORM-1");
+  });
+
+  it("resolves from normalizedData.sourceReference", () => {
+    expect(
+      resolveImportRowReference({
+        externalId: null,
+        normalizedData: { sourceReference: "SRC-9" },
+      })
+    ).toBe("SRC-9");
+  });
+
+  it("resolves from raw Arabic complaint-number header", () => {
     expect(
       resolveImportRowReference({
         externalId: null,
         rawData: { "رقم الشكوى": "COMP/RAW-1", "الوصف": "x" },
       })
     ).toBe("COMP/RAW-1");
+  });
+
+  it("resolves from raw English complaint-number header", () => {
+    expect(
+      resolveImportRowReference({
+        externalId: null,
+        rawData: { "Complaint Number": "EN-42" },
+      })
+    ).toBe("EN-42");
+  });
+
+  it("stringifies numeric complaint numbers", () => {
+    expect(
+      resolveImportRowReference({
+        externalId: null,
+        rawData: { "رقم الشكوى": 16219 },
+      })
+    ).toBe("16219");
+  });
+
+  it("ignores invalid object or array values", () => {
+    expect(
+      resolveImportRowReference({
+        externalId: null,
+        normalizedData: { externalId: { nested: true }, sourceReference: ["a"] },
+        rawData: { "رقم الشكوى": { id: 1 } },
+      })
+    ).toBe("غير متوفر");
+  });
+
+  it("returns غير متوفر when no reference is available", () => {
     expect(resolveImportRowReference({ externalId: null, rawData: {} })).toBe("غير متوفر");
   });
 

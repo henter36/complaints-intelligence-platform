@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildImportMessageKey,
   defaultPeriodRange,
   formatLocalDate,
+  getImportResultLabel,
   mappingContainsComplaintNumber,
   normalizeUploadResultPayload,
 } from "./import-center";
@@ -74,5 +76,36 @@ describe("import center mapping helpers", () => {
 
     expect(result.hasComplaintNumber).toBe(true);
     expect(result.unmappedColumns).toEqual(["عمود غير معروف"]);
+  });
+});
+
+describe("import result display helpers", () => {
+  it.each([
+    ["REJECTED", "مرفوض"],
+    ["IMPORTED_WITH_WARNINGS", "مستورد مع تحذيرات"],
+    ["IMPORTED", "مستورد"],
+    [undefined, "غير محدد"],
+    ["UNKNOWN", "غير محدد"],
+  ] as const)("maps %s to %s", (result, label) => {
+    expect(getImportResultLabel(result)).toBe(label);
+  });
+
+  it("builds stable keys that distinguish errors from warnings", () => {
+    const message = {
+      code: "DESCRIPTION_MISSING",
+      field: "description",
+      level: "warning",
+      message: "الوصف غير موجود",
+    };
+
+    expect(buildImportMessageKey("error", 3, message)).toBe(
+      "error:3:DESCRIPTION_MISSING:description:warning:الوصف غير موجود"
+    );
+    expect(buildImportMessageKey("warning", 3, message)).toBe(
+      "warning:3:DESCRIPTION_MISSING:description:warning:الوصف غير موجود"
+    );
+    expect(buildImportMessageKey("error", 3, message)).not.toBe(
+      buildImportMessageKey("warning", 3, message)
+    );
   });
 });

@@ -12,6 +12,12 @@ export type ErrorReportRow = {
   normalizedData?: unknown;
 };
 
+export type ImportRowReferenceInput = {
+  externalId?: string | null;
+  rawData?: unknown;
+  normalizedData?: unknown;
+};
+
 const COMPLAINT_NUMBER_RAW_KEYS = [
   "رقم الشكوى",
   "معرف الشكوى",
@@ -26,6 +32,10 @@ const COMPLAINT_NUMBER_RAW_KEYS = [
   "المُعرف",
 ];
 
+const COMPLAINT_NUMBER_HEADER_SET = new Set(
+  COMPLAINT_NUMBER_RAW_KEYS.map((key) => normalizeColumnHeader(key))
+);
+
 function cellToDisplay(value: unknown): string {
   if (value === null || value === undefined) return "";
   if (typeof value === "string") return value.trim();
@@ -35,42 +45,48 @@ function cellToDisplay(value: unknown): string {
   return "";
 }
 
-export function resolveImportRowReference(row: {
-  externalId?: string | null;
-  rawData?: unknown;
-  normalizedData?: unknown;
-}): string {
-  if (typeof row.externalId === "string" && row.externalId.trim()) {
-    return row.externalId.trim();
+function normalizeReference(value: unknown): string | null {
+  const text = cellToDisplay(value);
+  return text || null;
+}
+
+function toRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function resolveReferenceFromNormalizedData(normalizedData: unknown): string | null {
+  const normalized = toRecord(normalizedData);
+  if (!normalized) return null;
+  return normalizeReference(normalized.externalId) ?? normalizeReference(normalized.sourceReference);
+}
+
+function isComplaintNumberHeader(header: string): boolean {
+  return COMPLAINT_NUMBER_HEADER_SET.has(normalizeColumnHeader(header));
+}
+
+function resolveReferenceFromRawData(rawData: unknown): string | null {
+  const raw = toRecord(rawData);
+  if (!raw) return null;
+
+  for (const [header, value] of Object.entries(raw)) {
+    if (!isComplaintNumberHeader(header)) continue;
+    const text = normalizeReference(value);
+    if (text) return text;
   }
 
-  const normalized =
-    row.normalizedData && typeof row.normalizedData === "object" && !Array.isArray(row.normalizedData)
-      ? (row.normalizedData as Record<string, unknown>)
-      : null;
+  return null;
+}
 
-  const fromNormalized =
-    cellToDisplay(normalized?.externalId) || cellToDisplay(normalized?.sourceReference);
-  if (fromNormalized) return fromNormalized;
-
-  const raw =
-    row.rawData && typeof row.rawData === "object" && !Array.isArray(row.rawData)
-      ? (row.rawData as Record<string, unknown>)
-      : null;
-
-  if (raw) {
-    for (const [header, value] of Object.entries(raw)) {
-      const normalizedHeader = normalizeColumnHeader(header);
-      if (
-        COMPLAINT_NUMBER_RAW_KEYS.some((key) => normalizeColumnHeader(key) === normalizedHeader)
-      ) {
-        const text = cellToDisplay(value);
-        if (text) return text;
-      }
-    }
-  }
-
-  return "غير متوفر";
+export function resolveImportRowReference(row: ImportRowReferenceInput): string {
+  return (
+    normalizeReference(row.externalId) ??
+    resolveReferenceFromNormalizedData(row.normalizedData) ??
+    resolveReferenceFromRawData(row.rawData) ??
+    "غير متوفر"
+  );
 }
 
 export function toSafeMessage(value: unknown): string {

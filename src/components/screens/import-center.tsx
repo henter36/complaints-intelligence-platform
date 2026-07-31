@@ -145,6 +145,44 @@ export function toColumnMappingStatusLabel(status: string): string {
   return COLUMN_MAPPING_STATUS_LABELS[status] ?? "حالة مطابقة غير معروفة";
 }
 
+export type ImportDisplayResult =
+  | "REJECTED"
+  | "IMPORTED_WITH_WARNINGS"
+  | "IMPORTED";
+
+export function getImportResultLabel(result?: string): string {
+  switch (result) {
+    case "REJECTED":
+      return "مرفوض";
+    case "IMPORTED_WITH_WARNINGS":
+      return "مستورد مع تحذيرات";
+    case "IMPORTED":
+      return "مستورد";
+    default:
+      return "غير محدد";
+  }
+}
+
+export function buildImportMessageKey(
+  prefix: "error" | "warning",
+  row: number,
+  message: {
+    code?: string;
+    field?: string;
+    level?: string;
+    message: string;
+  }
+): string {
+  return [
+    prefix,
+    row,
+    message.code ?? "no-code",
+    message.field ?? "no-field",
+    message.level ?? "no-level",
+    message.message,
+  ].join(":");
+}
+
 export function normalizeUploadResultPayload(json: UploadResult): UploadResult {
   return {
     ...json,
@@ -1235,16 +1273,12 @@ export function ImportCenter() {
                                       {err.complaintNumber || "غير متوفر"}
                                     </TableCell>
                                     <TableCell className="text-xs">
-                                      {err.imported === "REJECTED"
-                                        ? "مرفوض"
-                                        : err.imported === "IMPORTED_WITH_WARNINGS"
-                                          ? "مستورد مع تحذيرات"
-                                          : "مستورد"}
+                                      {getImportResultLabel(err.imported)}
                                     </TableCell>
                                     <TableCell>
                                       <ul className="flex flex-wrap gap-1.5">
-                                        {err.errors.map((msg, mi) => (
-                                          <li key={`e-${mi}`}>
+                                        {err.errors.map((msg) => (
+                                          <li key={buildImportMessageKey("error", err.row, msg)}>
                                             <Badge
                                               variant="outline"
                                               className="bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/30 dark:text-rose-300 dark:border-rose-900 text-[11px] font-normal"
@@ -1254,8 +1288,8 @@ export function ImportCenter() {
                                             </Badge>
                                           </li>
                                         ))}
-                                        {(err.warnings ?? []).map((msg, mi) => (
-                                          <li key={`w-${mi}`}>
+                                        {(err.warnings ?? []).map((msg) => (
+                                          <li key={buildImportMessageKey("warning", err.row, msg)}>
                                             <Badge
                                               variant="outline"
                                               className="bg-amber-50 text-amber-800 border-amber-200 dark:bg-amber-950/30 dark:text-amber-300 dark:border-amber-900 text-[11px] font-normal"
