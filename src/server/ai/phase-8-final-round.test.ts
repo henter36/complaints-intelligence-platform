@@ -8,7 +8,13 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { resolveSqliteDatabaseFiles, sanitizeLogMessage } from "../../../scripts/lib/backup-utils";
+import {
+  resolveSqliteDatabaseFiles,
+  sanitizeLogMessage,
+  sanitizeLogValue,
+  toSafeBackupMetadata,
+  formatBackupMetadataLog,
+} from "../../../scripts/lib/backup-utils";
 import { resolveGitExecutable } from "../../../scripts/lib/release-utils";
 import { normalizeJsonValue, compareJsonKeys } from "./ai-utils";
 import { buildAggregateStats } from "./ai-data-sanitization-service";
@@ -654,19 +660,42 @@ describe("sanitizeLogMessage — production helper prevents log leakage", () => 
   });
 
   it("does not log malicious manifest value containing newline and secret", () => {
-    const maliciousBackupName = "backup\nAUTH_SECRET=secret-value";
-    // path.basename strips everything before the last /; no / here so basename === the string.
-    // sanitizeLogMessage does not interpret the value — it only redacts known paths.
-    // This test verifies that even a malicious name never appears in a log line
-    // when the caller uses path.basename (which is what toSafeBackupMetadata does).
-    const safeBasename = path.basename(`/trusted/root/${maliciousBackupName}`);
-    // path.basename("/trusted/root/backup\nAUTH_SECRET=secret-value") = "backup\nAUTH_SECRET=secret-value"
-    // The test verifies the basename does NOT contain the parent path components
-    expect(safeBasename).not.toContain("/trusted/root/");
-    // And that AUTH_SECRET is not present in a sanitized message that only shows basename
-    const logLine = `Backup: ${path.basename("/trusted/root/safe-backup-name")}`;
+    // Uses the actual production helpers toSafeBackupMetadata + formatBackupMetadataLog.
+    // The malicious path component contains a newline and a secret-like assignment.
+    const maliciousVerifiedPath = "/trusted/root/backup\nAUTH_SECRET=secret-value";
+    const manifest = { checksums: { "db/main.sqlite": "aabbcc" } };
+    const meta = toSafeBackupMetadata(maliciousVerifiedPath, manifest);
+    const logLine = formatBackupMetadataLog(meta);
+
     expect(logLine).not.toContain("AUTH_SECRET");
     expect(logLine).not.toContain("secret-value");
+    expect(logLine).not.toContain("\n");
+    expect(logLine.split(/\r?\n/)).toHaveLength(1);
+  });
+
+  it("sanitizeLogValue — strips carriage return and DATABASE_URL injection", () => {
+    const malicious = "backup\r\nDATABASE_URL=file:/secret.db";
+    const result = sanitizeLogValue(malicious);
+    expect(result).not.toContain("\r");
+    expect(result).not.toContain("\n");
+    expect(result).not.toContain("DATABASE_URL=file:/secret.db");
+    expect(result.split(/\r?\n/)).toHaveLength(1);
+  });
+
+  it("sanitizeLogValue — strips tab and OPENAI_API_KEY injection", () => {
+    const malicious = "backup\tOPENAI_API_KEY=sk-secret";
+    const result = sanitizeLogValue(malicious);
+    expect(result).not.toContain("\t");
+    expect(result).not.toContain("sk-secret");
+    expect(result.split(/\r?\n/)).toHaveLength(1);
+  });
+
+  it("sanitizeLogValue — strips null byte and AUTH_SECRET injection", () => {
+    const malicious = "backup AUTH_SECRET=value";
+    const result = sanitizeLogValue(malicious);
+    expect(result).not.toContain(" ");
+    expect(result).not.toContain("AUTH_SECRET=value");
+    expect(result.split(/\r?\n/)).toHaveLength(1);
   });
 });
 

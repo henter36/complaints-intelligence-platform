@@ -40,15 +40,83 @@ const PII_PATTERNS: { label: string; pattern: RegExp }[] = [
   { label: "IDENTIFIER", pattern: /\b\d{10,}\b/g },
 ];
 
-// Arabic name detection using label/context prefixes.
-// The pattern uses the Unicode flag (u) for correct script matching.
-// Prefixes are sorted longest-first so alternation greedily picks the most specific.
-// No lookbehind is used for maximum runtime compatibility.
-// \s (single space) is used instead of \s+ inside the repeated group to avoid
-// a quantifier-inside-quantifier that would flag as potentially super-linear.
-// [-] at end of character class avoids unnecessary \- escape.
-const ARABIC_NAME_PREFIX =
-  /(?:اسم المواطن|اسم المستفيد|اسم مقدم الشكوى|المواطن|المستفيد|الاسم)\s*[:：-]?\s*\p{Script=Arabic}{2,30}(?:\s\p{Script=Arabic}{2,30}){1,5}/gu;
+// Arabic name detection — two-phase approach to avoid super-linear backtracking.
+// Phase 1: detect the prefix label with a simple linear pattern (no quantifiers on name).
+// Phase 2: consume bounded Arabic words using a character-by-character scanner.
+// Prefixes sorted longest-first so the alternation picks the most specific match.
+const ARABIC_NAME_LABEL_PATTERN =
+  /(?:اسم مقدم الشكوى|اسم المستفيد|اسم المواطن|المستفيد|المواطن|الاسم)\s*[:：-]?\s*/gu;
+
+const MAX_ARABIC_NAME_WORDS = 5;
+const MAX_ARABIC_WORD_LENGTH = 30;
+const MIN_ARABIC_WORD_LENGTH = 2;
+const ARABIC_SCRIPT_RE = /\p{Script=Arabic}/u;
+
+function isArabicLetter(ch: string): boolean {
+  return ARABIC_SCRIPT_RE.test(ch);
+}
+
+// Scans forward from startIndex consuming between MIN and MAX Arabic words.
+// Returns the index past the last consumed character, or startIndex if < MIN words found.
+function consumeArabicName(input: string, startIndex: number): number {
+  let index = startIndex;
+  let words = 0;
+
+  while (index < input.length && words < MAX_ARABIC_NAME_WORDS) {
+    // skip a single space separator between words (not \s+ to avoid ambiguity)
+    if (words > 0) {
+      if (index < input.length && input[index] === " ") {
+        index += 1;
+      } else {
+        break;
+      }
+    }
+
+    const wordStart = index;
+    let length = 0;
+
+    while (
+      index < input.length &&
+      length < MAX_ARABIC_WORD_LENGTH &&
+      isArabicLetter(input[index])
+    ) {
+      index += 1;
+      length += 1;
+    }
+
+    if (length < MIN_ARABIC_WORD_LENGTH) {
+      // Not enough Arabic chars — undo the space we may have consumed and stop
+      index = wordStart > startIndex ? wordStart - 1 : wordStart;
+      break;
+    }
+
+    words += 1;
+  }
+
+  return words >= MIN_ARABIC_WORD_LENGTH ? index : startIndex;
+}
+
+function redactArabicNames(input: string): string {
+  let output = "";
+  let cursor = 0;
+
+  for (const match of input.matchAll(ARABIC_NAME_LABEL_PATTERN)) {
+    const matchIndex = match.index ?? 0;
+    const nameStart = matchIndex + match[0].length;
+    const nameEnd = consumeArabicName(input, nameStart);
+
+    if (nameEnd === nameStart) {
+      // No valid name after prefix — skip this match
+      continue;
+    }
+
+    output += input.slice(cursor, matchIndex);
+    output += "[NAME]";
+    cursor = nameEnd;
+  }
+
+  return output + input.slice(cursor);
+}
 
 export function sanitizeText(text: string): string {
   if (!text) return text;
@@ -62,7 +130,7 @@ export function sanitizeText(text: string): string {
   for (const { label, pattern } of PII_PATTERNS) {
     result = result.replace(pattern, `[${label}]`);
   }
-  result = result.replace(ARABIC_NAME_PREFIX, "[NAME]");
+  result = redactArabicNames(result);
   return result;
 }
 

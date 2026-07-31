@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { toSafeBackupMetadata, formatBackupMetadataLog } from "./lib/backup-utils";
 
 const backupArg = process.argv[2];
 if (!backupArg) {
@@ -165,20 +166,6 @@ function formatVerificationSummary(result: VerificationResult): string[] {
 // Safe metadata — only derived, allowlisted values reach the log
 // ──────────────────────────────────────────────────────────────────────────────
 
-type SafeBackupMetadata = Readonly<{
-  backupName: string;
-  fileCount: number;
-}>;
-
-function toSafeBackupMetadata(
-  verifiedPath: string,
-  manifest: BackupManifest
-): SafeBackupMetadata {
-  return {
-    backupName: path.basename(verifiedPath),
-    fileCount: Object.keys(manifest.checksums).length,
-  };
-}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Entry point
@@ -204,8 +191,7 @@ function main() {
   }
 
   const safeMetadata = toSafeBackupMetadata(verifiedPath, manifest);
-  console.log(`Backup: ${safeMetadata.backupName}`);
-  console.log(`Files to verify: ${safeMetadata.fileCount}`);
+  console.log(formatBackupMetadataLog(safeMetadata));
 
   const result = verifyBackupContents(verifiedPath, manifest);
 

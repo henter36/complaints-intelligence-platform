@@ -9,8 +9,8 @@ const UNIX_GIT_CANDIDATES = [
 ] as const;
 
 const WINDOWS_GIT_CANDIDATES = [
-  "C:\\Program Files\\Git\\cmd\\git.exe",
-  "C:\\Program Files\\Git\\bin\\git.exe",
+  String.raw`C:\Program Files\Git\cmd\git.exe`,
+  String.raw`C:\Program Files\Git\bin\git.exe`,
 ] as const;
 
 export function resolveGitExecutable(
