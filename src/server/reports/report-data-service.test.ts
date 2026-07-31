@@ -82,6 +82,25 @@ describe("report data service — parity with the central KPI service", () => {
     expect(report.kpis).toEqual(directKpis.kpis);
   });
 
+  it("EXECUTIVE_SUMMARY no longer emits a channel_distribution section", async () => {
+    dbMocks.findMany.mockResolvedValue([complaint()]);
+    dbMocks.count.mockResolvedValue(1);
+
+    const { buildReportData } = await import("./report-data-service");
+    const { parseReportRequest } = await import("./report-definition-service");
+
+    const request = parseReportRequest({ type: "EXECUTIVE_SUMMARY", filters: VALID_FILTERS });
+    const report = await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+
+    const ids = report.sections.map((section) => section.id);
+    expect(ids).not.toContain("channel_distribution");
+    expect(ids).toContain("region_trend_chart");
+    expect(ids).toContain("region_changes");
+    expect(ids).toContain("dept_class_rises");
+    // Comparison data is threaded through for the XLSX/PDF renderers.
+    expect(report.comparisonData).toBeDefined();
+  });
+
   it("DEPARTMENT_PERFORMANCE group breakdown matches getComplaintKpis distributions.byDepartment", async () => {
     const complaints = [
       complaint({ id: "cmp_1", department: "الدعم الفني" }),

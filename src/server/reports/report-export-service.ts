@@ -137,6 +137,8 @@ export async function runReport(input: RunReportInput, now: Date = new Date()): 
 
   try {
     const data = await buildReportData(request, "run", now);
+    // Stamp the run id so the PDF cover/footer can show a short traceable id.
+    data.reportRunId = run.id;
     const warnings = [...data.warnings];
     const artifacts: RunReportResult["artifacts"] = [];
     const expiresAt = new Date(now.getTime() + env.reportRetentionDays * 24 * 60 * 60 * 1000);

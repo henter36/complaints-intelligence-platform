@@ -1,6 +1,7 @@
 import ExcelJS from "exceljs";
 import { getReportDefinition } from "./report-definition-service";
 import type { ReportData, ReportTable } from "./report-data-service";
+import type { ComparisonResult } from "./report-comparison";
 import { formatRiyadhDateTime } from "./report-time";
 
 const FORMULA_INJECTION_PATTERN = /^[=+\-@]/;
@@ -213,6 +214,83 @@ function buildTableSheet(
   appendTruncationNote(sheet, table);
 }
 
+// The comparison result is threaded through `ReportData.comparisonData` (set
+// only by the EXECUTIVE_SUMMARY builder). We chose this over a separate return
+// value so the XLSX and PDF renderers share one immutable data object and the
+// export orchestrator does not have to plumb an extra argument through every
+// format.
+function buildRegionTrendSheet(workbook: ExcelJS.Workbook, comparison: ComparisonResult, usedNames: Set<string>): void {
+  const sheet = workbook.addWorksheet(sanitizeSheetName("اتجاه المناطق", usedNames));
+  applyRtlView(sheet);
+  sheet.columns = [
+    { header: "المنطقة", key: "region", width: 26 },
+    { header: "اليوم", key: "date", width: 16 },
+    { header: "عدد الشكاوى", key: "count", width: 16 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+  sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 3 } };
+  for (const series of comparison.regionTrend.series) {
+    for (const point of series.points) {
+      sheet.addRow({ region: sanitizeText(series.regionName), date: point.date, count: point.count });
+    }
+  }
+}
+
+function buildRegionChangesSheet(workbook: ExcelJS.Workbook, comparison: ComparisonResult, usedNames: Set<string>): void {
+  const sheet = workbook.addWorksheet(sanitizeSheetName("تغير المناطق", usedNames));
+  applyRtlView(sheet);
+  sheet.columns = [
+    { header: "المنطقة", key: "region", width: 26 },
+    { header: "الحالي", key: "current", width: 12 },
+    { header: "السابق", key: "previous", width: 12 },
+    { header: "الفرق", key: "difference", width: 12 },
+    { header: "نسبة التغير%", key: "changeRate", width: 16 },
+    { header: "الاتجاه", key: "direction", width: 14 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+  sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 6 } };
+  for (const row of comparison.regionChanges) {
+    const added = sheet.addRow({
+      region: sanitizeText(row.regionName),
+      current: row.currentCount,
+      previous: row.previousCount,
+      difference: row.difference,
+      changeRate: row.changeRate ?? "-",
+      direction: sanitizeText(row.direction),
+    });
+    added.getCell("changeRate").numFmt = '0.0"%"';
+  }
+}
+
+function buildDeptClassRisesSheet(workbook: ExcelJS.Workbook, comparison: ComparisonResult, usedNames: Set<string>): void {
+  const sheet = workbook.addWorksheet(sanitizeSheetName("ارتفاع الإدارات والتصنيفات", usedNames));
+  applyRtlView(sheet);
+  sheet.columns = [
+    { header: "الإدارة", key: "department", width: 28 },
+    { header: "التصنيف", key: "classification", width: 28 },
+    { header: "الحالي", key: "current", width: 12 },
+    { header: "السابق", key: "previous", width: 12 },
+    { header: "الفرق", key: "difference", width: 12 },
+    { header: "نسبة التغير%", key: "changeRate", width: 16 },
+    { header: "مساهمة التصنيف%", key: "contribution", width: 18 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+  sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 7 } };
+  for (const row of comparison.deptClassRises) {
+    const added = sheet.addRow({
+      department: sanitizeText(row.departmentName),
+      classification: sanitizeText(row.classificationName),
+      current: row.currentCount,
+      previous: row.previousCount,
+      difference: row.difference,
+      changeRate: row.changeRate ?? "-",
+      contribution: row.classificationContribution,
+    });
+    added.getCell("changeRate").numFmt = '0.0"%"';
+    added.getCell("contribution").numFmt = '0.0"%"';
+  }
+}
+
 export type XlsxRenderResult = {
   buffer: Buffer;
   warnings: string[];
@@ -235,6 +313,26 @@ export async function renderReportXlsx(data: ReportData): Promise<XlsxRenderResu
       buildTableSheet(workbook, section.table, usedNames);
     } catch {
       warnings.push(`تعذر إنشاء ورقة بيانات لقسم "${section.title}".`);
+    }
+  }
+
+  // Dedicated comparison worksheets for the executive summary. Guarded by
+  // try/catch each so a single sheet failure never aborts the whole export.
+  if (data.comparisonData) {
+    try {
+      buildRegionTrendSheet(workbook, data.comparisonData, usedNames);
+    } catch {
+      warnings.push('تعذر إنشاء ورقة "اتجاه المناطق".');
+    }
+    try {
+      buildRegionChangesSheet(workbook, data.comparisonData, usedNames);
+    } catch {
+      warnings.push('تعذر إنشاء ورقة "تغير المناطق".');
+    }
+    try {
+      buildDeptClassRisesSheet(workbook, data.comparisonData, usedNames);
+    } catch {
+      warnings.push('تعذر إنشاء ورقة "ارتفاع الإدارات والتصنيفات".');
     }
   }
 
