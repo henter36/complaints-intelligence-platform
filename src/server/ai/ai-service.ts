@@ -54,6 +54,15 @@ function normalizeAnalysisFilters(raw: AnalysisFilters): AnalysisFilters {
   return f;
 }
 
+// Stable locale-aware comparator for deterministic key ordering.
+// "en" locale with base sensitivity sorts ASCII-only filter keys identically
+// across all Node.js environments regardless of ICU data variant.
+const SORT_LOCALE = "en";
+
+function compareJsonKeys(a: string, b: string): number {
+  return a.localeCompare(b, SORT_LOCALE, { sensitivity: "base", numeric: true });
+}
+
 // Deterministic JSON snapshot: sort keys so {a:1,b:2} === {b:2,a:1}.
 // Used for both duplicate-detection query and the stored filtersSnapshot.
 function normalizeJsonValue(value: unknown): unknown {
@@ -61,7 +70,7 @@ function normalizeJsonValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(normalizeJsonValue);
   const obj = value as Record<string, unknown>;
   return Object.fromEntries(
-    Object.keys(obj).sort().map(k => [k, normalizeJsonValue(obj[k])])
+    Object.keys(obj).sort(compareJsonKeys).map(k => [k, normalizeJsonValue(obj[k])])
   );
 }
 
@@ -394,11 +403,9 @@ export async function runAiAnalysis(
   });
 
   const startMs = Date.now();
-  let providerModel = env.aiModel;
 
   try {
-    const { text, model } = await executeAnalysisProvider(type, statsJson, sampleJson, filters);
-    providerModel = model;
+    const { text, model: providerModel } = await executeAnalysisProvider(type, statsJson, sampleJson, filters);
 
     let parsed: unknown;
     try {

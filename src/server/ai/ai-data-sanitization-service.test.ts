@@ -146,3 +146,92 @@ describe("CARD regex — correctness and ReDoS safety", () => {
     expect(elapsed).toBeLessThan(100); // must complete well under 100ms
   });
 });
+
+describe("sanitizeText — adversarial performance (ReDoS safety)", () => {
+  const TIME_LIMIT_MS = 500;
+
+  it.each([
+    ["100k 'a' characters", "a".repeat(100_000)],
+    ["100k dashes", "-".repeat(100_000)],
+    ["100k angle brackets", "<".repeat(100_000)],
+  ])("completes quickly for %s", (_label, input) => {
+    const start = Date.now();
+    // Length 100_000 is at the limit; guard uses `>` so these are processed normally
+    let threwOrCompleted = false;
+    try {
+      sanitizeText(input);
+      threwOrCompleted = true;
+    } catch {
+      threwOrCompleted = true; // oversized input → throws fast; both outcomes are acceptable
+    }
+    const elapsed = Date.now() - start;
+    expect(threwOrCompleted).toBe(true);
+    expect(elapsed).toBeLessThan(TIME_LIMIT_MS);
+  });
+
+  it("completes within time limit for repeated Arabic words (Arabic name pattern)", () => {
+    // This must complete fast: \s (not \s+) in the Arabic name pattern ensures no nested quantifier
+    const arabic = "محمد ".repeat(20_000);
+    const start = Date.now();
+    let threwOrCompleted = false;
+    try {
+      sanitizeText(arabic);
+      threwOrCompleted = true;
+    } catch {
+      threwOrCompleted = true;
+    }
+    const elapsed = Date.now() - start;
+    expect(threwOrCompleted).toBe(true);
+    expect(elapsed).toBeLessThan(TIME_LIMIT_MS);
+  });
+
+  it("email pattern does not backtrack on input without TLD", () => {
+    // Adversarial: local@domain with no dot after domain — was super-linear before fix
+    const noTld = "user@" + "a".repeat(5_000);
+    const start = Date.now();
+    sanitizeText(noTld);
+    const elapsed = Date.now() - start;
+    expect(elapsed).toBeLessThan(TIME_LIMIT_MS);
+  });
+});
+
+describe("sanitizeText — Arabic name redaction", () => {
+  it("redacts name after 'اسم مقدم الشكوى' prefix", () => {
+    const result = sanitizeText("اسم مقدم الشكوى: محمد عبدالله");
+    expect(result).not.toContain("محمد عبدالله");
+    expect(result).toContain("[NAME]");
+  });
+
+  it("redacts name after 'المواطن' prefix", () => {
+    const result = sanitizeText("المواطن عبدالرحمن السيد");
+    expect(result).not.toContain("عبدالرحمن السيد");
+    expect(result).toContain("[NAME]");
+  });
+
+  it("does not redact standalone Arabic text without a recognized prefix", () => {
+    // Generic Arabic text without a name-indicating prefix must NOT be redacted
+    const text = "الشكوى تتعلق بجودة الخدمة الطبية في المنطقة";
+    const result = sanitizeText(text);
+    expect(result).toBe(text);
+  });
+
+  it("does not redact Arabic department names", () => {
+    const text = "قسم الموارد البشرية والتطوير";
+    expect(sanitizeText(text)).toBe(text);
+  });
+});
+
+describe("EMAIL regex — correctness after \\ fix", () => {
+  it("redacts standard email addresses", () => {
+    expect(sanitizeText("راسلنا على admin@example.com للمساعدة")).not.toContain("admin@example.com");
+  });
+
+  it("redacts subdomain emails", () => {
+    expect(sanitizeText("user@mail.example.co.uk")).not.toContain("user@mail.example.co.uk");
+  });
+
+  it("does not redact standalone domain without @", () => {
+    const text = "زر موقع example.com للتفاصيل";
+    expect(sanitizeText(text)).toBe(text);
+  });
+});

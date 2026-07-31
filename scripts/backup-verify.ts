@@ -39,9 +39,16 @@ function safeDisplayName(filePath: string): string {
 
 function sanitizeVerificationError(err: unknown): string {
   if (!(err instanceof Error)) return "Unknown verification error";
-  return err.message
-    .replaceAll(ROOT, "<project>")
-    .replaceAll(BACKUPS_ROOT, "<backups>");
+  const dbUrl = process.env.DATABASE_URL ?? "";
+  const dbPath = dbUrl.replace(/^file:/, "");
+  // Replace the more specific (longer) path first so it is not
+  // partially consumed by the shorter ROOT replacement.
+  let msg = err.message
+    .replaceAll(BACKUPS_ROOT, "<backups>")
+    .replaceAll(ROOT, "<project>");
+  if (dbUrl) msg = msg.replaceAll(dbUrl, "<database-url>");
+  if (dbPath && dbPath !== dbUrl) msg = msg.replaceAll(dbPath, "<database>");
+  return msg;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

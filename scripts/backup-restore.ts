@@ -114,11 +114,78 @@ function buildAllowedEnv(): Record<string, string | undefined> {
   };
 }
 
+interface BackupManifest {
+  readonly checksums: Record<string, string>;
+  readonly backupName: string;
+  readonly createdAt: string;
+}
+
 function removeSidecarsIfPresent(files: SqliteDatabaseFiles): void {
   // Remove stale WAL/SHM before restoring so no old data mixes with
   // the restored main database.
   if (fs.existsSync(files.wal)) fs.rmSync(files.wal, { force: true });
   if (fs.existsSync(files.shm)) fs.rmSync(files.shm, { force: true });
+}
+
+// Extracted to reduce cognitive complexity of main().
+// Verifies all entries in manifest.checksums; calls process.exit on any failure.
+function verifyAllChecksums(dir: string, manifest: BackupManifest): void {
+  for (const [relPath, expectedHash] of Object.entries(manifest.checksums)) {
+    const normalized = path.normalize(relPath);
+    if (normalized.startsWith("..") || path.isAbsolute(normalized)) {
+      console.error("SECURITY: path traversal in manifest");
+      process.exit(1);
+    }
+    const fullPath = path.join(dir, normalized);
+    if (!fs.existsSync(fullPath)) {
+      console.error(`MISSING file: ${path.basename(normalized)}`);
+      process.exit(1);
+    }
+    if (sha256File(fullPath) !== expectedHash) {
+      console.error(`CHECKSUM MISMATCH: ${path.basename(normalized)} — aborting restore.`);
+      process.exit(1);
+    }
+  }
+}
+
+// Restores database main file plus WAL/SHM sidecars if present in backup.
+// Removes stale destination sidecars first to prevent state mixing.
+function restoreDatabase(dir: string, dbDest: string): void {
+  const dbSrc = path.join(dir, "db", "database.sqlite");
+  if (!fs.existsSync(dbSrc)) return;
+
+  fs.mkdirSync(path.dirname(dbDest), { recursive: true });
+
+  const destFiles = resolveSqliteDatabaseFiles(dbDest);
+  removeSidecarsIfPresent(destFiles);
+
+  fs.copyFileSync(dbSrc, dbDest);
+
+  const srcFiles = resolveSqliteDatabaseFiles(dbSrc);
+  if (fs.existsSync(srcFiles.wal)) {
+    fs.copyFileSync(srcFiles.wal, destFiles.wal);
+    console.log("✓ WAL sidecar restored");
+  }
+  if (fs.existsSync(srcFiles.shm)) {
+    fs.copyFileSync(srcFiles.shm, destFiles.shm);
+    console.log("✓ SHM sidecar restored");
+  }
+
+  console.log("✓ Database restored");
+}
+
+// Restores a storage directory from backup; no-op if source is absent.
+function restoreStorageDirectory(
+  dir: string,
+  srcSubPath: string,
+  destPath: string,
+  label: string
+): void {
+  const src = path.join(dir, srcSubPath);
+  if (!fs.existsSync(src)) return;
+  fs.rmSync(destPath, { recursive: true, force: true });
+  copyDir(src, destPath);
+  console.log(`✓ ${label} restored`);
 }
 
 async function main() {
@@ -133,33 +200,12 @@ async function main() {
     process.exit(1);
   }
 
-  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as {
-    checksums: Record<string, string>;
-    backupName: string;
-    createdAt: string;
-  };
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8")) as BackupManifest;
 
-  // Verify checksums first
   console.log("Verifying backup integrity...");
-  for (const [relPath, expectedHash] of Object.entries(manifest.checksums)) {
-    const normalized = path.normalize(relPath);
-    if (normalized.startsWith("..") || path.isAbsolute(normalized)) {
-      console.error("SECURITY: path traversal in manifest");
-      process.exit(1);
-    }
-    const fullPath = path.join(backupDir, normalized);
-    if (!fs.existsSync(fullPath)) {
-      console.error(`MISSING file: ${path.basename(normalized)}`);
-      process.exit(1);
-    }
-    if (sha256File(fullPath) !== expectedHash) {
-      console.error(`CHECKSUM MISMATCH: ${path.basename(normalized)} — aborting restore.`);
-      process.exit(1);
-    }
-  }
+  verifyAllChecksums(backupDir, manifest);
   console.log("✓ Integrity verified");
 
-  // Create pre-restore backup using explicit binary and minimal env
   console.log("Creating pre-restore backup...");
   const backupResult = spawnSync(
     tsxBin,
@@ -175,51 +221,9 @@ async function main() {
     console.warn("Pre-restore backup failed — proceeding (manual backup recommended).");
   }
 
-  // Restore database
-  const dbDest = path.resolve(ROOT, DB_PATH);
-  const dbSrc = path.join(backupDir, "db", "database.sqlite");
-  if (fs.existsSync(dbSrc)) {
-    fs.mkdirSync(path.dirname(dbDest), { recursive: true });
-
-    // Remove stale sidecars BEFORE restoring the main file to prevent
-    // SQLite from merging old WAL data into the freshly restored database.
-    const destFiles = resolveSqliteDatabaseFiles(dbDest);
-    removeSidecarsIfPresent(destFiles);
-
-    // Restore main database
-    fs.copyFileSync(dbSrc, dbDest);
-
-    // Restore WAL/SHM sidecars if they were present in the backup
-    const srcFiles = resolveSqliteDatabaseFiles(dbSrc);
-    if (fs.existsSync(srcFiles.wal)) {
-      fs.copyFileSync(srcFiles.wal, destFiles.wal);
-      console.log("✓ WAL sidecar restored");
-    }
-    if (fs.existsSync(srcFiles.shm)) {
-      fs.copyFileSync(srcFiles.shm, destFiles.shm);
-      console.log("✓ SHM sidecar restored");
-    }
-
-    console.log("✓ Database restored");
-  }
-
-  // Restore import storage
-  const importSrc = path.join(backupDir, "storage", "imports");
-  const importDest = path.resolve(ROOT, IMPORT_STORAGE);
-  if (fs.existsSync(importSrc)) {
-    fs.rmSync(importDest, { recursive: true, force: true });
-    copyDir(importSrc, importDest);
-    console.log("✓ Import storage restored");
-  }
-
-  // Restore report storage
-  const reportSrc = path.join(backupDir, "storage", "reports");
-  const reportDest = path.resolve(ROOT, REPORT_STORAGE);
-  if (fs.existsSync(reportSrc)) {
-    fs.rmSync(reportDest, { recursive: true, force: true });
-    copyDir(reportSrc, reportDest);
-    console.log("✓ Report storage restored");
-  }
+  restoreDatabase(backupDir, path.resolve(ROOT, DB_PATH));
+  restoreStorageDirectory(backupDir, "storage/imports", path.resolve(ROOT, IMPORT_STORAGE), "Import storage");
+  restoreStorageDirectory(backupDir, "storage/reports", path.resolve(ROOT, REPORT_STORAGE), "Report storage");
 
   console.log(`\n✓ Restore complete from: ${manifest.backupName} (${manifest.createdAt})`);
   console.log("Note: .env and secrets were NOT restored. Restart the application to apply changes.");

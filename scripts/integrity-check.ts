@@ -42,6 +42,12 @@ function resolveResultSymbol(result: CheckResult): string {
 // Keep old name as alias so callers don't break
 const statusSymbol = resolveResultSymbol;
 
+function formatCheckResultSuffix(result: CheckResult): string {
+  if (result.detail) return ` — ${result.detail}`;
+  if (result.count !== undefined) return ` (${result.count})`;
+  return "";
+}
+
 async function checkDatabaseConnection(): Promise<CheckResult> {
   try {
     await db.$queryRaw`SELECT 1`;
@@ -256,7 +262,7 @@ async function run() {
     console.log("═".repeat(60));
     for (const r of results) {
       const icon = resolveResultSymbol(r);
-      const suffix = r.detail ? ` — ${r.detail}` : r.count !== undefined ? ` (${r.count})` : "";
+      const suffix = formatCheckResultSuffix(r);
       console.log(`${icon} ${r.name}${suffix}`);
     }
     console.log("═".repeat(60));

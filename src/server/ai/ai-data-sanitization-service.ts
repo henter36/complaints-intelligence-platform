@@ -22,8 +22,11 @@ const PII_PATTERNS: { label: string; pattern: RegExp }[] = [
   // Phone numbers (Saudi local / international variants) — fixed-length patterns only
   { label: "PHONE", pattern: /(?:\+966|00966|0)[0-9 -]{8,10}/g },
   { label: "PHONE", pattern: /\b05\d{8}\b/g },
-  // Email addresses — linear: local part, @, domain, dot, TLD
-  { label: "EMAIL", pattern: /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g },
+  // Email addresses — bounded quantifiers prevent O(n²) backtracking on
+  // long all-alpha inputs. Local part ≤64 chars and DNS labels ≤63 chars
+  // follow RFC 5321. Domain labels use [a-zA-Z0-9-] (no dot), eliminating
+  // the dot-overlap ambiguity that made the previous pattern super-linear.
+  { label: "EMAIL", pattern: /[a-zA-Z0-9._%+-]{1,64}@[a-zA-Z0-9-]{1,63}(?:\.[a-zA-Z0-9-]{1,63})+/g },
   // URLs — terminates at whitespace/quote/angle bracket
   { label: "URL", pattern: /https?:\/\/[^\s"'>]+/g },
   // Secrets / API keys — keyword followed by bounded alphanumeric suffix
@@ -36,12 +39,13 @@ const PII_PATTERNS: { label: string; pattern: RegExp }[] = [
 
 // Arabic name detection using label/context prefixes.
 // The pattern uses the Unicode flag (u) for correct script matching.
-// It matches a label word optionally followed by a colon/dash, then captures
-// up to 6 Arabic-script words. Prefixes are sorted longest-first so the
-// alternation greedily matches the most specific prefix.
+// Prefixes are sorted longest-first so alternation greedily picks the most specific.
 // No lookbehind is used for maximum runtime compatibility.
+// \s (single space) is used instead of \s+ inside the repeated group to avoid
+// a quantifier-inside-quantifier that would flag as potentially super-linear.
+// [-] at end of character class avoids unnecessary \- escape.
 const ARABIC_NAME_PREFIX =
-  /(?:اسم المواطن|اسم المستفيد|اسم مقدم الشكوى|المواطن|المستفيد|الاسم)\s*[:：\-]?\s*[؀-ۿ]+(?:\s+[؀-ۿ]+){1,5}/gu;
+  /(?:اسم المواطن|اسم المستفيد|اسم مقدم الشكوى|المواطن|المستفيد|الاسم)\s*[:：-]?\s*[؀-ۿ]+(?:\s[؀-ۿ]+){1,5}/gu;
 
 export function sanitizeText(text: string): string {
   if (!text) return text;

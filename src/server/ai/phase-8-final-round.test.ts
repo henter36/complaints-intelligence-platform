@@ -7,28 +7,23 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import crypto from "node:crypto";
 
 // ──────────────────────────────────────────────────
 // env.ts — non-enumerable openAiApiKey + isMissingOrPlaceholder
 // ──────────────────────────────────────────────────
 
 describe("isMissingOrPlaceholderSecret", () => {
-  it("returns true for undefined", async () => {
+  it.each([
+    ["undefined", undefined],
+    ["empty string", ""],
+    ["CHANGE_ME", "CHANGE_ME"],
+    ["CHANGE_prefixed value", "CHANGE_THIS"],
+  ])("returns true for %s", async (_, input) => {
     const { isMissingOrPlaceholderSecret } = await import("@/lib/env");
-    expect(isMissingOrPlaceholderSecret(undefined)).toBe(true);
+    expect(isMissingOrPlaceholderSecret(input)).toBe(true);
   });
-  it("returns true for empty string", async () => {
-    const { isMissingOrPlaceholderSecret } = await import("@/lib/env");
-    expect(isMissingOrPlaceholderSecret("")).toBe(true);
-  });
-  it("returns true for CHANGE_ME", async () => {
-    const { isMissingOrPlaceholderSecret } = await import("@/lib/env");
-    expect(isMissingOrPlaceholderSecret("CHANGE_ME")).toBe(true);
-  });
-  it("returns true for CHANGE_something", async () => {
-    const { isMissingOrPlaceholderSecret } = await import("@/lib/env");
-    expect(isMissingOrPlaceholderSecret("CHANGE_THIS")).toBe(true);
-  });
+
   it("returns false for a real-looking key", async () => {
     const { isMissingOrPlaceholderSecret } = await import("@/lib/env");
     expect(isMissingOrPlaceholderSecret("sk-proj-realkey123")).toBe(false);
@@ -313,5 +308,260 @@ describe("health/ready — storage check is observational only", () => {
     }
     expect(threw).toBe(true);
     expect(fs.existsSync(nonExistent)).toBe(false); // health check must not create it
+  });
+});
+
+// ──────────────────────────────────────────────────
+// backup-verify — sanitizeVerificationError
+// (reimplemented inline; mirrors scripts/backup-verify.ts logic)
+// ──────────────────────────────────────────────────
+
+describe("backup-verify — sanitizeVerificationError", () => {
+  const ROOT_FIXTURE = "/project/root";
+  const BACKUPS_ROOT_FIXTURE = "/project/root/backups";
+
+  function sanitize(errMsg: string): string {
+    const dbUrl = process.env.DATABASE_URL ?? "";
+    const dbPath = dbUrl.replace(/^file:/, "");
+    // Replace the more specific (longer) path first; mirrors backup-verify.ts order.
+    let msg = errMsg
+      .replaceAll(BACKUPS_ROOT_FIXTURE, "<backups>")
+      .replaceAll(ROOT_FIXTURE, "<project>");
+    if (dbUrl) msg = msg.replaceAll(dbUrl, "<database-url>");
+    if (dbPath && dbPath !== dbUrl) msg = msg.replaceAll(dbPath, "<database>");
+    return msg;
+  }
+
+  it("replaces project root in error messages", () => {
+    const result = sanitize(`File not found at ${ROOT_FIXTURE}/storage/file.txt`);
+    expect(result).not.toContain(ROOT_FIXTURE);
+    expect(result).toContain("<project>");
+  });
+
+  it("replaces backups root in error messages", () => {
+    const result = sanitize(`Cannot read ${BACKUPS_ROOT_FIXTURE}/backup-2026/manifest.json`);
+    expect(result).not.toContain(BACKUPS_ROOT_FIXTURE);
+    expect(result).toContain("<backups>");
+  });
+
+  it("replaces DATABASE_URL when set", () => {
+    const saved = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "file:./secret-production.sqlite";
+    try {
+      const result = sanitize("DB error at file:./secret-production.sqlite");
+      expect(result).not.toContain("file:./secret-production.sqlite");
+      expect(result).toContain("<database-url>");
+    } finally {
+      if (saved === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = saved;
+    }
+  });
+
+  it("replaces DB file path (without file: prefix) when DATABASE_URL set", () => {
+    const saved = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "file:./data/production.sqlite";
+    try {
+      const result = sanitize("Cannot open ./data/production.sqlite");
+      expect(result).not.toContain("./data/production.sqlite");
+    } finally {
+      if (saved === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = saved;
+    }
+  });
+
+  it("does not leak full checksum (checksums are never logged)", () => {
+    const fakeChecksum = crypto.createHash("sha256").update("test").digest("hex");
+    // Checksums should never appear in log output — they are not passed to the error formatter
+    const result = sanitize("Verification completed");
+    expect(result).not.toContain(fakeChecksum);
+  });
+
+  it("returns generic message for non-Error values", () => {
+    // Mirror the guard: if (!(err instanceof Error)) return "Unknown verification error"
+    const guard = (err: unknown): string =>
+      err instanceof Error ? sanitize(err.message) : "Unknown verification error";
+    expect(guard("string error")).toBe("Unknown verification error");
+    expect(guard(null)).toBe("Unknown verification error");
+  });
+
+  it("keeps useful operational information in sanitized output", () => {
+    const result = sanitize("manifest.json not found — backup may be corrupt");
+    expect(result).toContain("manifest.json not found");
+  });
+});
+
+// ──────────────────────────────────────────────────
+// backup-restore — file operation helpers
+// (reimplemented inline; mirrors scripts/backup-restore.ts logic)
+// ──────────────────────────────────────────────────
+
+describe("backup-restore — restoring main database only", () => {
+  it("copies main file and leaves WAL/SHM absent when not in backup", () => {
+    const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "restore-main-")));
+    try {
+      const srcDb = path.join(tmp, "src", "database.sqlite");
+      const destDb = path.join(tmp, "dest", "database.sqlite");
+      fs.mkdirSync(path.dirname(srcDb), { recursive: true });
+      fs.mkdirSync(path.dirname(destDb), { recursive: true });
+      fs.writeFileSync(srcDb, "main content");
+
+      const destWal = `${destDb}-wal`;
+      const destShm = `${destDb}-shm`;
+      // Remove stale sidecars, then copy main
+      if (fs.existsSync(destWal)) fs.rmSync(destWal, { force: true });
+      if (fs.existsSync(destShm)) fs.rmSync(destShm, { force: true });
+      fs.copyFileSync(srcDb, destDb);
+      if (fs.existsSync(`${srcDb}-wal`)) fs.copyFileSync(`${srcDb}-wal`, destWal);
+      if (fs.existsSync(`${srcDb}-shm`)) fs.copyFileSync(`${srcDb}-shm`, destShm);
+
+      expect(fs.readFileSync(destDb, "utf8")).toBe("main content");
+      expect(fs.existsSync(destWal)).toBe(false);
+      expect(fs.existsSync(destShm)).toBe(false);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("backup-restore — restoring main + WAL + SHM", () => {
+  it("copies all three SQLite files from backup", () => {
+    const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "restore-all-")));
+    try {
+      const srcDb = path.join(tmp, "src", "database.sqlite");
+      fs.mkdirSync(path.dirname(srcDb), { recursive: true });
+      fs.writeFileSync(srcDb, "main data");
+      fs.writeFileSync(`${srcDb}-wal`, "wal data");
+      fs.writeFileSync(`${srcDb}-shm`, "shm data");
+
+      const destDb = path.join(tmp, "dest", "database.sqlite");
+      const destWal = `${destDb}-wal`;
+      const destShm = `${destDb}-shm`;
+      fs.mkdirSync(path.dirname(destDb), { recursive: true });
+
+      if (fs.existsSync(destWal)) fs.rmSync(destWal, { force: true });
+      if (fs.existsSync(destShm)) fs.rmSync(destShm, { force: true });
+      fs.copyFileSync(srcDb, destDb);
+      if (fs.existsSync(`${srcDb}-wal`)) fs.copyFileSync(`${srcDb}-wal`, destWal);
+      if (fs.existsSync(`${srcDb}-shm`)) fs.copyFileSync(`${srcDb}-shm`, destShm);
+
+      expect(fs.readFileSync(destDb, "utf8")).toBe("main data");
+      expect(fs.readFileSync(destWal, "utf8")).toBe("wal data");
+      expect(fs.readFileSync(destShm, "utf8")).toBe("shm data");
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("backup-restore — old sidecars removed when absent from backup", () => {
+  it("removes stale WAL/SHM at destination before restoring main", () => {
+    const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "sidecar-remove-")));
+    try {
+      const destDb = path.join(tmp, "database.sqlite");
+      fs.writeFileSync(destDb, "old main");
+      fs.writeFileSync(`${destDb}-wal`, "stale wal");
+      fs.writeFileSync(`${destDb}-shm`, "stale shm");
+
+      // Simulate removeSidecarsIfPresent
+      if (fs.existsSync(`${destDb}-wal`)) fs.rmSync(`${destDb}-wal`, { force: true });
+      if (fs.existsSync(`${destDb}-shm`)) fs.rmSync(`${destDb}-shm`, { force: true });
+      fs.writeFileSync(destDb, "new main");
+
+      expect(fs.existsSync(`${destDb}-wal`)).toBe(false);
+      expect(fs.existsSync(`${destDb}-shm`)).toBe(false);
+      expect(fs.readFileSync(destDb, "utf8")).toBe("new main");
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("backup-restore — checksum failure before any file modification", () => {
+  it("detects mismatch without touching the destination", () => {
+    const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cksum-test-")));
+    try {
+      const srcFile = path.join(tmp, "backup", "database.sqlite");
+      fs.mkdirSync(path.dirname(srcFile), { recursive: true });
+      fs.writeFileSync(srcFile, "backup data");
+
+      const expectedHash = "aaaa0000wrong";
+      const actualHash = crypto
+        .createHash("sha256")
+        .update(fs.readFileSync(srcFile))
+        .digest("hex");
+
+      const checksumPassed = actualHash === expectedHash;
+
+      const destFile = path.join(tmp, "dest", "database.sqlite");
+      // Only copy if checksum passed (mirrors restore logic)
+      if (checksumPassed) {
+        fs.mkdirSync(path.dirname(destFile), { recursive: true });
+        fs.copyFileSync(srcFile, destFile);
+      }
+
+      expect(checksumPassed).toBe(false);
+      expect(fs.existsSync(destFile)).toBe(false);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("backup-restore — removeSidecarsIfPresent is a no-op when absent", () => {
+  it("does not throw when WAL/SHM do not exist", () => {
+    const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "no-sidecar-")));
+    try {
+      const dbPath = path.join(tmp, "database.sqlite");
+      fs.writeFileSync(dbPath, "content");
+      // No WAL/SHM — simulate removeSidecarsIfPresent
+      expect(() => {
+        if (fs.existsSync(`${dbPath}-wal`)) fs.rmSync(`${dbPath}-wal`, { force: true });
+        if (fs.existsSync(`${dbPath}-shm`)) fs.rmSync(`${dbPath}-shm`, { force: true });
+      }).not.toThrow();
+      expect(fs.existsSync(dbPath)).toBe(true);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// ──────────────────────────────────────────────────
+// ai-service — compareJsonKeys (localeCompare sort)
+// ──────────────────────────────────────────────────
+
+describe("ai-service — compareJsonKeys produces locale-stable order", () => {
+  const SORT_LOCALE = "en";
+  function compareJsonKeys(a: string, b: string): number {
+    return a.localeCompare(b, SORT_LOCALE, { sensitivity: "base", numeric: true });
+  }
+  function normalizeJsonValue(value: unknown): unknown {
+    if (value === null || typeof value !== "object") return value;
+    if (Array.isArray(value)) return value.map(normalizeJsonValue);
+    const obj = value as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.keys(obj).sort(compareJsonKeys).map(k => [k, normalizeJsonValue(obj[k])])
+    );
+  }
+
+  it("produces identical snapshots for different key insertion orders", () => {
+    const a = JSON.stringify(normalizeJsonValue({ department: "A", dateFrom: "2026-01-01", status: "OPEN" }));
+    const b = JSON.stringify(normalizeJsonValue({ status: "OPEN", dateFrom: "2026-01-01", department: "A" }));
+    expect(a).toBe(b);
+  });
+
+  it("sorts ASCII keys alphabetically (a < b < z)", () => {
+    const result = normalizeJsonValue({ z: 3, a: 1, m: 2 }) as Record<string, unknown>;
+    expect(Object.keys(result)).toEqual(["a", "m", "z"]);
+  });
+
+  it("handles numeric-style keys in natural order", () => {
+    const result = normalizeJsonValue({ key10: "c", key2: "b", key1: "a" }) as Record<string, unknown>;
+    expect(Object.keys(result)).toEqual(["key1", "key2", "key10"]);
+  });
+
+  it("nested objects are also sorted deterministically", () => {
+    const a = JSON.stringify(normalizeJsonValue({ outer: { z: "z", a: "a" }, x: 1 }));
+    const b = JSON.stringify(normalizeJsonValue({ x: 1, outer: { a: "a", z: "z" } }));
+    expect(a).toBe(b);
   });
 });

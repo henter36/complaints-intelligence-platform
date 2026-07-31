@@ -125,7 +125,8 @@ async function main() {
   }
 
   if (!dryRun) {
-    console.log(`\nAI cleanup complete. ${processed} results expired.${failed > 0 ? ` ${failed} failed.` : ""}`);
+    const failedSuffix = failed > 0 ? ` ${failed} failed.` : "";
+    console.log(`\nAI cleanup complete. ${processed} results expired.${failedSuffix}`);
   } else {
     console.log(`\n[DRY RUN] Would expire ${expiredRuns.length} results.`);
   }
