@@ -1,4 +1,5 @@
 import { ImportValidationError } from "./import-errors";
+import { normalizeArabic } from "./arabic-normalize";
 
 export const COMPLAINT_IMPORT_FIELDS = [
   "externalId",
@@ -26,6 +27,33 @@ export const COMPLAINT_IMPORT_FIELDS = [
 export type ComplaintImportField = (typeof COMPLAINT_IMPORT_FIELDS)[number];
 export type ColumnMapping = Record<string, ComplaintImportField>;
 
+export type ColumnMappingStatus =
+  | "AUTO_MAPPED"
+  | "MANUALLY_MAPPED"
+  | "UNMAPPED_PRESERVED"
+  | "CONFLICT"
+  | "MISSING_REQUIRED";
+
+export type ColumnMappingEntry = {
+  header: string;
+  normalizedHeader: string;
+  field: ComplaintImportField | null;
+  status: ColumnMappingStatus;
+  suggestedField?: ComplaintImportField;
+};
+
+export type ColumnMappingAnalysis = {
+  entries: ColumnMappingEntry[];
+  autoMappedCount: number;
+  manuallyMappedCount: number;
+  unmappedPreservedCount: number;
+  conflictCount: number;
+  missingRequiredFields: string[];
+  summary: string;
+  unmappedColumns: string[];
+  conflicts: Array<{ header: string; field: ComplaintImportField; conflictingHeader: string }>;
+};
+
 const COMPLAINT_IMPORT_FIELD_SET = new Set<ComplaintImportField>(COMPLAINT_IMPORT_FIELDS);
 const DANGEROUS_MAPPING_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
@@ -52,35 +80,91 @@ const FIELD_LABELS: Record<ComplaintImportField, string> = {
   resolution: "الإجراء أو الحل",
 };
 
+/** Prefer primary action text over descriptive action text when both headers are present. */
+const RESOLUTION_HEADER_PRIORITY = [
+  "الاجراء المتخذ",
+  "الاجراء او الحل",
+  "الحل",
+  "resolution",
+  "وصف الاجراء",
+];
+
 const SYNONYMS: Record<ComplaintImportField, string[]> = {
-  externalId: ["رقم الشكوى", "معرف الشكوى", "complaint id", "external id"],
-  sourceReference: ["الرقم المرجعي", "رقم المرجع", "مصدر الشكوى", "source reference"],
-  complaintDate: ["تاريخ الشكوى", "complaint date"],
-  receivedAt: ["تاريخ الورود", "تاريخ الاستلام", "received at", "received date"],
+  externalId: [
+    "رقم الشكوى",
+    "معرف الشكوى",
+    "رقم البلاغ",
+    "complaint id",
+    "external id",
+  ],
+  sourceReference: [
+    "المُعرف",
+    "المعرف",
+    "الرقم المرجعي",
+    "رقم المرجع",
+    "رقم المعاملة",
+    "source reference",
+  ],
+  complaintDate: [
+    "تاريخ الإنشاء",
+    "تاريخ انشاء الشكوى",
+    "تاريخ الشكوى",
+    "تاريخ تقديم الشكوى",
+    "complaint date",
+    "created date",
+  ],
+  receivedAt: [
+    "تاريخ التسجيل",
+    "تاريخ الورود",
+    "تاريخ الاستلام",
+    "تاريخ القيد",
+    "تاريخ استقبال الشكوى",
+    "received at",
+    "received date",
+  ],
   dueDate: ["تاريخ الاستحقاق", "المهلة", "due date"],
   closedAt: ["تاريخ الإغلاق", "closure date", "closed at"],
-  status: ["الحالة", "status"],
+  status: ["الحالة", "حالة الشكوى", "status"],
   subject: ["الموضوع", "عنوان الشكوى", "subject"],
-  description: ["وصف الشكوى", "الوصف", "description"],
+  description: [
+    "الوصف",
+    "وصف الشكوى",
+    "تفاصيل الشكوى",
+    "نص الشكوى",
+    "محتوى الشكوى",
+    "description",
+  ],
   complainantName: ["اسم مقدم الشكوى", "اسم المشتكي", "complainant name"],
-  complainantIdentifier: ["معرف مقدم الشكوى", "رقم الهوية", "complainant identifier"],
+  complainantIdentifier: [
+    "هوية السجين",
+    "هوية النزيل",
+    "رقم هوية السجين",
+    "رقم هوية النزيل",
+    "رقم الهوية",
+    "معرف مقدم الشكوى",
+    "complainant identifier",
+  ],
   complainantPhone: ["هاتف مقدم الشكوى", "رقم الجوال", "رقم الهاتف", "complainant phone"],
-  region: ["المنطقة", "region"],
-  facility: ["الموقع", "المنشأة", "facility"],
-  department: ["الإدارة", "department"],
+  region: ["المنطقة", "اسم المنطقة", "region"],
+  facility: ["السجن", "المنشأة", "الموقع", "اسم السجن", "facility"],
+  department: ["القسم", "الإدارة", "الادارة", "department"],
   category: ["الفئة", "category"],
-  classification: ["التصنيف", "classification"],
+  classification: ["تصنيف", "التصنيف", "نوع الشكوى", "classification"],
   priority: ["الأولوية", "priority"],
-  channel: ["القناة", "channel"],
-  resolution: ["الإجراء أو الحل", "الحل", "resolution"],
+  channel: ["المصدر", "مصدر الشكوى", "القناة", "channel", "source"],
+  resolution: [
+    "الإجراء المتخذ",
+    "الاجراء المتخذ",
+    "وصف الإجراء",
+    "وصف الاجراء",
+    "الإجراء أو الحل",
+    "الحل",
+    "resolution",
+  ],
 };
 
 export function normalizeColumnHeader(value: string): string {
-  return value
-    .trim()
-    .replaceAll(/[إأآا]/g, "ا")
-    .replaceAll("ى", "ي")
-    .replaceAll("ة", "ه")
+  return normalizeArabic(value)
     .replaceAll(/\s+/g, " ")
     .toLocaleLowerCase("ar-SA");
 }
@@ -91,13 +175,42 @@ for (const field of COMPLAINT_IMPORT_FIELDS) {
   SYNONYM_INDEX.set(normalizeColumnHeader(field), field);
   SYNONYM_INDEX.set(normalizeColumnHeader(FIELD_LABELS[field]), field);
   for (const synonym of SYNONYMS[field]) {
-    SYNONYM_INDEX.set(normalizeColumnHeader(synonym), field);
+    const key = normalizeColumnHeader(synonym);
+    const existing = SYNONYM_INDEX.get(key);
+    if (existing && existing !== field) {
+      throw new Error(`Synonym conflict: "${synonym}" maps to both ${existing} and ${field}`);
+    }
+    SYNONYM_INDEX.set(key, field);
   }
 }
 
-export function matchComplaintColumns(headers: string[]): ColumnMapping {
+function resolutionPriority(header: string): number {
+  const normalized = normalizeColumnHeader(header);
+  const index = RESOLUTION_HEADER_PRIORITY.findIndex((item) => normalizeColumnHeader(item) === normalized);
+  return index === -1 ? RESOLUTION_HEADER_PRIORITY.length : index;
+}
+
+function preferHeaderForField(
+  field: ComplaintImportField,
+  previousHeader: string,
+  nextHeader: string
+): string {
+  if (field !== "resolution") {
+    return previousHeader;
+  }
+
+  return resolutionPriority(nextHeader) < resolutionPriority(previousHeader)
+    ? nextHeader
+    : previousHeader;
+}
+
+export function matchComplaintColumns(headers: string[]): {
+  mapping: ColumnMapping;
+  conflicts: Array<{ header: string; field: ComplaintImportField; conflictingHeader: string }>;
+} {
   const mapping = Object.create(null) as ColumnMapping;
   const usedFields = new Map<ComplaintImportField, string>();
+  const conflicts: Array<{ header: string; field: ComplaintImportField; conflictingHeader: string }> = [];
 
   for (const header of headers) {
     const normalized = normalizeColumnHeader(header);
@@ -108,18 +221,148 @@ export function matchComplaintColumns(headers: string[]): ColumnMapping {
 
     const previousHeader = usedFields.get(field);
     if (previousHeader) {
-      throw new ImportValidationError(
-        "DUPLICATE_IMPORT_COLUMN",
-        `تكرر ربط الحقل ${FIELD_LABELS[field]} بين ${previousHeader} و${header}`,
-        422
-      );
+      const preferred = preferHeaderForField(field, previousHeader, header);
+      const discarded = preferred === previousHeader ? header : previousHeader;
+      conflicts.push({
+        header: discarded,
+        field,
+        conflictingHeader: preferred,
+      });
+
+      if (preferred === header) {
+        delete mapping[previousHeader];
+        mapping[header] = field;
+        usedFields.set(field, header);
+      }
+      continue;
     }
 
     mapping[header] = field;
     usedFields.set(field, header);
   }
 
-  return mapping;
+  return { mapping, conflicts };
+}
+
+function classifyHeaderMappingEntry(input: {
+  trimmed: string;
+  header: string;
+  mapping: ColumnMapping;
+  conflictHeaders: Set<string>;
+  manuallyMapped?: boolean;
+}): ColumnMappingEntry {
+  const normalizedHeader = normalizeColumnHeader(input.trimmed);
+  const field = input.mapping[input.trimmed] ?? input.mapping[input.header] ?? null;
+  const suggested = SYNONYM_INDEX.get(normalizedHeader);
+
+  if (input.conflictHeaders.has(input.trimmed) || input.conflictHeaders.has(input.header)) {
+    return {
+      header: input.trimmed,
+      normalizedHeader,
+      field: null,
+      status: "CONFLICT",
+      suggestedField: suggested,
+    };
+  }
+
+  if (field) {
+    return {
+      header: input.trimmed,
+      normalizedHeader,
+      field,
+      status: input.manuallyMapped ? "MANUALLY_MAPPED" : "AUTO_MAPPED",
+      suggestedField: suggested,
+    };
+  }
+
+  return {
+    header: input.trimmed,
+    normalizedHeader,
+    field: null,
+    status: "UNMAPPED_PRESERVED",
+    suggestedField: suggested,
+  };
+}
+
+function collectMissingRequiredFields(mappedFields: Set<ComplaintImportField>): string[] {
+  const missingRequiredFields: string[] = [];
+
+  if (!mappedFields.has("externalId") && !mappedFields.has("sourceReference")) {
+    missingRequiredFields.push("externalId|sourceReference");
+  }
+  if (!mappedFields.has("complaintDate") && !mappedFields.has("receivedAt")) {
+    missingRequiredFields.push("complaintDate|receivedAt");
+  }
+  if (!mappedFields.has("subject") && !mappedFields.has("description")) {
+    missingRequiredFields.push("subject|description");
+  }
+
+  return missingRequiredFields;
+}
+
+function countEntriesByStatus(entries: ColumnMappingEntry[], status: ColumnMappingStatus): number {
+  return entries.filter((entry) => entry.status === status).length;
+}
+
+export function analyzeColumnMapping(
+  headers: string[],
+  mapping: ColumnMapping,
+  options?: {
+    conflicts?: Array<{ header: string; field: ComplaintImportField; conflictingHeader: string }>;
+    manuallyMapped?: boolean;
+  }
+): ColumnMappingAnalysis {
+  const conflicts = options?.conflicts ?? [];
+  const conflictHeaders = new Set(conflicts.map((item) => item.header));
+  const mappedHeaders = new Set(Object.keys(mapping));
+  const mappedFields = new Set(Object.values(mapping));
+
+  const entries: ColumnMappingEntry[] = [];
+  for (const header of headers) {
+    const trimmed = header.trim();
+    if (!trimmed) continue;
+
+    entries.push(
+      classifyHeaderMappingEntry({
+        trimmed,
+        header,
+        mapping,
+        conflictHeaders,
+        manuallyMapped: options?.manuallyMapped,
+      })
+    );
+  }
+
+  const missingRequiredFields = collectMissingRequiredFields(mappedFields);
+  for (const key of missingRequiredFields) {
+    entries.push({
+      header: key,
+      normalizedHeader: key,
+      field: null,
+      status: "MISSING_REQUIRED",
+    });
+  }
+
+  const autoMappedCount = countEntriesByStatus(entries, "AUTO_MAPPED");
+  const manuallyMappedCount = countEntriesByStatus(entries, "MANUALLY_MAPPED");
+  const unmappedPreservedCount = countEntriesByStatus(entries, "UNMAPPED_PRESERVED");
+  const conflictCount = countEntriesByStatus(entries, "CONFLICT");
+  const mappedCount = autoMappedCount + manuallyMappedCount;
+
+  return {
+    entries,
+    autoMappedCount,
+    manuallyMappedCount,
+    unmappedPreservedCount,
+    conflictCount,
+    missingRequiredFields,
+    summary: `تم التعرف تلقائيًا على ${mappedCount} عمودًا، واحتفظ النظام بـ${unmappedPreservedCount} أعمدة إضافية ضمن البيانات الأصلية.`,
+    unmappedColumns: headers
+      .map((header) => header.trim())
+      .filter(Boolean)
+      .filter((header) => !mappedHeaders.has(header)),
+    conflicts,
+  };
 }
 
 export function isComplaintImportField(value: unknown): value is ComplaintImportField {
@@ -273,4 +516,8 @@ export function validateColumnMapping(mapping: ColumnMapping, workbookHeaders?: 
 
 export function toFieldLabels(): Record<ComplaintImportField, string> {
   return FIELD_LABELS;
+}
+
+export function lookupFieldForHeader(header: string): ComplaintImportField | undefined {
+  return SYNONYM_INDEX.get(normalizeColumnHeader(header));
 }

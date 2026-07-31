@@ -534,4 +534,49 @@ describe("transactional import confirmation", () => {
       status: ImportBatchStatus.CONFIRMED,
     });
   });
+
+  it("persists complainantIdentifier and derives subject from description on confirm", async () => {
+    const batch = await createReadyBatch();
+    const externalId = `COMP/TEST-${crypto.randomUUID()}`;
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 1,
+      action: ImportRowAction.NEW,
+      normalizedData: {
+        externalId,
+        sourceReference: "TEST-REF-001",
+        receivedAt: "2026-04-14T00:00:00.000Z",
+        complaintDate: "2026-04-14T11:18:21.000Z",
+        description: "وصف صناعي لا يحتوي بيانات تشغيلية",
+        complainantIdentifier: "1000000000",
+        channel: "مصدر تجريبي",
+        facility: "منشأة تجريبية",
+        region: "منطقة تجريبية",
+        department: "إدارة تجريبية",
+        resolution: "إجراء متخذ تجريبي",
+        status: ComplaintStatus.NEW,
+        priority: ComplaintPriority.MEDIUM,
+      },
+    });
+
+    await confirmReadyImportBatch(batch.id, { client: prisma });
+    const complaint = await prisma.complaint.findFirstOrThrow({ where: { externalId } });
+    const audit = await prisma.auditLog.findFirst({
+      where: { entityId: complaint.id, action: "IMPORT_COMPLAINT_CREATED" },
+    });
+
+    expect(complaint).toMatchObject({
+      externalId,
+      sourceReference: "TEST-REF-001",
+      complainantIdentifier: "1000000000",
+      channel: "مصدر تجريبي",
+      facility: "منشأة تجريبية",
+      region: "منطقة تجريبية",
+      department: "إدارة تجريبية",
+      resolution: "إجراء متخذ تجريبي",
+      description: "وصف صناعي لا يحتوي بيانات تشغيلية",
+      subject: "وصف صناعي لا يحتوي بيانات تشغيلية",
+    });
+    expect(JSON.stringify(audit?.metadata ?? {})).not.toContain("1000000000");
+  });
 });

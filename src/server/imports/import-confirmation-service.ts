@@ -12,6 +12,7 @@ import { db } from "@/lib/db";
 import { writeAuditLog, AUDIT_ACTOR_SINGLE_ADMIN } from "@/server/audit/audit-log-service";
 import { assertClosedAtMatchesStatus } from "@/server/complaints/status";
 import { calculateRowCounters } from "./import-batch-service";
+import { deriveSubject } from "./subject-derive";
 
 const CONFIRMABLE_ACTIONS = new Set<ImportRowAction>([
   ImportRowAction.NEW,
@@ -30,6 +31,9 @@ const SNAPSHOT_FIELDS = [
   "status",
   "subject",
   "description",
+  "complainantName",
+  "complainantIdentifier",
+  "complainantPhone",
   "region",
   "facility",
   "department",
@@ -57,6 +61,9 @@ type NormalizedConfirmationRow = {
   status?: ComplaintStatus | null;
   subject?: string | null;
   description?: string | null;
+  complainantName?: string | null;
+  complainantIdentifier?: string | null;
+  complainantPhone?: string | null;
   region?: string | null;
   facility?: string | null;
   department?: string | null;
@@ -220,6 +227,9 @@ function parseNormalizedRow(row: ConfirmationRow): NormalizedConfirmationRow {
     status: parseStatus(data.status),
     subject: parseText(data.subject),
     description: parseText(data.description),
+    complainantName: parseText(data.complainantName),
+    complainantIdentifier: parseText(data.complainantIdentifier),
+    complainantPhone: parseText(data.complainantPhone),
     region: parseText(data.region),
     facility: parseText(data.facility),
     department: parseText(data.department),
@@ -341,8 +351,13 @@ async function applyNewRow(
       dueDate: normalized.dueDate ?? null,
       closedAt,
       status,
-      subject: normalized.subject ?? normalized.description ?? "بدون موضوع",
+      subject:
+        normalized.subject?.trim() ||
+        (normalized.description ? deriveSubject(normalized.description) : "بدون موضوع"),
       description: normalized.description ?? null,
+      complainantName: normalized.complainantName ?? null,
+      complainantIdentifier: normalized.complainantIdentifier ?? null,
+      complainantPhone: normalized.complainantPhone ?? null,
       region: normalized.region ?? null,
       facility: normalized.facility ?? null,
       department: normalized.department ?? null,
@@ -414,8 +429,16 @@ function assignImportUpdateFields(
   assignIfDefined(data, "dueDate", normalized.dueDate);
   assignIfDefined(data, "closedAt", normalized.closedAt);
   assignIfDefined(data, "status", normalized.status === null ? current.status : normalized.status);
-  assignIfDefined(data, "subject", normalized.subject || undefined);
+  assignIfDefined(
+    data,
+    "subject",
+    normalized.subject?.trim() ||
+      (normalized.description ? deriveSubject(normalized.description) : undefined)
+  );
   assignIfDefined(data, "description", normalized.description);
+  assignIfDefined(data, "complainantName", normalized.complainantName);
+  assignIfDefined(data, "complainantIdentifier", normalized.complainantIdentifier);
+  assignIfDefined(data, "complainantPhone", normalized.complainantPhone);
   assignIfDefined(data, "region", normalized.region);
   assignIfDefined(data, "facility", normalized.facility);
   assignIfDefined(data, "department", normalized.department);
@@ -644,6 +667,9 @@ function restoreSnapshotData(beforeData: Prisma.JsonValue | null): Prisma.Compla
     status: restoreRequiredStatusField(data, "status"),
     subject: restoreRequiredTextField(data, "subject"),
     description: restoreOptionalTextField(data, "description"),
+    complainantName: restoreOptionalTextField(data, "complainantName"),
+    complainantIdentifier: restoreOptionalTextField(data, "complainantIdentifier"),
+    complainantPhone: restoreOptionalTextField(data, "complainantPhone"),
     region: restoreOptionalTextField(data, "region"),
     facility: restoreOptionalTextField(data, "facility"),
     department: restoreOptionalTextField(data, "department"),

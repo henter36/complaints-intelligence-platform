@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { ImportRowAction, ImportRowValidationStatus, type Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
+import { maskIdentifier } from "@/server/imports/privacy";
 
 type RouteContext = {
   params: Promise<{ batchId: string }>;
@@ -18,9 +19,15 @@ function parsePage(value: string | null): number {
 function maskSensitivePreview(value: unknown): unknown {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const record = { ...(value as Record<string, unknown>) };
-  if (record.complainantIdentifier) record.complainantIdentifier = "***";
-  if (record.complainantPhone) record.complainantPhone = "***";
-  if (record.complainantName) record.complainantName = "***";
+  if (typeof record.complainantIdentifier === "string") {
+    record.complainantIdentifier = maskIdentifier(record.complainantIdentifier);
+  }
+  if (typeof record.complainantPhone === "string" && record.complainantPhone.trim()) {
+    record.complainantPhone = "***";
+  }
+  if (typeof record.complainantName === "string" && record.complainantName.trim()) {
+    record.complainantName = "***";
+  }
   return record;
 }
 

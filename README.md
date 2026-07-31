@@ -85,6 +85,49 @@ Phase 4 accepts `.xlsx` files only. The server validates extension, MIME type, Z
 
 The parser uses `jszip` and `fast-xml-parser` to read OOXML XML parts directly. It does not evaluate formulas, macros, or external links.
 
+### Operational Arabic workbook support
+
+The importer auto-maps common Arabic operational headers without requiring the user to rename columns. Examples:
+
+| Excel header | System field |
+| --- | --- |
+| رقم الشكوى | `externalId` |
+| المُعرف / المعرف | `sourceReference` |
+| هوية السجين | `complainantIdentifier` (masked in preview) |
+| تاريخ التسجيل | `receivedAt` |
+| تاريخ الإنشاء | `complaintDate` |
+| الوصف | `description` |
+| السجن | `facility` |
+| المنطقة | `region` |
+| القسم | `department` |
+| المصدر | `channel` |
+| الحالة | `status` (unknown source labels warn and default to `NEW`) |
+| تصنيف | classification name lookup (never auto-created) |
+| الإجراء المتخذ | `resolution` |
+
+Arabic header matching strips diacritics/tatweel, folds alef/ya/ta-marbuta variants, collapses whitespace, and case-folds English synonyms. Unmapped columns remain in `rawData` with a non-blocking warning.
+
+**Dates:** Excel serial numbers such as `46126` and fractional values like `46126.47108796296` are parsed as Excel epoch dates (UTC), not Unix timestamps. `آخر تحديث في` is never used as complaint/received date.
+
+**Identity priority:** `externalId` from `رقم الشكوى` wins over `sourceReference` from `المُعرف`. Complainant national IDs are never used as complaint identity or fingerprints.
+
+**Subject policy:** either `subject` or `description` satisfies text requirements. When the database requires `subject` and only `description` is present, the importer derives a deterministic truncated subject (no AI).
+
+**Row limits:** `IMPORT_MAX_ROWS` counts non-empty data rows only (header and trailing/formatting empty rows are excluded).
+
+**Privacy:** preview and row APIs return masked complainant identifiers (for example `1000000000` → `******0000`). Full identifiers are not placed in public errors, CSV error reports, audit metadata, or AI payloads.
+
+**Duplicates:** same `externalId` inside one workbook blocks confirmation; re-import with no meaningful field changes yields `NO_CHANGE`, while allowed field changes yield `UPDATE`.
+
+Synthetic example only:
+
+```text
+رقم الشكوى = COMP/TEST-001
+المُعرف = TEST-REF-001
+تاريخ التسجيل = 46126
+الوصف = وصف صناعي لا يحتوي بيانات تشغيلية
+```
+
 ## Import Confirmation
 
 Phase 5 confirms batches only from `READY_FOR_CONFIRMATION`. Confirmation runs transactionally, creates `NEW` complaints, updates `UPDATE` complaints with optimistic preview-version checks, skips `NO_CHANGE` and `DUPLICATE`, and blocks any batch containing rejected or invalid rows. Rollback uses immutable `ImportChangeSnapshot` records and refuses to proceed if complaints changed after confirmation.

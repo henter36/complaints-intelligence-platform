@@ -134,7 +134,7 @@ describe("secure xlsx import parsing", () => {
   });
 
   it("keeps formulas as unsafe values for row validation", () => {
-    const mapping = matchComplaintColumns(["رقم الشكوى", "تاريخ الشكوى", "الموضوع"]);
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ الشكوى", "الموضوع"]);
     const result = normalizeImportRow(
       {
         rowNumber: 2,
@@ -155,7 +155,7 @@ describe("secure xlsx import parsing", () => {
   });
 
   it("validates required mapped columns", () => {
-    const mapping = matchComplaintColumns(["رقم الشكوى", "الموضوع"]);
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "الموضوع"]);
 
     expect(() => validateColumnMapping(mapping)).toThrow(/تاريخ/);
   });
@@ -179,7 +179,7 @@ describe("secure xlsx import parsing", () => {
     expect(parseColumnMapping({})).toBeUndefined();
     expect(parseColumnMapping({ "   ": "externalId" })).toBeUndefined();
 
-    const mapping = matchComplaintColumns(["رقم الشكوى", "تاريخ الشكوى", "الموضوع"]);
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ الشكوى", "الموضوع"]);
 
     expect(mapping).toMatchObject({
       "رقم الشكوى": "externalId",
@@ -223,7 +223,7 @@ describe("secure xlsx import parsing", () => {
 
   it("resolves caller mapping before stored mapping and auto matching", () => {
     const headers = ["رقم الشكوى", "الرقم المرجعي", "تاريخ الشكوى", "الموضوع"];
-    const mapping = resolveEffectiveColumnMapping({
+    const { columnMapping } = resolveEffectiveColumnMapping({
       headers,
       callerMapping: {
         "الرقم المرجعي": "sourceReference",
@@ -237,16 +237,16 @@ describe("secure xlsx import parsing", () => {
       },
     });
 
-    expect(mapping).toMatchObject({
+    expect(columnMapping).toMatchObject({
       "الرقم المرجعي": "sourceReference",
       "تاريخ الشكوى": "complaintDate",
       "الموضوع": "subject",
     });
-    expect(mapping).not.toHaveProperty("رقم الشكوى");
+    expect(columnMapping).not.toHaveProperty("رقم الشكوى");
   });
 
   it("falls back from empty caller mapping to stored mapping", () => {
-    const mapping = resolveEffectiveColumnMapping({
+    const { columnMapping } = resolveEffectiveColumnMapping({
       headers: ["رقم الشكوى", "تاريخ الشكوى", "الموضوع"],
       callerMapping: {},
       storedMapping: {
@@ -256,7 +256,7 @@ describe("secure xlsx import parsing", () => {
       },
     });
 
-    expect(mapping).toMatchObject({
+    expect(columnMapping).toMatchObject({
       "رقم الشكوى": "externalId",
       "تاريخ الشكوى": "complaintDate",
       "الموضوع": "subject",
@@ -264,13 +264,13 @@ describe("secure xlsx import parsing", () => {
   });
 
   it("falls back from empty caller and stored mappings to workbook header matching", () => {
-    const mapping = resolveEffectiveColumnMapping({
+    const { columnMapping } = resolveEffectiveColumnMapping({
       headers: ["رقم الشكوى", "تاريخ الشكوى", "الموضوع"],
       callerMapping: {},
       storedMapping: {},
     });
 
-    expect(mapping).toMatchObject({
+    expect(columnMapping).toMatchObject({
       "رقم الشكوى": "externalId",
       "تاريخ الشكوى": "complaintDate",
       "الموضوع": "subject",
@@ -312,8 +312,8 @@ describe("secure xlsx import parsing", () => {
     expect(normalizeDateCell("04-03-2024")).toBeUndefined();
   });
 
-  it("rejects inherited enum-like properties", () => {
-    const mapping = matchComplaintColumns(["رقم الشكوى", "تاريخ الشكوى", "الموضوع", "الحالة", "الأولوية"]);
+  it("warns on unknown source status and rejects unsupported priority", () => {
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ الشكوى", "الموضوع", "الحالة", "الأولوية"]);
     const result = normalizeImportRow({
       rowNumber: 2,
       values: {
@@ -325,8 +325,11 @@ describe("secure xlsx import parsing", () => {
       },
     }, mapping);
 
+    expect(result.warnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "UNKNOWN_SOURCE_STATUS" }),
+    ]));
+    expect(result.normalized.status).toBe(ComplaintStatus.NEW);
     expect(result.errors).toEqual(expect.arrayContaining([
-      expect.objectContaining({ code: "INVALID_STATUS" }),
       expect.objectContaining({ code: "INVALID_PRIORITY" }),
     ]));
   });
@@ -518,7 +521,7 @@ describe("secure xlsx import parsing", () => {
       }],
     };
 
-    const messages = validateNormalizedComplaintRow({
+    const { errors, warnings } = validateNormalizedComplaintRow({
       status: ComplaintStatus.OPEN,
       closedAt: new Date("2026-07-01T00:00:00Z"),
       subject: "س".repeat(301),
@@ -526,11 +529,13 @@ describe("secure xlsx import parsing", () => {
       classification: "غير موجود",
     }, taxonomy, new Date("2026-07-01T00:00:00Z"));
 
-    expect(messages.map((message) => message.code)).toEqual(expect.arrayContaining([
+    expect(errors.map((message) => message.code)).toEqual(expect.arrayContaining([
       "MISSING_IDENTITY",
       "MISSING_COMPLAINT_DATE",
       "CLOSED_AT_FOR_OPEN_STATUS",
       "SUBJECT_TOO_LONG",
+    ]));
+    expect(warnings.map((message) => message.code)).toEqual(expect.arrayContaining([
       "CATEGORY_NOT_FOUND",
       "CLASSIFICATION_NOT_FOUND",
     ]));

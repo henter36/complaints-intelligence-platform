@@ -184,9 +184,6 @@ function readSheetRowsFromWorksheet(
 ): Array<Record<number, CellValue>> {
   const limits = getImportLimits();
   const rows = toArray(worksheet.worksheet?.sheetData?.row);
-  if (enforceLimits && rows.length - 1 > limits.maxRows) {
-    throw new ImportValidationError("IMPORT_TOO_MANY_ROWS", "عدد الصفوف يتجاوز الحد المسموح", 422);
-  }
 
   return rows.map((row) => {
     const cells: Record<number, CellValue> = {};
@@ -261,6 +258,11 @@ export async function parseXlsxWorkbook(buffer: Buffer): Promise<ParsedWorkbook>
 
   if (!headerRow) {
     throw new ImportValidationError("IMPORT_EMPTY_WORKBOOK", "ملف Excel لا يحتوي صف عناوين", 422);
+  }
+
+  const dataRowCount = nonEmptyRows.length - 1;
+  if (dataRowCount > limits.maxRows) {
+    throw new ImportValidationError("IMPORT_TOO_MANY_ROWS", "عدد الصفوف يتجاوز الحد المسموح", 422);
   }
 
   const headerIndexes = Object.keys(headerRow).map(Number).sort((left, right) => left - right);
