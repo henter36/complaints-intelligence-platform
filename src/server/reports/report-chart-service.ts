@@ -37,9 +37,7 @@ const OTHER_STYLE: SeriesStyle = { color: "#6b7280", dash: "5,3", width: 1.5 };
 let fontBase64: string | null = null;
 
 function loadFontBase64(): string {
-  if (fontBase64 === null) {
-    fontBase64 = fs.readFileSync(FONT_REGULAR_PATH).toString("base64");
-  }
+  fontBase64 ??= fs.readFileSync(FONT_REGULAR_PATH).toString("base64");
   return fontBase64;
 }
 
@@ -48,14 +46,15 @@ function seriesStyle(index: number, isOther: boolean): SeriesStyle {
   return SERIES_STYLES[index % SERIES_STYLES.length];
 }
 
-/** Escapes text for safe inclusion in SVG text nodes. */
-function escapeXml(value: string): string {
+/** Escapes text for safe inclusion in SVG text nodes and attributes.
+ * `&` must be replaced first to avoid double-escaping the entities below it. */
+export function escapeXml(value: string): string {
   return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&apos;");
 }
 
 /** Chooses a "nice" upper bound and tick step for the Y axis. */
@@ -129,9 +128,7 @@ function renderAxes(geo: ChartGeometry, yTicks: number[], yMax: number, dates: s
   const parts: string[] = [];
   // Axis lines.
   parts.push(
-    `<line x1="${geo.plotLeft}" y1="${geo.plotTop}" x2="${geo.plotLeft}" y2="${geo.plotBottom}" stroke="#94a3b8" stroke-width="1"/>`
-  );
-  parts.push(
+    `<line x1="${geo.plotLeft}" y1="${geo.plotTop}" x2="${geo.plotLeft}" y2="${geo.plotBottom}" stroke="#94a3b8" stroke-width="1"/>`,
     `<line x1="${geo.plotLeft}" y1="${geo.plotBottom}" x2="${geo.plotRight}" y2="${geo.plotBottom}" stroke="#94a3b8" stroke-width="1"/>`
   );
 
@@ -139,9 +136,7 @@ function renderAxes(geo: ChartGeometry, yTicks: number[], yMax: number, dates: s
   for (const tick of yTicks) {
     const y = yForValue(geo, tick, yMax);
     parts.push(
-      `<line x1="${geo.plotLeft}" y1="${y}" x2="${geo.plotRight}" y2="${y}" stroke="#eef2f7" stroke-width="1"/>`
-    );
-    parts.push(
+      `<line x1="${geo.plotLeft}" y1="${y}" x2="${geo.plotRight}" y2="${y}" stroke="#eef2f7" stroke-width="1"/>`,
       `<text x="${geo.plotRight + 6}" y="${y + 4}" text-anchor="start" font-size="10" fill="#475569">${tick}</text>`
     );
   }
@@ -203,9 +198,7 @@ function renderLegend(section: ReportChartSection, width: number, legendTop: num
     const lineY = currentY + 6;
     const dashAttr = style.dash === "0" ? "" : ` stroke-dasharray="${style.dash}"`;
     parts.push(
-      `<line x1="${currentX - swatchWidth}" y1="${lineY}" x2="${currentX}" y2="${lineY}" stroke="${style.color}" stroke-width="${style.width}"${dashAttr}/>`
-    );
-    parts.push(
+      `<line x1="${currentX - swatchWidth}" y1="${lineY}" x2="${currentX}" y2="${lineY}" stroke="${style.color}" stroke-width="${style.width}"${dashAttr}/>`,
       `<text x="${currentX - swatchWidth - 4}" y="${lineY + 4}" text-anchor="end" font-size="10" fill="#334155" direction="rtl">${escapeXml(series.name)}</text>`
     );
     currentX -= columnWidth;
@@ -256,8 +249,7 @@ export async function renderLineChartPng(
   const width = Math.max(MIN_CHART_WIDTH, Math.round(widthPx));
   const height = Math.max(MIN_CHART_HEIGHT, Math.round(heightPx));
 
-  const hasData =
-    section.series.length > 0 && section.series.some((series) => series.points.length > 0);
+  const hasData = section.series.some((series) => series.points.length > 0);
   const svg = hasData ? buildChartSvg(section, width, height) : emptyChartSvg(section, width, height);
 
   try {

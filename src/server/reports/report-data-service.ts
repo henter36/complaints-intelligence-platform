@@ -409,48 +409,44 @@ async function buildExecutiveSummary(request: ReportRequest, mode: "preview" | "
     });
   }
 
-  // 4. Region trend chart.
-  sections.push(regionTrendChartSection(comparison.regionTrend));
-
-  // 5. Region change table.
-  sections.push({
-    id: "region_changes",
-    kind: "table",
-    title: "التغير في عدد الشكاوى حسب المنطقة",
-    table: regionChangesTable(comparison.regionChanges),
-  });
-
-  // 6. Department + classification rises table.
-  sections.push({
-    id: "dept_class_rises",
-    kind: "table",
-    title: "الإدارات والتصنيفات التي شهدت ارتفاعًا عن الأسبوع السابق",
-    table: deptClassRisesTable(comparison.deptClassRises, comparison.deptClassRises.length),
-  });
-
-  // 7-9. Top regions / departments / classifications (executive column set).
-  sections.push({
-    id: "top_regions",
-    kind: "table",
-    title: "أعلى المناطق",
-    table: groupTableExecutive("top_regions", "أعلى المناطق", topGroups(result.distributions.byRegion)),
-  });
-  sections.push({
-    id: "top_departments",
-    kind: "table",
-    title: "أعلى الإدارات",
-    table: groupTableExecutive("top_departments", "أعلى الإدارات", topGroups(result.distributions.byDepartment)),
-  });
-  sections.push({
-    id: "top_classifications",
-    kind: "table",
-    title: "أعلى التصنيفات",
-    table: groupTableExecutive(
-      "top_classifications",
-      "أعلى التصنيفات",
-      topGroups(result.distributions.byClassification)
-    ),
-  });
+  // 4-9. Region trend + change + rises + top groups (always present in executive summary).
+  sections.push(
+    regionTrendChartSection(comparison.regionTrend),
+    {
+      id: "region_changes",
+      kind: "table" as const,
+      title: "التغير في عدد الشكاوى حسب المنطقة",
+      table: regionChangesTable(comparison.regionChanges),
+    },
+    {
+      id: "dept_class_rises",
+      kind: "table" as const,
+      title: "الإدارات والتصنيفات التي شهدت ارتفاعًا عن الأسبوع السابق",
+      table: deptClassRisesTable(comparison.deptClassRises, comparison.deptClassRises.length),
+    },
+    {
+      id: "top_regions",
+      kind: "table" as const,
+      title: "أعلى المناطق",
+      table: groupTableExecutive("top_regions", "أعلى المناطق", topGroups(result.distributions.byRegion)),
+    },
+    {
+      id: "top_departments",
+      kind: "table" as const,
+      title: "أعلى الإدارات",
+      table: groupTableExecutive("top_departments", "أعلى الإدارات", topGroups(result.distributions.byDepartment)),
+    },
+    {
+      id: "top_classifications",
+      kind: "table" as const,
+      title: "أعلى التصنيفات",
+      table: groupTableExecutive(
+        "top_classifications",
+        "أعلى التصنيفات",
+        topGroups(result.distributions.byClassification)
+      ),
+    }
+  );
 
   // 10. Optional overdue table.
   if (options.includeDetailedRows) {

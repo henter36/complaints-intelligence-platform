@@ -276,14 +276,14 @@ function renderCoverPage(doc: PDFKit.PDFDocument, data: ReportData, logo: Buffer
 
   // Mini KPI overview on the cover (4 per row).
   const kpiSection = data.sections.find((section) => section.kind === "kpi");
-  if (kpiSection && kpiSection.kind === "kpi") {
+  if (kpiSection?.kind === "kpi") {
     drawSectionTitle(doc, "لمحة سريعة");
     drawKpiGrid(doc, kpiSection.cards, 4);
   }
 
   // Executive summary bullet points on the cover.
   const textSection = data.sections.find((section) => section.kind === "text");
-  if (textSection && textSection.kind === "text") {
+  if (textSection?.kind === "text") {
     doc.moveDown(0.4);
     drawTextSection(doc, textSection);
   }
@@ -350,7 +350,7 @@ function drawTextSection(doc: PDFKit.PDFDocument, section: ReportTextSection): v
   drawSectionTitle(doc, section.title);
   doc.font("Body").fontSize(10.5).fillColor("#1f2937");
   for (const point of section.points) {
-    if (!point || !point.trim()) continue;
+    if (!point?.trim()) continue;
     ensureSpace(doc, 18);
     doc.text(`•  ${point}`, PAGE_MARGIN + 8, doc.y, { width: CONTENT_WIDTH - 8, align: "right" });
     doc.moveDown(0.2);
@@ -478,7 +478,7 @@ function computeColumnWidths(columns: ReportTableColumn[]): number[] {
   }
 
   const flexWidth = Math.max(COL_MIN_TEXT_WIDTH, remaining / flexCount);
-  return widths.map((width) => (width === null ? flexWidth : width));
+  return widths.map((width) => width ?? flexWidth);
 }
 
 /** Estimates the number of wrapped lines a cell will need (capped at max). */

@@ -227,7 +227,7 @@ describe("DeptClassRiseRow", () => {
       []
     );
     // Two distinct classifications under the same dept -> two rows.
-    expect(rows.length).toBe(2);
+    expect(rows).toHaveLength(2);
   });
 
   it("does not merge two depts with the same-looking name but different id-bearing rows", async () => {
@@ -274,7 +274,7 @@ describe("DeptClassRiseRow", () => {
     );
     const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
     // Only the fully-specified row survives.
-    expect(result.deptClassRises.length).toBe(1);
+    expect(result.deptClassRises).toHaveLength(1);
     const codes = result.warnings.map((w) => w.code);
     expect(codes).toContain("MISSING_DEPARTMENT");
     expect(codes).toContain("MISSING_CLASSIFICATION");
@@ -285,7 +285,7 @@ describe("DeptClassRiseRow", () => {
       [row({ classificationId: C_HEALTH.id, classification: C_HEALTH })],
       [row({ classificationId: C_HEALTH.id, classification: C_HEALTH }), row({ classificationId: C_HEALTH.id, classification: C_HEALTH })]
     );
-    expect(rows.length).toBe(0);
+    expect(rows).toHaveLength(0);
   });
 
   it("never produces Infinity or NaN in changeRate or contribution", async () => {
@@ -305,7 +305,7 @@ describe("DeptClassRiseRow", () => {
     }
     mockPeriods(current, []);
     const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
-    expect(result.deptClassRises.length).toBe(DEPT_CLASS_RISES_LIMIT);
+    expect(result.deptClassRises).toHaveLength(DEPT_CLASS_RISES_LIMIT);
     expect(result.warnings.some((w) => w.code === "RISES_TRUNCATED")).toBe(true);
   });
 });
@@ -322,15 +322,17 @@ describe("RegionTrendData", () => {
   it("generates a data point for every day including zero-complaint days", async () => {
     const data = await trend([row({ region: R_RIYADH, complaintDate: new Date("2026-07-10T00:00:00Z") })]);
     // FILTERS is 2026-07-08..2026-07-14 inclusive -> 7 days.
-    expect(data.allDates.length).toBe(7);
-    expect(data.series[0].points.length).toBe(7);
-    const zeroDays = data.series[0].points.filter((p) => p.count === 0);
-    expect(zeroDays.length).toBe(6);
+    expect(data.allDates).toHaveLength(7);
+    const [firstSeries] = data.series;
+    expect(firstSeries).toBeDefined();
+    expect(firstSeries!.points).toHaveLength(7);
+    const zeroDays = firstSeries!.points.filter((p) => p.count === 0);
+    expect(zeroDays).toHaveLength(6);
   });
 
   it("single region: one series, no aggregated other", async () => {
     const data = await trend([row({ region: R_RIYADH })]);
-    expect(data.series.length).toBe(1);
+    expect(data.series).toHaveLength(1);
     expect(data.truncated).toBe(false);
     expect(data.otherSeriesName).toBeNull();
   });
@@ -346,7 +348,7 @@ describe("RegionTrendData", () => {
     expect(data.truncated).toBe(true);
     expect(data.otherSeriesName).toBe("مناطق أخرى");
     // 8 named + 1 aggregated = 9 series.
-    expect(data.series.length).toBe(9);
+    expect(data.series).toHaveLength(9);
     const other = data.series.find((s) => s.regionName === "مناطق أخرى")!;
     const otherTotal = other.points.reduce((sum, p) => sum + p.count, 0);
     // The 9th region (index 8) has 1 complaint.
@@ -355,8 +357,8 @@ describe("RegionTrendData", () => {
 
   it("empty data: empty series, allDates spans full period", async () => {
     const data = await trend([]);
-    expect(data.series.length).toBe(0);
-    expect(data.allDates.length).toBe(7);
+    expect(data.series).toHaveLength(0);
+    expect(data.allDates).toHaveLength(7);
   });
 
   it("series sorted by total count descending", async () => {

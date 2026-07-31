@@ -95,10 +95,10 @@ describe("report engine performance (10,000 complaints)", () => {
 
     // PDF generation cost includes: embedding Amiri TTFs (~800KB each),
     // SVG→PNG chart rendering via sharp, and laying out the new comparative
-    // sections. The chart adds ~5–10s on an unloaded machine over the old
-    // 7–9s baseline; the bound is set to 45s to absorb CI/shared-machine
+    // sections. The chart adds ~5-10s on an unloaded machine over the old
+    // 7-9s baseline; the bound is set to 45s to absorb CI/shared-machine
     // contention while still catching genuine regressions (e.g. an accidental
-    // per-row chart re-render).
+    // per-row chart re-render or TTF re-embed).
     const pdfStart = performance.now();
     const execPdf = await renderReportPdf(execData);
     const pdfMs = performance.now() - pdfStart;
