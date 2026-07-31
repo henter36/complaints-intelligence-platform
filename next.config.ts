@@ -3,13 +3,20 @@ import type { NextConfig } from "next";
 // Content Security Policy.
 // unsafe-inline is required by Next.js for its own inline scripts/styles.
 // We document this explicitly and scope it tightly.
+const isDevelopment = process.env.NODE_ENV === "development";
+
+const scriptSrc = [
+  "'self'",
+  "'unsafe-inline'",
+  ...(isDevelopment ? ["'unsafe-eval'"] : []),
+].join(" ");
+
 const csp = [
   "default-src 'self'",
-  // Next.js requires unsafe-inline for inline styles (Tailwind) and scripts
-  // until nonce-based CSP is fully supported in Next.js App Router.
-  "script-src 'self' 'unsafe-inline'",
+  // React and Turbopack require unsafe-eval for development diagnostics only.
+  // Production keeps unsafe-eval disabled.
+  `script-src ${scriptSrc}`,
   "style-src 'self' 'unsafe-inline'",
-  // No eval — prevents code injection
   "script-src-elem 'self' 'unsafe-inline'",
   "connect-src 'self'",
   "img-src 'self' data: blob:",
