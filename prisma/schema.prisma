@@ -65,6 +65,33 @@ enum PeriodType {
   CUSTOM
 }
 
+enum ReportType {
+  EXECUTIVE_SUMMARY
+  DEPARTMENT_PERFORMANCE
+  REGION_FACILITY_PERFORMANCE
+  CLASSIFICATION_ANALYSIS
+  COMPLAINT_DETAIL
+  OVERDUE_COMPLAINTS
+}
+
+enum ReportFormat {
+  PDF
+  XLSX
+}
+
+enum ReportRunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum ReportFrequency {
+  DAILY
+  WEEKLY
+  MONTHLY
+}
+
 model Category {
   id              String           @id @default(cuid())
   nameAr          String           @unique
@@ -338,11 +365,84 @@ model LoginAttempt {
 }
 
 model ReportTemplate {
-  id        String   @id @default(cuid())
-  name      String
-  type      String
-  config    Json
-  createdBy String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id          String           @id @default(cuid())
+  name        String
+  description String?
+  reportType  ReportType
+  filters     Json
+  options     Json
+  isActive    Boolean          @default(true)
+  createdBy   String           @default("single-admin")
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  lastRunAt   DateTime?
+  schedules   ReportSchedule[]
+  runs        ReportRun[]
+
+  @@index([isActive])
+  @@index([reportType])
+}
+
+model ReportSchedule {
+  id               String          @id @default(cuid())
+  reportTemplateId String
+  reportTemplate   ReportTemplate  @relation(fields: [reportTemplateId], references: [id], onDelete: Cascade)
+  frequency        ReportFrequency
+  timeOfDay        String
+  dayOfWeek        Int?
+  dayOfMonth       Int?
+  timezone         String          @default("Asia/Riyadh")
+  isEnabled        Boolean         @default(true)
+  nextRunAt        DateTime
+  lastRunAt        DateTime?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  @@index([isEnabled])
+  @@index([nextRunAt])
+  @@index([reportTemplateId])
+}
+
+model ReportRun {
+  id               String           @id @default(cuid())
+  reportTemplateId String?
+  reportTemplate   ReportTemplate?  @relation(fields: [reportTemplateId], references: [id])
+  reportType       ReportType
+  status           ReportRunStatus  @default(PENDING)
+  requestedBy      String           @default("single-admin")
+  scheduledFor     DateTime?
+  idempotencyKey   String?          @unique
+  startedAt        DateTime?
+  completedAt      DateTime?
+  failedAt         DateTime?
+  filtersSnapshot  Json
+  optionsSnapshot  Json
+  resultSummary    Json?
+  errorCode        String?
+  errorMessage     String?
+  createdAt        DateTime         @default(now())
+  artifacts        ReportArtifact[]
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([reportTemplateId])
+}
+
+model ReportArtifact {
+  id           String       @id @default(cuid())
+  reportRunId  String
+  reportRun    ReportRun    @relation(fields: [reportRunId], references: [id], onDelete: Cascade)
+  format       ReportFormat
+  storageKey   String
+  fileName     String
+  mimeType     String
+  fileSize     Int
+  sha256       String
+  createdAt    DateTime     @default(now())
+  expiresAt    DateTime
+  deletedAt    DateTime?
+
+  @@index([reportRunId])
+  @@index([expiresAt])
+  @@index([deletedAt])
 }

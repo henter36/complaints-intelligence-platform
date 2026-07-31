@@ -1,8 +1,8 @@
 # Complaints Intelligence Platform
 
-Arabic complaints intelligence prototype with Phase 6 complaint explorer and KPI engine.
+Arabic complaints intelligence prototype with a Phase 7 reports, exports, and scheduling engine.
 
-This repository is not production ready. Phase 1 made the codebase buildable and testable. Phase 2 added a normalized single-user complaint/import schema, migration, seed, and domain services. Phase 3 adds single-user administrator login, database-backed sessions, logout, password change, rate limiting, security headers, and API/page protection. Phase 4 adds secure `.xlsx` upload, OOXML parsing, validation, duplicate detection, preview rows, and CSV error reports. Phase 5 adds transactional import confirmation and rollback. Phase 6 adds a central complaint query service, KPI engine, complaint detail/update/status APIs, and safe CSV list export. PDF/XLSX reports and governed AI remain out of scope.
+This repository is not production ready. Phase 1 made the codebase buildable and testable. Phase 2 added a normalized single-user complaint/import schema, migration, seed, and domain services. Phase 3 adds single-user administrator login, database-backed sessions, logout, password change, rate limiting, security headers, and API/page protection. Phase 4 adds secure `.xlsx` upload, OOXML parsing, validation, duplicate detection, preview rows, and CSV error reports. Phase 5 adds transactional import confirmation and rollback. Phase 6 adds a central complaint query service, KPI engine, complaint detail/update/status APIs, and safe CSV list export. Phase 7 adds a central report engine (six governed report types), PDF/XLSX export, saved templates, internal scheduling, and a 90-day artifact retention policy. Governed AI remains out of scope.
 
 ## Current Status
 
@@ -11,8 +11,9 @@ This repository is not production ready. Phase 1 made the codebase buildable and
 - Security: one administrator credential, bcrypt password hashes, hashed session tokens in `AdminSession`, `cip_session` HttpOnly cookie, login rate limiting, logout, password change, and operational API guards.
 - Working: import center can upload `.xlsx`, validate rows, store preview rows, confirm eligible batches, and roll back confirmed batches.
 - Working: complaint explorer can query confirmed active complaints with validated filters, deterministic sorting, pagination, detail APIs, status/update APIs, central KPIs, and safe CSV export.
+- Working: reports center can preview, export PDF/XLSX, save/run templates, schedule recurring runs (daily/weekly/monthly, Asia/Riyadh), browse run history, and download artifacts — all backed by the same KPI/query services as the Dashboard and Analytics screens.
 - Stubbed: AI approval/execution endpoints return `501` until their later phases.
-- Missing: scoped permissions, production database architecture, PDF/XLSX exports, report scheduling, MFA, and external identity providers.
+- Missing: scoped permissions, production database architecture, email delivery of reports, MFA, and external identity providers.
 
 ## Requirements
 
@@ -36,6 +37,11 @@ IMPORT_MAX_COLUMNS="100"
 IMPORT_MAX_SHEETS="5"
 IMPORT_STORAGE_PATH="./storage/imports"
 IMPORT_RETENTION_DAYS="30"
+REPORT_STORAGE_PATH="./storage/reports"
+REPORT_RETENTION_DAYS="90"
+REPORT_MAX_ROWS="10000"
+REPORT_MAX_FILE_SIZE_MB="25"
+INTERNAL_SCHEDULER_SECRET="CHANGE_ME_WITH_AT_LEAST_32_RANDOM_BYTES"
 OPENAI_API_KEY="CHANGE_ME"
 ```
 
@@ -97,6 +103,19 @@ Phase 5 confirms batches only from `READY_FOR_CONFIRMATION`. Confirmation runs t
 
 Phase 6 centralizes complaint filters and KPI definitions. `GET /api/complaints`, `GET /api/dashboard`, `GET /api/analytics`, and `GET /api/complaints/export` share the same query contract. `RESOLVED` and `CLOSED` are operationally closed, `CANCELLED` is terminal but separate, and due-date compliance uses only closed complaints with due dates in its denominator.
 
+## Reports, Exports, And Scheduling
+
+Phase 7 adds a central report engine on top of the Phase 6 `ComplaintQueryService`/`ComplaintKpiService` — no report recomputes a metric independently, so PDF/XLSX/preview numbers always match the Dashboard and Analytics screens for the same filters.
+
+- **Report types**: `EXECUTIVE_SUMMARY`, `DEPARTMENT_PERFORMANCE`, `REGION_FACILITY_PERFORMANCE`, `CLASSIFICATION_ANALYSIS`, `COMPLAINT_DETAIL` (XLSX only, 10,000-row cap, no PII by default), `OVERDUE_COMPLAINTS`.
+- **PDF**: `pdfkit` + the OFL-licensed Amiri font (bundled locally under `src/server/reports/assets/fonts`, full Unicode coverage so Arabic and Latin digits render in the same document), right-aligned RTL layout, page numbers, and a Riyadh-time generation stamp.
+- **XLSX**: `exceljs`, right-to-left sheet views, frozen header row, autofilter, real numeric/date cell types, and formula-injection protection (`=`, `+`, `-`, `@` prefixes are neutralized as literal text).
+- **Templates and scheduling**: `ReportTemplate` stores a reusable filter/option set; `ReportSchedule` computes `nextRunAt` in `Asia/Riyadh` for `DAILY`/`WEEKLY`/`MONTHLY` frequencies (a `MONTHLY` day that doesn't exist in a given month falls back to that month's last day). `POST /api/internal/reports/run-due` executes at most one due schedule per call, is protected by `INTERNAL_SCHEDULER_SECRET` (not the session cookie, constant-time compared), and is idempotent per scheduled slot.
+- **Storage and retention**: generated files are stored outside `public/` under `REPORT_STORAGE_PATH` with random filenames and sha256 checksums; `npm run reports:cleanup` (supports `--dry-run`) removes artifacts past their `REPORT_RETENTION_DAYS` (default 90) expiry and audit-logs each deletion without touching `ReportRun` or `AuditLog` rows.
+- **Local scheduler script**: `npm run reports:run-due` calls the internal endpoint once; run it from an OS-level cron (`INTERNAL_SCHEDULER_SECRET` and, optionally, `APP_BASE_URL` must be set in the environment it runs under).
+
+See `docs/phase-7-reporting-design.md` and `docs/phase-7-completion-report.md` for the full design and results.
+
 ## Documentation
 
 - `docs/current-state-assessment.md`
@@ -111,4 +130,6 @@ Phase 6 centralizes complaint filters and KPI definitions. `GET /api/complaints`
 - `docs/phase-5-completion-report.md`
 - `docs/phase-6-explorer-kpi-design.md`
 - `docs/phase-6-completion-report.md`
+- `docs/phase-7-reporting-design.md`
+- `docs/phase-7-completion-report.md`
 - `docs/roadmap.md`

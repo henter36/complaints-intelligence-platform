@@ -315,13 +315,16 @@ export async function seed(database: PrismaClient = appDb) {
   await db.reportTemplate.create({
     data: {
       name: "ملخص الشكاوى الشهري التجريبي",
-      type: "monthly-summary",
-      config: {
-        periodType: "MONTHLY",
-        periodStart: "2026-07-01",
-        periodEnd: "2026-07-31",
-        sections: ["overview", "statusDistribution", "lateComplaints"],
-        synthetic: true,
+      description: "قالب تجريبي للتقرير التنفيذي الشهري",
+      reportType: "EXECUTIVE_SUMMARY",
+      filters: {
+        from: "2026-07-01",
+        to: "2026-07-31",
+      },
+      options: {
+        includeComparison: true,
+        includeCharts: true,
+        includeDetailedRows: false,
       },
       createdBy: actor,
     },

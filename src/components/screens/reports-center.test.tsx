@@ -1,209 +1,387 @@
+import { act, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  assertReportPaginationWithinLimit,
-  fetchAllComplaintsForReport,
-} from "@/lib/report-complaints";
+  ReportsCenter,
+  buildSupportedFiltersPayload,
+  requiresReportPeriod,
+  resetUnsupportedFilters,
+  supportsFilter,
+  validatePeriod,
+} from "./reports-center";
 
-function complaint(id: string) {
-  return {
-    id,
-    complaintNumber: id,
-    receivedDate: "2026-07-01T00:00:00.000Z",
-    channel: "الهاتف",
-    regionId: null,
-    locationId: null,
-    departmentId: null,
-    classificationId: null,
-    subject: `شكوى ${id}`,
-    description: "",
-    status: "open",
-    priority: "medium",
-    severity: "medium",
-    referralDate: null,
-    firstActionDate: null,
-    closureDate: null,
-    dueDate: null,
-    resolution: null,
-    delayReason: null,
-    isRepeated: false,
-    isValidated: false,
-    beneficiarySatisfaction: null,
-    isPotentialDuplicate: false,
-  };
+function jsonResponse(body: unknown): Response {
+  return { ok: true, json: () => Promise.resolve(body) } as Response;
 }
 
-function mockPagedComplaints(total: number) {
-  const records = Array.from({ length: total }, (_, index) => complaint(`cmp-${index + 1}`));
-  const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-    const url = new URL(String(input), "http://localhost");
-    const page = Number(url.searchParams.get("page"));
-    const pageSize = Number(url.searchParams.get("pageSize"));
-    const start = (page - 1) * pageSize;
-    const data = records.slice(start, start + pageSize);
+function errorResponse(status: number, message: string, code?: string): Response {
+  return {
+    ok: false,
+    status,
+    json: () => Promise.resolve({ error: { message, code } }),
+  } as Response;
+}
 
-    return Response.json({
-      data,
-      total,
-      page,
-      pageSize,
-      totalPages: Math.ceil(total / pageSize),
-    });
+const EXECUTIVE_SUMMARY_DEFINITION = {
+  type: "EXECUTIVE_SUMMARY", title: "التقرير التنفيذي الشامل", description: "وصف",
+  supportedFilters: ["from", "to"], sections: [], defaultColumns: [], maxRows: 500,
+  supportsPdf: true, supportsXlsx: true, requiresPeriod: true,
+};
+
+const DEPARTMENT_PERFORMANCE_DEFINITION = {
+  type: "DEPARTMENT_PERFORMANCE", title: "تقرير أداء الإدارات", description: "وصف",
+  // Deliberately supports "region" but not "department", to test that an
+  // unsupported filter never renders and never reaches the request payload.
+  supportedFilters: ["from", "to", "region"], sections: [], defaultColumns: [], maxRows: 1000,
+  supportsPdf: true, supportsXlsx: true, requiresPeriod: true,
+};
+
+const CLASSIFICATION_DEFINITION = {
+  type: "CLASSIFICATION_ANALYSIS", title: "تقرير التصنيفات", description: "وصف",
+  supportedFilters: ["region"], sections: [], defaultColumns: [], maxRows: 1000,
+  supportsPdf: true, supportsXlsx: true, requiresPeriod: false,
+};
+
+const DEFINITIONS = [EXECUTIVE_SUMMARY_DEFINITION, DEPARTMENT_PERFORMANCE_DEFINITION, CLASSIFICATION_DEFINITION];
+
+const FILTERS_DATA = {
+  regions: [{ id: "riyadh", name: "الرياض" }],
+  departments: [{ id: "support", name: "الدعم الفني" }],
+  facilities: [],
+  classifications: [],
+  channels: [],
+};
+
+function routedFetch(overrides: Record<string, () => Response> = {}) {
+  return vi.fn((input: RequestInfo | URL, _init?: RequestInit) => {
+    const url = String(input);
+    const overrideKey = Object.keys(overrides).find((key) => url.includes(key));
+    if (overrideKey) return Promise.resolve(overrides[overrideKey]());
+    if (url.includes("/api/reports/definitions")) return Promise.resolve(jsonResponse({ definitions: DEFINITIONS }));
+    if (url.includes("/api/filters")) return Promise.resolve(jsonResponse(FILTERS_DATA));
+    if (url.includes("/api/reports/templates")) return Promise.resolve(jsonResponse({ templates: [] }));
+    if (url.includes("/api/reports/schedules")) return Promise.resolve(jsonResponse({ schedules: [] }));
+    if (url.includes("/api/reports/runs")) return Promise.resolve(jsonResponse({ runs: [] }));
+    return Promise.resolve(jsonResponse({}));
   });
-  vi.stubGlobal("fetch", fetchMock);
-  return fetchMock;
 }
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
-describe("fetchAllComplaintsForReport", () => {
-  it.each([
-    [50, 1],
-    [100, 1],
-    [101, 2],
-    [250, 3],
-  ])("loads %i report complaints using paged requests", async (total, expectedRequests) => {
-    const fetchMock = mockPagedComplaints(total);
-    const query = new URLSearchParams("regionId=riyadh&departmentId=er");
+describe("ReportsCenter", () => {
+  it("renders available report type cards from the definitions API", async () => {
+    vi.stubGlobal("fetch", routedFetch());
+    render(<ReportsCenter />);
 
-    const result = await fetchAllComplaintsForReport(query);
-
-    expect(result).toHaveLength(total);
-    expect(fetchMock).toHaveBeenCalledTimes(expectedRequests);
-    for (const [input] of fetchMock.mock.calls) {
-      const url = new URL(String(input), "http://localhost");
-      expect(url.searchParams.get("pageSize")).toBe("100");
-      expect(url.searchParams.get("regionId")).toBe("riyadh");
-      expect(url.searchParams.get("departmentId")).toBe("er");
-      expect(url.searchParams.get("sortBy")).toBe("receivedDate");
-      expect(url.searchParams.get("sortOrder")).toBe("desc");
-      expect(url.searchParams.get("pageSize")).not.toBe(String(10 ** 3));
-    }
+    expect(await screen.findByText("التقرير التنفيذي الشامل")).toBeInTheDocument();
   });
 
-  it("preserves page order and removes duplicate records defensively", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = new URL(String(input), "http://localhost");
-      const page = Number(url.searchParams.get("page"));
+  it("reveals the settings form and export buttons after selecting a report type", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", routedFetch());
+    render(<ReportsCenter />);
 
-      return Response.json({
-        data: page === 1
-          ? [complaint("cmp-1"), complaint("cmp-2")]
-          : [complaint("cmp-2"), complaint("cmp-3")],
-        total: 4,
-        page,
-        pageSize: 100,
-        totalPages: 2,
-      });
+    const card = await screen.findByText("التقرير التنفيذي الشامل");
+    await user.click(card);
+
+    expect(await screen.findByText(/إعدادات التقرير/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /معاينة/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /تصدير PDF/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /تصدير XLSX/ })).toBeInTheDocument();
+  });
+
+  it("shows a report preview after clicking Preview, using a correctly-shaped POST request", async () => {
+    const user = userEvent.setup();
+    const fetchMock = routedFetch({
+      "/api/reports/preview": () =>
+        jsonResponse({
+          report: {
+            type: "EXECUTIVE_SUMMARY",
+            title: "التقرير التنفيذي الشامل",
+            generatedAt: new Date().toISOString(),
+            period: { from: "2026-07-01", to: "2026-07-31" },
+            filters: { from: "2026-07-01", to: "2026-07-31" },
+            sections: [
+              {
+                id: "kpi_overview", kind: "kpi", title: "المؤشرات الرئيسية",
+                cards: [{ key: "total", label: "إجمالي الشكاوى", value: 1240, format: "number" }],
+              },
+            ],
+            warnings: [],
+            rowCount: 0,
+          },
+        }),
     });
     vi.stubGlobal("fetch", fetchMock);
+    render(<ReportsCenter />);
 
-    await expect(fetchAllComplaintsForReport(new URLSearchParams())).resolves.toEqual([
-      complaint("cmp-1"),
-      complaint("cmp-2"),
-      complaint("cmp-3"),
-    ]);
+    const card = await screen.findByText("التقرير التنفيذي الشامل");
+    await user.click(card);
+    const previewButton = screen.getByRole("button", { name: /معاينة/ });
+    await user.click(previewButton);
+
+    expect(await screen.findByText("إجمالي الشكاوى")).toBeInTheDocument();
+
+    const previewCall = fetchMock.mock.calls.find(([input]) => String(input).includes("/api/reports/preview"));
+    expect(previewCall).toBeDefined();
+    const [, init] = previewCall!;
+    expect(init?.method).toBe("POST");
+    expect((init?.headers as Record<string, string>)["Content-Type"]).toBe("application/json");
+    const requestBody = JSON.parse(init?.body as string);
+    expect(requestBody).toMatchObject({
+      type: "EXECUTIVE_SUMMARY",
+      filters: expect.objectContaining({ from: expect.any(String), to: expect.any(String) }),
+      options: expect.any(Object),
+    });
   });
 
-  it("fails the whole report when a later page fails", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = new URL(String(input), "http://localhost");
-      const page = Number(url.searchParams.get("page"));
-      if (page === 2) {
-        return new Response(null, { status: 500 });
+  it("shows an empty state on the Templates tab when none exist", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", routedFetch());
+    render(<ReportsCenter />);
+
+    const templatesTab = await screen.findByRole("tab", { name: /القوالب/ });
+    await user.click(templatesTab);
+
+    expect(await screen.findByText("لا توجد قوالب محفوظة بعد")).toBeInTheDocument();
+  });
+
+  it("shows an empty state on the Run History tab when none exist", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", routedFetch());
+    render(<ReportsCenter />);
+
+    const historyTab = await screen.findByRole("tab", { name: /سجل التشغيلات/ });
+    await user.click(historyTab);
+
+    expect(await screen.findByText("لا توجد تشغيلات بعد")).toBeInTheDocument();
+  });
+
+  it("shows an explicit error state (not an empty list) when the templates request fails with 401", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      routedFetch({ "/api/reports/templates": () => errorResponse(401, "يلزم تسجيل الدخول") })
+    );
+    render(<ReportsCenter />);
+
+    const templatesTab = await screen.findByRole("tab", { name: /القوالب/ });
+    await user.click(templatesTab);
+
+    expect(await screen.findByText("يلزم تسجيل الدخول")).toBeInTheDocument();
+    expect(screen.queryByText("لا توجد قوالب محفوظة بعد")).not.toBeInTheDocument();
+  });
+
+  it("shows an explicit error state when the schedules request fails with 500", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal(
+      "fetch",
+      routedFetch({ "/api/reports/schedules": () => errorResponse(500, "خطأ داخلي في الخادم") })
+    );
+    render(<ReportsCenter />);
+
+    const schedulesTab = await screen.findByRole("tab", { name: /الجداول/ });
+    await user.click(schedulesTab);
+
+    expect(await screen.findByText("خطأ داخلي في الخادم")).toBeInTheDocument();
+  });
+
+  it("retrying after a failed load successfully repopulates the list", async () => {
+    const user = userEvent.setup();
+    let templatesCallCount = 0;
+    vi.stubGlobal(
+      "fetch",
+      routedFetch({
+        "/api/reports/templates": () => {
+          templatesCallCount += 1;
+          return templatesCallCount === 1 ? errorResponse(500, "خطأ داخلي") : jsonResponse({ templates: [] });
+        },
+      })
+    );
+    render(<ReportsCenter />);
+
+    const templatesTab = await screen.findByRole("tab", { name: /القوالب/ });
+    await user.click(templatesTab);
+    expect(await screen.findByText("خطأ داخلي")).toBeInTheDocument();
+
+    const retryButton = screen.getByRole("button", { name: /إعادة المحاولة/ });
+    await user.click(retryButton);
+
+    expect(await screen.findByText("لا توجد قوالب محفوظة بعد")).toBeInTheDocument();
+    expect(templatesCallCount).toBe(2);
+  });
+
+  it("shows an error state (not empty definitions) when the initial load fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      routedFetch({ "/api/reports/definitions": () => errorResponse(500, "تعذر تحميل الأنواع") })
+    );
+    render(<ReportsCenter />);
+
+    expect(await screen.findByText("تعذر تحميل الأنواع")).toBeInTheDocument();
+  });
+
+  it("aborts in-flight initial requests on unmount (never surfaced as an error)", async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const fetchMock = vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/reports/definitions")) {
+        capturedSignal = init?.signal ?? undefined;
+        return new Promise(() => {
+          // never resolves — simulates a slow request outlived by the component
+        });
       }
-
-      return Response.json({
-        data: Array.from({ length: 100 }, (_, index) => complaint(`cmp-${index + 1}`)),
-        total: 101,
-        page,
-        pageSize: 100,
-        totalPages: 2,
-      });
+      if (url.includes("/api/filters")) return Promise.resolve(jsonResponse(FILTERS_DATA));
+      return Promise.resolve(jsonResponse({}));
     });
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(fetchAllComplaintsForReport(new URLSearchParams())).rejects.toThrow(
-      "Failed to load report complaints"
-    );
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-  });
-
-  it("throws TypeError when the complaints response has no data array", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ total: 1 })));
-
-    await expect(fetchAllComplaintsForReport(new URLSearchParams())).rejects.toThrow(TypeError);
-    await expect(fetchAllComplaintsForReport(new URLSearchParams())).rejects.toThrow(
-      "Invalid report complaints response"
-    );
-  });
-
-  it("throws TypeError when the complaints response data is not an array", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ data: { id: "cmp-1" } })));
-
-    await expect(fetchAllComplaintsForReport(new URLSearchParams())).rejects.toThrow(TypeError);
-  });
-
-  it("loads multiple pages when only total metadata is available", async () => {
-    const records = Array.from({ length: 101 }, (_, index) => complaint(`cmp-${index + 1}`));
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = new URL(String(input), "http://localhost");
-      const page = Number(url.searchParams.get("page"));
-      const pageSize = Number(url.searchParams.get("pageSize"));
-      const start = (page - 1) * pageSize;
-
-      return Response.json({
-        data: records.slice(start, start + pageSize),
-        total: records.length,
-        pageSize,
-      });
+    const { unmount } = render(<ReportsCenter />);
+    await act(async () => {
+      await Promise.resolve();
     });
-    vi.stubGlobal("fetch", fetchMock);
+    expect(capturedSignal?.aborted).toBe(false);
 
-    await expect(fetchAllComplaintsForReport(new URLSearchParams())).resolves.toHaveLength(101);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    unmount();
+    expect(capturedSignal?.aborted).toBe(true);
   });
 
-  it("continues without pagination metadata until an empty page terminates loading", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
-      const url = new URL(String(input), "http://localhost");
-      const page = Number(url.searchParams.get("page"));
+  it("only shows filters supported by the selected report type (region shown, department hidden)", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", routedFetch());
+    render(<ReportsCenter />);
 
-      return Response.json({
-        data: page === 1 ? [complaint("cmp-1")] : [],
-      });
+    const card = await screen.findByText("تقرير أداء الإدارات");
+    await user.click(card);
+
+    expect(await screen.findByText(/إعدادات التقرير/)).toBeInTheDocument();
+    expect(screen.getByText("المنطقة")).toBeInTheDocument();
+    expect(screen.queryByText("الإدارة")).not.toBeInTheDocument();
+  });
+
+  it("does not render date filters for a report type that does not require a period", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", routedFetch());
+    const { container } = render(<ReportsCenter />);
+    const card = await screen.findByText("تقرير التصنيفات");
+    await user.click(card);
+
+    expect(await screen.findByText(/إعدادات التقرير/)).toBeInTheDocument();
+    expect(container.querySelectorAll('input[type="date"]')).toHaveLength(0);
+  });
+
+  it("blocks preview when a required period is missing, without calling the preview API", async () => {
+    const user = userEvent.setup();
+    const fetchMock = routedFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const { container } = render(<ReportsCenter />);
+
+    const card = await screen.findByText("التقرير التنفيذي الشامل");
+    await user.click(card);
+
+    const fromInput = container.querySelector('input[type="date"]') as HTMLInputElement;
+    expect(fromInput).toBeTruthy();
+    await user.clear(fromInput);
+
+    const previewButton = screen.getByRole("button", { name: /معاينة/ });
+    await user.click(previewButton);
+    await act(async () => {
+      await Promise.resolve();
     });
-    vi.stubGlobal("fetch", fetchMock);
 
-    await expect(fetchAllComplaintsForReport(new URLSearchParams())).resolves.toEqual([
-      complaint("cmp-1"),
-    ]);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const previewCalls = fetchMock.mock.calls.filter(([input]) => String(input).includes("/api/reports/preview"));
+    expect(previewCalls).toHaveLength(0);
+  });
+});
+
+describe("supportsFilter / requiresReportPeriod", () => {
+  it("reports false for a null definition", () => {
+    expect(supportsFilter(null, "region")).toBe(false);
+    expect(requiresReportPeriod(null)).toBe(false);
   });
 
-  it("throws RangeError when report pagination exceeds the hard page limit", () => {
-    expect(() => assertReportPaginationWithinLimit(10_000)).not.toThrow();
-    expect(() => assertReportPaginationWithinLimit(10_001)).toThrow(RangeError);
+  it("reflects the definition's supportedFilters and requiresPeriod", () => {
+    expect(supportsFilter(DEPARTMENT_PERFORMANCE_DEFINITION as any, "region")).toBe(true);
+    expect(supportsFilter(DEPARTMENT_PERFORMANCE_DEFINITION as any, "department")).toBe(false);
+    expect(requiresReportPeriod(CLASSIFICATION_DEFINITION as any)).toBe(false);
+    expect(requiresReportPeriod(EXECUTIVE_SUMMARY_DEFINITION as any)).toBe(true);
+  });
+});
+
+describe("resetUnsupportedFilters", () => {
+  const baseFilters = {
+    from: "2026-07-01", to: "2026-07-31", region: "riyadh", department: "support", facility: "all",
+    classificationId: "all", priority: "all", severity: "all", channel: "all", status: "all",
+  };
+
+  it("clears a filter the new report type does not support", () => {
+    const next = resetUnsupportedFilters(baseFilters, DEPARTMENT_PERFORMANCE_DEFINITION as any);
+    expect(next.region).toBe("riyadh"); // supported, preserved
+    expect(next.department).toBe("all"); // not supported, cleared
   });
 
-  it("stops before requesting another page when aborted", async () => {
-    const controller = new AbortController();
-    const fetchMock = vi.fn(async () => {
-      controller.abort();
-      return Response.json({
-        data: [complaint("cmp-1")],
-        total: 250,
-        page: 1,
-        pageSize: 100,
-        totalPages: 3,
-      });
-    });
-    vi.stubGlobal("fetch", fetchMock);
+  it("clears the period when switching to a type that doesn't require one", () => {
+    const next = resetUnsupportedFilters(baseFilters, CLASSIFICATION_DEFINITION as any);
+    expect(next.from).toBe("");
+    expect(next.to).toBe("");
+  });
 
-    await expect(fetchAllComplaintsForReport(new URLSearchParams(), controller.signal)).rejects.toThrow(
-      "Report complaints request was aborted"
-    );
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+  it("keeps or restores a sane period when switching to a type that requires one", () => {
+    const next = resetUnsupportedFilters({ ...baseFilters, from: "", to: "" }, EXECUTIVE_SUMMARY_DEFINITION as any);
+    expect(next.from).not.toBe("");
+    expect(next.to).not.toBe("");
+  });
+});
+
+describe("buildSupportedFiltersPayload", () => {
+  const filters = {
+    from: "2026-07-01", to: "2026-07-31", region: "riyadh", department: "support", facility: "all",
+    classificationId: "all", priority: "all", severity: "all", channel: "all", status: "all",
+  };
+
+  it("omits an unsupported filter from the payload even though it holds a real value", () => {
+    const payload = buildSupportedFiltersPayload(filters, DEPARTMENT_PERFORMANCE_DEFINITION as any);
+    expect(payload.region).toBe("riyadh");
+    expect(payload).not.toHaveProperty("department");
+  });
+
+  it("omits from/to entirely when the report type does not require a period", () => {
+    const payload = buildSupportedFiltersPayload(filters, CLASSIFICATION_DEFINITION as any);
+    expect(payload).not.toHaveProperty("from");
+    expect(payload).not.toHaveProperty("to");
+  });
+
+  it("includes from/to when the report type requires a period", () => {
+    const payload = buildSupportedFiltersPayload(filters, EXECUTIVE_SUMMARY_DEFINITION as any);
+    expect(payload.from).toBe("2026-07-01");
+    expect(payload.to).toBe("2026-07-31");
+  });
+});
+
+describe("validatePeriod", () => {
+  const filters = {
+    from: "2026-07-01", to: "2026-07-31", region: "all", department: "all", facility: "all",
+    classificationId: "all", priority: "all", severity: "all", channel: "all", status: "all",
+  };
+
+  it("requires from/to for a report type that needs a period", () => {
+    expect(validatePeriod(EXECUTIVE_SUMMARY_DEFINITION as any, { ...filters, from: "" })).toMatch(/الفترة/);
+  });
+
+  it("rejects from > to", () => {
+    expect(
+      validatePeriod(EXECUTIVE_SUMMARY_DEFINITION as any, { ...filters, from: "2026-08-01", to: "2026-07-01" })
+    ).toMatch(/تاريخ البداية/);
+  });
+
+  it("does not require a period for a report type that doesn't need one", () => {
+    expect(validatePeriod(CLASSIFICATION_DEFINITION as any, { ...filters, from: "", to: "" })).toBeNull();
+  });
+
+  it("passes for a valid period", () => {
+    expect(validatePeriod(EXECUTIVE_SUMMARY_DEFINITION as any, filters)).toBeNull();
   });
 });
