@@ -479,11 +479,26 @@ export function resolveEffectiveColumnMapping(input: {
     conflicts = matched.conflicts;
   }
 
-  validateColumnMapping(columnMapping, input.headers);
   const mappingAnalysis = analyzeColumnMapping([...input.headers], columnMapping, {
     conflicts,
     manuallyMapped,
   });
+
+  try {
+    validateColumnMapping(columnMapping, input.headers);
+  } catch (error) {
+    if (
+      error instanceof ImportValidationError &&
+      error.code === "IMPORT_REQUIRED_COLUMNS_MISSING"
+    ) {
+      throw new ImportValidationError(error.code, error.message, error.status, {
+        ...error.details,
+        missingRequiredFields: mappingAnalysis.missingRequiredFields,
+        mappingAnalysis,
+      });
+    }
+    throw error;
+  }
 
   return { columnMapping, mappingAnalysis, manuallyMapped };
 }

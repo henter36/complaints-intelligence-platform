@@ -315,7 +315,8 @@ function collectCrossFieldWarnings(normalized: NormalizedComplaintRow): RowMessa
 
 function applyResolutionFallback(
   target: NormalizedComplaintRow,
-  rawRow: RawImportRow
+  rawRow: RawImportRow,
+  errors: RowMessage[]
 ): void {
   if (target.resolution) return;
 
@@ -325,6 +326,15 @@ function applyResolutionFallback(
       (candidate) => normalizeColumnHeader(candidate) === normalizedHeader
     );
     if (!isFallback) continue;
+
+    if (isFormulaLikeValue(value)) {
+      errors.push({
+        field: "resolution",
+        code: "FORMULA_NOT_ALLOWED",
+        message: "لا يسمح باستخدام صيغ Excel في حقول الاستيراد",
+      });
+      continue;
+    }
 
     const text = normalizeTextCell(value);
     if (text) {
@@ -363,7 +373,7 @@ export function normalizeImportRow(
     normalizeMappedField(normalized, field, value, errors, warnings, rawRow.rowNumber);
   }
 
-  applyResolutionFallback(normalized, rawRow);
+  applyResolutionFallback(normalized, rawRow, errors);
   applyDerivedSubject(normalized);
 
   if (!normalized.status) normalized.status = ComplaintStatus.NEW;

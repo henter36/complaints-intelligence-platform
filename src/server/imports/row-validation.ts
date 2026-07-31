@@ -130,7 +130,11 @@ function validateTaxonomy(row: NormalizedComplaintRow, lookup: TaxonomyLookup): 
   let clearClassification = false;
 
   const categories = findCategories(row, lookup);
-  if (row.category && categories.length === 0) {
+  const classifications = findClassifications(row, lookup);
+  const categoryPresent = Boolean(row.category?.trim());
+  const classificationPresent = Boolean(row.classification?.trim());
+
+  if (categoryPresent && categories.length === 0) {
     warnings.push({
       field: "category",
       code: "CATEGORY_NOT_FOUND",
@@ -146,8 +150,7 @@ function validateTaxonomy(row: NormalizedComplaintRow, lookup: TaxonomyLookup): 
     clearCategory = true;
   }
 
-  const classifications = findClassifications(row, lookup);
-  if (row.classification && classifications.length === 0) {
+  if (classificationPresent && classifications.length === 0) {
     warnings.push({
       field: "classification",
       code: "CLASSIFICATION_NOT_FOUND",
@@ -163,8 +166,20 @@ function validateTaxonomy(row: NormalizedComplaintRow, lookup: TaxonomyLookup): 
     clearClassification = true;
   }
 
-  const category = categories.length === 1 ? categories[0] : null;
-  const classification = classifications.length === 1 ? classifications[0] : null;
+  const categoryUnresolved = categoryPresent && (clearCategory || categories.length !== 1);
+  const category = !clearCategory && categories.length === 1 ? categories[0] : null;
+  const classification = !clearClassification && classifications.length === 1 ? classifications[0] : null;
+
+  // When a source category exists but is unresolved, do not adopt a lone classification
+  // (avoids silently attaching a different parent category).
+  if (categoryUnresolved && classificationPresent && !clearClassification) {
+    warnings.push({
+      field: "classification",
+      code: "CLASSIFICATION_PARENT_UNRESOLVED",
+      message: "تعذر اعتماد التصنيف لأن الفئة المصدرية غير محسومة، وتم الاحتفاظ بالقيمة ضمن البيانات الأصلية.",
+    });
+    clearClassification = true;
+  }
 
   if (category && classification && classification.categoryId !== category.id) {
     errors.push({
@@ -172,6 +187,7 @@ function validateTaxonomy(row: NormalizedComplaintRow, lookup: TaxonomyLookup): 
       code: "CLASSIFICATION_CATEGORY_MISMATCH",
       message: "التصنيف لا يتبع الفئة المحددة",
     });
+    clearClassification = true;
   }
 
   return {

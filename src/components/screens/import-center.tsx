@@ -131,6 +131,18 @@ export function mappingContainsComplaintNumber(
   return Object.values(mapping ?? {}).includes("externalId");
 }
 
+const COLUMN_MAPPING_STATUS_LABELS: Record<string, string> = {
+  AUTO_MAPPED: "مطابق تلقائيًا",
+  MANUALLY_MAPPED: "مطابق يدويًا",
+  UNMAPPED_PRESERVED: "غير مطابق — تم الاحتفاظ به",
+  MISSING_REQUIRED: "حقل إلزامي مفقود",
+  CONFLICT: "تعارض في المطابقة",
+};
+
+export function toColumnMappingStatusLabel(status: string): string {
+  return COLUMN_MAPPING_STATUS_LABELS[status] ?? "حالة مطابقة غير معروفة";
+}
+
 export function normalizeUploadResultPayload(json: UploadResult): UploadResult {
   return {
     ...json,
@@ -1108,7 +1120,7 @@ export function ImportCenter() {
                                       )}
                                     </TableCell>
                                     <TableCell className="text-center text-xs">
-                                      {entry.status}
+                                      {toColumnMappingStatusLabel(entry.status)}
                                     </TableCell>
                                   </TableRow>
                                 );

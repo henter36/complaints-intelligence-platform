@@ -158,6 +158,7 @@ const SYNONYMS: Record<ComplaintImportField, string[]> = {
     "وصف الإجراء",
     "وصف الاجراء",
     "الإجراء أو الحل",
+    "الحل",
     "resolution",
   ],
 };

@@ -15,6 +15,7 @@ import { buildComplaintFingerprint } from "@/server/complaints/identity-service"
 import { sanitizeComplaint } from "@/server/ai/ai-data-sanitization-service";
 import { buildImportErrorCsv } from "./error-report";
 import { ImportRowAction, ImportRowValidationStatus } from "@prisma/client";
+import { validateNormalizedComplaintRow } from "./row-validation";
 
 const OPERATIONAL_HEADERS = [
   "رقم الشكوى",
@@ -234,7 +235,7 @@ describe("subject derivation and description-only rows", () => {
     expect(preserved.normalized.subject).toBe("موضوع موجود");
   });
 
-  it("rejects rows missing both subject and description", () => {
+  it("rejects rows missing both subject and description during validation", () => {
     const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل"]);
     const result = normalizeImportRow({
       rowNumber: 27,
@@ -246,14 +247,29 @@ describe("subject derivation and description-only rows", () => {
 
     expect(result.normalized.subject).toBeUndefined();
     expect(result.normalized.description).toBeUndefined();
+
+    const validation = validateNormalizedComplaintRow(
+      result.normalized,
+      { categories: [], classifications: [] },
+      new Date("2026-04-14T00:00:00Z")
+    );
+
+    expect(validation.errors).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "MISSING_TEXT" })])
+    );
   });
 });
 
 describe("privacy helpers", () => {
-  it("masks identifiers for preview and reports", () => {
-    expect(maskIdentifier("1082536010")).toBe("******6010");
-    expect(maskIdentifier("1000000000")).toBe("******0000");
+  it("masks identifiers with a fixed-length prefix and never reveals original length", () => {
+    expect(maskIdentifier("1082536010")).toBe("****6010");
+    expect(maskIdentifier("1000000000")).toBe("****0000");
+    expect(maskIdentifier("1234")).toBe("****");
     expect(maskIdentifier("12")).toBe("****");
+    expect(maskIdentifier("")).toBe("****");
+    expect(maskIdentifier("   ")).toBe("****");
+    expect(maskIdentifier("1000000000")).toHaveLength(8);
+    expect(maskIdentifier("999999999999")).toHaveLength(8);
   });
 
   it("keeps complainant identifiers out of AI payloads and fingerprints", () => {
@@ -328,7 +344,7 @@ describe("operational workbook parsing and normalization", () => {
     expect(normalized.normalized.receivedAt?.toISOString()).toBe("2026-04-14T00:00:00.000Z");
     expect(normalized.normalized.complaintDate).toBeInstanceOf(Date);
     expect(normalized.warnings.some((item) => item.code === "UNKNOWN_SOURCE_STATUS")).toBe(true);
-    expect(maskIdentifier(normalized.normalized.complainantIdentifier!)).toBe("******0000");
+    expect(maskIdentifier(normalized.normalized.complainantIdentifier!)).toBe("****0000");
   });
 
   it("counts only non-empty data rows toward IMPORT_MAX_ROWS", async () => {

@@ -5,5 +5,5 @@ export function maskIdentifier(value: string): string {
     return "****";
   }
 
-  return `${"*".repeat(normalized.length - 4)}${normalized.slice(-4)}`;
+  return `****${normalized.slice(-4)}`;
 }

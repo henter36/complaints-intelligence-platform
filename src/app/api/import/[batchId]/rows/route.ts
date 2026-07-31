@@ -22,8 +22,8 @@ function maskSensitivePreview(value: unknown): unknown {
   if (typeof record.complainantIdentifier === "string") {
     record.complainantIdentifier = maskIdentifier(record.complainantIdentifier);
   }
-  if (typeof record.complainantPhone === "string") {
-    record.complainantPhone = maskIdentifier(record.complainantPhone);
+  if (typeof record.complainantPhone === "string" && record.complainantPhone.trim()) {
+    record.complainantPhone = "***";
   }
   if (typeof record.complainantName === "string" && record.complainantName.trim()) {
     record.complainantName = "***";
