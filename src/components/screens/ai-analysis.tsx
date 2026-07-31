@@ -138,13 +138,23 @@ export function AiAnalysis() {
     return () => c.abort();
   }, [loadStatus, loadRuns]);
 
-  const loadDetail = async (id: string) => {
+  const loadDetail = async (id: string): Promise<boolean> => {
     setLoadingDetail(true);
     try {
-      const res = await fetch(`/api/ai/analyses/${id}`);
-      if (!res.ok) { toast({ variant: "destructive", title: "خطأ", description: "تعذر تحميل التفاصيل" }); return; }
-      const json = await res.json() as AnalysisDetail;
-      setSelectedDetail(json);
+      const response = await fetch(`/api/ai/analyses/${id}`);
+      if (!response.ok) {
+        throw new Error("Failed to load analysis detail");
+      }
+      const detail = await response.json() as AnalysisDetail;
+      setSelectedDetail(detail);
+      return true;
+    } catch {
+      toast({
+        variant: "destructive",
+        title: "خطأ",
+        description: "تعذّر تحميل تفاصيل التحليل",
+      });
+      return false;
     } finally {
       setLoadingDetail(false);
     }
@@ -183,28 +193,34 @@ export function AiAnalysis() {
 
   const sendFeedback = async (runId: string, rating: "helpful" | "not_helpful") => {
     try {
-      await fetch(`/api/ai/analyses/${runId}/feedback`, {
+      const response = await fetch(`/api/ai/analyses/${runId}/feedback`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ rating }),
       });
-      toast({ title: "شكراً على تقييمك" });
+      if (!response.ok) {
+        toast({ variant: "destructive", title: "خطأ", description: "تعذّر إرسال التقييم" });
+        return;
+      }
       if (selectedDetail?.id === runId) {
         await loadDetail(runId);
       }
     } catch {
-      toast({ variant: "destructive", title: "خطأ", description: "تعذر حفظ التقييم" });
+      toast({ variant: "destructive", title: "خطأ", description: "تعذّر إرسال التقييم" });
     }
   };
 
   const deleteResult = async (runId: string) => {
     try {
-      await fetch(`/api/ai/analyses/${runId}`, { method: "DELETE" });
-      toast({ title: "حُذفت النتيجة" });
+      const response = await fetch(`/api/ai/analyses/${runId}`, { method: "DELETE" });
+      if (!response.ok) {
+        toast({ variant: "destructive", title: "خطأ", description: "تعذّر حذف نتيجة التحليل" });
+        return;
+      }
       setSelectedDetail(null);
       await loadRuns();
     } catch {
-      toast({ variant: "destructive", title: "خطأ", description: "تعذر الحذف" });
+      toast({ variant: "destructive", title: "خطأ", description: "تعذّر حذف نتيجة التحليل" });
     }
   };
 

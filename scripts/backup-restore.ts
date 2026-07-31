@@ -11,6 +11,7 @@ import { spawnSync } from "node:child_process";
 import {
   resolveSqliteDatabaseFiles,
   buildAllowedEnv,
+  getSafePath,
   type SqliteDatabaseFiles,
 } from "./lib/backup-utils";
 
@@ -190,7 +191,7 @@ async function main() {
       cwd: ROOT,
       stdio: "inherit",
       shell: false,
-      env: buildAllowedEnv() as NodeJS.ProcessEnv,
+      env: buildAllowedEnv(process.env, getSafePath()) as NodeJS.ProcessEnv,
     }
   );
   if (backupResult.status !== 0) {

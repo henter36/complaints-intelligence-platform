@@ -7,6 +7,7 @@ import { env } from "@/lib/env";
 import { logger } from "@/server/logger";
 import { writeAuditLog, AUDIT_ACTOR_SINGLE_ADMIN } from "@/server/audit/audit-log-service";
 import { sanitizeComplaintsForAi, buildAggregateStats } from "./ai-data-sanitization-service";
+import { compareJsonKeys, normalizeJsonValue } from "./ai-utils";
 import { callOpenAI, AiProviderError } from "./openai-provider";
 import { ANALYSIS_SCHEMAS } from "./ai-contracts";
 import * as executiveSummaryPrompt from "./prompts/executive-summary";
@@ -61,26 +62,8 @@ function normalizeAnalysisFilters(raw: AnalysisFilters): AnalysisFilters {
   return f;
 }
 
-// Stable locale-aware comparator for deterministic key ordering.
-// "en" locale with base sensitivity sorts ASCII-only filter keys identically
-// across all Node.js environments regardless of ICU data variant.
-const SORT_LOCALE = "en";
-
-function compareJsonKeys(a: string, b: string): number {
-  return a.localeCompare(b, SORT_LOCALE, { sensitivity: "base", numeric: true });
-}
-
 // Deterministic JSON snapshot: sort keys so {a:1,b:2} === {b:2,a:1}.
 // Used for both duplicate-detection query and the stored filtersSnapshot.
-function normalizeJsonValue(value: unknown): unknown {
-  if (value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map(normalizeJsonValue);
-  const obj = value as Record<string, unknown>;
-  return Object.fromEntries(
-    Object.keys(obj).sort(compareJsonKeys).map(k => [k, normalizeJsonValue(obj[k])])
-  );
-}
-
 function toFiltersSnapshot(filters: AnalysisFilters): Record<string, unknown> {
   return normalizeJsonValue(filters) as Record<string, unknown>;
 }
@@ -384,23 +367,29 @@ export async function runAiAnalysis(
     env.aiMaxInputChars
   );
 
-  // Build stats from all loaded complaints (not just the sanitized sample)
-  // so totals are accurate even when the sample is capped by char budget.
-  const stats = buildAggregateStats(mapped);
-  // stats.totalComplaints reflects the full matching population (may exceed the
-  // loaded cap), while the sample sent to the model is only `records`.
-  stats.totalComplaints = totalMatching;
-
-  const statsJson = JSON.stringify(stats, null, 2);
+  const sampleStats = buildAggregateStats(mapped);
+  const statsPayload = {
+    population: {
+      totalMatchingComplaints: totalMatching,
+    },
+    sample: {
+      analyzedComplaints: sampleStats.totalComplaints,
+      truncated: totalMatching > sampleStats.totalComplaints || truncated,
+      byDepartment: sampleStats.byDepartment,
+      byRegion: sampleStats.byRegion,
+      byClassification: sampleStats.byClassification,
+      byStatus: sampleStats.byStatus,
+      byChannel: sampleStats.byChannel,
+      byMonth: sampleStats.byMonth,
+      overdueCount: sampleStats.overdueCount,
+    },
+  };
+  const statsJson = JSON.stringify(statsPayload, null, 2);
   const sampleJson = JSON.stringify(records.slice(0, 50), null, 2);
   const inputSummary = {
-    // totalMatching is the full population count; sentToAi is the analyzed sample.
     totalMatching,
     sentToAi: records.length,
     truncated: truncated || totalMatching > env.aiMaxInputComplaints,
-    note: totalMatching > records.length
-      ? "stats.totalComplaints reflects the full population; the sample sent to the model is a subset"
-      : "stats.totalComplaints and the sample sent to the model cover the same population",
   };
 
   const promptVersion = getPromptVersion(type);

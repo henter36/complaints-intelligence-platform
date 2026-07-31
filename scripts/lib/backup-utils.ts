@@ -32,19 +32,68 @@ export function resolvePrismaSqlitePath(
     : path.resolve(schemaDirectory, pathWithoutQuery);
 }
 
-export function buildAllowedEnv(): Record<string, string | undefined> {
-  const SAFE_PATH = process.platform === "win32"
+export function getSafePath(): string {
+  return process.platform === "win32"
     ? (process.env.PATH ?? "")
     : "/usr/local/bin:/usr/bin:/bin";
+}
+
+export function buildAllowedEnv(
+  env: Record<string, string | undefined>,
+  safePath: string
+): Record<string, string | undefined> {
   return {
-    PATH: SAFE_PATH,
-    DATABASE_URL: process.env.DATABASE_URL,
-    BACKUP_PATH: process.env.BACKUP_PATH,
-    IMPORT_STORAGE_PATH: process.env.IMPORT_STORAGE_PATH,
-    REPORT_STORAGE_PATH: process.env.REPORT_STORAGE_PATH,
-    HOME: process.env.HOME,
-    NODE_ENV: process.env.NODE_ENV,
+    PATH: safePath,
+    DATABASE_URL: env.DATABASE_URL,
+    BACKUP_PATH: env.BACKUP_PATH,
+    IMPORT_STORAGE_PATH: env.IMPORT_STORAGE_PATH,
+    REPORT_STORAGE_PATH: env.REPORT_STORAGE_PATH,
+    HOME: env.HOME,
+    NODE_ENV: env.NODE_ENV,
   };
+}
+
+export function resolveBackupPath(backupsRoot: string, input: string): string {
+  const canonicalRoot = fs.existsSync(backupsRoot)
+    ? fs.realpathSync(backupsRoot)
+    : backupsRoot;
+  const rawCandidate = path.resolve(canonicalRoot, input);
+  let candidate: string;
+  try {
+    candidate = fs.existsSync(rawCandidate)
+      ? fs.realpathSync(rawCandidate)
+      : rawCandidate;
+  } catch {
+    throw new Error("Backup directory not found");
+  }
+  const rel = path.relative(canonicalRoot, candidate);
+  if (rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel)) {
+    return candidate;
+  }
+  throw new Error("Backup path must remain inside the configured backup directory");
+}
+
+export const SHA256_PATTERN = /\b[a-f0-9]{64}\b/gi;
+
+export function sanitizeLogMessage(
+  message: string,
+  opts: {
+    databaseUrl?: string;
+    backupsRoot?: string;
+    projectRoot?: string;
+  }
+): string {
+  let msg = message;
+  const { databaseUrl, backupsRoot, projectRoot } = opts;
+  if (databaseUrl) msg = msg.replaceAll(databaseUrl, "<database-url>");
+  const dbPath = databaseUrl?.startsWith("file:")
+    ? databaseUrl.slice("file:".length)
+    : undefined;
+  if (dbPath && dbPath !== databaseUrl) msg = msg.replaceAll(dbPath, "<database>");
+  if (backupsRoot) msg = msg.replaceAll(backupsRoot, "<backups>");
+  if (projectRoot) msg = msg.replaceAll(projectRoot, "<project>");
+  msg = msg.replace(SHA256_PATTERN, "<checksum>");
+  return msg;
 }
 
 export function escapeSqliteDotCommandPath(filePath: string): string {

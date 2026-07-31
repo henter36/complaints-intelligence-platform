@@ -8,6 +8,9 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { resolveSqliteDatabaseFiles } from "../../../scripts/lib/backup-utils";
+import { normalizeJsonValue, compareJsonKeys } from "./ai-utils";
+import { buildAggregateStats } from "./ai-data-sanitization-service";
 
 // ──────────────────────────────────────────────────
 // env.ts — non-enumerable openAiApiKey + isMissingOrPlaceholder
@@ -110,10 +113,6 @@ describe("Prompt injection isolation", () => {
 // ──────────────────────────────────────────────────
 
 describe("resolveSqliteDatabaseFiles — WAL/SHM paths", () => {
-  function resolveSqliteDatabaseFiles(databasePath: string) {
-    return { main: databasePath, wal: `${databasePath}-wal`, shm: `${databasePath}-shm` };
-  }
-
   it("returns correct sidecar paths", () => {
     const files = resolveSqliteDatabaseFiles("/data/database.sqlite");
     expect(files.main).toBe("/data/database.sqlite");
@@ -229,13 +228,6 @@ describe("resolveSqliteDatabaseFiles — WAL/SHM paths", () => {
 // ──────────────────────────────────────────────────
 
 describe("Deterministic filter serialization", () => {
-  function normalizeJsonValue(value: unknown): unknown {
-    if (value === null || typeof value !== "object") return value;
-    if (Array.isArray(value)) return value.map(normalizeJsonValue);
-    const obj = value as Record<string, unknown>;
-    return Object.fromEntries(Object.keys(obj).sort().map(k => [k, normalizeJsonValue(obj[k])]));
-  }
-
   it("produces identical snapshots regardless of key insertion order", () => {
     const a = normalizeJsonValue({ b: 2, a: 1, c: 3 });
     const b = normalizeJsonValue({ c: 3, a: 1, b: 2 });
@@ -326,13 +318,14 @@ describe("backup-verify — sanitizeVerificationError", () => {
 
   function sanitize(errMsg: string): string {
     const dbUrl = process.env.DATABASE_URL ?? "";
-    const dbPath = dbUrl.replace(/^file:/, "");
-    // Replace the more specific (longer) path first; mirrors backup-verify.ts order.
-    let msg = errMsg
-      .replaceAll(BACKUPS_ROOT_FIXTURE, "<backups>")
-      .replaceAll(ROOT_FIXTURE, "<project>");
+    const dbPath = dbUrl.startsWith("file:") ? dbUrl.slice("file:".length) : "";
+    let msg = errMsg;
     if (dbUrl) msg = msg.replaceAll(dbUrl, "<database-url>");
     if (dbPath && dbPath !== dbUrl) msg = msg.replaceAll(dbPath, "<database>");
+    msg = msg
+      .replaceAll(BACKUPS_ROOT_FIXTURE, "<backups>")
+      .replaceAll(ROOT_FIXTURE, "<project>");
+    msg = msg.replace(/\b[a-f0-9]{64}\b/gi, "<checksum>");
     return msg;
   }
 
@@ -373,11 +366,26 @@ describe("backup-verify — sanitizeVerificationError", () => {
     }
   });
 
-  it("does not leak full checksum (checksums are never logged)", () => {
-    const fakeChecksum = crypto.createHash("sha256").update("test").digest("hex");
-    // Checksums should never appear in log output — they are not passed to the error formatter
-    const result = sanitize("Verification completed");
-    expect(result).not.toContain(fakeChecksum);
+  it("redacts a full checksum from errors", () => {
+    const checksum = crypto.createHash("sha256").update("test").digest("hex");
+    const result = sanitize(`Checksum mismatch: expected ${checksum}`);
+    expect(result).not.toContain(checksum);
+    expect(result).toContain("<checksum>");
+  });
+
+  it("redacts DATABASE_URL before project root to prevent partial replacement", () => {
+    const saved = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = `file:${ROOT_FIXTURE}/prisma/prod.db`;
+    try {
+      const result = sanitize(`file:${ROOT_FIXTURE}/prisma/prod.db`);
+      expect(result).not.toContain("file:");
+      expect(result).not.toContain(ROOT_FIXTURE);
+      expect(result).not.toContain("prod.db");
+      expect(result).toContain("<database-url>");
+    } finally {
+      if (saved === undefined) delete process.env.DATABASE_URL;
+      else process.env.DATABASE_URL = saved;
+    }
   });
 
   it("returns generic message for non-Error values", () => {
@@ -534,19 +542,6 @@ describe("backup-restore — removeSidecarsIfPresent is a no-op when absent", ()
 // ──────────────────────────────────────────────────
 
 describe("ai-service — compareJsonKeys produces locale-stable order", () => {
-  const SORT_LOCALE = "en";
-  function compareJsonKeys(a: string, b: string): number {
-    return a.localeCompare(b, SORT_LOCALE, { sensitivity: "base", numeric: true });
-  }
-  function normalizeJsonValue(value: unknown): unknown {
-    if (value === null || typeof value !== "object") return value;
-    if (Array.isArray(value)) return value.map(normalizeJsonValue);
-    const obj = value as Record<string, unknown>;
-    return Object.fromEntries(
-      Object.keys(obj).sort(compareJsonKeys).map(k => [k, normalizeJsonValue(obj[k])])
-    );
-  }
-
   it("produces identical snapshots for different key insertion orders", () => {
     const a = JSON.stringify(normalizeJsonValue({ department: "A", dateFrom: "2026-01-01", status: "OPEN" }));
     const b = JSON.stringify(normalizeJsonValue({ status: "OPEN", dateFrom: "2026-01-01", department: "A" }));
@@ -567,5 +562,35 @@ describe("ai-service — compareJsonKeys produces locale-stable order", () => {
     const a = JSON.stringify(normalizeJsonValue({ outer: { z: "z", a: "a" }, x: 1 }));
     const b = JSON.stringify(normalizeJsonValue({ x: 1, outer: { a: "a", z: "z" } }));
     expect(a).toBe(b);
+  });
+});
+
+// ──────────────────────────────────────────────────
+// ai-service — population vs sample stats structure
+// ──────────────────────────────────────────────────
+
+describe("ai-service — population vs sample stats structure", () => {
+  it("population.totalMatchingComplaints reflects full count, sample reflects analyzed subset", () => {
+    // Simulate: 1000 matching, 500 loaded as sample
+    const sampleComplaints = Array.from({ length: 500 }, (_, i) => ({
+      id: `c${i}`, subject: "s", department: "Dept A",
+    }));
+    const totalMatching = 1000;
+    const sampleStats = buildAggregateStats(sampleComplaints);
+
+    const statsPayload = {
+      population: { totalMatchingComplaints: totalMatching },
+      sample: {
+        analyzedComplaints: sampleStats.totalComplaints,
+        truncated: totalMatching > sampleStats.totalComplaints,
+        byDepartment: sampleStats.byDepartment,
+      },
+    };
+
+    expect(statsPayload.population.totalMatchingComplaints).toBe(1000);
+    expect(statsPayload.sample.analyzedComplaints).toBe(500);
+    expect(statsPayload.sample.truncated).toBe(true);
+    // Breakdowns reflect sample only, not the full 1000
+    expect(statsPayload.sample.byDepartment["Dept A"]).toBe(500);
   });
 });

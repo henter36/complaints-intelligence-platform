@@ -41,23 +41,18 @@ function backupDisplayName(p: string): string {
   return path.basename(p);
 }
 
-// Redacts every known sensitive absolute path or connection string from a string.
-// Order matters: longer/more specific paths are replaced before shorter ones so a
-// longer path is never partially consumed by a shorter replacement.
-function redactKnownPaths(value: string): string {
-  const dbUrl = process.env.DATABASE_URL ?? "";
-  const dbPath = dbUrl.replace(/^file:/, "");
-  let msg = value
-    .replaceAll(BACKUPS_ROOT, "<backups>")
-    .replaceAll(ROOT, "<project>");
-  if (dbUrl) msg = msg.replaceAll(dbUrl, "<database-url>");
-  if (dbPath && dbPath !== dbUrl) msg = msg.replaceAll(dbPath, "<database>");
-  return msg;
-}
-
 function sanitizeVerificationError(err: unknown): string {
   if (!(err instanceof Error)) return "Unknown verification error";
-  return redactKnownPaths(err.message);
+  const dbUrl = process.env.DATABASE_URL ?? "";
+  const dbPath = dbUrl.startsWith("file:") ? dbUrl.slice("file:".length) : "";
+  let msg = err.message;
+  if (dbUrl) msg = msg.replaceAll(dbUrl, "<database-url>");
+  if (dbPath && dbPath !== dbUrl) msg = msg.replaceAll(dbPath, "<database>");
+  msg = msg
+    .replaceAll(BACKUPS_ROOT, "<backups>")
+    .replaceAll(ROOT, "<project>");
+  msg = msg.replace(/\b[a-f0-9]{64}\b/gi, "<checksum>");
+  return msg;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

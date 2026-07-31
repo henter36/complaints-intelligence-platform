@@ -6,28 +6,12 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { resolveBackupPath, buildAllowedEnv } from "../../../scripts/lib/backup-utils";
+import { listMigrationDirectories } from "../../../scripts/lib/release-utils";
 
 // ──────────────────────────────────────────────────
 // resolveBackupPath — mirrors scripts/backup-verify.ts and backup-restore.ts
 // ──────────────────────────────────────────────────
-
-function resolveBackupPath(backupsRoot: string, input: string): string {
-  const canonicalRoot = fs.existsSync(backupsRoot)
-    ? fs.realpathSync(backupsRoot)
-    : backupsRoot;
-  const rawCandidate = path.resolve(canonicalRoot, input);
-  let candidate: string;
-  try {
-    candidate = fs.existsSync(rawCandidate) ? fs.realpathSync(rawCandidate) : rawCandidate;
-  } catch {
-    throw new Error("Backup directory not found");
-  }
-  const rel = path.relative(canonicalRoot, candidate);
-  if (rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel)) {
-    return candidate;
-  }
-  throw new Error("Backup path must remain inside the configured backup directory");
-}
 
 describe("resolveBackupPath — path traversal prevention", () => {
   let tmpRoot: string;
@@ -76,15 +60,6 @@ describe("resolveBackupPath — path traversal prevention", () => {
 // listMigrationDirectories — mirrors scripts/release-manifest.ts
 // ──────────────────────────────────────────────────
 
-function listMigrationDirectories(migrationsRoot: string): string[] {
-  if (!fs.existsSync(migrationsRoot)) return [];
-  return fs
-    .readdirSync(migrationsRoot, { withFileTypes: true })
-    .filter(entry => entry.isDirectory())
-    .map(entry => entry.name)
-    .sort();
-}
-
 describe("listMigrationDirectories — excludes files, includes only dirs", () => {
   let tmpMigrations: string;
 
@@ -130,21 +105,6 @@ describe("listMigrationDirectories — excludes files, includes only dirs", () =
 // ──────────────────────────────────────────────────
 // buildAllowedEnv — mirrors scripts/backup-restore.ts
 // ──────────────────────────────────────────────────
-
-function buildAllowedEnv(
-  env: Record<string, string | undefined>,
-  safePath: string
-): Record<string, string | undefined> {
-  return {
-    PATH: safePath,
-    DATABASE_URL: env.DATABASE_URL,
-    BACKUP_PATH: env.BACKUP_PATH,
-    IMPORT_STORAGE_PATH: env.IMPORT_STORAGE_PATH,
-    REPORT_STORAGE_PATH: env.REPORT_STORAGE_PATH,
-    HOME: env.HOME,
-    NODE_ENV: env.NODE_ENV,
-  };
-}
 
 describe("buildAllowedEnv — minimal environment for subprocess", () => {
   it("only passes the expected keys", () => {
