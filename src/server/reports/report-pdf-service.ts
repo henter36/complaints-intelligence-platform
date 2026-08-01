@@ -4,10 +4,12 @@ import PDFDocument from "pdfkit";
 import sharp from "sharp";
 import { ReportType } from "@prisma/client";
 import { getReportDefinition } from "./report-definition-service";
+import { renderExecutiveBriefPdf } from "./report-executive-brief-pdf-service";
 import type {
   ReportChartSection,
   ReportData,
   ReportKpiCard,
+  ReportMatrixSection,
   ReportSection,
   ReportTable,
   ReportTableColumn,
@@ -128,6 +130,14 @@ export type PdfRenderResult = {
 };
 
 export async function renderReportPdf(data: ReportData): Promise<PdfRenderResult> {
+  // Route to specialised executive brief renderers for the new modes.
+  if (
+    data.reportMode === "DIGITAL_EXECUTIVE_BRIEF" ||
+    data.reportMode === "PRINT_EXECUTIVE_BRIEF"
+  ) {
+    return renderExecutiveBriefPdf(data, data.reportMode);
+  }
+
   const { regular, bold } = loadFonts();
   const warnings = [...data.warnings];
   const definition = getReportDefinition(data.type);
@@ -209,6 +219,10 @@ async function renderSection(
   }
   if (section.kind === "chart") {
     await drawChartSection(doc, section, warnings);
+    return;
+  }
+  if (section.kind === "matrix") {
+    drawMatrixSection(doc, section, warnings);
     return;
   }
   // table
@@ -364,6 +378,110 @@ function drawTextSection(doc: PDFKit.PDFDocument, section: ReportTextSection): v
     doc.moveDown(0.2);
   }
   doc.fillColor("#000000");
+}
+
+function drawMatrixSection(
+  doc: PDFKit.PDFDocument,
+  section: ReportMatrixSection,
+  warnings: string[]
+): void {
+  drawSectionTitle(doc, section.title);
+  if (section.description) {
+    doc.font("Body").fontSize(9).fillColor("#64748b");
+    doc.text(section.description, { width: CONTENT_WIDTH, align: "right" });
+    doc.fillColor("#000000");
+    doc.moveDown(0.2);
+  }
+
+  const { rowHeaders, columnHeaders, cells } = section;
+  if (rowHeaders.length === 0 || columnHeaders.length === 0) {
+    doc.font("Body").fontSize(9).fillColor("#64748b");
+    doc.text("لا توجد بيانات لعرضها.", { width: CONTENT_WIDTH, align: "right" });
+    doc.fillColor("#000000");
+    return;
+  }
+
+  const headerColWidth = 90;
+  const cellWidth = Math.max(
+    36,
+    Math.floor((CONTENT_WIDTH - headerColWidth) / columnHeaders.length)
+  );
+  const rowHeight = 16;
+  const headerHeight = 20;
+  const fontSize = 7.5;
+
+  ensureSpace(doc, headerHeight + rowHeight * Math.min(rowHeaders.length + 1, 12));
+
+  // Column headers row (RTL: last column on the right)
+  const top = doc.y;
+  doc.font("Bold").fontSize(fontSize).fillColor("#0f172a");
+  // Row label placeholder (top-left corner)
+  doc.text(`${section.rowLabel} / ${section.columnLabel}`, PAGE_MARGIN, top + 4, {
+    width: headerColWidth - 4,
+    height: headerHeight - 4,
+    align: "right",
+    lineBreak: false,
+    ellipsis: true,
+  });
+  columnHeaders.forEach((colHeader, ci) => {
+    const x = PAGE_MARGIN + headerColWidth + ci * cellWidth;
+    doc.text(colHeader, x + 2, top + 4, {
+      width: cellWidth - 4,
+      height: headerHeight - 4,
+      align: "center",
+      lineBreak: false,
+      ellipsis: true,
+    });
+  });
+  doc.y = top + headerHeight;
+  doc.moveTo(PAGE_MARGIN, doc.y)
+    .lineTo(PAGE_SIZE[0] - PAGE_MARGIN, doc.y)
+    .strokeColor("#94a3b8")
+    .stroke();
+  doc.strokeColor("#000000");
+
+  rowHeaders.forEach((rowHeader, ri) => {
+    if (doc.y + rowHeight > doc.page.height - doc.page.margins.bottom) {
+      doc.addPage();
+    }
+    const rowTop = doc.y;
+    if (ri % 2 === 1) {
+      doc.rect(PAGE_MARGIN, rowTop, CONTENT_WIDTH, rowHeight).fill("#f8fafc");
+      doc.fillColor("#000000");
+    }
+    doc.font("Bold").fontSize(fontSize).fillColor("#0f172a");
+    doc.text(rowHeader, PAGE_MARGIN, rowTop + 3, {
+      width: headerColWidth - 4,
+      height: rowHeight - 3,
+      align: "right",
+      lineBreak: false,
+      ellipsis: true,
+    });
+    doc.font("Body").fontSize(fontSize).fillColor("#1f2937");
+    const row = cells[ri] ?? [];
+    row.forEach((cellValue, ci) => {
+      const x = PAGE_MARGIN + headerColWidth + ci * cellWidth;
+      doc.text(cellValue > 0 ? String(cellValue) : "-", x + 2, rowTop + 3, {
+        width: cellWidth - 4,
+        height: rowHeight - 3,
+        align: "center",
+        lineBreak: false,
+      });
+    });
+    doc.y = rowTop + rowHeight;
+  });
+
+  if (section.truncated) {
+    doc.moveDown(0.2);
+    doc.font("Body").fontSize(8).fillColor("#b45309");
+    doc.text(
+      `تم عرض ${rowHeaders.length} من أصل ${section.grandTotal} صفاً (أعلى ${section.maxRows}).`,
+      { width: CONTENT_WIDTH, align: "right" }
+    );
+    doc.fillColor("#000000");
+  }
+
+  void warnings;
 }
 
 async function drawChartSection(
