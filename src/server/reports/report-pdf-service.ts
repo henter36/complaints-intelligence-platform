@@ -2,9 +2,20 @@ import fs from "node:fs";
 import path from "node:path";
 import PDFDocument from "pdfkit";
 import sharp from "sharp";
+import { ReportType } from "@prisma/client";
 import { getReportDefinition } from "./report-definition-service";
-import type { ReportData, ReportKpiCard, ReportTable } from "./report-data-service";
+import type {
+  ReportChartSection,
+  ReportData,
+  ReportKpiCard,
+  ReportSection,
+  ReportTable,
+  ReportTableColumn,
+  ReportTextSection,
+} from "./report-data-service";
+import { renderLineChartPng } from "./report-chart-service";
 import { formatRiyadhDateTime } from "./report-time";
+import { MAX_TREND_SERIES, DEPT_CLASS_RISES_LIMIT } from "./report-comparison";
 
 const ASSETS_DIR = path.join(process.cwd(), "src/server/reports/assets");
 const FONT_REGULAR_PATH = path.join(ASSETS_DIR, "fonts/Amiri-Regular.ttf");
@@ -15,6 +26,14 @@ const PAGE_MARGIN = 40;
 const PAGE_SIZE: [number, number] = [595.28, 841.89]; // A4 points
 const CONTENT_WIDTH = PAGE_SIZE[0] - PAGE_MARGIN * 2;
 const FOOTER_HEIGHT = 30;
+
+// Flex-width table layout hints (points).
+const COL_MIN_TEXT_WIDTH = 80;
+const COL_NUMBER_WIDTH = 55;
+const COL_DATE_WIDTH = 70;
+const COL_PERCENT_WIDTH = 50;
+const COL_DIRECTION_WIDTH = 45;
+const TABLE_ROW_MAX_LINES = 2;
 
 let fontRegularBuffer: Buffer | null = null;
 let fontBoldBuffer: Buffer | null = null;
@@ -49,7 +68,28 @@ function formatKpiValue(card: ReportKpiCard): string {
   return `${value}${KPI_FORMAT_SUFFIX[card.format]}`;
 }
 
-/** Renders any value to text, without relying on the default
+const REPORT_TYPE_LABEL: Record<ReportType, string> = {
+  EXECUTIVE_SUMMARY: "التقرير التنفيذي الشامل",
+  DEPARTMENT_PERFORMANCE: "أداء الإدارات",
+  REGION_FACILITY_PERFORMANCE: "أداء المناطق والمواقع",
+  CLASSIFICATION_ANALYSIS: "تحليل التصنيفات",
+  COMPLAINT_DETAIL: "الشكاوى التفصيلي",
+  OVERDUE_COMPLAINTS: "المتأخرات",
+};
+
+const FILTER_LABELS: Record<string, string> = {
+  region: "المنطقة",
+  department: "الإدارة",
+  facility: "الموقع",
+  classificationId: "التصنيف",
+  categoryId: "الفئة",
+  priority: "الأولوية",
+  severity: "الخطورة",
+  channel: "القناة",
+  status: "الحالة",
+};
+
+/** Renders any value to text without relying on the default
  * `[object Object]` stringification of a bare template-literal/String() call. */
 function toDisplayText(value: unknown): string {
   if (typeof value === "string") return value;
@@ -58,9 +98,17 @@ function toDisplayText(value: unknown): string {
   return JSON.stringify(value);
 }
 
-function formatCellValue(value: unknown, format?: "number" | "percent" | "date" | "text"): string {
+function formatSignedNumber(value: unknown): string {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "";
+  if (n > 0) return `+${n}`;
+  return String(n);
+}
+
+function formatCellValue(value: unknown, format?: ReportTableColumn["format"]): string {
   if (value === null || value === undefined || value === "") return "-";
   if (format === "percent") return `${toDisplayText(value)}%`;
+  if (format === "signed-number") return formatSignedNumber(value);
   if (format === "date") {
     const date = new Date(toDisplayText(value));
     if (Number.isNaN(date.getTime())) return "-";
@@ -68,6 +116,10 @@ function formatCellValue(value: unknown, format?: "number" | "percent" | "date" 
   }
   if (typeof value === "boolean") return value ? "نعم" : "لا";
   return toDisplayText(value);
+}
+
+function shortRunId(runId?: string): string {
+  return runId ? runId.slice(0, 8) : "";
 }
 
 export type PdfRenderResult = {
@@ -80,6 +132,16 @@ export async function renderReportPdf(data: ReportData): Promise<PdfRenderResult
   const warnings = [...data.warnings];
   const definition = getReportDefinition(data.type);
 
+  // Section titles are mirrored into the Info /Keywords field. PDFKit encodes
+  // Info strings as UTF-16BE literals (searchable in the raw buffer), whereas
+  // on-page text is glyph-subsetted and NOT searchable. This makes the report's
+  // structure discoverable to tooling/tests without a PDF-parsing dependency.
+  const keywordParts = data.sections.map((section) => section.title);
+  if (data.type === ReportType.EXECUTIVE_SUMMARY) {
+    keywordParts.push("منهجية الاحتساب");
+  }
+  const sectionTitles = keywordParts.join(" | ");
+
   const doc = new PDFDocument({
     size: PAGE_SIZE,
     margins: { top: PAGE_MARGIN, bottom: PAGE_MARGIN + FOOTER_HEIGHT, left: PAGE_MARGIN, right: PAGE_MARGIN },
@@ -88,6 +150,7 @@ export async function renderReportPdf(data: ReportData): Promise<PdfRenderResult
       Title: data.title,
       Author: "نظام ذكاء الشكاوى",
       Subject: definition.description,
+      Keywords: sectionTitles,
     },
   });
 
@@ -103,45 +166,64 @@ export async function renderReportPdf(data: ReportData): Promise<PdfRenderResult
 
   const logo = await loadLogoPng();
 
-  renderHeader(doc, data, logo);
-  renderFilters(doc, data);
+  renderCoverPage(doc, data, logo);
+
+  // Body sections start on a fresh page after the cover.
+  doc.addPage();
 
   for (const section of data.sections) {
-    ensureSpace(doc, 60);
-    if (section.kind === "kpi") {
-      drawSectionTitle(doc, section.title);
-      drawKpiGrid(doc, section.cards);
-    } else {
-      drawSectionTitle(doc, section.title);
-      try {
-        drawTable(doc, section.table);
-      } catch {
-        warnings.push(`تعذر عرض جدول "${section.title}" بالكامل.`);
-      }
-      if (section.table.truncated) {
-        doc.moveDown(0.2);
-        doc.font("Body").fontSize(8).fillColor("#b45309");
-        doc.text(
-          `تم عرض ${section.table.rows.length} من أصل ${section.table.totalMatched} صفاً.`,
-          { align: "right" }
-        );
-        doc.fillColor("#000000");
-      }
-    }
+    await renderSection(doc, section, warnings);
     doc.moveDown(0.8);
   }
 
-  // Rendered last, so it reflects any render-time failures collected while
-  // walking the sections above, not just the warnings the report started with.
+  if (data.type === ReportType.EXECUTIVE_SUMMARY) {
+    renderMethodologyNote(doc);
+  }
+
+  // Rendered last so it reflects render-time failures collected above.
   if (warnings.length > 0) {
     renderWarnings(doc, warnings);
   }
 
-  drawFooters(doc, data.title);
+  drawFooters(doc, data.title, shortRunId(data.reportRunId));
   doc.end();
 
   const buffer = await done;
   return { buffer, warnings };
+}
+
+async function renderSection(
+  doc: PDFKit.PDFDocument,
+  section: ReportSection,
+  warnings: string[]
+): Promise<void> {
+  ensureSpace(doc, 60);
+  if (section.kind === "kpi") {
+    drawSectionTitle(doc, section.title);
+    drawKpiGrid(doc, section.cards);
+    return;
+  }
+  if (section.kind === "text") {
+    drawTextSection(doc, section);
+    return;
+  }
+  if (section.kind === "chart") {
+    await drawChartSection(doc, section, warnings);
+    return;
+  }
+  // table
+  drawSectionTitle(doc, section.title);
+  try {
+    drawTable(doc, section.table);
+  } catch {
+    warnings.push(`تعذر عرض جدول "${section.title}" بالكامل.`);
+  }
+  if (section.table.truncated) {
+    doc.moveDown(0.2);
+    doc.font("Body").fontSize(8).fillColor("#b45309");
+    doc.text(`تم عرض ${section.table.rows.length} من أصل ${section.table.totalMatched} صفاً.`, { align: "right" });
+    doc.fillColor("#000000");
+  }
 }
 
 function ensureSpace(doc: PDFKit.PDFDocument, needed: number): void {
@@ -151,57 +233,87 @@ function ensureSpace(doc: PDFKit.PDFDocument, needed: number): void {
   }
 }
 
-function renderHeader(doc: PDFKit.PDFDocument, data: ReportData, logo: Buffer | null): void {
+// ---------------------------------------------------------------------------
+// Cover page
+// ---------------------------------------------------------------------------
+
+function renderCoverPage(doc: PDFKit.PDFDocument, data: ReportData, logo: Buffer | null): void {
+  const definition = getReportDefinition(data.type);
   const top = doc.y;
+
   if (logo) {
     try {
-      doc.image(logo, PAGE_MARGIN, top, { width: 40, height: 40 });
+      doc.image(logo, PAGE_MARGIN, top, { width: 48, height: 48 });
     } catch {
       // Logo is decorative; a failure here must not fail the report.
     }
   }
 
-  doc.font("Bold").fontSize(18).fillColor("#0f172a");
-  doc.text(data.title, PAGE_MARGIN, top, { width: CONTENT_WIDTH, align: "right" });
+  doc.font("Bold").fontSize(12).fillColor("#334155");
+  doc.text("نظام ذكاء الشكاوى", PAGE_MARGIN, top + 6, { width: CONTENT_WIDTH - 56, align: "right" });
 
-  doc.font("Body").fontSize(10).fillColor("#475569");
-  doc.text(getReportDefinition(data.type).description, { width: CONTENT_WIDTH, align: "right" });
-  doc.moveDown(0.4);
+  doc.moveDown(1.2);
+  doc.font("Bold").fontSize(22).fillColor("#0f172a");
+  doc.text(data.title, { width: CONTENT_WIDTH, align: "right" });
+
+  doc.font("Body").fontSize(11).fillColor("#475569");
+  doc.text(definition.description, { width: CONTENT_WIDTH, align: "right" });
+  doc.moveDown(0.8);
 
   doc.fontSize(10).fillColor("#0f172a");
-  doc.text(`الفترة: من ${data.period.from} إلى ${data.period.to}`, { width: CONTENT_WIDTH, align: "right" });
-  doc.text(`تاريخ الإنشاء: ${formatRiyadhDateTime(new Date(data.generatedAt))}`, {
-    width: CONTENT_WIDTH,
-    align: "right",
-  });
-  doc.fillColor("#000000");
-  doc.moveDown(0.6);
+  const metaLines: string[] = [
+    `نوع التقرير: ${REPORT_TYPE_LABEL[data.type]}`,
+    `الفترة الحالية: من ${data.period.from} إلى ${data.period.to}`,
+  ];
+  if (data.previousPeriod) {
+    metaLines.push(`الفترة المرجعية للمقارنة: من ${data.previousPeriod.from} إلى ${data.previousPeriod.to}`);
+  }
+  metaLines.push(`تاريخ الإنشاء: ${formatRiyadhDateTime(new Date(data.generatedAt))}`);
+  const runId = shortRunId(data.reportRunId);
+  if (runId) metaLines.push(`تشغيل: ${runId}`);
+  for (const line of metaLines) {
+    doc.text(line, { width: CONTENT_WIDTH, align: "right" });
+  }
 
-  doc.moveTo(PAGE_MARGIN, doc.y).lineTo(PAGE_SIZE[0] - PAGE_MARGIN, doc.y).strokeColor("#cbd5e1").stroke();
-  doc.strokeColor("#000000");
-  doc.moveDown(0.6);
+  renderFilterLine(doc, data);
+
+  doc.fillColor("#000000");
+  doc.moveDown(0.5);
+  separator(doc);
+  doc.moveDown(0.5);
+
+  // Mini KPI overview on the cover (4 per row).
+  const kpiSection = data.sections.find((section) => section.kind === "kpi");
+  if (kpiSection?.kind === "kpi") {
+    drawSectionTitle(doc, "لمحة سريعة");
+    drawKpiGrid(doc, kpiSection.cards, 4);
+  }
+
+  // Executive summary bullet points on the cover.
+  const textSection = data.sections.find((section) => section.kind === "text");
+  if (textSection?.kind === "text") {
+    doc.moveDown(0.4);
+    drawTextSection(doc, textSection);
+  }
 }
 
-function renderFilters(doc: PDFKit.PDFDocument, data: ReportData): void {
+function renderFilterLine(doc: PDFKit.PDFDocument, data: ReportData): void {
   const entries = Object.entries(data.filters).filter(([key, value]) => key !== "from" && key !== "to" && value);
   if (entries.length === 0) return;
-  const labels: Record<string, string> = {
-    region: "المنطقة",
-    department: "الإدارة",
-    facility: "الموقع",
-    classificationId: "التصنيف",
-    categoryId: "الفئة",
-    priority: "الأولوية",
-    severity: "الخطورة",
-    channel: "القناة",
-    status: "الحالة",
-  };
-  const text = entries.map(([key, value]) => `${labels[key] ?? key}: ${String(value)}`).join(" | ");
+  const text = entries.map(([key, value]) => `${FILTER_LABELS[key] ?? key}: ${toDisplayText(value)}`).join(" | ");
   doc.font("Body").fontSize(9).fillColor("#475569");
   doc.text(`الفلاتر المطبقة: ${text}`, { width: CONTENT_WIDTH, align: "right" });
-  doc.fillColor("#000000");
-  doc.moveDown(0.6);
+  doc.fillColor("#0f172a");
 }
+
+function separator(doc: PDFKit.PDFDocument): void {
+  doc.moveTo(PAGE_MARGIN, doc.y).lineTo(PAGE_SIZE[0] - PAGE_MARGIN, doc.y).strokeColor("#cbd5e1").stroke();
+  doc.strokeColor("#000000");
+}
+
+// ---------------------------------------------------------------------------
+// Section renderers
+// ---------------------------------------------------------------------------
 
 function renderWarnings(doc: PDFKit.PDFDocument, warnings: string[]): void {
   ensureSpace(doc, 20 + warnings.length * 14);
@@ -215,6 +327,25 @@ function renderWarnings(doc: PDFKit.PDFDocument, warnings: string[]): void {
   doc.moveDown(0.6);
 }
 
+function renderMethodologyNote(doc: PDFKit.PDFDocument): void {
+  const bullets = [
+    "الفترة الحالية هي المدة المحددة في التقرير، والفترة السابقة هي مدة مماثلة لها في الطول وتسبقها مباشرة دون تداخل.",
+    "الفرق = عدد الشكاوى في الفترة الحالية ناقص عددها في الفترة السابقة، ونسبة التغير = الفرق مقسوماً على عدد الفترة السابقة ضرب 100.",
+    'عند غياب أي شكاوى في الفترة السابقة تُصنَّف الحالة كـ "جديد" ولا تُحتسب نسبة تغير تفادياً للقسمة على صفر.',
+    "مساهمة التصنيف تعني نسبة ارتفاع هذا التصنيف من مجموع ارتفاعات تصنيفات الإدارة نفسها (الفروق الموجبة فقط).",
+    "حجم الشكاوى مؤشر كمّي يوضّح الاتجاه، وليس حكماً منفرداً على الأداء.",
+    `يعرض الرسم البياني أعلى ${MAX_TREND_SERIES} مناطق كحد أقصى، ويعرض جدول الارتفاعات ${DEPT_CLASS_RISES_LIMIT} صفاً كحد أقصى.`,
+  ];
+  ensureSpace(doc, 30 + bullets.length * 26);
+  drawSectionTitle(doc, "منهجية الاحتساب");
+  doc.font("Body").fontSize(9).fillColor("#334155");
+  for (const bullet of bullets) {
+    doc.text(`• ${bullet}`, { width: CONTENT_WIDTH, align: "right" });
+    doc.moveDown(0.2);
+  }
+  doc.fillColor("#000000");
+}
+
 function drawSectionTitle(doc: PDFKit.PDFDocument, title: string): void {
   ensureSpace(doc, 24);
   doc.font("Bold").fontSize(13).fillColor("#0f172a");
@@ -223,8 +354,64 @@ function drawSectionTitle(doc: PDFKit.PDFDocument, title: string): void {
   doc.moveDown(0.3);
 }
 
-function drawKpiGrid(doc: PDFKit.PDFDocument, cards: ReportKpiCard[]): void {
-  const columns = 3;
+function drawTextSection(doc: PDFKit.PDFDocument, section: ReportTextSection): void {
+  drawSectionTitle(doc, section.title);
+  doc.font("Body").fontSize(10.5).fillColor("#1f2937");
+  for (const point of section.points) {
+    if (!point?.trim()) continue;
+    ensureSpace(doc, 18);
+    doc.text(`•  ${point}`, PAGE_MARGIN + 8, doc.y, { width: CONTENT_WIDTH - 8, align: "right" });
+    doc.moveDown(0.2);
+  }
+  doc.fillColor("#000000");
+}
+
+async function drawChartSection(
+  doc: PDFKit.PDFDocument,
+  section: ReportChartSection,
+  warnings: string[]
+): Promise<void> {
+  drawSectionTitle(doc, section.title);
+  if (section.description) {
+    doc.font("Body").fontSize(9).fillColor("#64748b");
+    doc.text(section.description, { width: CONTENT_WIDTH, align: "right" });
+    doc.fillColor("#000000");
+    doc.moveDown(0.2);
+  }
+
+  const widthPx = 1000;
+  const heightPx = 560;
+  const displayWidth = CONTENT_WIDTH;
+  const displayHeight = (heightPx / widthPx) * displayWidth;
+
+  ensureSpace(doc, displayHeight + 10);
+
+  try {
+    const png = await renderLineChartPng(section, widthPx, heightPx);
+    doc.image(png, PAGE_MARGIN, doc.y, { width: displayWidth, height: displayHeight });
+    doc.y += displayHeight;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    // Never leave a silent blank space: draw a visible placeholder box.
+    const boxHeight = 60;
+    const top = doc.y;
+    doc.rect(PAGE_MARGIN, top, CONTENT_WIDTH, boxHeight).fillAndStroke("#fef2f2", "#fca5a5");
+    doc.font("Body").fontSize(11).fillColor("#991b1b");
+    doc.text("تعذر عرض الرسم البياني", PAGE_MARGIN + 8, top + 22, { width: CONTENT_WIDTH - 16, align: "center" });
+    doc.fillColor("#000000");
+    doc.y = top + boxHeight;
+    warnings.push(`تعذر عرض الرسم البياني "${section.title}": ${reason}`);
+  }
+
+  if (section.truncated && section.truncatedMessage) {
+    doc.moveDown(0.2);
+    doc.font("Body").fontSize(8).fillColor("#b45309");
+    doc.text(section.truncatedMessage, { width: CONTENT_WIDTH, align: "right" });
+    doc.fillColor("#000000");
+  }
+}
+
+function drawKpiGrid(doc: PDFKit.PDFDocument, cards: ReportKpiCard[], columns = 3): void {
   const gap = 10;
   const cardWidth = (CONTENT_WIDTH - gap * (columns - 1)) / columns;
   const cardHeight = 46;
@@ -235,7 +422,7 @@ function drawKpiGrid(doc: PDFKit.PDFDocument, cards: ReportKpiCard[]): void {
     const rowTop = doc.y;
     rowCards.forEach((card, index) => {
       // Right-to-left grid: first card sits at the rightmost slot.
-      const slot = rowCards.length - 1 - index;
+      const slot = columns - 1 - index;
       const x = PAGE_MARGIN + slot * (cardWidth + gap);
       doc.roundedRect(x, rowTop, cardWidth, cardHeight, 4).fillAndStroke("#f8fafc", "#e2e8f0");
       doc.font("Body").fontSize(8).fillColor("#64748b");
@@ -260,6 +447,57 @@ function drawKpiGrid(doc: PDFKit.PDFDocument, cards: ReportKpiCard[]): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Flex-width tables with 2-line wrapping
+// ---------------------------------------------------------------------------
+
+function columnFixedWidth(column: ReportTableColumn): number | null {
+  switch (column.format) {
+    case "number":
+    case "signed-number":
+      return COL_NUMBER_WIDTH;
+    case "percent":
+      return COL_PERCENT_WIDTH;
+    case "date":
+      return COL_DATE_WIDTH;
+    default:
+      return null; // text -> flexible
+  }
+}
+
+/** Direction-style short text columns get a narrow fixed width. */
+function isDirectionColumn(column: ReportTableColumn): boolean {
+  return column.key === "direction";
+}
+
+function computeColumnWidths(columns: ReportTableColumn[]): number[] {
+  const widths = columns.map((column) => {
+    if (isDirectionColumn(column)) return COL_DIRECTION_WIDTH;
+    return columnFixedWidth(column);
+  });
+
+  const fixedTotal = widths.reduce<number>((sum, width) => sum + (width ?? 0), 0);
+  const flexCount = widths.filter((width) => width === null).length;
+  const remaining = CONTENT_WIDTH - fixedTotal;
+
+  if (flexCount === 0) {
+    // No flexible columns: scale fixed columns to fill width.
+    const scale = CONTENT_WIDTH / (fixedTotal || CONTENT_WIDTH);
+    return widths.map((width) => (width ?? 0) * scale);
+  }
+
+  const flexWidth = Math.max(COL_MIN_TEXT_WIDTH, remaining / flexCount);
+  return widths.map((width) => width ?? flexWidth);
+}
+
+/** Estimates the number of wrapped lines a cell will need (capped at max). */
+function estimateLines(doc: PDFKit.PDFDocument, text: string, width: number, fontSize: number): number {
+  doc.fontSize(fontSize);
+  const textWidth = doc.widthOfString(text);
+  const lines = Math.ceil(textWidth / Math.max(1, width - 4));
+  return Math.min(Math.max(1, lines), TABLE_ROW_MAX_LINES);
+}
+
 function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
   if (table.columns.length === 0 || table.rows.length === 0) {
     doc.font("Body").fontSize(9).fillColor("#64748b");
@@ -269,19 +507,28 @@ function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
   }
 
   const columns = table.columns;
-  const colWidth = CONTENT_WIDTH / columns.length;
-  const rowHeight = 18;
-  const headerHeight = 20;
+  const widths = computeColumnWidths(columns);
+  // Right-to-left x offset for a column (rightmost column = index 0).
+  const xOffsets: number[] = [];
+  {
+    let cursor = PAGE_SIZE[0] - PAGE_MARGIN;
+    for (let i = 0; i < columns.length; i++) {
+      cursor -= widths[i];
+      xOffsets.push(cursor);
+    }
+  }
+
+  const headerHeight = 22;
+  const lineHeight = 11;
+  const cellPadding = 4;
 
   function drawHeaderRow(): void {
     const top = doc.y;
     doc.font("Bold").fontSize(8.5).fillColor("#0f172a");
     columns.forEach((column, index) => {
-      const slot = columns.length - 1 - index;
-      const x = PAGE_MARGIN + slot * colWidth;
-      doc.text(column.label, x + 2, top + 4, {
-        width: colWidth - 4,
-        height: headerHeight - 6,
+      doc.text(column.label, xOffsets[index] + 2, top + 5, {
+        width: widths[index] - 4,
+        height: headerHeight - 8,
         align: "right",
         lineBreak: false,
         ellipsis: true,
@@ -293,11 +540,20 @@ function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
     doc.fillColor("#000000");
   }
 
-  ensureSpace(doc, headerHeight + rowHeight);
+  ensureSpace(doc, headerHeight + 24);
   drawHeaderRow();
 
   doc.font("Body").fontSize(8.5);
   table.rows.forEach((row, rowIndex) => {
+    // Compute dynamic row height (up to 2 lines).
+    const cellTexts = columns.map((column) => formatCellValue(row[column.key], column.format));
+    const maxLines = columns.reduce(
+      (max, column, index) => Math.max(max, estimateLines(doc, cellTexts[index], widths[index], 8.5)),
+      1
+    );
+    const rowHeight = maxLines * lineHeight + cellPadding * 2;
+
+    // Never split a row across pages: if it doesn't fit, start a new page.
     if (doc.y + rowHeight > doc.page.height - doc.page.margins.bottom) {
       doc.addPage();
       drawHeaderRow();
@@ -309,14 +565,11 @@ function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
       doc.fillColor("#000000");
     }
     columns.forEach((column, index) => {
-      const slot = columns.length - 1 - index;
-      const x = PAGE_MARGIN + slot * colWidth;
-      const value = formatCellValue(row[column.key], column.format);
-      doc.text(value, x + 2, top + 4, {
-        width: colWidth - 4,
-        height: rowHeight - 6,
+      doc.text(cellTexts[index], xOffsets[index] + 2, top + cellPadding, {
+        width: widths[index] - 4,
+        height: rowHeight - cellPadding,
         align: "right",
-        lineBreak: false,
+        lineGap: 0,
         ellipsis: true,
       });
     });
@@ -324,19 +577,18 @@ function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
   });
 }
 
-function drawFooters(doc: PDFKit.PDFDocument, title: string): void {
+function drawFooters(doc: PDFKit.PDFDocument, title: string, runId: string): void {
   const range = doc.bufferedPageRange();
+  const runPart = runId ? ` — تشغيل: ${runId}` : "";
   for (let i = range.start; i < range.start + range.count; i++) {
     doc.switchToPage(i);
     const pageNumber = i - range.start + 1;
     const y = doc.page.height - PAGE_MARGIN - 14;
     doc.font("Body").fontSize(8).fillColor("#64748b");
-    doc.text(
-      `${title} — تم إنشاؤه بواسطة نظام ذكاء الشكاوى — صفحة ${pageNumber} من ${range.count}`,
-      PAGE_MARGIN,
-      y,
-      { width: CONTENT_WIDTH, align: "center" }
-    );
+    doc.text(`${title}${runPart} — صفحة ${pageNumber} من ${range.count}`, PAGE_MARGIN, y, {
+      width: CONTENT_WIDTH,
+      align: "center",
+    });
     doc.fillColor("#000000");
   }
 }

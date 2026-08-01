@@ -173,4 +173,54 @@ describe("XLSX report rendering", () => {
     });
     expect(foundNote).toBe(true);
   });
+
+  it("adds dedicated comparison worksheets when comparisonData is present", async () => {
+    const report = baseReport({
+      comparisonData: {
+        currentPeriod: { from: new Date("2026-07-08T00:00:00Z"), toExclusive: new Date("2026-07-15T00:00:00Z") },
+        previousPeriod: { from: new Date("2026-07-01T00:00:00Z"), toExclusive: new Date("2026-07-08T00:00:00Z") },
+        regionTrend: {
+          allDates: ["2026-07-08"],
+          series: [{ regionName: "منطقة الرياض", points: [{ date: "2026-07-08", count: 3 }] }],
+          truncated: false,
+          otherSeriesName: null,
+        },
+        regionChanges: [
+          { regionName: "منطقة الرياض", currentCount: 3, previousCount: 1, difference: 2, changeRate: 200, direction: "ارتفاع" },
+        ],
+        deptClassRises: [
+          {
+            departmentId: "d1",
+            departmentName: "إدارة الرعاية الصحية",
+            classificationId: "c1",
+            classificationName: "تصنيف الرعاية الصحية",
+            currentCount: 5,
+            previousCount: 2,
+            difference: 3,
+            changeRate: 150,
+            classificationContribution: 100,
+          },
+        ],
+        deptClassRisesTotal: 1,
+        executiveSummaryPoints: ["نقطة"],
+        warnings: [],
+      },
+    });
+    const { buffer } = await renderReportXlsx(report);
+    const workbook = await readBack(buffer);
+    const sheetNames = workbook.worksheets.map((s) => s.name);
+    expect(sheetNames).toContain("اتجاه المناطق");
+    expect(sheetNames).toContain("تغير المناطق");
+    expect(sheetNames).toContain("ارتفاع الإدارات والتصنيفات");
+    // Existing sheets remain intact.
+    expect(sheetNames).toContain("الملخص");
+    expect(sheetNames).toContain("المؤشرات");
+  });
+
+  it("omits comparison worksheets when comparisonData is absent (no regression)", async () => {
+    const { buffer } = await renderReportXlsx(baseReport());
+    const workbook = await readBack(buffer);
+    const sheetNames = workbook.worksheets.map((s) => s.name);
+    expect(sheetNames).not.toContain("اتجاه المناطق");
+  });
 });

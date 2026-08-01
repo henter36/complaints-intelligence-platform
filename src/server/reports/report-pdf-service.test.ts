@@ -4,8 +4,25 @@
 // globals; under the project's default jsdom environment those checks fail
 // with "Not a supported font format", so this file opts back into node.
 import { describe, expect, it } from "vitest";
-import type { ReportData } from "./report-data-service";
+import type { ReportData, ReportSection } from "./report-data-service";
 import { renderReportPdf } from "./report-pdf-service";
+
+/** PDFKit stores Info strings (Title/Keywords) as UTF-16BE literals, so a
+ * title is discoverable in the raw buffer via its UTF-16BE byte sequence.
+ * On-page text is glyph-subsetted and cannot be searched directly.
+ *
+ * PDF literal strings escape the bytes 0x28 "(", 0x29 ")" and 0x5C "\" with a
+ * backslash, so any Arabic code unit whose low byte is one of those is written
+ * as `5C <byte>`. We reproduce that escaping to build a byte-accurate needle. */
+function bufferContainsText(buffer: Buffer, text: string): boolean {
+  const raw = Buffer.from(text, "utf16le").swap16();
+  const escaped: number[] = [];
+  for (const byte of raw) {
+    if (byte === 0x28 || byte === 0x29 || byte === 0x5c) escaped.push(0x5c);
+    escaped.push(byte);
+  }
+  return buffer.includes(Buffer.from(escaped));
+}
 
 function baseReport(overrides: Partial<ReportData> = {}): ReportData {
   return {
@@ -118,5 +135,115 @@ describe("PDF report rendering", () => {
     const report = baseReport({ warnings: ["تم اختصار جدول المتأخرات."] });
     const { warnings } = await renderReportPdf(report);
     expect(warnings).toContain("تم اختصار جدول المتأخرات.");
+  });
+});
+
+describe("PDF report — comparative executive sections", () => {
+  function executiveSections(): ReportSection[] {
+    return [
+      { id: "executive_summary_text", kind: "text", title: "الملخص التنفيذي", points: ["نقطة تجريبية أولى"] },
+      {
+        id: "kpi_overview",
+        kind: "kpi",
+        title: "المؤشرات الرئيسية",
+        cards: [{ key: "total", label: "إجمالي الشكاوى", value: 342, format: "number" }],
+      },
+      {
+        id: "region_trend_chart",
+        kind: "chart",
+        chartType: "line",
+        title: "الاتجاه الزمني للشكاوى حسب المنطقة",
+        series: [
+          { name: "منطقة الرياض", points: [{ x: "2026-07-08", y: 2 }, { x: "2026-07-09", y: 3 }] },
+          { name: "منطقة مكة المكرمة", points: [{ x: "2026-07-08", y: 1 }, { x: "2026-07-09", y: 4 }] },
+        ],
+      },
+      {
+        id: "region_changes",
+        kind: "table",
+        title: "التغير في عدد الشكاوى حسب المنطقة",
+        table: {
+          id: "region_changes",
+          title: "التغير في عدد الشكاوى حسب المنطقة",
+          columns: [
+            { key: "regionName", label: "المنطقة", format: "text" },
+            { key: "difference", label: "الفرق", format: "text" },
+            { key: "direction", label: "الاتجاه", format: "text" },
+          ],
+          rows: [{ regionName: "منطقة الرياض", difference: "+12", direction: "↑ ارتفاع" }],
+          truncated: false,
+          totalMatched: 1,
+        },
+      },
+      {
+        id: "dept_class_rises",
+        kind: "table",
+        title: "الإدارات والتصنيفات التي شهدت ارتفاعًا عن الأسبوع السابق",
+        table: {
+          id: "dept_class_rises",
+          title: "الإدارات والتصنيفات التي شهدت ارتفاعًا عن الأسبوع السابق",
+          columns: [{ key: "departmentName", label: "الإدارة", format: "text" }],
+          rows: [{ departmentName: "إدارة الرعاية الصحية" }],
+          truncated: false,
+          totalMatched: 1,
+        },
+      },
+    ];
+  }
+
+  function executiveReport(): ReportData {
+    return baseReport({
+      previousPeriod: { from: "2026-07-01", to: "2026-07-07" },
+      reportRunId: "abcd1234efgh5678",
+      sections: executiveSections(),
+    });
+  }
+
+  it("produces a non-empty PDF buffer", async () => {
+    const { buffer } = await renderReportPdf(executiveReport());
+    expect(buffer.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+    expect(buffer.length).toBeGreaterThan(1000);
+  });
+
+  it("references the new comparative section titles in the document metadata", async () => {
+    const { buffer } = await renderReportPdf(executiveReport());
+    expect(bufferContainsText(buffer, "الاتجاه الزمني للشكاوى حسب المنطقة")).toBe(true);
+    expect(bufferContainsText(buffer, "التغير في عدد الشكاوى حسب المنطقة")).toBe(true);
+    expect(bufferContainsText(buffer, "الإدارات والتصنيفات التي شهدت ارتفاعًا عن الأسبوع السابق")).toBe(true);
+    expect(bufferContainsText(buffer, "الملخص التنفيذي")).toBe(true);
+  });
+
+  it("does not reference channel distribution anywhere", async () => {
+    const { buffer } = await renderReportPdf(executiveReport());
+    expect(bufferContainsText(buffer, "توزيع القنوات")).toBe(false);
+    expect(buffer.toString("binary")).not.toContain("channel_distribution");
+  });
+
+  it("never renders [object Object]", async () => {
+    const { buffer } = await renderReportPdf(executiveReport());
+    expect(buffer.toString("binary")).not.toContain("[object Object]");
+  });
+
+  it("renders a methodology note only for executive summaries", async () => {
+    const { buffer } = await renderReportPdf(executiveReport());
+    expect(bufferContainsText(buffer, "منهجية الاحتساب")).toBe(true);
+  });
+
+  it("renders a visible placeholder instead of crashing when a chart has no data", async () => {
+    const report = baseReport({
+      sections: [
+        {
+          id: "region_trend_chart",
+          kind: "chart",
+          chartType: "line",
+          title: "الاتجاه الزمني للشكاوى حسب المنطقة",
+          series: [],
+          emptyState: "لا توجد بيانات",
+        },
+      ],
+    });
+    const { buffer } = await renderReportPdf(report);
+    // Empty series still renders (empty-state PNG), producing a valid PDF.
+    expect(buffer.subarray(0, 5).toString("latin1")).toBe("%PDF-");
   });
 });

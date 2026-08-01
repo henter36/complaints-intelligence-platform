@@ -50,12 +50,16 @@ function buildContentSecurityPolicy(nonce: string): string {
   return [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}'${developmentScriptSource}`,
+    `script-src-elem 'self' 'nonce-${nonce}'`,
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data:",
+    "img-src 'self' data: blob:",
     "font-src 'self' data:",
     "connect-src 'self'",
     "object-src 'none'",
     "frame-ancestors 'none'",
+    "frame-src 'none'",
+    "worker-src 'self' blob:",
+    "manifest-src 'self'",
     "base-uri 'self'",
     "form-action 'self'",
   ].join("; ");

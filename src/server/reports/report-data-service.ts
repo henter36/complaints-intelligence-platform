@@ -12,6 +12,17 @@ import {
   type ReportFilters,
   type ReportRequest,
 } from "./report-definition-service";
+import {
+  buildComparisonResult,
+  comparisonWarningMessage,
+  MAX_TREND_SERIES,
+  type ComparisonResult,
+  type DeptClassRiseRow,
+  type RegionChangeRow,
+  type RegionTrendData,
+} from "./report-comparison";
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 export class ReportRowLimitExceededError extends Error {
   readonly code = "REPORT_ROW_LIMIT_EXCEEDED";
@@ -40,7 +51,7 @@ export type ReportKpiCard = {
 export type ReportTableColumn = {
   key: string;
   label: string;
-  format?: "number" | "percent" | "date" | "text";
+  format?: "number" | "signed-number" | "percent" | "date" | "text";
 };
 
 export type ReportTable = {
@@ -52,20 +63,60 @@ export type ReportTable = {
   totalMatched: number;
 };
 
+export type ChartSeries = {
+  name: string;
+  points: { x: string; y: number }[];
+  isOther?: boolean;
+};
+
+export type ReportChartSection = {
+  id: string;
+  kind: "chart";
+  chartType: "line";
+  title: string;
+  description?: string;
+  xAxisLabel?: string;
+  yAxisLabel?: string;
+  series: ChartSeries[];
+  emptyState?: string;
+  truncated?: boolean;
+  truncatedMessage?: string;
+  unit?: string;
+};
+
+export type ReportTextSection = {
+  id: string;
+  kind: "text";
+  title: string;
+  points: string[];
+};
+
 export type ReportSection =
   | { id: string; kind: "kpi"; title: string; cards: ReportKpiCard[] }
-  | { id: string; kind: "table"; title: string; table: ReportTable };
+  | { id: string; kind: "table"; title: string; table: ReportTable }
+  | ReportTextSection
+  | ReportChartSection;
 
 export type ReportData = {
   type: ReportType;
   title: string;
   generatedAt: string;
   period: { from: string; to: string };
+  // ISO dates (YYYY-MM-DD) for the reference period used in the comparison,
+  // for display on the cover page. null when no comparison period exists.
+  previousPeriod?: { from: string; to: string } | null;
+  // The run id (when produced by a real report run) so the PDF footer/cover can
+  // display a short traceable identifier. Optional for preview/tests.
+  reportRunId?: string;
   filters: ReportFilters;
   kpis: ComplaintKpiSummary;
   sections: ReportSection[];
   warnings: string[];
   rowCount: number;
+  // The raw comparison result is threaded through so the XLSX service can emit
+  // dedicated worksheets without recomputing it. It is undefined for report
+  // types that do not run a comparison (only EXECUTIVE_SUMMARY populates it).
+  comparisonData?: ComparisonResult;
 };
 
 const PREVIEW_TABLE_ROW_CAP = 100;
@@ -94,6 +145,109 @@ function groupTable(id: string, title: string, groups: ComplaintGroupMetrics[]):
     rows: groups.map((group) => ({ ...group })),
     truncated: false,
     totalMatched: groups.length,
+  };
+}
+
+/** Executive PDF-friendly 6-column view of a group distribution. The full
+ * 11-column `groupTable` remains for XLSX and other report types. */
+function groupTableExecutive(id: string, title: string, groups: ComplaintGroupMetrics[]): ReportTable {
+  return {
+    id,
+    title,
+    columns: [
+      { key: "name", label: "الاسم", format: "text" },
+      { key: "total", label: "الإجمالي", format: "number" },
+      { key: "open", label: "المفتوحة", format: "number" },
+      { key: "currentlyLate", label: "المتأخرة حالياً", format: "number" },
+      { key: "complianceRate", label: "نسبة الالتزام%", format: "percent" },
+      { key: "averageResolutionDays", label: "متوسط الإغلاق (يوم)", format: "number" },
+    ],
+    rows: groups.map((group) => ({ ...group })),
+    truncated: false,
+    totalMatched: groups.length,
+  };
+}
+
+const DIRECTION_SYMBOL: Record<string, string> = {
+  ارتفاع: "↑ ارتفاع",
+  انخفاض: "↓ انخفاض",
+  جديد: "★ جديد",
+  "دون تغير": "= دون تغير",
+  "دون شكاوى": "○ دون شكاوى",
+};
+
+function regionTrendChartSection(trend: RegionTrendData): ReportChartSection {
+  return {
+    id: "region_trend_chart",
+    kind: "chart",
+    chartType: "line",
+    title: "الاتجاه الزمني للشكاوى حسب المنطقة",
+    description: "عدد الشكاوى المستقبلة يومياً لكل منطقة خلال الفترة الحالية.",
+    xAxisLabel: "اليوم",
+    yAxisLabel: "عدد الشكاوى",
+    unit: "شكوى",
+    emptyState: "لا توجد بيانات لعرضها في الرسم البياني.",
+    truncated: trend.truncated,
+    truncatedMessage: trend.truncated
+      ? `تم عرض أعلى ${MAX_TREND_SERIES} مناطق فقط، وتم تجميع البقية ضمن "${trend.otherSeriesName ?? "مناطق أخرى"}".`
+      : undefined,
+    series: trend.series.map((series) => ({
+      name: series.regionName,
+      isOther: series.regionName === trend.otherSeriesName,
+      points: series.points.map((point) => ({ x: point.date, y: point.count })),
+    })),
+  };
+}
+
+function regionChangesTable(rows: RegionChangeRow[]): ReportTable {
+  return {
+    id: "region_changes",
+    title: "التغير في عدد الشكاوى حسب المنطقة",
+    columns: [
+      { key: "regionName", label: "المنطقة", format: "text" },
+      { key: "currentCount", label: "الحالي", format: "number" },
+      { key: "previousCount", label: "السابق", format: "number" },
+      { key: "difference", label: "الفرق", format: "signed-number" },
+      { key: "changeRate", label: "نسبة التغير%", format: "percent" },
+      { key: "direction", label: "الاتجاه", format: "text" },
+    ],
+    rows: rows.map((row) => ({
+      regionName: row.regionName,
+      currentCount: row.currentCount,
+      previousCount: row.previousCount,
+      difference: row.difference,
+      changeRate: row.changeRate,
+      direction: DIRECTION_SYMBOL[row.direction] ?? row.direction,
+    })),
+    truncated: false,
+    totalMatched: rows.length,
+  };
+}
+
+function deptClassRisesTable(rows: DeptClassRiseRow[], totalMatched: number): ReportTable {
+  return {
+    id: "dept_class_rises",
+    title: "الإدارات والتصنيفات التي شهدت ارتفاعًا عن الأسبوع السابق",
+    columns: [
+      { key: "departmentName", label: "الإدارة", format: "text" },
+      { key: "classificationName", label: "التصنيف", format: "text" },
+      { key: "currentCount", label: "الحالي", format: "number" },
+      { key: "previousCount", label: "السابق", format: "number" },
+      { key: "difference", label: "الفرق", format: "signed-number" },
+      { key: "changeRate", label: "نسبة التغير%", format: "percent" },
+      { key: "classificationContribution", label: "مساهمة التصنيف%", format: "percent" },
+    ],
+    rows: rows.map((row) => ({
+      departmentName: row.departmentName,
+      classificationName: row.classificationName,
+      currentCount: row.currentCount,
+      previousCount: row.previousCount,
+      difference: row.difference,
+      changeRate: row.changeRate,
+      classificationContribution: row.classificationContribution,
+    })),
+    truncated: totalMatched > rows.length,
+    totalMatched: Math.max(totalMatched, rows.length),
   };
 }
 
@@ -194,33 +348,50 @@ function topGroups(groups: ComplaintGroupMetrics[], n = 5): ComplaintGroupMetric
   return groups.slice(0, n);
 }
 
+function executiveKpiSection(result: Awaited<ReturnType<typeof getComplaintKpis>>): ReportSection {
+  return {
+    id: "kpi_overview",
+    kind: "kpi",
+    title: "المؤشرات الرئيسية",
+    cards: [
+      kpi("total", "إجمالي الشكاوى", result.volume.total),
+      kpi("open", "المفتوحة", result.kpis.openComplaints.currentValue),
+      kpi("closed", "المغلقة", result.kpis.closedComplaints.currentValue),
+      kpi("currentlyLate", "المتأخرة حالياً", result.kpis.currentlyLateComplaints.currentValue),
+      kpi("closedLate", "المغلقة بعد المهلة", result.kpis.closedLateComplaints.currentValue),
+      kpi("withinDueDate", "ضمن المهلة", result.kpis.closedWithinDueDate.currentValue),
+      kpi("onTimeRate", "نسبة الالتزام بالمهلة", result.performance.onTimeRate, "percent"),
+      kpi("avgResolutionDays", "متوسط زمن الإغلاق (يوم)", result.performance.averageResolutionDays),
+      kpi("medianResolutionDays", "الوسيط (يوم)", result.performance.medianResolutionDays),
+      kpi("unclassified", "غير المصنفة", result.kpis.unclassifiedComplaints.currentValue),
+      kpi("highPriorityOpen", "عالية الأولوية المفتوحة", result.kpis.highPriorityOpenComplaints.currentValue),
+    ],
+  };
+}
+
 async function buildExecutiveSummary(request: ReportRequest, mode: "preview" | "run", now: Date): Promise<ReportData> {
   const { filters, options } = request;
   const params = buildComplaintQueryParams(filters);
   const result = await getComplaintKpis(params, now);
-  const warnings: string[] = [];
+  const comparison = await buildComparisonResult(filters, now);
+  const warnings: string[] = comparison.warnings.map(comparisonWarningMessage);
 
-  const sections: ReportSection[] = [
-    {
-      id: "kpi_overview",
-      kind: "kpi",
-      title: "المؤشرات الرئيسية",
-      cards: [
-        kpi("total", "إجمالي الشكاوى", result.volume.total),
-        kpi("open", "المفتوحة", result.kpis.openComplaints.currentValue),
-        kpi("closed", "المغلقة", result.kpis.closedComplaints.currentValue),
-        kpi("currentlyLate", "المتأخرة حالياً", result.kpis.currentlyLateComplaints.currentValue),
-        kpi("closedLate", "المغلقة بعد المهلة", result.kpis.closedLateComplaints.currentValue),
-        kpi("withinDueDate", "ضمن المهلة", result.kpis.closedWithinDueDate.currentValue),
-        kpi("onTimeRate", "نسبة الالتزام بالمهلة", result.performance.onTimeRate, "percent"),
-        kpi("avgResolutionDays", "متوسط زمن الإغلاق (يوم)", result.performance.averageResolutionDays),
-        kpi("medianResolutionDays", "الوسيط (يوم)", result.performance.medianResolutionDays),
-        kpi("unclassified", "غير المصنفة", result.kpis.unclassifiedComplaints.currentValue),
-        kpi("highPriorityOpen", "عالية الأولوية المفتوحة", result.kpis.highPriorityOpenComplaints.currentValue),
-      ],
-    },
-  ];
+  const sections: ReportSection[] = [];
 
+  // 1. Auto-generated executive summary bullet points.
+  if (comparison.executiveSummaryPoints.length > 0) {
+    sections.push({
+      id: "executive_summary_text",
+      kind: "text",
+      title: "الملخص التنفيذي",
+      points: comparison.executiveSummaryPoints,
+    });
+  }
+
+  // 2. Headline KPIs.
+  sections.push(executiveKpiSection(result));
+
+  // 3. Optional previous-period comparison KPI cards.
   if (options.includeComparison) {
     sections.push({
       id: "comparison",
@@ -233,42 +404,46 @@ async function buildExecutiveSummary(request: ReportRequest, mode: "preview" | "
     });
   }
 
-  const topRegionsSection: ReportSection = {
-    id: "top_regions",
-    kind: "table",
-    title: "أعلى المناطق",
-    table: groupTable("top_regions", "أعلى المناطق", topGroups(result.distributions.byRegion)),
-  };
-  const topDepartmentsSection: ReportSection = {
-    id: "top_departments",
-    kind: "table",
-    title: "أعلى الإدارات",
-    table: groupTable("top_departments", "أعلى الإدارات", topGroups(result.distributions.byDepartment)),
-  };
-  const topClassificationsSection: ReportSection = {
-    id: "top_classifications",
-    kind: "table",
-    title: "أعلى التصنيفات",
-    table: groupTable("top_classifications", "أعلى التصنيفات", topGroups(result.distributions.byClassification)),
-  };
-  const channelDistributionSection: ReportSection = {
-    id: "channel_distribution",
-    kind: "table",
-    title: "توزيع القنوات",
-    table: {
-      id: "channel_distribution",
-      title: "توزيع القنوات",
-      columns: [
-        { key: "name", label: "القناة", format: "text" },
-        { key: "count", label: "العدد", format: "number" },
-      ],
-      rows: result.distributions.byChannel.map((item) => ({ ...item })),
-      truncated: false,
-      totalMatched: result.distributions.byChannel.length,
+  // 4-9. Region trend + change + rises + top groups (always present in executive summary).
+  sections.push(
+    regionTrendChartSection(comparison.regionTrend),
+    {
+      id: "region_changes",
+      kind: "table" as const,
+      title: "التغير في عدد الشكاوى حسب المنطقة",
+      table: regionChangesTable(comparison.regionChanges),
     },
-  };
-  sections.push(topRegionsSection, topDepartmentsSection, topClassificationsSection, channelDistributionSection);
+    {
+      id: "dept_class_rises",
+      kind: "table" as const,
+      title: "الإدارات والتصنيفات التي شهدت ارتفاعًا عن الأسبوع السابق",
+      table: deptClassRisesTable(comparison.deptClassRises, comparison.deptClassRisesTotal),
+    },
+    {
+      id: "top_regions",
+      kind: "table" as const,
+      title: "أعلى المناطق",
+      table: groupTableExecutive("top_regions", "أعلى المناطق", topGroups(result.distributions.byRegion)),
+    },
+    {
+      id: "top_departments",
+      kind: "table" as const,
+      title: "أعلى الإدارات",
+      table: groupTableExecutive("top_departments", "أعلى الإدارات", topGroups(result.distributions.byDepartment)),
+    },
+    {
+      id: "top_classifications",
+      kind: "table" as const,
+      title: "أعلى التصنيفات",
+      table: groupTableExecutive(
+        "top_classifications",
+        "أعلى التصنيفات",
+        topGroups(result.distributions.byClassification)
+      ),
+    }
+  );
 
+  // 10. Optional overdue table.
   if (options.includeDetailedRows) {
     const overdueLimit = Math.min(options.maxRows ?? 50, 50);
     const overdueTable = await fetchOverdueTable(filters, overdueLimit, "preview");
@@ -278,16 +453,27 @@ async function buildExecutiveSummary(request: ReportRequest, mode: "preview" | "
     }
   }
 
+  const previousPeriod = comparison.previousPeriod
+    ? {
+        from: comparison.previousPeriod.from.toISOString().slice(0, 10),
+        // The stored period is half-open; subtract one day to present the
+        // inclusive last day to the reader.
+        to: new Date(comparison.previousPeriod.toExclusive.getTime() - DAY_MS).toISOString().slice(0, 10),
+      }
+    : null;
+
   return {
     type: ReportType.EXECUTIVE_SUMMARY,
     title: request.title ?? getReportDefinition(ReportType.EXECUTIVE_SUMMARY).title,
     generatedAt: now.toISOString(),
     period: { from: filters.from, to: filters.to },
+    previousPeriod,
     filters,
     kpis: result.kpis,
     sections,
     warnings,
     rowCount: 0,
+    comparisonData: comparison,
   };
 }
 
