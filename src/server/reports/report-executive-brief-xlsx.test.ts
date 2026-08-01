@@ -170,7 +170,90 @@ describe("renderReportXlsx — executive brief mode", () => {
     headerRow.eachCell((cell) => {
       if (cell.value) headers.push(String(cell.value));
     });
-    expect(headers.length).toBe(9);
+    expect(headers).toHaveLength(9);
+  });
+
+  it("keeps missing numeric values empty instead of writing text placeholders", async () => {
+    const report = makeReport();
+    const briefData = makeBriefData();
+    briefData.briefKpis[1] = {
+      ...briefData.briefKpis[1],
+      previousValue: null,
+      difference: null,
+      changeRate: null,
+    };
+    briefData.allRegions[1] = {
+      ...briefData.allRegions[1],
+      changeRate: null,
+      complianceRate: null,
+      averageResolutionDays: null,
+    };
+    briefData.topClassifications[0] = {
+      ...briefData.topClassifications[0],
+      changeRate: null,
+    };
+    report.briefData = briefData;
+
+    const result = await renderReportXlsx(report);
+    const workbook = await readBack(result.buffer);
+    const kpiRow = workbook.getWorksheet("المؤشرات التنفيذية")!.getRow(3);
+    expect(kpiRow.getCell(2).value).toBeTypeOf("number");
+    expect(kpiRow.getCell(3).value).toBeNull();
+    expect(kpiRow.getCell(4).value).toBeNull();
+    expect(kpiRow.getCell(5).value).toBeNull();
+
+    const regionRow = workbook.getWorksheet("جميع المناطق")!.getRow(3);
+    expect(regionRow.getCell(5).value).toBeNull();
+    expect(regionRow.getCell(6).value).toBeNull();
+    expect(regionRow.getCell(7).value).toBeNull();
+
+    const classificationRow = workbook.getWorksheet("أبرز التصنيفات")!.getRow(2);
+    expect(classificationRow.getCell(5).value).toBeNull();
+  });
+
+  it("distinguishes a real zero from a missing previous timeline", async () => {
+    const report = makeReport();
+    const briefData = makeBriefData();
+    briefData.comparativeTimeline = {
+      current: { label: "الفترة الحالية", points: [{ relativeDay: 1, count: 0 }] },
+      previous: null,
+      periodDays: 1,
+    };
+    report.briefData = briefData;
+
+    const result = await renderReportXlsx(report);
+    const workbook = await readBack(result.buffer);
+    const timelineRow = workbook.getWorksheet("الاتجاه الزمني المقارن")!.getRow(2);
+    expect(timelineRow.getCell(2).value).toBe(0);
+    expect(timelineRow.getCell(3).value).toBeNull();
+  });
+
+  it("isolates a failed brief sheet and writes its warning to the summary", async () => {
+    const report = makeReport();
+    const briefData = makeBriefData();
+    Object.defineProperty(briefData, "allRegions", {
+      configurable: true,
+      get: () => {
+        throw new Error("internal builder failure");
+      },
+    });
+    report.briefData = briefData;
+
+    const result = await renderReportXlsx(report);
+    const expectedWarning = "تعذر إنشاء ورقة البيانات الإضافية (all_regions).";
+    expect(result.warnings).toContain(expectedWarning);
+
+    const workbook = await readBack(result.buffer);
+    const names = sheetNames(workbook);
+    expect(names).toContain("جميع المناطق");
+    expect(names).toContain("أبرز التصنيفات");
+    expect(names).toContain("التركز");
+
+    const summaryValues: string[] = [];
+    workbook.getWorksheet("الملخص")!.eachRow((row) => {
+      row.eachCell((cell) => summaryValues.push(String(cell.value ?? "")));
+    });
+    expect(summaryValues).toContain(expectedWarning);
   });
 });
 

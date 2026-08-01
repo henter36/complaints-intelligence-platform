@@ -77,6 +77,23 @@ function formatSigned(n: number | null): string {
   return String(n);
 }
 
+function formatKpiDelta(difference: number, changeRate: number | null): string {
+  const differenceText = formatSigned(difference);
+  if (changeRate === null) return differenceText;
+  const rateSign = changeRate > 0 ? "+" : "";
+  return `${differenceText}  (${rateSign}${changeRate}%)`;
+}
+
+function resolveRegionCellColor(
+  columnKey: keyof RegionReferenceRow | "idx",
+  row: RegionReferenceRow
+): string {
+  if (columnKey !== "direction") return COLOR_DARK;
+  if (row.currentCount > row.previousCount) return COLOR_NEGATIVE;
+  if (row.currentCount < row.previousCount) return COLOR_POSITIVE;
+  return COLOR_MUTED;
+}
+
 function shortRunId(runId?: string): string {
   return runId ? runId.slice(0, 8) : "";
 }
@@ -84,6 +101,24 @@ function shortRunId(runId?: string): string {
 export type ExecutiveBriefPdfResult = {
   buffer: Buffer;
   warnings: string[];
+};
+
+type BriefPageLayout = {
+  pageSize: readonly [number, number];
+  margin: number;
+  contentWidth: number;
+};
+
+type ExecutiveBriefRenderContext = {
+  doc: PDFKit.PDFDocument;
+  data: ReportData;
+  warnings: string[];
+  layout: BriefPageLayout;
+};
+
+type Page3Context = ExecutiveBriefRenderContext & {
+  topClassifications: readonly ClassificationBriefRow[];
+  comparativeTimeline: ComparativeTimelineData;
 };
 
 // ---------------------------------------------------------------------------
@@ -101,6 +136,7 @@ export async function renderExecutiveBriefPdf(
   const pageSize = isWidescreen ? PAGE_16x9 : PAGE_A4L;
   const margin = isWidescreen ? SLIDE_MARGIN : PRINT_MARGIN;
   const contentW = pageSize[0] - margin * 2;
+  const layout: BriefPageLayout = { pageSize, margin, contentWidth: contentW };
 
   const doc = new PDFDocument({
     size: pageSize,
@@ -136,17 +172,22 @@ export async function renderExecutiveBriefPdf(
   }
 
   // Page 1: KPIs + executive summary + comparative bar chart
-  await renderPage1(doc, data, briefData.briefKpis, warnings, pageSize, margin, contentW);
+  const context: ExecutiveBriefRenderContext = { doc, data, warnings, layout };
+  await renderPage1(context, briefData.briefKpis);
 
   // Page 2: All reference regions table
   doc.addPage();
-  renderPage2(doc, data, briefData.allRegions, pageSize, margin, contentW);
+  renderPage2(doc, data, briefData.allRegions, layout);
 
   // Page 3: Top 8 classifications + comparative timeline
   doc.addPage();
-  await renderPage3(doc, data, briefData.topClassifications, briefData.comparativeTimeline, warnings, pageSize, margin, contentW);
+  await renderPage3({
+    ...context,
+    topClassifications: briefData.topClassifications,
+    comparativeTimeline: briefData.comparativeTimeline,
+  });
 
-  drawBriefFooters(doc, data.title, shortRunId(data.reportRunId), margin, pageSize, contentW);
+  drawBriefFooters(doc, data.title, shortRunId(data.reportRunId), layout);
 
   doc.end();
   const buffer = await done;
@@ -157,29 +198,24 @@ export async function renderExecutiveBriefPdf(
 // Page 1 — KPIs + executive summary + region bar chart
 // ---------------------------------------------------------------------------
 
-async function renderPage1(
+function drawPage1Header(
   doc: PDFKit.PDFDocument,
   data: ReportData,
-  briefKpis: ExecutiveBriefKpiCard[],
-  warnings: string[],
-  pageSize: [number, number],
-  margin: number,
-  contentW: number
-): Promise<void> {
-  let y = margin;
-
-  // ── Header ──────────────────────────────────────────────────────────────
+  layout: BriefPageLayout,
+  startY: number
+): number {
+  const { pageSize, margin, contentWidth } = layout;
+  let y = startY;
   doc.font("Bold").fontSize(22).fillColor(COLOR_DARK);
-  doc.text(data.title, margin, y, { width: contentW, align: "right" });
+  doc.text(data.title, margin, y, { width: contentWidth, align: "right" });
   y += 30;
 
   doc.font("Body").fontSize(10).fillColor(COLOR_MUTED);
   const periodLine = `الفترة: ${data.period.from} – ${data.period.to}`;
   const genLine = `تاريخ الإنشاء: ${formatRiyadhDateTime(new Date(data.generatedAt))}`;
-  doc.text(`${periodLine}   |   ${genLine}`, margin, y, { width: contentW, align: "right" });
+  doc.text(`${periodLine}   |   ${genLine}`, margin, y, { width: contentWidth, align: "right" });
   y += 18;
 
-  // ── Separator ───────────────────────────────────────────────────────────
   doc
     .moveTo(margin, y)
     .lineTo(pageSize[0] - margin, y)
@@ -187,70 +223,89 @@ async function renderPage1(
     .stroke();
   doc.strokeColor("#000000");
   y += 12;
+  return y;
+}
 
-  // ── 8 KPI cards — 4 per row ─────────────────────────────────────────────
+function drawKpiCard(
+  doc: PDFKit.PDFDocument,
+  card: ExecutiveBriefKpiCard,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+): void {
+  doc.roundedRect(x, y, width, height, 5).fillAndStroke(COLOR_CARD_BG, COLOR_BORDER);
+  doc.fillColor("#000000").strokeColor("#000000");
+
+  doc.font("Body").fontSize(8.5).fillColor(COLOR_MUTED);
+  doc.text(card.label, x + 8, y + 8, {
+    width: width - 16,
+    height: 14,
+    align: "right",
+    lineBreak: false,
+    ellipsis: true,
+  });
+
+  doc.font("Bold").fontSize(18).fillColor(COLOR_DARK);
+  doc.text(formatValue(card.value, card.format), x + 8, y + 22, {
+    width: width - 16,
+    height: 24,
+    align: "right",
+    lineBreak: false,
+    ellipsis: true,
+  });
+
+  if (card.difference === null) return;
+  doc.font("Body").fontSize(8).fillColor(assessmentColor(card.assessment));
+  doc.text(formatKpiDelta(card.difference, card.changeRate), x + 8, y + 48, {
+    width: width - 16,
+    height: 14,
+    align: "right",
+    lineBreak: false,
+    ellipsis: true,
+  });
+}
+
+function drawKpiGrid(
+  doc: PDFKit.PDFDocument,
+  briefKpis: readonly ExecutiveBriefKpiCard[],
+  layout: BriefPageLayout,
+  startY: number
+): number {
+  let y = startY;
+  const { margin, contentWidth } = layout;
+
   const cards = briefKpis.slice(0, 8);
   const cols = 4;
   const gap = 10;
-  const cardW = (contentW - gap * (cols - 1)) / cols;
+  const cardW = (contentWidth - gap * (cols - 1)) / cols;
   const cardH = 72;
 
   for (let row = 0; row < 2; row++) {
     const rowCards = cards.slice(row * cols, (row + 1) * cols);
     rowCards.forEach((card, col) => {
-      // RTL: rightmost slot = col index 0
       const slot = cols - 1 - col;
       const x = margin + slot * (cardW + gap);
-      const cardY = y;
-
-      doc.roundedRect(x, cardY, cardW, cardH, 5).fillAndStroke(COLOR_CARD_BG, COLOR_BORDER);
-      doc.fillColor("#000000").strokeColor("#000000");
-
-      // Label
-      doc.font("Body").fontSize(8.5).fillColor(COLOR_MUTED);
-      doc.text(card.label, x + 8, cardY + 8, {
-        width: cardW - 16,
-        height: 14,
-        align: "right",
-        lineBreak: false,
-        ellipsis: true,
-      });
-
-      // Value
-      doc.font("Bold").fontSize(18).fillColor(COLOR_DARK);
-      doc.text(formatValue(card.value, card.format), x + 8, cardY + 22, {
-        width: cardW - 16,
-        height: 24,
-        align: "right",
-        lineBreak: false,
-        ellipsis: true,
-      });
-
-      // Difference / change rate
-      if (card.difference !== null) {
-        const deltaText =
-          `${formatSigned(card.difference)}` +
-          (card.changeRate !== null ? `  (${card.changeRate > 0 ? "+" : ""}${card.changeRate}%)` : "");
-        doc.font("Body").fontSize(8).fillColor(assessmentColor(card.assessment));
-        doc.text(deltaText, x + 8, cardY + 48, {
-          width: cardW - 16,
-          height: 14,
-          align: "right",
-          lineBreak: false,
-          ellipsis: true,
-        });
-      }
+      drawKpiCard(doc, card, x, y, cardW, cardH);
     });
     y += cardH + 10;
   }
 
-  y += 4;
+  return y + 4;
+}
 
-  // ── Executive summary points ─────────────────────────────────────────────
+function drawExecutiveSummary(
+  doc: PDFKit.PDFDocument,
+  data: ReportData,
+  layout: BriefPageLayout,
+  startY: number
+): number {
+  const { margin, contentWidth } = layout;
+  let y = startY;
   const textSection = data.sections.find((s) => s.kind === "text");
   if (textSection?.kind === "text" && textSection.points.length > 0) {
     doc.font("Bold").fontSize(11).fillColor(COLOR_DARK);
-    doc.text("الملخص التنفيذي", margin, y, { width: contentW, align: "right" });
+    doc.text("الملخص التنفيذي", margin, y, { width: contentWidth, align: "right" });
     y += 16;
 
     const points = textSection.points.slice(0, 5);
@@ -258,56 +313,70 @@ async function renderPage1(
       if (!point?.trim()) continue;
       doc.font("Body").fontSize(9.5).fillColor(COLOR_MID);
       const text = `• ${point}`;
-      const textOptions = { width: contentW - 8, align: "right" as const };
+      const textOptions = { width: contentWidth - 8, align: "right" as const };
       const pointHeight = doc.heightOfString(text, textOptions);
       doc.text(text, margin + 8, y, textOptions);
       y += pointHeight + 4;
     }
   }
 
-  y += 6;
+  return y + 6;
+}
 
-  // ── Comparative bar chart (current vs previous per region) ───────────────
+async function drawRegionComparisonChart(
+  context: ExecutiveBriefRenderContext,
+  y: number
+): Promise<void> {
+  const { doc, data, warnings, layout } = context;
+  const { pageSize, margin, contentWidth } = layout;
   const comparisonSection = data.comparisonData;
-  if (comparisonSection && y < pageSize[1] - margin - 40) {
-    doc.font("Bold").fontSize(11).fillColor(COLOR_DARK);
-    doc.text("مقارنة الشكاوى بالمناطق", margin, y, { width: contentW, align: "right" });
-    y += 16;
+  if (!comparisonSection || y >= pageSize[1] - margin - 40) return;
 
-    const availableH = pageSize[1] - margin - 24 - y - 20;
-    if (availableH < 80) return;
-    const chartW = Math.round(contentW);
-    const chartH = Math.round(availableH);
+  doc.font("Bold").fontSize(11).fillColor(COLOR_DARK);
+  doc.text("مقارنة الشكاوى بالمناطق", margin, y, { width: contentWidth, align: "right" });
+  const chartY = y + 16;
+  const availableHeight = pageSize[1] - margin - 24 - chartY - 20;
+  if (availableHeight < 80) return;
 
-    // Build a simple chart from region changes
-    const regionChanges = comparisonSection.regionChanges.slice(0, 8);
-    if (regionChanges.length > 0) {
-      const chartSection = {
-        id: "brief_region_bar",
-        kind: "chart" as const,
-        chartType: "line" as const,
-        title: "مقارنة الشكاوى بالمناطق",
-        series: [
-          {
-            name: "الفترة الحالية",
-            points: regionChanges.map((r, i) => ({ x: String(i + 1), y: r.currentCount })),
-          },
-          {
-            name: "الفترة السابقة",
-            points: regionChanges.map((r, i) => ({ x: String(i + 1), y: r.previousCount })),
-          },
-        ],
-      };
+  const regionChanges = comparisonSection.regionChanges.slice(0, 8);
+  if (regionChanges.length === 0) return;
+  const chartWidth = Math.round(contentWidth);
+  const chartHeight = Math.round(availableHeight);
+  const chartSection = {
+    id: "brief_region_bar",
+    kind: "chart" as const,
+    chartType: "line" as const,
+    title: "مقارنة الشكاوى بالمناطق",
+    series: [
+      {
+        name: "الفترة الحالية",
+        points: regionChanges.map((row, index) => ({ x: String(index + 1), y: row.currentCount })),
+      },
+      {
+        name: "الفترة السابقة",
+        points: regionChanges.map((row, index) => ({ x: String(index + 1), y: row.previousCount })),
+      },
+    ],
+  };
 
-      try {
-        const png = await renderLineChartPng(chartSection, chartW, chartH);
-        doc.image(png, margin, y, { width: contentW, height: chartH });
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
-        warnings.push(`تعذر رسم مخطط المناطق: ${reason}`);
-      }
-    }
+  try {
+    const png = await renderLineChartPng(chartSection, chartWidth, chartHeight);
+    doc.image(png, margin, chartY, { width: contentWidth, height: chartHeight });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    warnings.push(`تعذر رسم مخطط المناطق: ${reason}`);
   }
+}
+
+async function renderPage1(
+  context: ExecutiveBriefRenderContext,
+  briefKpis: readonly ExecutiveBriefKpiCard[]
+): Promise<void> {
+  const { doc, data, layout } = context;
+  let y = drawPage1Header(doc, data, layout, layout.margin);
+  y = drawKpiGrid(doc, briefKpis, layout, y);
+  y = drawExecutiveSummary(doc, data, layout, y);
+  await drawRegionComparisonChart(context, y);
 }
 
 // ---------------------------------------------------------------------------
@@ -345,11 +414,10 @@ function formatRegionCell(row: RegionReferenceRow, key: string): string {
 function renderPage2(
   doc: PDFKit.PDFDocument,
   data: ReportData,
-  allRegions: RegionReferenceRow[],
-  pageSize: [number, number],
-  margin: number,
-  contentW: number
+  allRegions: readonly RegionReferenceRow[],
+  layout: BriefPageLayout
 ): void {
+  const { pageSize, margin, contentWidth: contentW } = layout;
   let y = margin;
 
   // Page header
@@ -426,15 +494,7 @@ function renderPage2(
     doc.font("Body").fontSize(fontSize).fillColor(COLOR_DARK);
     cols.forEach((col, ci) => {
       const text = formatRegionCell(row, col.key);
-      const isDirectionCol = col.key === "direction";
-      const color = isDirectionCol
-        ? row.currentCount > row.previousCount
-          ? COLOR_NEGATIVE
-          : row.currentCount < row.previousCount
-            ? COLOR_POSITIVE
-            : COLOR_MUTED
-        : COLOR_DARK;
-      doc.fillColor(color);
+      doc.fillColor(resolveRegionCellColor(col.key, row));
       doc.text(text, xOffsets[ci] + 2, y + 2, {
         width: scaledWidths[ci] - 4,
         height: rowH - 2,
@@ -488,16 +548,9 @@ function renderPage2(
 // Page 3 — Top 8 classifications + comparative timeline
 // ---------------------------------------------------------------------------
 
-async function renderPage3(
-  doc: PDFKit.PDFDocument,
-  data: ReportData,
-  topClassifications: ClassificationBriefRow[],
-  comparativeTimeline: ComparativeTimelineData,
-  warnings: string[],
-  pageSize: [number, number],
-  margin: number,
-  contentW: number
-): Promise<void> {
+async function renderPage3(context: Page3Context): Promise<void> {
+  const { doc, topClassifications, comparativeTimeline, warnings, layout } = context;
+  const { pageSize, margin, contentWidth: contentW } = layout;
   let y = margin;
 
   // ── Page header ───────────────────────────────────────────────────────────
@@ -641,10 +694,9 @@ function drawBriefFooters(
   doc: PDFKit.PDFDocument,
   title: string,
   runId: string,
-  margin: number,
-  pageSize: [number, number],
-  contentW: number
+  layout: BriefPageLayout
 ): void {
+  const { pageSize, margin, contentWidth: contentW } = layout;
   const range = doc.bufferedPageRange();
   const runPart = runId ? ` — تشغيل: ${runId}` : "";
   for (let i = range.start; i < range.start + range.count; i++) {

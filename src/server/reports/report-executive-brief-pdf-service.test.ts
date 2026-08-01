@@ -3,11 +3,13 @@
 // Smoke tests for the executive brief PDF service.
 // Verifies that the renderers produce valid, non-empty PDFs without errors.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import PDFDocument from "pdfkit";
 import type { ReportData } from "./report-data-service";
 import type { ExecutiveBriefData } from "./report-data-service";
 import type { ReportType } from "@prisma/client";
 import { renderExecutiveBriefPdf } from "./report-executive-brief-pdf-service";
+import * as chartService from "./report-chart-service";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -218,6 +220,77 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
     data.briefData = makeBriefData({ allRegions: manyRegions });
     const result = await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
     expect(result.buffer.length).toBeGreaterThan(0);
+  });
+
+  it("renders positive, negative, zero, and no-rate KPI deltas with all region directions", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.briefData = makeBriefData({
+      briefKpis: [
+        { key: "positive", label: "موجب", value: 15, previousValue: 10, difference: 5, changeRate: 10, format: "number", assessment: "neutral" },
+        { key: "negative", label: "سالب", value: 5, previousValue: 10, difference: -5, changeRate: -10, format: "number", assessment: "neutral" },
+        { key: "zero", label: "صفر", value: 10, previousValue: 10, difference: 0, changeRate: 0, format: "number", assessment: "neutral" },
+        { key: "no-rate", label: "دون نسبة", value: 15, previousValue: 10, difference: 5, changeRate: null, format: "number", assessment: "neutral" },
+      ],
+      allRegions: [
+        { regionName: "منطقة صاعدة", currentCount: 2, previousCount: 1, difference: 1, changeRate: 100, complianceRate: 90, averageResolutionDays: 2, currentlyLate: 0, direction: "↑ صاعد" },
+        { regionName: "منطقة هابطة", currentCount: 1, previousCount: 2, difference: -1, changeRate: -50, complianceRate: 90, averageResolutionDays: 2, currentlyLate: 0, direction: "↓ هابط" },
+        { regionName: "منطقة ثابتة", currentCount: 1, previousCount: 1, difference: 0, changeRate: 0, complianceRate: 90, averageResolutionDays: 2, currentlyLate: 0, direction: "= ثابت" },
+      ],
+    });
+
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    const fillColorSpy = vi.spyOn(PDFDocument.prototype, "fillColor");
+    try {
+      const result = await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+      expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
+      expect(result.warnings).toEqual([]);
+
+      const renderedText = textSpy.mock.calls.map((call) => call[0]);
+      expect(renderedText).toContain("+5  (+10%)");
+      expect(renderedText).toContain("-5  (-10%)");
+      expect(renderedText).toContain("0  (0%)");
+      expect(renderedText).toContain("+5");
+
+      const colorImmediatelyBefore = (text: string): string | undefined => {
+        const textIndex = textSpy.mock.calls.findIndex((call) => call[0] === text);
+        const textOrder = textSpy.mock.invocationCallOrder[textIndex];
+        let colorIndex = -1;
+        fillColorSpy.mock.invocationCallOrder.forEach((order, index) => {
+          if (order < textOrder && (colorIndex === -1 || order > fillColorSpy.mock.invocationCallOrder[colorIndex])) {
+            colorIndex = index;
+          }
+        });
+        return colorIndex === -1 ? undefined : String(fillColorSpy.mock.calls[colorIndex][0]);
+      };
+
+      expect(colorImmediatelyBefore("↑ صاعد")).toBe("#b91c1c");
+      expect(colorImmediatelyBefore("↓ هابط")).toBe("#15803d");
+      expect(colorImmediatelyBefore("= ثابت")).toBe("#64748b");
+      expect(colorImmediatelyBefore("منطقة صاعدة")).toBe("#0f172a");
+    } finally {
+      textSpy.mockRestore();
+      fillColorSpy.mockRestore();
+    }
+  });
+
+  it("draws region charts at the same height used for rasterization", async () => {
+    const chartSpy = vi.spyOn(chartService, "renderLineChartPng");
+    const imageSpy = vi.spyOn(PDFDocument.prototype, "image");
+    try {
+      await renderExecutiveBriefPdf(
+        makeReportData("DIGITAL_EXECUTIVE_BRIEF"),
+        "DIGITAL_EXECUTIVE_BRIEF"
+      );
+      const rasterHeights = chartSpy.mock.calls.map((call) => call[2]);
+      const displayHeights = imageSpy.mock.calls
+        .map((call) => (call[3] as { height?: number } | undefined)?.height)
+        .filter((height): height is number => typeof height === "number");
+      expect(rasterHeights.length).toBeGreaterThanOrEqual(2);
+      expect(displayHeights.slice(0, rasterHeights.length)).toEqual(rasterHeights);
+    } finally {
+      chartSpy.mockRestore();
+      imageSpy.mockRestore();
+    }
   });
 });
 

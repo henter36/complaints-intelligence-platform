@@ -4,6 +4,7 @@ import type {
   ReportData,
   ReportTable,
   ExecutiveBriefData,
+  FullAnalyticalData,
 } from "./report-data-service";
 import { isFullAnalyticalData } from "./report-data-service";
 import type { ComparisonResult } from "./report-comparison";
@@ -327,9 +328,9 @@ function buildBriefKpisSheet(workbook: ExcelJS.Workbook, briefData: ExecutiveBri
     const row = sheet.addRow({
       label: sanitizeText(card.label),
       current: card.value,
-      previous: card.previousValue ?? "-",
-      difference: card.difference ?? "-",
-      changeRate: card.changeRate ?? "-",
+      previous: card.previousValue ?? null,
+      difference: card.difference ?? null,
+      changeRate: card.changeRate ?? null,
       assessment: sanitizeText(assessmentLabels[card.assessment] ?? card.assessment),
     });
     if (typeof card.changeRate === "number") {
@@ -361,9 +362,9 @@ function buildAllRegionsSheet(workbook: ExcelJS.Workbook, briefData: ExecutiveBr
       current: row.currentCount,
       previous: row.previousCount,
       difference: row.difference,
-      changeRate: row.changeRate ?? "-",
-      complianceRate: row.complianceRate ?? "-",
-      avgResolution: row.averageResolutionDays ?? "-",
+      changeRate: row.changeRate ?? null,
+      complianceRate: row.complianceRate ?? null,
+      avgResolution: row.averageResolutionDays ?? null,
       currentlyLate: row.currentlyLate,
       direction: sanitizeText(row.direction),
     });
@@ -392,7 +393,7 @@ function buildTopClassificationsSheet(workbook: ExcelJS.Workbook, briefData: Exe
       current: row.currentCount,
       previous: row.previousCount,
       difference: row.difference,
-      changeRate: row.changeRate ?? "-",
+      changeRate: row.changeRate ?? null,
       shareOfTotal: row.shareOfTotal,
     });
     if (typeof row.changeRate === "number") added.getCell("changeRate").numFmt = '0.0"%"';
@@ -537,88 +538,173 @@ export type XlsxRenderResult = {
   warnings: string[];
 };
 
-export async function renderReportXlsx(data: ReportData): Promise<XlsxRenderResult> {
-  const warnings = [...data.warnings];
+type WorkbookBuildContext = {
+  workbook: ExcelJS.Workbook;
+  data: ReportData;
+  warnings: string[];
+  usedNames: Set<string>;
+};
+
+type BriefSheetDefinition = {
+  key: string;
+  build: (
+    workbook: ExcelJS.Workbook,
+    data: ExecutiveBriefData,
+    usedNames: Set<string>
+  ) => void;
+};
+
+type ComparisonSheetDefinition = {
+  failureMessage: string;
+  build: (
+    workbook: ExcelJS.Workbook,
+    comparison: ComparisonResult,
+    usedNames: Set<string>
+  ) => void;
+};
+
+type FullAnalyticalSheetDefinition = {
+  failureMessage: string;
+  build: (
+    workbook: ExcelJS.Workbook,
+    data: FullAnalyticalData,
+    usedNames: Set<string>
+  ) => void;
+};
+
+const BRIEF_SHEET_BUILDERS: readonly BriefSheetDefinition[] = [
+  { key: "brief_kpis", build: buildBriefKpisSheet },
+  { key: "all_regions", build: buildAllRegionsSheet },
+  { key: "top_classifications", build: buildTopClassificationsSheet },
+  { key: "comparative_timeline", build: buildComparativeTimelineSheet },
+  { key: "concentration", build: buildConcentrationSheet },
+];
+
+const COMPARISON_SHEET_BUILDERS: readonly ComparisonSheetDefinition[] = [
+  { failureMessage: 'تعذر إنشاء ورقة "اتجاه المناطق".', build: buildRegionTrendSheet },
+  { failureMessage: 'تعذر إنشاء ورقة "تغير المناطق".', build: buildRegionChangesSheet },
+  {
+    failureMessage: 'تعذر إنشاء ورقة "ارتفاع الإدارات والتصنيفات".',
+    build: buildDeptClassRisesSheet,
+  },
+];
+
+const FULL_ANALYTICAL_SHEET_BUILDERS: readonly FullAnalyticalSheetDefinition[] = [
+  {
+    failureMessage: 'تعذر إنشاء ورقة "صافي التدفق".',
+    build: (workbook, data, usedNames) =>
+      buildNetBacklogSheet(workbook, data.netBacklogFlow, usedNames),
+  },
+  {
+    failureMessage: 'تعذر إنشاء ورقة "الأداء والحجم".',
+    build: (workbook, data, usedNames) =>
+      buildPerfVolumeSheet(workbook, data.perfVolumeRows, usedNames),
+  },
+  {
+    failureMessage: 'تعذر إنشاء ورقة "الاستمرارية".',
+    build: (workbook, data, usedNames) =>
+      buildContinuitySheet(workbook, data.continuityRows, usedNames),
+  },
+];
+
+function createWorkbookContext(data: ReportData): WorkbookBuildContext {
   const workbook = new ExcelJS.Workbook();
   workbook.creator = "نظام ذكاء الشكاوى";
   workbook.created = new Date();
   workbook.calcProperties.fullCalcOnLoad = false;
+  return {
+    workbook,
+    data,
+    warnings: [...data.warnings],
+    usedNames: new Set<string>(["الملخص", "المؤشرات"]),
+  };
+}
 
-  const summarySheet = buildSummarySheet(workbook, data);
-  buildKpiSheet(workbook, data);
+function buildCoreSheets(context: WorkbookBuildContext): ExcelJS.Worksheet {
+  const summarySheet = buildSummarySheet(context.workbook, context.data);
+  buildKpiSheet(context.workbook, context.data);
+  return summarySheet;
+}
 
-  const usedNames = new Set<string>(["الملخص", "المؤشرات"]);
+function runSheetBuilder(
+  warnings: string[],
+  failureMessage: string,
+  build: () => void
+): void {
+  try {
+    build();
+  } catch {
+    warnings.push(failureMessage);
+  }
+}
 
-  // Standard table sections (all modes).
+function appendStandardTableSheets(context: WorkbookBuildContext): void {
+  const { workbook, data, warnings, usedNames } = context;
   for (const section of data.sections) {
     if (section.kind !== "table") continue;
-    try {
-      buildTableSheet(workbook, section.table, usedNames);
-    } catch {
-      warnings.push(`تعذر إنشاء ورقة بيانات لقسم "${section.title}".`);
-    }
+    runSheetBuilder(
+      warnings,
+      `تعذر إنشاء ورقة بيانات لقسم "${section.title}".`,
+      () => buildTableSheet(workbook, section.table, usedNames)
+    );
   }
+}
 
-  // Dedicated comparison worksheets for the executive summary (all modes).
-  if (data.comparisonData) {
-    try {
-      buildRegionTrendSheet(workbook, data.comparisonData, usedNames);
-    } catch {
-      warnings.push('تعذر إنشاء ورقة "اتجاه المناطق".');
-    }
-    try {
-      buildRegionChangesSheet(workbook, data.comparisonData, usedNames);
-    } catch {
-      warnings.push('تعذر إنشاء ورقة "تغير المناطق".');
-    }
-    try {
-      buildDeptClassRisesSheet(workbook, data.comparisonData, usedNames);
-    } catch {
-      warnings.push('تعذر إنشاء ورقة "ارتفاع الإدارات والتصنيفات".');
-    }
+function appendComparisonSheets(context: WorkbookBuildContext): void {
+  const { workbook, data, warnings, usedNames } = context;
+  const comparison = data.comparisonData;
+  if (!comparison) return;
+  for (const definition of COMPARISON_SHEET_BUILDERS) {
+    runSheetBuilder(warnings, definition.failureMessage, () =>
+      definition.build(workbook, comparison, usedNames)
+    );
   }
+}
 
-  // Five shared sheets for brief and analytical modes.
-  if (data.briefData) {
-    const briefSheetBuilders: Array<[string, (wb: ExcelJS.Workbook, bd: ExecutiveBriefData, used: Set<string>) => void]> = [
-      ["brief_kpis", buildBriefKpisSheet],
-      ["all_regions", buildAllRegionsSheet],
-      ["top_classifications", buildTopClassificationsSheet],
-      ["comparative_timeline", buildComparativeTimelineSheet],
-      ["concentration", buildConcentrationSheet],
-    ];
-
-    for (const [key, builder] of briefSheetBuilders) {
-      try {
-        builder(workbook, data.briefData, usedNames);
-      } catch {
-        warnings.push(`تعذر إنشاء ورقة البيانات الإضافية (${key}).`);
-      }
-    }
-
-    // Additional sheets for FULL_ANALYTICAL mode only.
-    if (isFullAnalyticalData(data.briefData)) {
-      const fullData = data.briefData;
-      try {
-        buildNetBacklogSheet(workbook, fullData.netBacklogFlow, usedNames);
-      } catch {
-        warnings.push('تعذر إنشاء ورقة "صافي التدفق".');
-      }
-      try {
-        buildPerfVolumeSheet(workbook, fullData.perfVolumeRows, usedNames);
-      } catch {
-        warnings.push('تعذر إنشاء ورقة "الأداء والحجم".');
-      }
-      try {
-        buildContinuitySheet(workbook, fullData.continuityRows, usedNames);
-      } catch {
-        warnings.push('تعذر إنشاء ورقة "الاستمرارية".');
-      }
-    }
+function appendBriefSheets(
+  context: WorkbookBuildContext,
+  briefData: ExecutiveBriefData
+): void {
+  const { workbook, warnings, usedNames } = context;
+  for (const definition of BRIEF_SHEET_BUILDERS) {
+    runSheetBuilder(
+      warnings,
+      `تعذر إنشاء ورقة البيانات الإضافية (${definition.key}).`,
+      () => definition.build(workbook, briefData, usedNames)
+    );
   }
+}
 
-  appendWarningsToSummarySheet(summarySheet, warnings);
+function appendFullAnalyticalSheets(
+  context: WorkbookBuildContext,
+  fullData: FullAnalyticalData
+): void {
+  const { workbook, warnings, usedNames } = context;
+  for (const definition of FULL_ANALYTICAL_SHEET_BUILDERS) {
+    runSheetBuilder(warnings, definition.failureMessage, () =>
+      definition.build(workbook, fullData, usedNames)
+    );
+  }
+}
 
+async function writeWorkbookBuffer(workbook: ExcelJS.Workbook): Promise<Buffer> {
   const arrayBuffer = await workbook.xlsx.writeBuffer();
-  return { buffer: Buffer.from(arrayBuffer), warnings };
+  return Buffer.from(arrayBuffer);
+}
+
+export async function renderReportXlsx(data: ReportData): Promise<XlsxRenderResult> {
+  const context = createWorkbookContext(data);
+  const summarySheet = buildCoreSheets(context);
+  appendStandardTableSheets(context);
+  appendComparisonSheets(context);
+
+  const briefData = data.briefData;
+  if (briefData) {
+    appendBriefSheets(context, briefData);
+    if (isFullAnalyticalData(briefData)) appendFullAnalyticalSheets(context, briefData);
+  }
+
+  appendWarningsToSummarySheet(summarySheet, context.warnings);
+  const buffer = await writeWorkbookBuffer(context.workbook);
+  return { buffer, warnings: context.warnings };
 }
