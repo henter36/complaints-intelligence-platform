@@ -47,7 +47,7 @@ export async function POST(req: NextRequest) {
   try {
     await requireAdminApiSession(req);
     const body = await req.json();
-    const { name, description, color, keywords, parentId } = body;
+    const { id, name, description, color, keywords, parentId } = body;
     const normalizedParentId = typeof parentId === "string" ? parentId.trim() : "";
 
     if (parentId != null && normalizedParentId.length === 0) {
@@ -73,15 +73,26 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const classification = await db.classification.create({
-        data: {
-          categoryId: parentCategory.id,
-          nameAr: name,
-          description,
-          color: color || "#64748b",
-          keywords: keywords ?? undefined,
-        },
-      });
+      const classification = typeof id === "string" && id.trim()
+        ? await db.classification.update({
+            where: { id: id.trim() },
+            data: {
+              categoryId: parentCategory.id,
+              nameAr: name,
+              description,
+              color: color || "#64748b",
+              keywords: keywords ?? undefined,
+            },
+          })
+        : await db.classification.create({
+            data: {
+              categoryId: parentCategory.id,
+              nameAr: name,
+              description,
+              color: color || "#64748b",
+              keywords: keywords ?? undefined,
+            },
+          });
       return NextResponse.json({
         ...classification,
         name: classification.nameAr,

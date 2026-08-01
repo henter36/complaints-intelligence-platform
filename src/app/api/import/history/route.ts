@@ -2,6 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { ImportBatchStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
+import { DELETABLE_IMPORT_BATCH_STATUSES } from "@/server/imports/import-batch-deletion-service";
+
+const RESUMABLE_IMPORT_BATCH_STATUSES = new Set<ImportBatchStatus>([
+  ImportBatchStatus.UPLOADED,
+  ImportBatchStatus.PARSING,
+  ImportBatchStatus.VALIDATED,
+  ImportBatchStatus.READY_FOR_CONFIRMATION,
+  ImportBatchStatus.FAILED,
+]);
 
 function toLegacyPeriodType(periodType: string): string {
   return periodType.toLowerCase();
@@ -83,6 +92,11 @@ export async function GET(req: NextRequest) {
         periodEnd: batch.periodEnd,
         entity: null,
         status: toLegacyBatchStatus(batch.status),
+        serverStatus: batch.status,
+        canResume: RESUMABLE_IMPORT_BATCH_STATUSES.has(batch.status),
+        canDelete: DELETABLE_IMPORT_BATCH_STATUSES.includes(
+          batch.status as typeof DELETABLE_IMPORT_BATCH_STATUSES[number]
+        ),
         totalRecords: batch.totalRows,
         validRecords: batch.validRows,
         newRecords: batch.newRows,

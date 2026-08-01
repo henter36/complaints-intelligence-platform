@@ -23,6 +23,9 @@ export type NormalizedComplaintRow = {
   dueDate?: Date;
   closedAt?: Date;
   status?: ComplaintStatus;
+  sourceStatus?: string;
+  sourceDetail?: string;
+  sourceActionStatus?: string;
   subject?: string;
   description?: string;
   complainantName?: string;
@@ -60,6 +63,17 @@ const STATUS_LABELS = new Map<string, ComplaintStatus>([
   ["ملغاه", ComplaintStatus.CANCELLED],
 ]);
 
+const SOURCE_COMPLAINT_STATUS_ENTRIES = [
+  ["الإرسال إلى السجن", ComplaintStatus.IN_PROGRESS],
+  ["الإرسال إلى المديرية", ComplaintStatus.AWAITING_RESPONSE],
+  ["مغلقة", ComplaintStatus.CLOSED],
+  ["مغلق", ComplaintStatus.CLOSED],
+  ["تم الإغلاق", ComplaintStatus.CLOSED],
+  ["إغلاق الشكوى", ComplaintStatus.CLOSED],
+  ["منتهية", ComplaintStatus.CLOSED],
+  ["تمت المعالجة", ComplaintStatus.CLOSED],
+] as const;
+
 const PRIORITY_LABELS = new Map<string, ComplaintPriority>([
   ["منخفضه", ComplaintPriority.LOW],
   ["متوسطه", ComplaintPriority.MEDIUM],
@@ -80,6 +94,26 @@ function normalizeArabicToken(value: string): string {
   return normalizeArabic(value)
     .replaceAll(/\s+/g, " ")
     .toLocaleLowerCase("ar-SA");
+}
+
+export const SOURCE_COMPLAINT_STATUS_MAP = new Map<string, ComplaintStatus>(
+  SOURCE_COMPLAINT_STATUS_ENTRIES.map(([label, status]) => [normalizeArabicToken(label), status])
+);
+
+export function getImportedStatusDisplay(status: ComplaintStatus): string {
+  if (status === ComplaintStatus.IN_PROGRESS) return "تحت الإجراء";
+  if (status === ComplaintStatus.AWAITING_RESPONSE) return "تحت المراجعة";
+
+  const labels: Record<ComplaintStatus, string> = {
+    NEW: "جديدة",
+    OPEN: "مفتوحة",
+    IN_PROGRESS: "تحت الإجراء",
+    AWAITING_RESPONSE: "تحت المراجعة",
+    RESOLVED: "محلولة",
+    CLOSED: "مغلقة",
+    CANCELLED: "ملغاة",
+  };
+  return labels[status];
 }
 
 function primitiveCellText(value: unknown): string | undefined {
@@ -181,7 +215,8 @@ function normalizeStatus(value: unknown): ComplaintStatus | undefined {
   if (Object.hasOwn(ComplaintStatus, text)) {
     return ComplaintStatus[text as keyof typeof ComplaintStatus];
   }
-  return STATUS_LABELS.get(normalizeArabicToken(text));
+  const normalized = normalizeArabicToken(text);
+  return SOURCE_COMPLAINT_STATUS_MAP.get(normalized) ?? STATUS_LABELS.get(normalized);
 }
 
 function normalizePriority(value: unknown): ComplaintPriority | undefined {
@@ -198,6 +233,8 @@ const ENUM_FIELDS = new Set<ComplaintImportField>(["status", "priority"]);
 const TEXT_FIELDS = [
   "externalId",
   "sourceReference",
+  "sourceDetail",
+  "sourceActionStatus",
   "subject",
   "description",
   "complainantName",
@@ -259,6 +296,7 @@ function normalizeEnumField(
 ): void {
   if (field === "status") {
     const text = normalizeTextCell(value);
+    if (text) target.sourceStatus = text;
     const status = normalizeStatus(value);
     if (value !== undefined && value !== null && value !== "" && !status) {
       warnings.push({

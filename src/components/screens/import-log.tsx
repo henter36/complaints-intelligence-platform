@@ -65,6 +65,8 @@ import {
   Eye,
   Calendar,
   ArrowRightLeft,
+  PlayCircle,
+  Trash2,
 } from "lucide-react";
 import {
   formatNumber,
@@ -88,6 +90,9 @@ interface ImportBatch {
   periodEnd: string;
   entity?: string | null;
   status: string;
+  serverStatus?: string;
+  canResume?: boolean;
+  canDelete?: boolean;
   totalRecords: number;
   validRecords: number;
   newRecords: number;
@@ -407,7 +412,7 @@ function ExpandedDetails({ batch }: ExpandedDetailsProps) {
 }
 
 // ---------- Main Component ----------
-export function ImportLog() {
+export function ImportLog({ onResume }: Readonly<{ onResume?: (batchId: string) => void }>) {
   const { toast } = useToast();
   const [loading, setLoading] = useState(true);
   const [batches, setBatches] = useState<ImportBatch[]>([]);
@@ -417,6 +422,8 @@ export function ImportLog() {
   const [rollbackBatch, setRollbackBatch] = useState<ImportBatch | null>(null);
   const [rollbackDialogOpen, setRollbackDialogOpen] = useState(false);
   const [rollingBack, setRollingBack] = useState(false);
+  const [deleteBatch, setDeleteBatch] = useState<ImportBatch | null>(null);
+  const [deleting, setDeleting] = useState(false);
   const fetchRequestRef = useRef(0);
 
   const fetchBatches = useCallback(async (signal?: AbortSignal) => {
@@ -531,6 +538,32 @@ export function ImportLog() {
       });
     } finally {
       setRollingBack(false);
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteBatch) return;
+    setDeleting(true);
+    try {
+      const response = await fetch(`/api/import/${deleteBatch.id}`, { method: "DELETE" });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error?.message || "تعذر حذف دفعة الاستيراد");
+      toast({
+        title: "تم حذف الملف",
+        description: payload.storageCleanup === "FAILED"
+          ? "حُذفت الدفعة وسُجلت متابعة آمنة لتنظيف الملف."
+          : "حُذفت الدفعة غير المعتمدة وبيانات معاينتها.",
+      });
+      setDeleteBatch(null);
+      await fetchBatches();
+    } catch (deleteError) {
+      toast({
+        variant: "destructive",
+        title: "تعذر حذف الملف",
+        description: deleteError instanceof Error ? deleteError.message : "حدث خطأ غير متوقع",
+      });
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -813,6 +846,34 @@ export function ImportLog() {
                                   </Tooltip>
                                 </TooltipProvider>
                               )}
+                              {batch.canResume && (
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  className="h-7 gap-1 text-primary"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    onResume?.(batch.id);
+                                  }}
+                                >
+                                  <PlayCircle className="h-3.5 w-3.5" />
+                                  استكمال الاستيراد
+                                </Button>
+                              )}
+                              {batch.canDelete && (
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="h-7 w-7 text-destructive"
+                                  aria-label="حذف ملف الاستيراد غير المعتمد"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    setDeleteBatch(batch);
+                                  }}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </Button>
+                              )}
                             </div>
                           </TableCell>
                         </TableRow>
@@ -1077,6 +1138,28 @@ export function ImportLog() {
                 <RotateCcw className="h-4 w-4" />
               )}
               تأكيد التراجع
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={Boolean(deleteBatch)} onOpenChange={(open) => !open && setDeleteBatch(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>هل تريد حذف ملف الاستيراد غير المعتمد؟</AlertDialogTitle>
+            <AlertDialogDescription className="space-y-2">
+              <span className="block">سيتم حذف الملف المرفوع ونتائج المعاينة والصفوف المرتبطة به، ولا يمكن التراجع عن هذا الإجراء.</span>
+              <span className="block font-medium text-foreground">اسم الملف: {deleteBatch?.fileName}</span>
+              <span className="block">تاريخ الرفع: {deleteBatch ? formatDateTime(deleteBatch.createdAt) : "—"}</span>
+              <span className="block">عدد الصفوف: {formatNumber(deleteBatch?.totalRecords ?? 0)}</span>
+              <span className="block">الحالة: {deleteBatch ? getStatusMeta(deleteBatch.status).label : "—"}</span>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleting}>إلغاء</AlertDialogCancel>
+            <AlertDialogAction disabled={deleting} onClick={(event) => { event.preventDefault(); void confirmDelete(); }}>
+              {deleting && <Loader2 className="h-4 w-4 animate-spin" />}
+              حذف الملف
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

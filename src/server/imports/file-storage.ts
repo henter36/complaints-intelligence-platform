@@ -179,6 +179,29 @@ export async function deleteStoredImportFile(storageKey: string | null | undefin
   }
 }
 
+export async function deleteStoredImportFileForBatch(
+  storageKey: string | null | undefined
+): Promise<"DELETED" | "NOT_FOUND" | "NO_FILE"> {
+  if (!storageKey) return "NO_FILE";
+  if (storageKey !== path.basename(storageKey) || !storageKey.toLowerCase().endsWith(".xlsx")) {
+    throw new ImportValidationError("IMPORT_STORAGE_PATH_INVALID", "مرجع ملف الاستيراد غير آمن", 500);
+  }
+
+  const storageRoot = path.resolve(env.importStoragePath);
+  const filePath = path.join(storageRoot, storageKey);
+  if (!filePath.startsWith(`${storageRoot}${path.sep}`)) {
+    throw new ImportValidationError("IMPORT_STORAGE_PATH_INVALID", "مرجع ملف الاستيراد غير آمن", 500);
+  }
+
+  try {
+    await unlink(filePath);
+    return "DELETED";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "NOT_FOUND";
+    throw new ImportValidationError("IMPORT_FILE_CLEANUP_FAILED", "تعذر تنظيف ملف الاستيراد بأمان", 500);
+  }
+}
+
 export async function readStoredImportFile(storageKey: string): Promise<Buffer> {
   const storageRoot = path.resolve(env.importStoragePath);
   const filePath = path.join(storageRoot, path.basename(storageKey));
