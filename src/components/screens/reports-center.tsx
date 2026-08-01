@@ -29,6 +29,8 @@ import {
   AlertTriangle, Loader2, CalendarClock, PlayCircle,
 } from "lucide-react";
 import { formatNumber, formatDate, formatDateTime } from "@/lib/ar-utils";
+import type { ReportMatrixSection } from "@/lib/reports/report-contract";
+import { buildMatrixTruncationMessage } from "@/lib/reports/matrix-truncation";
 
 // =========================================================================
 // Types (mirrors src/server/reports/*)
@@ -74,7 +76,8 @@ type ReportSection =
   | { id: string; kind: "kpi"; title: string; cards: ReportKpiCard[] }
   | { id: string; kind: "table"; title: string; table: ReportTable }
   | { id: string; kind: "text"; title: string; points: string[] }
-  | { id: string; kind: "chart"; chartType: "line"; title: string; series: ChartSeries[]; description?: string; emptyState?: string; unit?: string; truncated?: boolean; truncatedMessage?: string };
+  | { id: string; kind: "chart"; chartType: "line"; title: string; series: ChartSeries[]; description?: string; emptyState?: string; unit?: string; truncated?: boolean; truncatedMessage?: string }
+  | ReportMatrixSection;
 
 type ReportData = {
   type: ReportType;
@@ -1215,6 +1218,44 @@ function SectionBody({ section }: Readonly<{ section: ReportSection }>) {
 
     case "chart":
       return <ReportChartPreview section={section} />;
+
+    case "matrix": {
+      if (section.rowHeaders.length === 0 || section.columnHeaders.length === 0) {
+        return <p className="text-sm text-muted-foreground">لا توجد بيانات لعرضها.</p>;
+      }
+      const truncationMessage = buildMatrixTruncationMessage(section);
+      return (
+        <div className="overflow-x-auto rounded-lg border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>{`${section.rowLabel} / ${section.columnLabel}`}</TableHead>
+                {section.columnHeaders.map((col) => (
+                  <TableHead key={col} className="text-center">{col}</TableHead>
+                ))}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {section.rowHeaders.map((rowHeader, ri) => (
+                <TableRow key={rowHeader}>
+                  <TableHead scope="row" className="font-medium text-sm">{rowHeader}</TableHead>
+                  {(section.cells[ri] ?? []).map((cellVal, ci) => (
+                    <TableCell key={`${rowHeader}-${section.columnHeaders[ci]}`} className="text-center text-sm tabular-nums">
+                      {cellVal > 0 ? formatNumber(cellVal) : "-"}
+                    </TableCell>
+                  ))}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+          {truncationMessage && (
+            <div className="p-2 text-xs text-muted-foreground border-t">
+              {truncationMessage}
+            </div>
+          )}
+        </div>
+      );
+    }
 
     default:
       return assertNeverReportSection(section);

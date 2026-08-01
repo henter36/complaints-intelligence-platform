@@ -77,6 +77,20 @@ export type ComparisonWarning =
   | { code: "MISSING_DEPARTMENT"; count: number; message: string }
   | { code: "MISSING_CLASSIFICATION"; count: number; message: string };
 
+/**
+ * All dept+class pairs that appeared in either the current or the previous
+ * period. Used for continuity analysis (persistent / new / resolved) so that
+ * resolved pairs (present in previous only) are not lost in the "rises" list.
+ */
+export type DeptClassPeriodCount = {
+  departmentId: string;
+  departmentName: string;
+  classificationId: string;
+  classificationName: string;
+  currentCount: number;
+  previousCount: number;
+};
+
 export type ComparisonResult = {
   currentPeriod: PeriodRange;
   previousPeriod: PeriodRange | null;
@@ -84,6 +98,8 @@ export type ComparisonResult = {
   regionChanges: RegionChangeRow[];
   deptClassRises: DeptClassRiseRow[];
   deptClassRisesTotal: number;
+  /** All dept×class pairs with counts from both periods (used for continuity). */
+  deptClassAllPairs: DeptClassPeriodCount[];
   executiveSummaryPoints: string[];
   warnings: ComparisonWarning[];
 };
@@ -370,7 +386,7 @@ function buildDeptClassRises(
   current: ComparisonComplaint[],
   previous: ComparisonComplaint[],
   minimumIncreaseCount: number
-): { rows: DeptClassRiseRow[]; total: number; warnings: ComparisonWarning[] } {
+): { rows: DeptClassRiseRow[]; total: number; allPairs: DeptClassPeriodCount[]; warnings: ComparisonWarning[] } {
   const warnings: ComparisonWarning[] = [];
   const map = new Map<string, DeptClassAccumulator>();
   accumulateDeptClass(map, current, "currentCount");
@@ -391,6 +407,16 @@ function buildDeptClassRises(
       message: `تم استبعاد ${missing.missingClassification} شكوى من تحليل الارتفاع لعدم تحديد التصنيف.`,
     });
   }
+
+  // All pairs (for continuity analysis).
+  const allPairs: DeptClassPeriodCount[] = Array.from(map.values()).map((acc) => ({
+    departmentId: acc.departmentId,
+    departmentName: acc.departmentName,
+    classificationId: acc.classificationId,
+    classificationName: acc.classificationName,
+    currentCount: acc.currentCount,
+    previousCount: acc.previousCount,
+  }));
 
   // Rising rows only.
   const rising = Array.from(map.values())
@@ -441,7 +467,7 @@ function buildDeptClassRises(
     });
   }
 
-  return { rows: rows.slice(0, DEPT_CLASS_RISES_LIMIT), total, warnings };
+  return { rows: rows.slice(0, DEPT_CLASS_RISES_LIMIT), total, allPairs, warnings };
 }
 
 // ---------------------------------------------------------------------------
@@ -582,6 +608,7 @@ export async function buildComparisonResult(
     regionChanges,
     deptClassRises: rises.rows,
     deptClassRisesTotal: rises.total,
+    deptClassAllPairs: rises.allPairs,
     executiveSummaryPoints,
     warnings,
   };

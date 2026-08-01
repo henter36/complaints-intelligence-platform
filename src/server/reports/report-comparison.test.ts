@@ -106,6 +106,25 @@ describe("derivePreviousPeriodRange", () => {
   });
 });
 
+describe("buildComparisonResult without a reference period", () => {
+  it("does not query a previous period and keeps it unavailable", async () => {
+    const { buildComparisonResult } = await loadModule();
+    dbMocks.findMany.mockReset();
+    dbMocks.findMany.mockResolvedValueOnce([row()]);
+
+    const result = await buildComparisonResult(
+      { from: "2026-07-15", to: "2026-07-14" },
+      new Date("2026-07-31T00:00:00Z")
+    );
+
+    expect(result.previousPeriod).toBeNull();
+    expect(dbMocks.findMany).toHaveBeenCalledTimes(1);
+    expect(result.deptClassAllPairs).toEqual([
+      expect.objectContaining({ currentCount: 1, previousCount: 0 }),
+    ]);
+  });
+});
+
 describe("RegionChangeRow", () => {
   beforeEach(() => dbMocks.findMany.mockReset());
 

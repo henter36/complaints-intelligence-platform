@@ -414,6 +414,32 @@ describe("SectionBody — all section kinds via preview", () => {
     expect(screen.getByText("جدة")).toBeInTheDocument();
   });
 
+  it("renders the same defensive matrix truncation fallback as PDF", async () => {
+    await renderPreviewWithSections([{
+      id: "matrix",
+      kind: "matrix",
+      title: "مصفوفة الاختبار",
+      rowLabel: "الإدارة",
+      columnLabel: "التصنيف",
+      rowHeaders: ["إدارة أ"],
+      columnHeaders: ["تصنيف أ"],
+      cells: [[1]],
+      rowTotals: [1],
+      columnTotals: [1],
+      grandTotal: 1,
+      totalRows: 1,
+      totalColumns: 1,
+      truncatedRows: false,
+      truncatedColumns: false,
+      truncated: true,
+      maxRows: 10,
+      maxColumns: 10,
+    }]);
+
+    expect(await screen.findByText("تم اختصار عرض بيانات المصفوفة."))
+      .toBeInTheDocument();
+  });
+
   it("renders text section as a bullet list — crash regression for kind='text'", async () => {
     // Before the fix, section.table.rows.length threw when kind was "text".
     await renderPreviewWithSections([

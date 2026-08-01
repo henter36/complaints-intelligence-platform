@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { ReportType } from "@prisma/client";
+import { REPORT_MODES } from "@/lib/reports/report-contract";
 
 export { ReportType };
 
@@ -239,6 +240,7 @@ export const reportOptionsSchema = z
     includeSensitiveFields: z.literal(false).default(false),
     maxRows: z.coerce.number().int().positive().max(10_000).optional(),
     columns: z.array(z.string().trim().min(1).max(100)).max(50).optional(),
+    reportMode: z.enum(REPORT_MODES).optional(),
   })
   .strict();
 
