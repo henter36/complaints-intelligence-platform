@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Dashboard } from "@/components/screens/dashboard";
 import { ImportCenter } from "@/components/screens/import-center";
 import { ComplaintsExplorer } from "@/components/screens/complaints-explorer";
@@ -15,20 +15,45 @@ import type { ScreenId } from "@/app/page";
 
 export function HomeShell({ username }: Readonly<{ username: string }>) {
   const [activeScreen, setActiveScreen] = useState<ScreenId>("dashboard");
+  const [resumeBatchId, setResumeBatchId] = useState<string | null>(null);
+
+  const navigate = useCallback((screen: ScreenId, batchId?: string | null) => {
+    setActiveScreen(screen);
+    setResumeBatchId(batchId ?? null);
+    const params = new URLSearchParams();
+    if (screen !== "dashboard") params.set("screen", screen);
+    if (batchId) params.set("batchId", batchId);
+    const query = params.toString();
+    window.history.replaceState(null, "", query ? `/?${query}` : "/");
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const screen = params.get("screen") as ScreenId | null;
+    const batchId = params.get("batchId");
+    void Promise.resolve().then(() => {
+      if (batchId) {
+        setActiveScreen("import");
+        setResumeBatchId(batchId);
+      } else if (screen) {
+        setActiveScreen(screen);
+      }
+    });
+  }, []);
 
   return (
     <div className="min-h-screen flex flex-col bg-muted/30">
       <SidebarProvider>
-        <AppSidebar activeScreen={activeScreen} onNavigate={setActiveScreen} username={username} />
+        <AppSidebar activeScreen={activeScreen} onNavigate={(screen) => navigate(screen)} username={username} />
         <SidebarInset className="flex flex-col min-h-screen">
           <main className="flex-1 p-4 md:p-6 lg:p-8 overflow-x-hidden">
             {activeScreen === "dashboard" && <Dashboard onNavigate={setActiveScreen} />}
-            {activeScreen === "import" && <ImportCenter />}
+            {activeScreen === "import" && <ImportCenter batchId={resumeBatchId} />}
             {activeScreen === "explorer" && <ComplaintsExplorer />}
             {activeScreen === "analytics" && <Analytics />}
             {activeScreen === "reports" && <ReportsCenter />}
             {activeScreen === "classifications" && <ClassificationsManager />}
-            {activeScreen === "import-log" && <ImportLog />}
+            {activeScreen === "import-log" && <ImportLog onResume={(batchId) => navigate("import", batchId)} />}
             {activeScreen === "ai-analysis" && <AiAnalysis />}
           </main>
           <footer className="border-t bg-card py-4 px-6 mt-auto">

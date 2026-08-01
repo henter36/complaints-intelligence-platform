@@ -99,4 +99,34 @@ describe("import upload route", () => {
       actor: "admin",
     }));
   });
+
+  it("returns direct resume and delete metadata for a duplicate active file", async () => {
+    const { POST } = await import("./route");
+    const { ImportValidationError } = await import("@/server/imports/import-errors");
+    mocks.processUploadedImportFile.mockRejectedValue(new ImportValidationError(
+      "IMPORT_FILE_ALREADY_EXISTS",
+      "سبق رفع هذا الملف، ويمكنك استكمال الدفعة الحالية أو حذفها.",
+      409,
+      {
+        existingBatchId: "batch_existing",
+        existingBatchStatus: "READY_FOR_CONFIRMATION",
+        canResume: true,
+        canDelete: true,
+      }
+    ));
+    const formData = new FormData();
+    formData.append("file", new File(["PK\u0003\u0004"], "complaints.xlsx"));
+
+    const response = await POST(formRequest(formData));
+    const body = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(body.error).toMatchObject({
+      code: "IMPORT_FILE_ALREADY_EXISTS",
+      existingBatchId: "batch_existing",
+      existingBatchStatus: "READY_FOR_CONFIRMATION",
+      canResume: true,
+      canDelete: true,
+    });
+  });
 });

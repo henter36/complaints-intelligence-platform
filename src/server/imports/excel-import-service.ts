@@ -1,5 +1,6 @@
 import {
   ImportBatchStatus,
+  ComplaintStatus,
   ImportRowAction,
   ImportRowValidationStatus,
   PeriodType,
@@ -29,7 +30,13 @@ import {
   type ColumnMapping,
   type ColumnMappingAnalysis,
 } from "./complaint-column-schema";
-import { normalizeImportRow, type NormalizedComplaintRow, type RawImportRow, type RowMessage } from "./normalization";
+import {
+  getImportedStatusDisplay,
+  normalizeImportRow,
+  type NormalizedComplaintRow,
+  type RawImportRow,
+  type RowMessage,
+} from "./normalization";
 import { maskIdentifier } from "./privacy";
 import { validateNormalizedComplaintRow } from "./row-validation";
 import { parseXlsxWorkbook } from "./xlsx-parser";
@@ -43,6 +50,7 @@ export const DUPLICATE_BLOCKING_IMPORT_STATUSES = [
   ImportBatchStatus.READY_FOR_CONFIRMATION,
   ImportBatchStatus.CONFIRMING,
   ImportBatchStatus.CONFIRMED,
+  ImportBatchStatus.FAILED,
 ] as const;
 const REPROCESSABLE_STATUSES = new Set<ImportBatchStatus>([
   ImportBatchStatus.UPLOADED,
@@ -97,6 +105,8 @@ export type ImportUploadResult = {
   errors: Array<{ row: number; errors: RowMessage[]; warnings: RowMessage[] }>;
   preview: Array<Record<string, unknown>>;
   canApprove: boolean;
+  failureCode?: string | null;
+  failureNotes?: string | null;
 };
 
 function parsePeriodType(value?: string | null): PeriodType {
@@ -696,12 +706,13 @@ async function finalizeReadyImportBatch(input: {
 function toImportUploadResult(
   batchId: string,
   fileName: string,
-  processed: ProcessedWorkbook
+  processed: ProcessedWorkbook,
+  status: ImportBatchStatus = ImportBatchStatus.READY_FOR_CONFIRMATION
 ): ImportUploadResult {
   return {
     batchId,
     fileName,
-    status: ImportBatchStatus.READY_FOR_CONFIRMATION,
+    status,
     selectedSheet: processed.selectedSheet,
     totalRecords: processed.counters.totalRows,
     validRecords: processed.counters.validRows,
@@ -746,7 +757,13 @@ function toImportUploadResult(
         receivedDate: normalized?.receivedAt ?? normalized?.complaintDate ?? null,
         channel: normalized?.channel ?? null,
         subject: normalized?.subject ?? null,
+        sourceDetail: normalized?.sourceDetail ?? null,
+        sourceStatus: normalized?.sourceStatus ?? null,
+        sourceActionStatus: normalized?.sourceActionStatus ?? null,
         status: normalized?.status ?? null,
+        statusDisplay: typeof normalized?.status === "string"
+          ? getImportedStatusDisplay(normalized.status as ComplaintStatus)
+          : null,
         priority: normalized?.priority ?? null,
         region: normalized?.region ?? null,
         department: normalized?.department ?? null,
@@ -754,7 +771,56 @@ function toImportUploadResult(
         complainantIdentifierMasked: identifier ? maskIdentifier(identifier) : null,
       };
     }),
-    canApprove: processed.counters.invalidRows === 0 && processed.counters.rejectedRows === 0,
+    canApprove:
+      status === ImportBatchStatus.READY_FOR_CONFIRMATION &&
+      processed.counters.invalidRows === 0 &&
+      processed.counters.rejectedRows === 0,
+  };
+}
+
+export async function loadImportBatchForResume(batchId: string): Promise<ImportUploadResult> {
+  const batch = await db.importBatch.findUnique({
+    where: { id: batchId },
+    include: { rows: { orderBy: { rowNumber: "asc" } } },
+  });
+  if (!batch) {
+    throw new ImportValidationError("IMPORT_BATCH_NOT_FOUND", "دفعة الاستيراد غير موجودة", 404);
+  }
+  if (batch.status === ImportBatchStatus.CONFIRMED || batch.status === ImportBatchStatus.ROLLED_BACK) {
+    throw new ImportValidationError("IMPORT_BATCH_STATE_CONFLICT", "هذه الدفعة نهائية ولا يمكن استكمالها", 409);
+  }
+
+  const columnMapping = parseColumnMapping(batch.columnMapping) ?? Object.create(null) as ColumnMapping;
+  const firstRawData = batch.rows[0]?.rawData;
+  const headers = firstRawData && typeof firstRawData === "object" && !Array.isArray(firstRawData)
+    ? Object.keys(firstRawData)
+    : Object.keys(columnMapping);
+  const processedRows: ProcessedImportRow[] = batch.rows.map((row) => ({
+    rowNumber: row.rowNumber,
+    rawData: row.rawData as Prisma.InputJsonValue,
+    normalizedData: row.normalizedData as Prisma.InputJsonValue | null,
+    externalId: row.externalId,
+    action: row.action,
+    validationStatus: row.validationStatus,
+    validationErrors: row.validationErrors as Prisma.InputJsonValue | null,
+    validationWarnings: row.validationWarnings as Prisma.InputJsonValue | null,
+    matchedComplaintId: row.matchedComplaintId,
+    matchedComplaintVersion: row.matchedComplaintVersion,
+  }));
+  const mappingAnalysis = analyzeColumnMapping(headers, columnMapping, { manuallyMapped: true });
+
+  const result = toImportUploadResult(batch.id, batch.originalFileName, {
+    selectedSheet: batch.selectedSheet ?? "",
+    columnMapping,
+    mappingAnalysis,
+    columnCount: headers.length,
+    processedRows,
+    counters: calculateRowCounters(processedRows),
+  }, batch.status);
+  return {
+    ...result,
+    failureCode: batch.failureCode,
+    failureNotes: batch.notes,
   };
 }
 
@@ -778,13 +844,23 @@ export async function processUploadedImportFile(input: UploadInput): Promise<Imp
           fileHash: storedFile.fileHash,
           status: { in: [...DUPLICATE_BLOCKING_IMPORT_STATUSES] },
         },
-        select: { id: true },
+        select: { id: true, status: true },
+        orderBy: { createdAt: "desc" },
       });
 
       if (duplicateBatch) {
-        throw new ImportValidationError("DUPLICATE_IMPORT_FILE", "سبق رفع هذا الملف", 409, {
+        const canDelete = REPROCESSABLE_STATUSES.has(duplicateBatch.status);
+        throw new ImportValidationError(
+          "IMPORT_FILE_ALREADY_EXISTS",
+          "سبق رفع هذا الملف، ويمكنك استكمال الدفعة الحالية أو حذفها.",
+          409,
+          {
           existingBatchId: duplicateBatch.id,
-        });
+            existingBatchStatus: duplicateBatch.status,
+            canResume: duplicateBatch.status !== ImportBatchStatus.CONFIRMED,
+            canDelete,
+          }
+        );
       }
 
       return tx.importBatch.create({

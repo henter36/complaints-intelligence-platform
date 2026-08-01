@@ -6,7 +6,7 @@ import {
   normalizeColumnHeader,
 } from "./complaint-column-schema";
 import { parseExcelSerialDate } from "./excel-date-parser";
-import { normalizeDateCell, normalizeImportRow } from "./normalization";
+import { getImportedStatusDisplay, normalizeDateCell, normalizeImportRow } from "./normalization";
 import { maskIdentifier } from "./privacy";
 import { deriveSubject } from "./subject-derive";
 import { parseXlsxWorkbook } from "./xlsx-parser";
@@ -143,13 +143,14 @@ describe("operational workbook column synonyms", () => {
     expect(mapping["القسم"]).toBe("department");
     expect(mapping["تصنيف"]).toBe("classification");
     expect(mapping["الحالة"]).toBe("status");
+    expect(mapping["تفصيل"]).toBe("sourceDetail");
+    expect(mapping["حالة الاجراء"]).toBe("sourceActionStatus");
     expect(mapping["المصدر"]).toBe("channel");
     expect(mapping["الإجراء المتخذ"]).toBe("resolution");
     expect(mapping["المُعرف"]).toBe("sourceReference");
     expect(mapping["وصف الإجراء"]).toBeUndefined();
     expect(conflicts.some((item) => item.header === "وصف الإجراء")).toBe(true);
     expect(mapping).not.toHaveProperty("عدد الشكاوي");
-    expect(mapping).not.toHaveProperty("تفصيل");
   });
 
   it("equates hamza and tatweel variants", () => {
@@ -340,12 +341,106 @@ describe("operational workbook parsing and normalization", () => {
       description: "وصف صناعي لا يحتوي بيانات تشغيلية",
       sourceReference: "TEST-REF-001",
       resolution: "إجراء متخذ تجريبي",
+      sourceDetail: "تفصيل تجريبي",
+      sourceStatus: "حالة مصدرية تجريبية",
+      sourceActionStatus: "حالة إجراء تجريبية",
       status: ComplaintStatus.NEW,
     });
     expect(normalized.normalized.receivedAt?.toISOString()).toBe("2026-04-14T00:00:00.000Z");
     expect(normalized.normalized.complaintDate).toBeInstanceOf(Date);
     expect(normalized.warnings.some((item) => item.code === "UNKNOWN_SOURCE_STATUS")).toBe(true);
     expect(maskIdentifier(normalized.normalized.complainantIdentifier!)).toBe("****0000");
+  });
+
+  it.each([
+    ["الإرسال إلى السجن", ComplaintStatus.IN_PROGRESS],
+    ["الإرسال إلى المديرية", ComplaintStatus.AWAITING_RESPONSE],
+    ["مغلقة", ComplaintStatus.CLOSED],
+    ["مغلق", ComplaintStatus.CLOSED],
+    ["تم الإغلاق", ComplaintStatus.CLOSED],
+    ["إغلاق الشكوى", ComplaintStatus.CLOSED],
+    ["منتهية", ComplaintStatus.CLOSED],
+    ["تمت المعالجة", ComplaintStatus.CLOSED],
+  ])("maps source complaint status %s without consulting action status", (sourceStatus, expected) => {
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "الوصف", "تفصيل", "حالة الاجراء", "الحالة"]);
+    const result = normalizeImportRow({
+      rowNumber: 2,
+      values: {
+        "رقم الشكوى": "COMP/STATUS-001",
+        "تاريخ التسجيل": "2026-07-01",
+        "الوصف": "وصف اختباري",
+        "تفصيل": "  وكالة   ",
+        "حالة الاجراء": "مغلقة",
+        "الحالة": sourceStatus,
+      },
+    }, mapping);
+
+    expect(result.normalized).toMatchObject({
+      sourceDetail: "وكالة",
+      sourceActionStatus: "مغلقة",
+      sourceStatus,
+      status: expected,
+    });
+  });
+
+  it("uses the requested Arabic displays for routed statuses", () => {
+    expect(getImportedStatusDisplay(ComplaintStatus.IN_PROGRESS)).toBe("تحت الإجراء");
+    expect(getImportedStatusDisplay(ComplaintStatus.AWAITING_RESPONSE)).toBe("تحت المراجعة");
+  });
+
+  it("uses NEW with a warning for an unknown source status and preserves the original", () => {
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "الوصف", "الحالة"]);
+    const result = normalizeImportRow({
+      rowNumber: 2,
+      values: {
+        "رقم الشكوى": "COMP/STATUS-002",
+        "تاريخ التسجيل": "2026-07-01",
+        "الوصف": "وصف اختباري",
+        "الحالة": "حالة تشغيلية غير معروفة",
+      },
+    }, mapping);
+
+    expect(result.normalized.status).toBe(ComplaintStatus.NEW);
+    expect(result.normalized.sourceStatus).toBe("حالة تشغيلية غير معروفة");
+    expect(result.warnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "UNKNOWN_SOURCE_STATUS" }),
+    ]));
+  });
+
+  it("does not use action status when the complaint status column is empty", () => {
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "الوصف", "حالة الاجراء", "الحالة"]);
+    const result = normalizeImportRow({
+      rowNumber: 2,
+      values: {
+        "رقم الشكوى": "COMP/STATUS-003",
+        "تاريخ التسجيل": "2026-07-01",
+        "الوصف": "وصف اختباري",
+        "حالة الاجراء": "تم الإغلاق",
+        "الحالة": "",
+      },
+    }, mapping);
+
+    expect(result.normalized.sourceActionStatus).toBe("تم الإغلاق");
+    expect(result.normalized.status).toBe(ComplaintStatus.NEW);
+    expect(result.normalized).not.toHaveProperty("sourceStatus");
+  });
+
+  it("warns for CLOSED without inventing closedAt", () => {
+    const normalized = {
+      externalId: "COMP/CLOSED-001",
+      receivedAt: new Date("2026-07-01T00:00:00.000Z"),
+      subject: "شكوى مغلقة",
+      status: ComplaintStatus.CLOSED,
+    };
+    const validation = validateNormalizedComplaintRow(normalized, {
+      categories: [],
+      classifications: [],
+    });
+
+    expect(normalized).not.toHaveProperty("closedAt");
+    expect(validation.warnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "TERMINAL_STATUS_WITHOUT_CLOSED_AT" }),
+    ]));
   });
 
   it("counts only non-empty data rows toward IMPORT_MAX_ROWS", async () => {

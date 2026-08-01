@@ -6,7 +6,7 @@ import {
   parseColumnMapping,
   validateColumnMapping,
 } from "./complaint-column-schema";
-import { getRequiredUncompressedSize, validateXlsxZip } from "./file-storage";
+import { deleteStoredImportFileForBatch, getRequiredUncompressedSize, validateXlsxZip } from "./file-storage";
 import { buildImportErrorCsv, toSafeMessage } from "./error-report";
 import { normalizeDateCell, normalizeExcelSerialDate, normalizeImportRow, normalizeTextCell } from "./normalization";
 import { parseXlsxWorkbook } from "./xlsx-parser";
@@ -15,11 +15,13 @@ import {
   complaintCandidateIdentityKeys,
   getImportRowOutcome,
   hasMeaningfulChange,
+  loadImportBatchForResume,
   normalizedCandidateIdentityKeys,
   persistPreviewRows,
   resolveEffectiveColumnMapping,
   type ProcessedImportRow,
 } from "./excel-import-service";
+import { db } from "@/lib/db";
 import {
   ComplaintPriority,
   ComplaintStatus,
@@ -91,6 +93,13 @@ function expectImportMappingError(callback: () => unknown, code: string): void {
 }
 
 describe("secure xlsx import parsing", () => {
+  it("rejects unsafe storage keys without exposing or deleting outside import storage", async () => {
+    await expect(deleteStoredImportFileForBatch("../secret.xlsx")).rejects.toMatchObject({
+      code: "IMPORT_STORAGE_PATH_INVALID",
+      message: "مرجع ملف الاستيراد غير آمن",
+    });
+  });
+
   it("parses a valid Arabic complaint workbook", async () => {
     const parsed = await parseXlsxWorkbook(await workbookBuffer());
 
@@ -443,8 +452,8 @@ describe("secure xlsx import parsing", () => {
       ImportBatchStatus.READY_FOR_CONFIRMATION,
       ImportBatchStatus.CONFIRMING,
       ImportBatchStatus.CONFIRMED,
+      ImportBatchStatus.FAILED,
     ]);
-    expect(DUPLICATE_BLOCKING_IMPORT_STATUSES).not.toContain(ImportBatchStatus.FAILED);
     expect(DUPLICATE_BLOCKING_IMPORT_STATUSES).not.toContain(ImportBatchStatus.ROLLED_BACK);
   });
 
@@ -550,5 +559,60 @@ describe("getImportRowOutcome", () => {
       "IMPORTED_WITH_WARNINGS"
     );
     expect(getImportRowOutcome(ImportRowValidationStatus.VALID)).toBe("IMPORTED");
+  });
+});
+
+describe("durable import resume", () => {
+  it("rebuilds the preview from the same persisted batch without creating another batch", async () => {
+    const findUnique = vi.spyOn(db.importBatch, "findUnique").mockResolvedValue({
+      id: "batch_resume",
+      originalFileName: "operational.xlsx",
+      status: ImportBatchStatus.READY_FOR_CONFIRMATION,
+      selectedSheet: "الشكاوى",
+      columnMapping: {
+        "رقم الشكوى": "externalId",
+        "تفصيل": "sourceDetail",
+        "الحالة": "status",
+        "حالة الاجراء": "sourceActionStatus",
+      },
+      rows: [{
+        rowNumber: 2,
+        rawData: {
+          "رقم الشكوى": "C-1",
+          "تفصيل": "وكالة",
+          "الحالة": "الإرسال إلى السجن",
+          "حالة الاجراء": "جديد",
+        },
+        normalizedData: {
+          externalId: "C-1",
+          sourceDetail: "وكالة",
+          sourceStatus: "الإرسال إلى السجن",
+          sourceActionStatus: "جديد",
+          status: ComplaintStatus.IN_PROGRESS,
+        },
+        externalId: "C-1",
+        action: ImportRowAction.NEW,
+        validationStatus: ImportRowValidationStatus.VALID,
+        validationErrors: null,
+        validationWarnings: null,
+        matchedComplaintId: null,
+        matchedComplaintVersion: null,
+      }],
+    } as never);
+
+    try {
+      const result = await loadImportBatchForResume("batch_resume");
+      expect(result.batchId).toBe("batch_resume");
+      expect(result.preview[0]).toMatchObject({
+        sourceDetail: "وكالة",
+        sourceStatus: "الإرسال إلى السجن",
+        sourceActionStatus: "جديد",
+        status: ComplaintStatus.IN_PROGRESS,
+        statusDisplay: "تحت الإجراء",
+      });
+      expect(findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { id: "batch_resume" } }));
+    } finally {
+      findUnique.mockRestore();
+    }
   });
 });

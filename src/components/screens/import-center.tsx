@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PageHeader } from "@/components/shared/page-header";
 import {
   Card,
@@ -46,7 +46,6 @@ import {
   AlertTriangle,
   Download,
   FileWarning,
-  ArrowLeft,
   ArrowRight,
   RefreshCw,
   Loader2,
@@ -123,8 +122,18 @@ interface UploadResult {
   errors: ImportError[];
   preview: ImportPreviewRow[];
   canApprove: boolean;
+  status?: string;
+  failureCode?: string | null;
+  failureNotes?: string | null;
   confirmedAt?: string;
   confirmationStatus?: string;
+}
+
+interface ExistingImportBatch {
+  id: string;
+  status: string;
+  canResume: boolean;
+  canDelete: boolean;
 }
 
 export function mappingContainsComplaintNumber(
@@ -295,6 +304,13 @@ type StageKey = (typeof STAGES)[number]["key"];
 
 // Field display names (English field -> Arabic label)
 const FIELD_LABELS: Record<string, string> = {
+  externalId: "رقم الشكوى",
+  sourceReference: "الرقم المرجعي",
+  complaintDate: "تاريخ الشكوى",
+  receivedAt: "تاريخ الورود",
+  closedAt: "تاريخ الإغلاق",
+  sourceDetail: "تفصيل",
+  sourceActionStatus: "حالة الإجراء",
   complaintNumber: "رقم الشكوى",
   receivedDate: "تاريخ الورود",
   channel: "القناة",
@@ -319,6 +335,21 @@ const FIELD_LABELS: Record<string, string> = {
   isValidated: "صحة الشكوى",
   satisfaction: "رضا المستفيد",
 };
+
+const IMPORT_MAPPING_FIELDS = [
+  "externalId", "sourceReference", "complaintDate", "receivedAt", "dueDate", "closedAt",
+  "status", "sourceDetail", "sourceActionStatus", "subject", "description", "complainantName",
+  "complainantIdentifier", "complainantPhone", "region", "facility", "department", "category",
+  "classification", "priority", "channel", "resolution",
+] as const;
+
+const NON_CONFIRMABLE_RESUME_STATUSES = new Set([
+  "UPLOADED",
+  "PARSING",
+  "VALIDATED",
+  "CONFIRMING",
+  "FAILED",
+]);
 
 // Stat card config
 const STAT_CARDS = [
@@ -445,7 +476,7 @@ export function defaultPeriodRange(periodType: PeriodType, today = new Date()) {
   return { start: formatLocalDate(startDate), end };
 }
 
-export function ImportCenter() {
+export function ImportCenter({ batchId }: Readonly<{ batchId?: string | null }>) {
   const { toast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const initialPeriod = useMemo(() => defaultPeriodRange("daily"), []);
@@ -461,8 +492,32 @@ export function ImportCenter() {
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [confirming, setConfirming] = useState(false);
+  const [reprocessing, setReprocessing] = useState(false);
   const [result, setResult] = useState<UploadResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [existingBatch, setExistingBatch] = useState<ExistingImportBatch | null>(null);
+
+  const loadBatch = useCallback(async (id: string) => {
+    setUploading(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/import/${id}?resume=true`);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error?.message || "تعذر استكمال دفعة الاستيراد");
+      setResult(normalizeUploadResultPayload(payload));
+      setExistingBatch(null);
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : "تعذر استكمال دفعة الاستيراد";
+      setError(message);
+      toast({ variant: "destructive", title: "تعذر استكمال الاستيراد", description: message });
+    } finally {
+      setUploading(false);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    if (batchId) void Promise.resolve().then(() => loadBatch(batchId));
+  }, [batchId, loadBatch]);
 
   const handlePeriodTypeChange = (value: PeriodType) => {
     setPeriodType(value);
@@ -507,6 +562,7 @@ export function ImportCenter() {
     }
     setFile(f);
     setResult(null);
+    setExistingBatch(null);
     setError(null);
   }, [toast]);
 
@@ -558,6 +614,14 @@ export function ImportCenter() {
       });
       const json = await res.json();
       if (!res.ok) {
+        if (json.error?.code === "IMPORT_FILE_ALREADY_EXISTS") {
+          setExistingBatch({
+            id: json.error.existingBatchId,
+            status: json.error.existingBatchStatus,
+            canResume: Boolean(json.error.canResume),
+            canDelete: Boolean(json.error.canDelete),
+          });
+        }
         throw new Error(json.error?.message || "فشل في رفع الملف");
       }
       setResult(normalizeUploadResultPayload(json));
@@ -583,8 +647,60 @@ export function ImportCenter() {
     setFile(null);
     setResult(null);
     setError(null);
+    setExistingBatch(null);
     setUploadProgress(0);
     if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const deleteExistingBatch = async () => {
+    if (!existingBatch) return;
+    const confirmed = window.confirm(
+      "هل تريد حذف ملف الاستيراد غير المعتمد؟\nسيتم حذف الملف المرفوع ونتائج المعاينة والصفوف المرتبطة به، ولا يمكن التراجع عن هذا الإجراء."
+    );
+    if (!confirmed) return;
+    const response = await fetch(`/api/import/${existingBatch.id}`, { method: "DELETE" });
+    const payload = await response.json();
+    if (!response.ok) {
+      setError(payload.error?.message || "تعذر حذف الملف السابق");
+      return;
+    }
+    setExistingBatch(null);
+    setError(null);
+    toast({ title: "تم حذف الملف", description: "يمكنك الآن رفع الملف نفسه من جديد." });
+  };
+
+  const updateMapping = (header: string, field: string) => {
+    if (!result) return;
+    const nextMapping = { ...result.columnMapping };
+    for (const [mappedHeader, mappedField] of Object.entries(nextMapping)) {
+      if (mappedField === field || mappedHeader === header) delete nextMapping[mappedHeader];
+    }
+    if (field !== "unmapped") nextMapping[header] = field;
+    setResult({ ...result, columnMapping: nextMapping });
+  };
+
+  const reprocessCurrentBatch = async () => {
+    if (!result) return;
+    setReprocessing(true);
+    try {
+      const response = await fetch(`/api/import/${result.batchId}/reprocess`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mapping: result.columnMapping }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error?.message || "تعذر إعادة معالجة الدفعة");
+      setResult(normalizeUploadResultPayload(payload));
+      toast({ title: "اكتملت إعادة المعالجة", description: "حُفظ ربط الأعمدة وتحدثت المعاينة." });
+    } catch (reprocessError) {
+      toast({
+        variant: "destructive",
+        title: "فشلت إعادة المعالجة",
+        description: reprocessError instanceof Error ? reprocessError.message : "حدث خطأ غير متوقع",
+      });
+    } finally {
+      setReprocessing(false);
+    }
   };
 
   const downloadErrorReport = () => {
@@ -923,7 +1039,23 @@ export function ImportCenter() {
               <Alert variant="destructive">
                 <XCircle className="h-4 w-4" />
                 <AlertTitle>فشل في الاستيراد</AlertTitle>
-                <AlertDescription>{error}</AlertDescription>
+                <AlertDescription className="space-y-3">
+                  <p>{error}</p>
+                  {existingBatch && (
+                    <div className="flex flex-wrap gap-2">
+                      {existingBatch.canResume && (
+                        <Button type="button" variant="outline" size="sm" onClick={() => void loadBatch(existingBatch.id)}>
+                          استكمال الملف السابق
+                        </Button>
+                      )}
+                      {existingBatch.canDelete && (
+                        <Button type="button" variant="destructive" size="sm" onClick={() => void deleteExistingBatch()}>
+                          حذف الملف السابق
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </AlertDescription>
               </Alert>
             )}
 
@@ -964,6 +1096,24 @@ export function ImportCenter() {
 
             {result && (
               <>
+                {(result.status === "PARSING" || result.status === "CONFIRMING") && (
+                  <Alert>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <AlertTitle>الدفعة قيد المعالجة</AlertTitle>
+                    <AlertDescription>
+                      يعرض النظام الحالة الحالية من الخادم، ولن يبدأ عملية موازية ثانية. حدّث الصفحة بعد اكتمالها.
+                    </AlertDescription>
+                  </Alert>
+                )}
+                {result.status === "FAILED" && (
+                  <Alert variant="destructive">
+                    <AlertTriangle className="h-4 w-4" />
+                    <AlertTitle>توقفت الدفعة ويمكن إعادة معالجتها</AlertTitle>
+                    <AlertDescription>
+                      {result.failureNotes || result.failureCode || "تعذر إكمال المعالجة السابقة."}
+                    </AlertDescription>
+                  </Alert>
+                )}
                 {/* Stat cards grid */}
                 <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
                   {STAT_CARDS.map((card) => {
@@ -996,7 +1146,9 @@ export function ImportCenter() {
                   })}
                 </div>
 
-                <ImportReadyAlert result={result} />
+                {!NON_CONFIRMABLE_RESUME_STATUSES.has(result.status ?? "") && (
+                  <ImportReadyAlert result={result} />
+                )}
 
                 {/* Detailed tabs */}
                 <Card>
@@ -1026,6 +1178,12 @@ export function ImportCenter() {
                         >
                           <Download className="h-4 w-4" />
                           تنزيل تقرير الأخطاء
+                        </Button>
+                      )}
+                      {["UPLOADED", "VALIDATED", "READY_FOR_CONFIRMATION", "FAILED"].includes(result.status ?? "READY_FOR_CONFIRMATION") && (
+                        <Button variant="outline" size="sm" disabled={reprocessing} onClick={() => void reprocessCurrentBatch()}>
+                          {reprocessing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                          إعادة المعالجة
                         </Button>
                       )}
                     </div>
@@ -1151,22 +1309,18 @@ export function ImportCenter() {
                                         )}
                                     </TableCell>
                                     <TableCell>
-                                      {entry.field ? (
-                                        <div className="flex items-center gap-1.5">
-                                          <ArrowLeft className="h-3 w-3 text-muted-foreground" />
-                                          <Badge
-                                            variant="outline"
-                                            className="bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-900/30 dark:text-emerald-300 dark:border-emerald-800"
-                                          >
-                                            {FIELD_LABELS[entry.field] ||
-                                              entry.field}
-                                          </Badge>
-                                        </div>
-                                      ) : (
-                                        <span className="text-amber-600 dark:text-amber-400 text-sm">
-                                          محفوظ في البيانات الأصلية
-                                        </span>
-                                      )}
+                                      <Select
+                                        value={result.columnMapping[entry.header] ?? "unmapped"}
+                                        onValueChange={(field) => updateMapping(entry.header, field)}
+                                      >
+                                        <SelectTrigger className="h-8"><SelectValue /></SelectTrigger>
+                                        <SelectContent>
+                                          <SelectItem value="unmapped">محفوظ في البيانات الأصلية</SelectItem>
+                                          {IMPORT_MAPPING_FIELDS.map((field) => (
+                                            <SelectItem key={field} value={field}>{FIELD_LABELS[field] || field}</SelectItem>
+                                          ))}
+                                        </SelectContent>
+                                      </Select>
                                     </TableCell>
                                     <TableCell className="text-center text-xs">
                                       {toColumnMappingStatusLabel(entry.status)}
@@ -1195,9 +1349,10 @@ export function ImportCenter() {
                                   <TableHead>التاريخ</TableHead>
                                   <TableHead>القناة</TableHead>
                                   <TableHead>الموضوع</TableHead>
-                                  <TableHead>الحالة</TableHead>
-                                  <TableHead>الأولوية</TableHead>
-                                  <TableHead>هوية مقدم الشكوى</TableHead>
+                                  <TableHead>تفصيل</TableHead>
+                                  <TableHead>الحالة المصدرية</TableHead>
+                                  <TableHead>الحالة بعد التحويل</TableHead>
+                                  <TableHead>حالة الإجراء</TableHead>
                                 </TableRow>
                               </TableHeader>
                               <TableBody>
@@ -1221,13 +1376,16 @@ export function ImportCenter() {
                                       {row.subject || "-"}
                                     </TableCell>
                                     <TableCell className="text-xs">
-                                      {row.status || "-"}
+                                      {row.sourceDetail || "-"}
                                     </TableCell>
                                     <TableCell className="text-xs">
-                                      {row.priority || "-"}
+                                      {row.sourceStatus || "-"}
                                     </TableCell>
-                                    <TableCell className="font-mono text-xs">
-                                      {row.complainantIdentifierMasked || "-"}
+                                    <TableCell className="text-xs">
+                                      {row.statusDisplay || row.status || "-"}
+                                    </TableCell>
+                                    <TableCell className="text-xs">
+                                      {row.sourceActionStatus || "-"}
                                     </TableCell>
                                   </TableRow>
                                 ))}
@@ -1321,12 +1479,14 @@ export function ImportCenter() {
                   </CardContent>
                 </Card>
 
-                <ImportActionFooter
-                  result={result}
-                  confirming={confirming}
-                  onReset={resetForm}
-                  onConfirm={confirmImport}
-                />
+                {!NON_CONFIRMABLE_RESUME_STATUSES.has(result.status ?? "") && (
+                  <ImportActionFooter
+                    result={result}
+                    confirming={confirming}
+                    onReset={resetForm}
+                    onConfirm={confirmImport}
+                  />
+                )}
               </>
             )}
           </div>

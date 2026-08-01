@@ -15,6 +15,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   Dialog,
   DialogContent,
@@ -78,7 +80,7 @@ interface Classification {
   name: string;
   description?: string | null;
   color: string;
-  keywords?: string | null; // JSON string
+  keywords?: unknown;
   parentId?: string | null;
   children?: Classification[];
 }
@@ -111,14 +113,198 @@ const PRESET_COLORS = [
 ];
 
 // ---------- Helpers ----------
-function parseKeywords(raw?: string | null): string[] {
+function parseKeywords(raw?: unknown): string[] {
   if (!raw) return [];
+  if (Array.isArray(raw)) return raw.filter((value): value is string => typeof value === "string" && Boolean(value));
+  if (typeof raw !== "string") return [];
   try {
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
   } catch {
     return [];
   }
+}
+
+type ImportedDetailItem = {
+  normalizedValue: string;
+  displayValue: string;
+  occurrences: number;
+  linkedKeywordsCount: number;
+  alreadyLinkedToCurrentClassification: boolean;
+  linkedToOtherClassification: boolean;
+};
+
+export function ImportedDetailPicker({
+  classificationId,
+  onImported,
+}: Readonly<{
+  classificationId: string;
+  onImported: (keywords: string[]) => void;
+}>) {
+  const { toast } = useToast();
+  const [items, setItems] = useState<ImportedDetailItem[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [search, setSearch] = useState("");
+  const [linkStatus, setLinkStatus] = useState("ALL");
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const pageSize = 20;
+
+  const loadValues = useCallback(async (signal?: AbortSignal) => {
+    setLoading(true);
+    setLoadError(null);
+    try {
+      const params = new URLSearchParams({
+        classificationId,
+        linkStatus,
+        page: String(page),
+        pageSize: String(pageSize),
+      });
+      if (search.trim()) params.set("search", search.trim());
+      const response = await fetch(`/api/classifications/imported-detail-values?${params}`, { signal });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error?.message || "تعذر تحميل القيم المستوردة");
+      setItems(payload.items);
+      setTotal(payload.total);
+    } catch (error) {
+      if (isAbortError(error)) return;
+      setLoadError(error instanceof Error ? error.message : "تعذر تحميل القيم المستوردة");
+    } finally {
+      if (!signal?.aborted) setLoading(false);
+    }
+  }, [classificationId, linkStatus, page, search]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void Promise.resolve().then(() => loadValues(controller.signal));
+    return () => controller.abort();
+  }, [loadValues]);
+
+  const selectableItems = items.filter((item) => !item.alreadyLinkedToCurrentClassification);
+  const allSelected = selectableItems.length > 0 && selectableItems.every((item) => selected.has(item.normalizedValue));
+
+  const toggleValue = (value: string) => {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(value)) next.delete(value);
+      else next.add(value);
+      return next;
+    });
+  };
+
+  const addSelected = async () => {
+    const values = items
+      .filter((item) => selected.has(item.normalizedValue))
+      .map((item) => item.displayValue);
+    if (values.length === 0) return;
+    setAdding(true);
+    try {
+      const response = await fetch(`/api/classifications/${classificationId}/keywords/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ values }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error?.message || "تعذر إضافة الكلمات المحددة");
+      onImported(payload.keywords);
+      setSelected(new Set());
+      await loadValues();
+      toast({
+        title: "تمت إضافة الكلمات المفتاحية",
+        description: `أضيفت ${formatNumber(payload.added)} كلمة، وتجاوز النظام ${formatNumber(payload.alreadyExists)} كلمة موجودة.`,
+      });
+    } catch (error) {
+      toast({
+        variant: "destructive",
+        title: "تعذر إضافة الكلمات",
+        description: error instanceof Error ? error.message : "حدث خطأ غير متوقع",
+      });
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="grid gap-2 sm:grid-cols-[1fr_180px]">
+        <Input
+          value={search}
+          onChange={(event) => { setSearch(event.target.value); setPage(1); }}
+          placeholder="ابحث في قيم تفصيل"
+          aria-label="البحث في قيم تفصيل"
+        />
+        <Select value={linkStatus} onValueChange={(value) => { setLinkStatus(value); setPage(1); }}>
+          <SelectTrigger><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="ALL">جميع القيم</SelectItem>
+            <SelectItem value="UNLINKED">غير مرتبطة</SelectItem>
+            <SelectItem value="CURRENT">مرتبطة بهذا التصنيف</SelectItem>
+            <SelectItem value="OTHER">مرتبطة بتصنيفات أخرى</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="flex items-center justify-between text-xs text-muted-foreground">
+        <span>إجمالي القيم: {formatNumber(total)}</span>
+        <label className="flex items-center gap-2">
+          <Checkbox
+            checked={allSelected}
+            onCheckedChange={() => {
+              setSelected((current) => {
+                const next = new Set(current);
+                for (const item of selectableItems) {
+                  if (allSelected) next.delete(item.normalizedValue);
+                  else next.add(item.normalizedValue);
+                }
+                return next;
+              });
+            }}
+          />
+          اختيار الكل في الصفحة
+        </label>
+      </div>
+      {loading && <div className="space-y-2"><Skeleton className="h-10" /><Skeleton className="h-10" /></div>}
+      {loadError && <p className="text-sm text-destructive">{loadError}</p>}
+      {!loading && !loadError && items.length === 0 && (
+        <p className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
+          لا توجد قيم مستوردة مطابقة.
+        </p>
+      )}
+      {!loading && items.length > 0 && (
+        <div className="max-h-64 space-y-1 overflow-y-auto rounded-md border p-2">
+          {items.map((item) => (
+            <label key={item.normalizedValue} className="flex items-center gap-3 rounded-md p-2 hover:bg-muted/50">
+              <Checkbox
+                checked={selected.has(item.normalizedValue)}
+                disabled={item.alreadyLinkedToCurrentClassification}
+                onCheckedChange={() => toggleValue(item.normalizedValue)}
+              />
+              <span className="min-w-0 flex-1 truncate text-sm">{item.displayValue}</span>
+              <span className="text-xs text-muted-foreground">{formatNumber(item.occurrences)} ظهور</span>
+              {item.alreadyLinkedToCurrentClassification && <Badge variant="secondary">مضافة مسبقًا</Badge>}
+              {!item.alreadyLinkedToCurrentClassification && item.linkedToOtherClassification && (
+                <Badge variant="destructive">مرتبطة بتصنيف آخر</Badge>
+              )}
+              {item.linkedKeywordsCount === 0 && <Badge variant="outline">غير مرتبطة</Badge>}
+            </label>
+          ))}
+        </div>
+      )}
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex gap-1">
+          <Button type="button" variant="outline" size="sm" disabled={page === 1 || loading} onClick={() => setPage((value) => value - 1)}>السابق</Button>
+          <Button type="button" variant="outline" size="sm" disabled={page * pageSize >= total || loading} onClick={() => setPage((value) => value + 1)}>التالي</Button>
+        </div>
+        <Button type="button" size="sm" disabled={selected.size === 0 || adding} onClick={() => void addSelected()}>
+          {adding && <Loader2 className="h-4 w-4 animate-spin" />}
+          إضافة المحدد ككلمات مفتاحية
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">لن تؤدي الإضافة إلى إعادة تصنيف الشكاوى السابقة تلقائيًا.</p>
+    </div>
+  );
 }
 
 // Flatten tree for selector + merge list
@@ -631,6 +817,7 @@ export function ClassificationsManager() {
     setSubmitting(true);
     try {
       const payload = {
+        id: editing?.id,
         name: formName.trim(),
         description: formDescription.trim() || null,
         color: formColor,
@@ -1009,10 +1196,22 @@ export function ClassificationsManager() {
                 <Tags className="h-3.5 w-3.5" />
                 الكلمات المفتاحية
               </Label>
-              <KeywordInput
-                keywords={formKeywords}
-                onChange={setFormKeywords}
-              />
+              <Tabs defaultValue="current" className="w-full">
+                <TabsList className="grid w-full grid-cols-2">
+                  <TabsTrigger value="current">الكلمات الحالية</TabsTrigger>
+                  <TabsTrigger value="imported" disabled={!editing?.parentId}>القيم المستوردة من «تفصيل»</TabsTrigger>
+                </TabsList>
+                <TabsContent value="current" className="mt-3">
+                  <KeywordInput keywords={formKeywords} onChange={setFormKeywords} />
+                </TabsContent>
+                <TabsContent value="imported" className="mt-3">
+                  {editing?.parentId ? (
+                    <ImportedDetailPicker classificationId={editing.id} onImported={setFormKeywords} />
+                  ) : (
+                    <p className="text-sm text-muted-foreground">احفظ التصنيف الفرعي أولًا لاختيار قيم تفصيل.</p>
+                  )}
+                </TabsContent>
+              </Tabs>
             </div>
           </div>
 
