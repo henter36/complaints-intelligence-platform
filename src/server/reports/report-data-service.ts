@@ -21,6 +21,25 @@ import {
   type RegionChangeRow,
   type RegionTrendData,
 } from "./report-comparison";
+import type {
+  ReportMatrixSection,
+  ReportMode,
+  ExecutiveBriefKpiCard,
+  KpiAssessment,
+  RegionReferenceRow,
+  ClassificationBriefRow,
+  ComparativeTimelineData,
+  ComparativeTimelinePoint,
+  ComparativeTimelineSeries,
+  ConcentrationBand,
+  NetBacklogFlow,
+  PerfVolumeRow,
+  ContinuityRow,
+} from "@/lib/reports/report-contract";
+import {
+  buildExecutiveBriefData,
+  buildFullAnalyticalData,
+} from "./report-executive-brief-data-service";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -95,7 +114,8 @@ export type ReportSection =
   | { id: string; kind: "kpi"; title: string; cards: ReportKpiCard[] }
   | { id: string; kind: "table"; title: string; table: ReportTable }
   | ReportTextSection
-  | ReportChartSection;
+  | ReportChartSection
+  | ReportMatrixSection;
 
 export type ReportData = {
   type: ReportType;
@@ -117,6 +137,42 @@ export type ReportData = {
   // dedicated worksheets without recomputing it. It is undefined for report
   // types that do not run a comparison (only EXECUTIVE_SUMMARY populates it).
   comparisonData?: ComparisonResult;
+  // Mode-specific extended data (only present for the new report modes).
+  reportMode?: ReportMode;
+  briefData?: ExecutiveBriefData;
+};
+
+/** Extended payload for DIGITAL_EXECUTIVE_BRIEF and PRINT_EXECUTIVE_BRIEF modes. */
+export type ExecutiveBriefData = {
+  briefKpis: ExecutiveBriefKpiCard[];
+  allRegions: RegionReferenceRow[];
+  topClassifications: ClassificationBriefRow[];
+  comparativeTimeline: ComparativeTimelineData;
+  concentrationBands: ConcentrationBand[];
+};
+
+/** Extended payload for FULL_ANALYTICAL mode (super-set of ExecutiveBriefData). */
+export type FullAnalyticalData = ExecutiveBriefData & {
+  netBacklogFlow: NetBacklogFlow;
+  perfVolumeRows: PerfVolumeRow[];
+  continuityRows: ContinuityRow[];
+};
+
+// Re-export contract types so consumers only need to import from this file.
+export type {
+  ReportMatrixSection,
+  ReportMode,
+  ExecutiveBriefKpiCard,
+  KpiAssessment,
+  RegionReferenceRow,
+  ClassificationBriefRow,
+  ComparativeTimelineData,
+  ComparativeTimelinePoint,
+  ComparativeTimelineSeries,
+  ConcentrationBand,
+  NetBacklogFlow,
+  PerfVolumeRow,
+  ContinuityRow,
 };
 
 const PREVIEW_TABLE_ROW_CAP = 100;
@@ -477,6 +533,74 @@ async function buildExecutiveSummary(request: ReportRequest, mode: "preview" | "
   };
 }
 
+/** Builds the executive summary with one of the new report modes attached. */
+async function buildExecutiveSummaryWithMode(
+  request: ReportRequest,
+  mode: "preview" | "run",
+  now: Date,
+  reportMode: ReportMode
+): Promise<ReportData> {
+  // Start from the standard executive summary data.
+  const base = await buildExecutiveSummary(request, mode, now);
+  const comparison = base.comparisonData!;
+  const params = buildComplaintQueryParams(request.filters);
+  const result = await getComplaintKpis(params, now);
+
+  // Optionally fetch previous-period distributions for richer classification data.
+  let previousResult: Awaited<ReturnType<typeof getComplaintKpis>> | undefined;
+  if (comparison.previousPeriod) {
+    const prevParams = buildComplaintQueryParams(request.filters);
+    prevParams.set(
+      "from",
+      comparison.previousPeriod.from.toISOString().slice(0, 10)
+    );
+    prevParams.set(
+      "to",
+      new Date(comparison.previousPeriod.toExclusive.getTime() - DAY_MS)
+        .toISOString()
+        .slice(0, 10)
+    );
+    previousResult = await getComplaintKpis(prevParams, now);
+  }
+
+  const modeTitle: Record<ReportMode, string> = {
+    DIGITAL_EXECUTIVE_BRIEF: "تقرير تنفيذي مختصر — عرض رقمي",
+    PRINT_EXECUTIVE_BRIEF: "تقرير تنفيذي مختصر — نسخة طباعة",
+    FULL_ANALYTICAL: "التقرير التحليلي الكامل",
+  };
+
+  const title = request.title ?? modeTitle[reportMode];
+
+  if (reportMode === "FULL_ANALYTICAL") {
+    const fullData = await buildFullAnalyticalData(
+      request.filters,
+      result,
+      comparison,
+      previousResult
+    );
+    return {
+      ...base,
+      title,
+      reportMode,
+      briefData: fullData,
+    };
+  }
+
+  // DIGITAL_EXECUTIVE_BRIEF / PRINT_EXECUTIVE_BRIEF
+  const briefData = await buildExecutiveBriefData(
+    request.filters,
+    result,
+    comparison,
+    previousResult
+  );
+  return {
+    ...base,
+    title,
+    reportMode,
+    briefData,
+  };
+}
+
 async function buildGroupPerformanceReport(
   request: ReportRequest,
   now: Date,
@@ -709,8 +833,13 @@ export async function buildReportData(
   now: Date = new Date()
 ): Promise<ReportData> {
   switch (request.type) {
-    case ReportType.EXECUTIVE_SUMMARY:
+    case ReportType.EXECUTIVE_SUMMARY: {
+      const reportMode = request.options.reportMode as ReportMode | undefined;
+      if (reportMode === "DIGITAL_EXECUTIVE_BRIEF" || reportMode === "PRINT_EXECUTIVE_BRIEF" || reportMode === "FULL_ANALYTICAL") {
+        return buildExecutiveSummaryWithMode(request, mode, now, reportMode);
+      }
       return buildExecutiveSummary(request, mode, now);
+    }
     case ReportType.DEPARTMENT_PERFORMANCE: {
       const params = buildComplaintQueryParams(request.filters);
       const result = await getComplaintKpis(params, now);

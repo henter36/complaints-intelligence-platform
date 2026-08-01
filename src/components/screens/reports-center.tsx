@@ -70,11 +70,20 @@ type ReportTable = {
   rows: Record<string, unknown>[]; truncated: boolean; totalMatched: number;
 };
 type ChartSeries = { name: string; points: { x: string; y: number }[]; isOther?: boolean };
+type ReportMatrixSection = {
+  id: string; kind: "matrix"; title: string; description?: string;
+  rowLabel: string; columnLabel: string;
+  rowHeaders: string[]; columnHeaders: string[];
+  cells: number[][];
+  rowTotals: number[]; columnTotals: number[]; grandTotal: number;
+  truncated: boolean; maxRows: number; maxColumns: number;
+};
 type ReportSection =
   | { id: string; kind: "kpi"; title: string; cards: ReportKpiCard[] }
   | { id: string; kind: "table"; title: string; table: ReportTable }
   | { id: string; kind: "text"; title: string; points: string[] }
-  | { id: string; kind: "chart"; chartType: "line"; title: string; series: ChartSeries[]; description?: string; emptyState?: string; unit?: string; truncated?: boolean; truncatedMessage?: string };
+  | { id: string; kind: "chart"; chartType: "line"; title: string; series: ChartSeries[]; description?: string; emptyState?: string; unit?: string; truncated?: boolean; truncatedMessage?: string }
+  | ReportMatrixSection;
 
 type ReportData = {
   type: ReportType;
@@ -1215,6 +1224,42 @@ function SectionBody({ section }: Readonly<{ section: ReportSection }>) {
 
     case "chart":
       return <ReportChartPreview section={section} />;
+
+    case "matrix":
+      if (section.rowHeaders.length === 0 || section.columnHeaders.length === 0) {
+        return <p className="text-sm text-muted-foreground">لا توجد بيانات لعرضها.</p>;
+      }
+      return (
+        <div className="overflow-x-auto rounded-lg border">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>{`${section.rowLabel} / ${section.columnLabel}`}</TableHead>
+                {section.columnHeaders.map((col) => (
+                  <TableHead key={col} className="text-center">{col}</TableHead>
+                ))}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {section.rowHeaders.map((rowHeader, ri) => (
+                <TableRow key={rowHeader}>
+                  <TableCell className="font-medium text-sm">{rowHeader}</TableCell>
+                  {(section.cells[ri] ?? []).map((cellVal, ci) => (
+                    <TableCell key={`${rowHeader}-${section.columnHeaders[ci]}`} className="text-center text-sm tabular-nums">
+                      {cellVal > 0 ? formatNumber(cellVal) : "-"}
+                    </TableCell>
+                  ))}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+          {section.truncated && (
+            <div className="p-2 text-xs text-muted-foreground border-t">
+              تم عرض {section.rowHeaders.length} صفاً من أصل {formatNumber(section.grandTotal)}.
+            </div>
+          )}
+        </div>
+      );
 
     default:
       return assertNeverReportSection(section);

@@ -1,6 +1,10 @@
 import ExcelJS from "exceljs";
 import { getReportDefinition } from "./report-definition-service";
-import type { ReportData, ReportTable } from "./report-data-service";
+import type {
+  ReportData,
+  ReportTable,
+  ExecutiveBriefData,
+} from "./report-data-service";
 import type { ComparisonResult } from "./report-comparison";
 import { formatRiyadhDateTime } from "./report-time";
 
@@ -292,6 +296,163 @@ function buildDeptClassRisesSheet(workbook: ExcelJS.Workbook, comparison: Compar
   }
 }
 
+// ---------------------------------------------------------------------------
+// Executive brief XLSX sheets
+// ---------------------------------------------------------------------------
+
+function buildBriefKpisSheet(workbook: ExcelJS.Workbook, briefData: ExecutiveBriefData, usedNames: Set<string>): void {
+  const sheet = workbook.addWorksheet(sanitizeSheetName("المؤشرات التنفيذية", usedNames));
+  applyRtlView(sheet);
+  sheet.columns = [
+    { header: "المؤشر", key: "label", width: 28 },
+    { header: "الحالي", key: "current", width: 14 },
+    { header: "السابق", key: "previous", width: 14 },
+    { header: "الفرق", key: "difference", width: 12 },
+    { header: "نسبة التغير%", key: "changeRate", width: 16 },
+    { header: "التقييم", key: "assessment", width: 14 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+  sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 6 } };
+
+  const assessmentLabels: Record<string, string> = {
+    positive: "إيجابي",
+    negative: "سلبي",
+    warning: "تحذير",
+    neutral: "محايد",
+  };
+
+  for (const card of briefData.briefKpis) {
+    const row = sheet.addRow({
+      label: sanitizeText(card.label),
+      current: card.value,
+      previous: card.previousValue ?? "-",
+      difference: card.difference ?? "-",
+      changeRate: card.changeRate ?? "-",
+      assessment: sanitizeText(assessmentLabels[card.assessment] ?? card.assessment),
+    });
+    if (typeof card.changeRate === "number") {
+      row.getCell("changeRate").numFmt = '+0.0"%";-0.0"%";0"%"';
+    }
+  }
+}
+
+function buildAllRegionsSheet(workbook: ExcelJS.Workbook, briefData: ExecutiveBriefData, usedNames: Set<string>): void {
+  const sheet = workbook.addWorksheet(sanitizeSheetName("جميع المناطق", usedNames));
+  applyRtlView(sheet);
+  sheet.columns = [
+    { header: "المنطقة", key: "regionName", width: 28 },
+    { header: "الحالي", key: "current", width: 12 },
+    { header: "السابق", key: "previous", width: 12 },
+    { header: "الفرق", key: "difference", width: 12 },
+    { header: "نسبة التغير%", key: "changeRate", width: 16 },
+    { header: "الالتزام%", key: "complianceRate", width: 14 },
+    { header: "متوسط الإغلاق", key: "avgResolution", width: 16 },
+    { header: "المتأخرة", key: "currentlyLate", width: 12 },
+    { header: "الاتجاه", key: "direction", width: 14 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+  sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 9 } };
+
+  for (const row of briefData.allRegions) {
+    const added = sheet.addRow({
+      regionName: sanitizeText(row.regionName),
+      current: row.currentCount,
+      previous: row.previousCount,
+      difference: row.difference,
+      changeRate: row.changeRate ?? "-",
+      complianceRate: row.complianceRate ?? "-",
+      avgResolution: row.averageResolutionDays ?? "-",
+      currentlyLate: row.currentlyLate,
+      direction: sanitizeText(row.direction),
+    });
+    if (typeof row.changeRate === "number") added.getCell("changeRate").numFmt = '0.0"%"';
+    if (typeof row.complianceRate === "number") added.getCell("complianceRate").numFmt = '0.0"%"';
+  }
+}
+
+function buildTopClassificationsSheet(workbook: ExcelJS.Workbook, briefData: ExecutiveBriefData, usedNames: Set<string>): void {
+  const sheet = workbook.addWorksheet(sanitizeSheetName("أبرز التصنيفات", usedNames));
+  applyRtlView(sheet);
+  sheet.columns = [
+    { header: "التصنيف", key: "name", width: 30 },
+    { header: "الحالي", key: "current", width: 12 },
+    { header: "السابق", key: "previous", width: 12 },
+    { header: "الفرق", key: "difference", width: 12 },
+    { header: "نسبة التغير%", key: "changeRate", width: 16 },
+    { header: "النسبة من الإجمالي%", key: "shareOfTotal", width: 20 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+  sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 6 } };
+
+  for (const row of briefData.topClassifications) {
+    const added = sheet.addRow({
+      name: sanitizeText(row.classificationName),
+      current: row.currentCount,
+      previous: row.previousCount,
+      difference: row.difference,
+      changeRate: row.changeRate ?? "-",
+      shareOfTotal: row.shareOfTotal,
+    });
+    if (typeof row.changeRate === "number") added.getCell("changeRate").numFmt = '0.0"%"';
+    added.getCell("shareOfTotal").numFmt = '0.0"%"';
+  }
+}
+
+function buildComparativeTimelineSheet(workbook: ExcelJS.Workbook, briefData: ExecutiveBriefData, usedNames: Set<string>): void {
+  const sheet = workbook.addWorksheet(sanitizeSheetName("الاتجاه الزمني المقارن", usedNames));
+  applyRtlView(sheet);
+  sheet.columns = [
+    { header: "اليوم النسبي", key: "day", width: 14 },
+    { header: "الفترة الحالية", key: "current", width: 16 },
+    { header: "الفترة السابقة", key: "previous", width: 16 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+  sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 3 } };
+
+  const { current, previous } = briefData.comparativeTimeline;
+  const prevMap = new Map(previous?.points.map((p) => [p.relativeDay, p.count]) ?? []);
+
+  for (const point of current.points) {
+    sheet.addRow({
+      day: point.relativeDay,
+      current: point.count,
+      previous: prevMap.get(point.relativeDay) ?? 0,
+    });
+  }
+}
+
+function buildConcentrationSheet(workbook: ExcelJS.Workbook, briefData: ExecutiveBriefData, usedNames: Set<string>): void {
+  const sheet = workbook.addWorksheet(sanitizeSheetName("التركز", usedNames));
+  applyRtlView(sheet);
+  sheet.columns = [
+    { header: "البُعد", key: "type", width: 22 },
+    { header: "حصة أعلى 1%", key: "top1", width: 18 },
+    { header: "حصة أعلى 3%", key: "top3", width: 18 },
+    { header: "حصة أعلى 5%", key: "top5", width: 18 },
+    { header: "إجمالي الكيانات", key: "total", width: 18 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+
+  const typeLabels: Record<string, string> = {
+    region: "المناطق",
+    classification: "التصنيفات",
+    department: "الإدارات",
+  };
+
+  for (const band of briefData.concentrationBands) {
+    const row = sheet.addRow({
+      type: sanitizeText(typeLabels[band.entityType] ?? band.entityType),
+      top1: band.top1SharePercent,
+      top3: band.top3SharePercent,
+      top5: band.top5SharePercent,
+      total: band.totalEntities,
+    });
+    row.getCell("top1").numFmt = '0.0"%"';
+    row.getCell("top3").numFmt = '0.0"%"';
+    row.getCell("top5").numFmt = '0.0"%"';
+  }
+}
+
 export type XlsxRenderResult = {
   buffer: Buffer;
   warnings: string[];
@@ -308,6 +469,8 @@ export async function renderReportXlsx(data: ReportData): Promise<XlsxRenderResu
   buildKpiSheet(workbook, data);
 
   const usedNames = new Set<string>(["الملخص", "المؤشرات"]);
+
+  // Standard table sections (all modes).
   for (const section of data.sections) {
     if (section.kind !== "table") continue;
     try {
@@ -317,8 +480,7 @@ export async function renderReportXlsx(data: ReportData): Promise<XlsxRenderResu
     }
   }
 
-  // Dedicated comparison worksheets for the executive summary. Guarded by
-  // try/catch each so a single sheet failure never aborts the whole export.
+  // Dedicated comparison worksheets for the executive summary (all modes).
   if (data.comparisonData) {
     try {
       buildRegionTrendSheet(workbook, data.comparisonData, usedNames);
@@ -334,6 +496,25 @@ export async function renderReportXlsx(data: ReportData): Promise<XlsxRenderResu
       buildDeptClassRisesSheet(workbook, data.comparisonData, usedNames);
     } catch {
       warnings.push('تعذر إنشاء ورقة "ارتفاع الإدارات والتصنيفات".');
+    }
+  }
+
+  // Extended sheets for brief and analytical modes (7 for brief, 17 for full).
+  if (data.briefData) {
+    const briefSheetBuilders: Array<[string, (wb: ExcelJS.Workbook, bd: ExecutiveBriefData, used: Set<string>) => void]> = [
+      ["brief_kpis", buildBriefKpisSheet],
+      ["all_regions", buildAllRegionsSheet],
+      ["top_classifications", buildTopClassificationsSheet],
+      ["comparative_timeline", buildComparativeTimelineSheet],
+      ["concentration", buildConcentrationSheet],
+    ];
+
+    for (const [key, builder] of briefSheetBuilders) {
+      try {
+        builder(workbook, data.briefData, usedNames);
+      } catch {
+        warnings.push(`تعذر إنشاء ورقة البيانات الإضافية (${key}).`);
+      }
     }
   }
 
