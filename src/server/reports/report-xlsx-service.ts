@@ -565,6 +565,7 @@ type ComparisonSheetDefinition = {
 
 type FullAnalyticalSheetDefinition = {
   failureMessage: string;
+  shouldBuild?: (data: FullAnalyticalData) => boolean;
   build: (
     workbook: ExcelJS.Workbook,
     data: FullAnalyticalData,
@@ -602,6 +603,7 @@ const FULL_ANALYTICAL_SHEET_BUILDERS: readonly FullAnalyticalSheetDefinition[] =
   },
   {
     failureMessage: 'تعذر إنشاء ورقة "الاستمرارية".',
+    shouldBuild: (data) => data.comparativeTimeline.previous !== null,
     build: (workbook, data, usedNames) =>
       buildContinuitySheet(workbook, data.continuityRows, usedNames),
   },
@@ -681,6 +683,7 @@ function appendFullAnalyticalSheets(
 ): void {
   const { workbook, warnings, usedNames } = context;
   for (const definition of FULL_ANALYTICAL_SHEET_BUILDERS) {
+    if (definition.shouldBuild && !definition.shouldBuild(fullData)) continue;
     runSheetBuilder(warnings, definition.failureMessage, () =>
       definition.build(workbook, fullData, usedNames)
     );

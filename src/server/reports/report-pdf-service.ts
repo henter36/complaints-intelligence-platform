@@ -18,6 +18,7 @@ import type {
 import { renderLineChartPng } from "./report-chart-service";
 import { formatRiyadhDateTime } from "./report-time";
 import { MAX_TREND_SERIES, DEPT_CLASS_RISES_LIMIT } from "./report-comparison";
+import { buildMatrixTruncationMessage } from "@/lib/reports/matrix-truncation";
 
 const ASSETS_DIR = path.join(process.cwd(), "src/server/reports/assets");
 const FONT_REGULAR_PATH = path.join(ASSETS_DIR, "fonts/Amiri-Regular.ttf");
@@ -378,26 +379,6 @@ function drawTextSection(doc: PDFKit.PDFDocument, section: ReportTextSection): v
     doc.moveDown(0.2);
   }
   doc.fillColor("#000000");
-}
-
-function buildMatrixTruncationMessage(section: ReportMatrixSection): string | null {
-  if (!section.truncated && !section.truncatedRows && !section.truncatedColumns) return null;
-  const displayedRows = section.rowHeaders.length;
-  const displayedCols = section.columnHeaders.length;
-  const totalRows = section.totalRows;
-  const totalCols = section.totalColumns;
-  const rowsTruncated = section.truncatedRows;
-  const colsTruncated = section.truncatedColumns;
-  if (rowsTruncated && colsTruncated) {
-    return `تم عرض ${displayedRows} من أصل ${totalRows} صفاً، و${displayedCols} من أصل ${totalCols} عموداً.`;
-  }
-  if (rowsTruncated) {
-    return `تم عرض ${displayedRows} من أصل ${totalRows} صفاً (أعلى ${section.maxRows}).`;
-  }
-  if (colsTruncated) {
-    return `تم عرض ${displayedCols} من أصل ${totalCols} عموداً (أعلى ${section.maxColumns}).`;
-  }
-  return null;
 }
 
 function drawMatrixSection(

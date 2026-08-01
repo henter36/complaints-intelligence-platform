@@ -3,7 +3,8 @@
 // pdfkit/fontkit parse binary font data using Node's real Buffer/typed-array
 // globals; under the project's default jsdom environment those checks fail
 // with "Not a supported font format", so this file opts back into node.
-import { describe, expect, it } from "vitest";
+import PDFDocument from "pdfkit";
+import { describe, expect, it, vi } from "vitest";
 import type { ReportData, ReportSection } from "./report-data-service";
 import { renderReportPdf } from "./report-pdf-service";
 
@@ -135,6 +136,39 @@ describe("PDF report rendering", () => {
     const report = baseReport({ warnings: ["تم اختصار جدول المتأخرات."] });
     const { warnings } = await renderReportPdf(report);
     expect(warnings).toContain("تم اختصار جدول المتأخرات.");
+  });
+
+  it("renders the defensive matrix truncation fallback", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderReportPdf(baseReport({
+        sections: [{
+          id: "matrix",
+          kind: "matrix",
+          title: "مصفوفة الاختبار",
+          rowLabel: "الإدارة",
+          columnLabel: "التصنيف",
+          rowHeaders: ["إدارة أ"],
+          columnHeaders: ["تصنيف أ"],
+          cells: [[1]],
+          rowTotals: [1],
+          columnTotals: [1],
+          grandTotal: 1,
+          totalRows: 1,
+          totalColumns: 1,
+          truncatedRows: false,
+          truncatedColumns: false,
+          truncated: true,
+          maxRows: 10,
+          maxColumns: 10,
+        }],
+      }));
+
+      expect(textSpy.mock.calls.map((call) => call[0]))
+        .toContain("تم اختصار عرض بيانات المصفوفة.");
+    } finally {
+      textSpy.mockRestore();
+    }
   });
 });
 

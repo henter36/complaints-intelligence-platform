@@ -586,7 +586,10 @@ export async function buildFullAnalyticalData(
     result.volume.total
   );
 
-  const continuityRows = buildContinuityRows(comparison.deptClassAllPairs);
+  let continuityRows: ContinuityRow[] = [];
+  if (comparison.previousPeriod) {
+    continuityRows = buildContinuityRows(comparison.deptClassAllPairs);
+  }
 
   return {
     ...briefData,

@@ -299,4 +299,18 @@ describe("renderReportXlsx — FULL_ANALYTICAL mode", () => {
     expect(names.some((n) => n.includes("الأداء والحجم"))).toBe(false);
     expect(names.some((n) => n.includes("الاستمرارية"))).toBe(false);
   });
+
+  it("omits the continuity sheet when no reference timeline is available", async () => {
+    const report = makeReport(true, "FULL_ANALYTICAL");
+    const fullData = report.briefData as FullAnalyticalData;
+    fullData.comparativeTimeline.previous = null;
+    fullData.continuityRows = [];
+
+    const result = await renderReportXlsx(report);
+    const workbook = await readBack(result.buffer);
+
+    expect(sheetNames(workbook)).not.toContain("الاستمرارية");
+    expect(sheetNames(workbook)).toContain("صافي التدفق");
+    expect(sheetNames(workbook)).toContain("الأداء والحجم");
+  });
 });

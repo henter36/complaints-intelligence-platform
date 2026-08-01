@@ -30,6 +30,7 @@ import {
 } from "lucide-react";
 import { formatNumber, formatDate, formatDateTime } from "@/lib/ar-utils";
 import type { ReportMatrixSection } from "@/lib/reports/report-contract";
+import { buildMatrixTruncationMessage } from "@/lib/reports/matrix-truncation";
 
 // =========================================================================
 // Types (mirrors src/server/reports/*)
@@ -1159,19 +1160,6 @@ function assertNeverReportSection(section: never): never {
   throw new Error(`نوع قسم التقرير غير معروف: ${JSON.stringify((section as ReportSection).kind)}`);
 }
 
-function matrixTruncationMessage(section: ReportMatrixSection): string | null {
-  if (section.truncatedRows && section.truncatedColumns) {
-    return `تم عرض ${section.rowHeaders.length} من أصل ${formatNumber(section.totalRows)} صفاً، و${section.columnHeaders.length} من أصل ${formatNumber(section.totalColumns)} عموداً.`;
-  }
-  if (section.truncatedRows) {
-    return `تم عرض ${section.rowHeaders.length} من أصل ${formatNumber(section.totalRows)} صفاً.`;
-  }
-  if (section.truncatedColumns) {
-    return `تم عرض ${section.columnHeaders.length} من أصل ${formatNumber(section.totalColumns)} عموداً.`;
-  }
-  return null;
-}
-
 function SectionBody({ section }: Readonly<{ section: ReportSection }>) {
   switch (section.kind) {
     case "kpi":
@@ -1231,10 +1219,11 @@ function SectionBody({ section }: Readonly<{ section: ReportSection }>) {
     case "chart":
       return <ReportChartPreview section={section} />;
 
-    case "matrix":
+    case "matrix": {
       if (section.rowHeaders.length === 0 || section.columnHeaders.length === 0) {
         return <p className="text-sm text-muted-foreground">لا توجد بيانات لعرضها.</p>;
       }
+      const truncationMessage = buildMatrixTruncationMessage(section);
       return (
         <div className="overflow-x-auto rounded-lg border">
           <Table>
@@ -1259,13 +1248,14 @@ function SectionBody({ section }: Readonly<{ section: ReportSection }>) {
               ))}
             </TableBody>
           </Table>
-          {matrixTruncationMessage(section) && (
+          {truncationMessage && (
             <div className="p-2 text-xs text-muted-foreground border-t">
-              {matrixTruncationMessage(section)}
+              {truncationMessage}
             </div>
           )}
         </div>
       );
+    }
 
     default:
       return assertNeverReportSection(section);

@@ -617,14 +617,30 @@ describe("buildFullAnalyticalData — netBacklogFlow", () => {
     expect(callArg.where.isDeleted).toBe(false);
   });
 
-  it("outflow is deduplicated by complaint (groupBy)", async () => {
-    // Three transitions to CLOSED, but only two distinct complaints.
+  it("uses the number of returned complaint groups as outflow", async () => {
+    // Prisma groupBy returns one row per distinct complaint, so outflow equals
+    // the number of returned complaint groups.
     dbMocks.statusHistoryGroupBy.mockResolvedValue([
       { complaintId: "c-001" },
       { complaintId: "c-002" },
     ]);
     const data = await buildFullAnalyticalData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
     expect(data.netBacklogFlow.outflow).toBe(2);
+    expect(dbMocks.statusHistoryGroupBy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        by: ["complaintId"],
+        where: expect.objectContaining({
+          toStatus: { in: ["CLOSED", "RESOLVED"] },
+          changedAt: {
+            gte: CURRENT_PERIOD.from,
+            lt: CURRENT_PERIOD.toExclusive,
+          },
+          complaint: {
+            is: expect.objectContaining({ isDeleted: false }),
+          },
+        }),
+      })
+    );
   });
 
   it("outflow uses changedAt for the date range, not complaintDate", async () => {
@@ -684,6 +700,23 @@ describe("buildFullAnalyticalData — perfVolumeRows", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildFullAnalyticalData — continuityRows", () => {
+  it("returns no continuity rows when the comparison period is unavailable", async () => {
+    const comparison = makeComparison(false);
+    comparison.deptClassAllPairs = [
+      { departmentId: "d1", departmentName: "الصحة", classificationId: "c1", classificationName: "ضوضاء", currentCount: 5, previousCount: 0 },
+      { departmentId: "d2", departmentName: "التعليم", classificationId: "c2", classificationName: "مخلفات", currentCount: 3, previousCount: 0 },
+    ];
+
+    const data = await buildFullAnalyticalData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
+
+    expect(data.continuityRows).toEqual([]);
+    expect(data.continuityRows).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ recurrenceType: expect.stringMatching(/new|persistent|resolved/) }),
+      ])
+    );
+  });
+
   it("persistent: both periods > 0", async () => {
     const comparison = makeComparison();
     comparison.deptClassAllPairs = [
