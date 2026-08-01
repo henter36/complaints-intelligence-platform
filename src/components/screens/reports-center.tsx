@@ -76,6 +76,8 @@ type ReportMatrixSection = {
   rowHeaders: string[]; columnHeaders: string[];
   cells: number[][];
   rowTotals: number[]; columnTotals: number[]; grandTotal: number;
+  totalRows?: number; totalColumns?: number;
+  truncatedRows?: boolean; truncatedColumns?: boolean;
   truncated: boolean; maxRows: number; maxColumns: number;
 };
 type ReportSection =
@@ -1243,7 +1245,7 @@ function SectionBody({ section }: Readonly<{ section: ReportSection }>) {
             <TableBody>
               {section.rowHeaders.map((rowHeader, ri) => (
                 <TableRow key={rowHeader}>
-                  <TableCell className="font-medium text-sm">{rowHeader}</TableCell>
+                  <TableHead scope="row" className="font-medium text-sm">{rowHeader}</TableHead>
                   {(section.cells[ri] ?? []).map((cellVal, ci) => (
                     <TableCell key={`${rowHeader}-${section.columnHeaders[ci]}`} className="text-center text-sm tabular-nums">
                       {cellVal > 0 ? formatNumber(cellVal) : "-"}
@@ -1255,7 +1257,7 @@ function SectionBody({ section }: Readonly<{ section: ReportSection }>) {
           </Table>
           {section.truncated && (
             <div className="p-2 text-xs text-muted-foreground border-t">
-              تم عرض {section.rowHeaders.length} صفاً من أصل {formatNumber(section.grandTotal)}.
+              تم عرض {section.rowHeaders.length} صفاً من أصل {formatNumber(section.totalRows ?? section.grandTotal)}.
             </div>
           )}
         </div>

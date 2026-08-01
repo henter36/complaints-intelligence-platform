@@ -323,8 +323,22 @@ async function buildComparativeTimeline(
   params.delete("to");
   const query = parseComplaintQuery(params);
   const where = buildComplaintWhere(query, new Date());
-  where.complaintDate = { gte: previousPeriod.from, lt: previousPeriod.toExclusive };
   where.isDeleted = false;
+  where.OR = [
+    {
+      complaintDate: {
+        gte: previousPeriod.from,
+        lt: previousPeriod.toExclusive,
+      },
+    },
+    {
+      complaintDate: null,
+      receivedAt: {
+        gte: previousPeriod.from,
+        lt: previousPeriod.toExclusive,
+      },
+    },
+  ];
 
   const prevComplaints = await db.complaint.findMany({
     where,
@@ -386,13 +400,20 @@ async function buildNetBacklogFlow(
     (currentPeriod.toExclusive.getTime() - currentPeriod.from.getTime()) / DAY_MS
   );
 
-  // Inflow: complaints with complaintDate (or receivedAt) in the current period.
+  // Inflow: complaints with complaintDate (or receivedAt fallback) in the current period.
   const inflow = await db.complaint.count({
     where: {
       isDeleted: false,
       OR: [
         {
           complaintDate: {
+            gte: currentPeriod.from,
+            lt: currentPeriod.toExclusive,
+          },
+        },
+        {
+          complaintDate: null,
+          receivedAt: {
             gte: currentPeriod.from,
             lt: currentPeriod.toExclusive,
           },
@@ -408,6 +429,9 @@ async function buildNetBacklogFlow(
       changedAt: {
         gte: currentPeriod.from,
         lt: currentPeriod.toExclusive,
+      },
+      complaint: {
+        is: { isDeleted: false },
       },
     },
   });
@@ -438,47 +462,31 @@ function buildPerfVolumeRows(
 // Continuity analysis (re-occurrence of dept+classification pairs)
 // ---------------------------------------------------------------------------
 
-function buildContinuityRows(
-  current: ComparisonResult["deptClassRises"],
-  comparison: ComparisonResult
-): ContinuityRow[] {
-  // Build sets of dept+class keys for current and previous periods.
-  type DeptClassKey = string;
-  const currentKeys = new Map<DeptClassKey, { dept: string; class: string; currentCount: number }>();
-  const previousKeys = new Map<DeptClassKey, number>();
-
-  for (const rise of comparison.deptClassRises) {
-    const key = `${rise.departmentId}||${rise.classificationId}`;
-    currentKeys.set(key, {
-      dept: rise.departmentName,
-      class: rise.classificationName,
-      currentCount: rise.currentCount,
-    });
-    previousKeys.set(key, rise.previousCount);
-  }
-
+function buildContinuityRows(comparison: ComparisonResult): ContinuityRow[] {
   const rows: ContinuityRow[] = [];
-  for (const [key, cur] of currentKeys) {
-    const previousCount = previousKeys.get(key) ?? 0;
-    const appearsInBoth = previousCount > 0 && cur.currentCount > 0;
+  for (const pair of comparison.deptClassAllPairs) {
+    const { currentCount, previousCount } = pair;
+    if (currentCount === 0 && previousCount === 0) continue; // absent — skip
+
     let recurrenceType: ContinuityRow["recurrenceType"];
-    if (appearsInBoth) recurrenceType = "persistent";
-    else if (cur.currentCount > 0 && previousCount === 0) recurrenceType = "new";
-    else recurrenceType = "absent";
+    if (currentCount > 0 && previousCount > 0) recurrenceType = "persistent";
+    else if (currentCount > 0 && previousCount === 0) recurrenceType = "new";
+    else recurrenceType = "resolved"; // previousCount > 0 && currentCount === 0
 
     rows.push({
-      departmentName: cur.dept,
-      classificationName: cur.class,
-      currentCount: cur.currentCount,
+      departmentName: pair.departmentName,
+      classificationName: pair.classificationName,
+      currentCount,
       previousCount,
-      appearsInBothPeriods: appearsInBoth,
+      appearsInBothPeriods: currentCount > 0 && previousCount > 0,
       recurrenceType,
     });
   }
 
-  return rows.sort((a, b) =>
-    Number(b.appearsInBothPeriods) - Number(a.appearsInBothPeriods) ||
-    b.currentCount - a.currentCount
+  return rows.sort(
+    (a, b) =>
+      Number(b.appearsInBothPeriods) - Number(a.appearsInBothPeriods) ||
+      b.currentCount - a.currentCount
   );
 }
 
@@ -544,7 +552,7 @@ export async function buildFullAnalyticalData(
     result.volume.total
   );
 
-  const continuityRows = buildContinuityRows(comparison.deptClassRises, comparison);
+  const continuityRows = buildContinuityRows(comparison);
 
   return {
     ...briefData,

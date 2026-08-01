@@ -4,10 +4,17 @@
 
 import { describe, expect, it } from "vitest";
 import ExcelJS from "exceljs";
-import type { ReportData } from "./report-data-service";
-import type { ExecutiveBriefData } from "./report-data-service";
+import type { ReportData, ExecutiveBriefData, FullAnalyticalData } from "./report-data-service";
 import type { ReportType } from "@prisma/client";
 import { renderReportXlsx } from "./report-xlsx-service";
+
+const BRIEF_SHEETS = [
+  "المؤشرات التنفيذية",
+  "جميع المناطق",
+  "أبرز التصنيفات",
+  "الاتجاه الزمني المقارن",
+  "التركز",
+] as const;
 
 function makeBriefData(): ExecutiveBriefData {
   return {
@@ -45,7 +52,22 @@ function makeBriefData(): ExecutiveBriefData {
   };
 }
 
-function makeReport(withBriefData = true): ReportData {
+function makeFullAnalyticalData(): FullAnalyticalData {
+  return {
+    ...makeBriefData(),
+    netBacklogFlow: { inflow: 45, outflow: 30, net: 15, periodDays: 7 },
+    perfVolumeRows: [
+      { entityName: "الصحة", totalComplaints: 45, complianceRate: 93.5, averageResolutionDays: 3.8, currentlyLate: 4, share: 45.0 },
+      { entityName: "التعليم", totalComplaints: 35, complianceRate: 95.8, averageResolutionDays: 3.2, currentlyLate: 2, share: 35.0 },
+    ],
+    continuityRows: [
+      { departmentName: "الصحة", classificationName: "ضوضاء", currentCount: 15, previousCount: 10, appearsInBothPeriods: true, recurrenceType: "persistent" },
+      { departmentName: "التعليم", classificationName: "مخلفات", currentCount: 5, previousCount: 0, appearsInBothPeriods: false, recurrenceType: "new" },
+    ],
+  };
+}
+
+function makeReport(withBriefData = true, mode: "DIGITAL_EXECUTIVE_BRIEF" | "FULL_ANALYTICAL" = "DIGITAL_EXECUTIVE_BRIEF"): ReportData {
   return {
     type: "EXECUTIVE_SUMMARY" as ReportType,
     title: "تقرير تنفيذي مختصر",
@@ -58,8 +80,10 @@ function makeReport(withBriefData = true): ReportData {
     sections: [],
     warnings: [],
     rowCount: 0,
-    reportMode: "DIGITAL_EXECUTIVE_BRIEF",
-    briefData: withBriefData ? makeBriefData() : undefined,
+    reportMode: mode,
+    briefData: withBriefData
+      ? (mode === "FULL_ANALYTICAL" ? makeFullAnalyticalData() : makeBriefData())
+      : undefined,
   };
 }
 
@@ -87,44 +111,12 @@ describe("renderReportXlsx — executive brief mode", () => {
     expect(result.buffer.length).toBeGreaterThan(0);
   });
 
-  it("includes المؤشرات التنفيذية sheet", async () => {
+  it.each(BRIEF_SHEETS)("includes %s sheet", async (sheetName) => {
     const report = makeReport();
     const result = await renderReportXlsx(report);
     const wb = await readBack(result.buffer);
     const names = sheetNames(wb);
-    expect(names.some((n) => n.includes("المؤشرات التنفيذية"))).toBe(true);
-  });
-
-  it("includes جميع المناطق sheet", async () => {
-    const report = makeReport();
-    const result = await renderReportXlsx(report);
-    const wb = await readBack(result.buffer);
-    const names = sheetNames(wb);
-    expect(names.some((n) => n.includes("جميع المناطق"))).toBe(true);
-  });
-
-  it("includes أبرز التصنيفات sheet", async () => {
-    const report = makeReport();
-    const result = await renderReportXlsx(report);
-    const wb = await readBack(result.buffer);
-    const names = sheetNames(wb);
-    expect(names.some((n) => n.includes("أبرز التصنيفات"))).toBe(true);
-  });
-
-  it("includes الاتجاه الزمني المقارن sheet", async () => {
-    const report = makeReport();
-    const result = await renderReportXlsx(report);
-    const wb = await readBack(result.buffer);
-    const names = sheetNames(wb);
-    expect(names.some((n) => n.includes("الاتجاه الزمني المقارن"))).toBe(true);
-  });
-
-  it("includes التركز sheet", async () => {
-    const report = makeReport();
-    const result = await renderReportXlsx(report);
-    const wb = await readBack(result.buffer);
-    const names = sheetNames(wb);
-    expect(names.some((n) => n.includes("التركز"))).toBe(true);
+    expect(names.some((n) => n.includes(sheetName))).toBe(true);
   });
 
   it("المؤشرات التنفيذية has correct number of data rows", async () => {
@@ -204,6 +196,66 @@ describe("renderReportXlsx — executive brief mode", () => {
       if (cell.value) headers.push(String(cell.value));
     });
     expect(headers.length).toBe(9);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FULL_ANALYTICAL XLSX tests
+// ---------------------------------------------------------------------------
+
+const FULL_ANALYTICAL_SHEETS = [
+  "صافي التدفق",
+  "الأداء والحجم",
+  "الاستمرارية",
+] as const;
+
+describe("renderReportXlsx — FULL_ANALYTICAL mode", () => {
+  it.each(FULL_ANALYTICAL_SHEETS)("includes %s sheet", async (sheetName) => {
+    const report = makeReport(true, "FULL_ANALYTICAL");
+    const result = await renderReportXlsx(report);
+    const wb = await readBack(result.buffer);
+    const names = sheetNames(wb);
+    expect(names.some((n) => n.includes(sheetName))).toBe(true);
+  });
+
+  it("صافي التدفق has 4 data rows (inflow, outflow, net, periodDays)", async () => {
+    const report = makeReport(true, "FULL_ANALYTICAL");
+    const result = await renderReportXlsx(report);
+    const wb = await readBack(result.buffer);
+    const sheet = wb.worksheets.find((ws) => ws.name.includes("صافي التدفق"));
+    expect(sheet).toBeDefined();
+    // 1 header row + 4 data rows
+    expect(sheet!.rowCount).toBe(5);
+  });
+
+  it("الأداء والحجم has correct number of data rows", async () => {
+    const report = makeReport(true, "FULL_ANALYTICAL");
+    const result = await renderReportXlsx(report);
+    const wb = await readBack(result.buffer);
+    const sheet = wb.worksheets.find((ws) => ws.name.includes("الأداء والحجم"));
+    expect(sheet).toBeDefined();
+    // 1 header row + 2 perf rows
+    expect(sheet!.rowCount).toBe(3);
+  });
+
+  it("الاستمرارية has correct number of data rows", async () => {
+    const report = makeReport(true, "FULL_ANALYTICAL");
+    const result = await renderReportXlsx(report);
+    const wb = await readBack(result.buffer);
+    const sheet = wb.worksheets.find((ws) => ws.name.includes("الاستمرارية"));
+    expect(sheet).toBeDefined();
+    // 1 header row + 2 continuity rows
+    expect(sheet!.rowCount).toBe(3);
+  });
+
+  it("does NOT include FULL_ANALYTICAL sheets when mode is DIGITAL_EXECUTIVE_BRIEF", async () => {
+    const report = makeReport(true, "DIGITAL_EXECUTIVE_BRIEF");
+    const result = await renderReportXlsx(report);
+    const wb = await readBack(result.buffer);
+    const names = sheetNames(wb);
+    expect(names.some((n) => n.includes("صافي التدفق"))).toBe(false);
+    expect(names.some((n) => n.includes("الأداء والحجم"))).toBe(false);
+    expect(names.some((n) => n.includes("الاستمرارية"))).toBe(false);
   });
 });
 

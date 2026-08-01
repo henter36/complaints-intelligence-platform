@@ -202,6 +202,7 @@ describe("XLSX report rendering", () => {
           },
         ],
         deptClassRisesTotal: 1,
+        deptClassAllPairs: [],
         executiveSummaryPoints: ["نقطة"],
         warnings: [],
       },
