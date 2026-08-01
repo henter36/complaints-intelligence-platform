@@ -25,17 +25,16 @@ import type {
   ReportMatrixSection,
   ReportMode,
   ExecutiveBriefKpiCard,
-  KpiAssessment,
   RegionReferenceRow,
   ClassificationBriefRow,
   ComparativeTimelineData,
-  ComparativeTimelinePoint,
-  ComparativeTimelineSeries,
   ConcentrationBand,
   NetBacklogFlow,
   PerfVolumeRow,
   ContinuityRow,
 } from "@/lib/reports/report-contract";
+// Types that are only re-exported (not used locally) — direct re-export avoids a redundant import.
+export type { KpiAssessment, ComparativeTimelinePoint, ComparativeTimelineSeries } from "@/lib/reports/report-contract";
 import {
   buildExecutiveBriefData,
   buildFullAnalyticalData,
@@ -139,7 +138,7 @@ export type ReportData = {
   comparisonData?: ComparisonResult;
   // Mode-specific extended data (only present for the new report modes).
   reportMode?: ReportMode;
-  briefData?: ExecutiveBriefData;
+  briefData?: ExecutiveBriefData | FullAnalyticalData;
 };
 
 /** Extended payload for DIGITAL_EXECUTIVE_BRIEF and PRINT_EXECUTIVE_BRIEF modes. */
@@ -158,17 +157,20 @@ export type FullAnalyticalData = ExecutiveBriefData & {
   continuityRows: ContinuityRow[];
 };
 
+export function isFullAnalyticalData(
+  data: ExecutiveBriefData | FullAnalyticalData
+): data is FullAnalyticalData {
+  return "netBacklogFlow" in data && "perfVolumeRows" in data && "continuityRows" in data;
+}
+
 // Re-export contract types so consumers only need to import from this file.
 export type {
   ReportMatrixSection,
   ReportMode,
   ExecutiveBriefKpiCard,
-  KpiAssessment,
   RegionReferenceRow,
   ClassificationBriefRow,
   ComparativeTimelineData,
-  ComparativeTimelinePoint,
-  ComparativeTimelineSeries,
   ConcentrationBand,
   NetBacklogFlow,
   PerfVolumeRow,
@@ -425,7 +427,17 @@ function executiveKpiSection(result: Awaited<ReturnType<typeof getComplaintKpis>
   };
 }
 
-async function buildExecutiveSummary(request: ReportRequest, mode: "preview" | "run", now: Date): Promise<ReportData> {
+type ExecutiveSummaryCore = {
+  data: ReportData;
+  kpiResult: Awaited<ReturnType<typeof getComplaintKpis>>;
+  comparison: ComparisonResult;
+};
+
+async function buildExecutiveSummaryCore(
+  request: ReportRequest,
+  mode: "preview" | "run",
+  now: Date
+): Promise<ExecutiveSummaryCore> {
   const { filters, options } = request;
   const params = buildComplaintQueryParams(filters);
   const result = await getComplaintKpis(params, now);
@@ -518,7 +530,7 @@ async function buildExecutiveSummary(request: ReportRequest, mode: "preview" | "
       }
     : null;
 
-  return {
+  const data: ReportData = {
     type: ReportType.EXECUTIVE_SUMMARY,
     title: request.title ?? getReportDefinition(ReportType.EXECUTIVE_SUMMARY).title,
     generatedAt: now.toISOString(),
@@ -531,6 +543,16 @@ async function buildExecutiveSummary(request: ReportRequest, mode: "preview" | "
     rowCount: 0,
     comparisonData: comparison,
   };
+  return { data, kpiResult: result, comparison };
+}
+
+async function buildExecutiveSummary(
+  request: ReportRequest,
+  mode: "preview" | "run",
+  now: Date
+): Promise<ReportData> {
+  const { data } = await buildExecutiveSummaryCore(request, mode, now);
+  return data;
 }
 
 /** Builds the executive summary with one of the new report modes attached. */
@@ -540,11 +562,7 @@ async function buildExecutiveSummaryWithMode(
   now: Date,
   reportMode: ReportMode
 ): Promise<ReportData> {
-  // Start from the standard executive summary data.
-  const base = await buildExecutiveSummary(request, mode, now);
-  const comparison = base.comparisonData!;
-  const params = buildComplaintQueryParams(request.filters);
-  const result = await getComplaintKpis(params, now);
+  const { data: base, kpiResult: result, comparison } = await buildExecutiveSummaryCore(request, mode, now);
 
   // Optionally fetch previous-period distributions for richer classification data.
   let previousResult: Awaited<ReturnType<typeof getComplaintKpis>> | undefined;

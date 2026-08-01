@@ -222,7 +222,7 @@ async function renderSection(
     return;
   }
   if (section.kind === "matrix") {
-    drawMatrixSection(doc, section, warnings);
+    drawMatrixSection(doc, section);
     return;
   }
   // table
@@ -380,10 +380,29 @@ function drawTextSection(doc: PDFKit.PDFDocument, section: ReportTextSection): v
   doc.fillColor("#000000");
 }
 
+function buildMatrixTruncationMessage(section: ReportMatrixSection): string | null {
+  if (!section.truncated && !section.truncatedRows && !section.truncatedColumns) return null;
+  const displayedRows = section.rowHeaders.length;
+  const displayedCols = section.columnHeaders.length;
+  const totalRows = section.totalRows ?? section.grandTotal;
+  const totalCols = section.totalColumns ?? displayedCols;
+  const rowsTruncated = section.truncatedRows ?? (displayedRows < totalRows);
+  const colsTruncated = section.truncatedColumns ?? (displayedCols < totalCols);
+  if (rowsTruncated && colsTruncated) {
+    return `تم عرض ${displayedRows} من أصل ${totalRows} صفاً، و${displayedCols} من أصل ${totalCols} عموداً.`;
+  }
+  if (rowsTruncated) {
+    return `تم عرض ${displayedRows} من أصل ${totalRows} صفاً (أعلى ${section.maxRows}).`;
+  }
+  if (colsTruncated) {
+    return `تم عرض ${displayedCols} من أصل ${totalCols} عموداً (أعلى ${section.maxColumns}).`;
+  }
+  return null;
+}
+
 function drawMatrixSection(
   doc: PDFKit.PDFDocument,
-  section: ReportMatrixSection,
-  warnings: string[]
+  section: ReportMatrixSection
 ): void {
   drawSectionTitle(doc, section.title);
   if (section.description) {
@@ -410,57 +429,67 @@ function drawMatrixSection(
   const headerHeight = 20;
   const fontSize = 7.5;
 
-  ensureSpace(doc, headerHeight + rowHeight * Math.min(rowHeaders.length + 1, 12));
+  // RTL layout: row label column at the right, data columns extend leftward.
+  const tableRight = PAGE_SIZE[0] - PAGE_MARGIN;
+  const rowLabelX = tableRight - headerColWidth;
 
-  // Column headers row (RTL: last column on the right)
-  const top = doc.y;
-  doc.font("Bold").fontSize(fontSize).fillColor("#0f172a");
-  // Row label placeholder (top-left corner)
-  doc.text(`${section.rowLabel} / ${section.columnLabel}`, PAGE_MARGIN, top + 4, {
-    width: headerColWidth - 4,
-    height: headerHeight - 4,
-    align: "right",
-    lineBreak: false,
-    ellipsis: true,
-  });
-  columnHeaders.forEach((colHeader, ci) => {
-    const x = PAGE_MARGIN + headerColWidth + ci * cellWidth;
-    doc.text(colHeader, x + 2, top + 4, {
-      width: cellWidth - 4,
+  function drawColumnHeaders(): void {
+    const top = doc.y;
+    doc.font("Bold").fontSize(fontSize).fillColor("#0f172a");
+    // Row/column label in the top-right corner cell
+    doc.text(`${section.rowLabel} / ${section.columnLabel}`, rowLabelX + 2, top + 4, {
+      width: headerColWidth - 4,
       height: headerHeight - 4,
-      align: "center",
+      align: "right",
       lineBreak: false,
       ellipsis: true,
     });
-  });
-  doc.y = top + headerHeight;
-  doc.moveTo(PAGE_MARGIN, doc.y)
-    .lineTo(PAGE_SIZE[0] - PAGE_MARGIN, doc.y)
-    .strokeColor("#94a3b8")
-    .stroke();
-  doc.strokeColor("#000000");
+    // Column headers extend leftward from rowLabelX
+    columnHeaders.forEach((colHeader, ci) => {
+      const x = rowLabelX - (ci + 1) * cellWidth;
+      doc.text(colHeader, x + 2, top + 4, {
+        width: cellWidth - 4,
+        height: headerHeight - 4,
+        align: "center",
+        lineBreak: false,
+        ellipsis: true,
+      });
+    });
+    doc.y = top + headerHeight;
+    doc.moveTo(PAGE_MARGIN, doc.y)
+      .lineTo(tableRight, doc.y)
+      .strokeColor("#94a3b8")
+      .stroke();
+    doc.strokeColor("#000000");
+  }
+
+  ensureSpace(doc, headerHeight + rowHeight * Math.min(rowHeaders.length + 1, 12));
+  drawColumnHeaders();
 
   rowHeaders.forEach((rowHeader, ri) => {
     if (doc.y + rowHeight > doc.page.height - doc.page.margins.bottom) {
       doc.addPage();
+      drawColumnHeaders();
     }
     const rowTop = doc.y;
     if (ri % 2 === 1) {
       doc.rect(PAGE_MARGIN, rowTop, CONTENT_WIDTH, rowHeight).fill("#f8fafc");
       doc.fillColor("#000000");
     }
+    // Row label at the right
     doc.font("Bold").fontSize(fontSize).fillColor("#0f172a");
-    doc.text(rowHeader, PAGE_MARGIN, rowTop + 3, {
+    doc.text(rowHeader, rowLabelX + 2, rowTop + 3, {
       width: headerColWidth - 4,
       height: rowHeight - 3,
       align: "right",
       lineBreak: false,
       ellipsis: true,
     });
+    // Data cells extend leftward
     doc.font("Body").fontSize(fontSize).fillColor("#1f2937");
     const row = cells[ri] ?? [];
     row.forEach((cellValue, ci) => {
-      const x = PAGE_MARGIN + headerColWidth + ci * cellWidth;
+      const x = rowLabelX - (ci + 1) * cellWidth;
       doc.text(cellValue > 0 ? String(cellValue) : "-", x + 2, rowTop + 3, {
         width: cellWidth - 4,
         height: rowHeight - 3,
@@ -471,17 +500,13 @@ function drawMatrixSection(
     doc.y = rowTop + rowHeight;
   });
 
-  if (section.truncated) {
+  const truncMsg = buildMatrixTruncationMessage(section);
+  if (truncMsg) {
     doc.moveDown(0.2);
     doc.font("Body").fontSize(8).fillColor("#b45309");
-    doc.text(
-      `تم عرض ${rowHeaders.length} من أصل ${section.grandTotal} صفاً (أعلى ${section.maxRows}).`,
-      { width: CONTENT_WIDTH, align: "right" }
-    );
+    doc.text(truncMsg, { width: CONTENT_WIDTH, align: "right" });
     doc.fillColor("#000000");
   }
-
-  void warnings;
 }
 
 async function drawChartSection(

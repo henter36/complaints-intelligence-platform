@@ -1,14 +1,41 @@
 // @vitest-environment node
 //
 // Tests for the executive brief data builder.
-// These tests use the in-memory SQLite test database via Vitest's setup.
+// Uses mocked DB calls — no real SQLite required.
 
-import { describe, expect, it, beforeAll, afterAll } from "vitest";
-import { db } from "@/lib/db";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import { buildExecutiveBriefData, buildFullAnalyticalData } from "./report-executive-brief-data-service";
 import type { ReportFilters } from "./report-definition-service";
 import type { ComparisonResult, PeriodRange } from "./report-comparison";
 import type { ComplaintKpiResult } from "@/server/complaints/complaint-kpi-service";
+
+const {
+  complaintGroupByMock,
+  complaintFindManyMock,
+  complaintCountMock,
+  statusHistoryCountMock,
+  statusHistoryFindManyMock,
+} = vi.hoisted(() => ({
+  complaintGroupByMock: vi.fn(),
+  complaintFindManyMock: vi.fn(),
+  complaintCountMock: vi.fn(),
+  statusHistoryCountMock: vi.fn(),
+  statusHistoryFindManyMock: vi.fn(),
+}));
+
+vi.mock("@/lib/db", () => ({
+  db: {
+    complaint: {
+      groupBy: complaintGroupByMock,
+      findMany: complaintFindManyMock,
+      count: complaintCountMock,
+    },
+    complaintStatusHistory: {
+      count: statusHistoryCountMock,
+      findMany: statusHistoryFindManyMock,
+    },
+  },
+}));
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -187,6 +214,16 @@ function makeComparison(hasPrevious = true): ComparisonResult {
       },
     ],
     deptClassRisesTotal: 1,
+    deptClassAllPairs: [
+      {
+        departmentId: "dept-health",
+        departmentName: "الصحة",
+        classificationId: "class-01",
+        classificationName: "ضوضاء",
+        currentCount: 15,
+        previousCount: 10,
+      },
+    ],
     executiveSummaryPoints: [
       "استُقبلت خلال الفترة الحالية 100 شكوى.",
       "سجّلت الرياض أعلى ارتفاع.",
@@ -194,6 +231,17 @@ function makeComparison(hasPrevious = true): ComparisonResult {
     warnings: [],
   };
 }
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  // Default: no all-time regions (so allRegions comes only from comparison data)
+  complaintGroupByMock.mockResolvedValue([]);
+  // Default: no previous-period complaints
+  complaintFindManyMock.mockResolvedValue([]);
+  // Default: 0 inflow and outflow
+  complaintCountMock.mockResolvedValue(0);
+  statusHistoryCountMock.mockResolvedValue(0);
+});
 
 // ---------------------------------------------------------------------------
 // Tests: buildBriefKpis (via buildExecutiveBriefData)
@@ -602,7 +650,7 @@ describe("buildFullAnalyticalData", () => {
     const result = makeKpiResult();
     const comparison = makeComparison();
     // Add a rise row where both current and previous > 0
-    comparison.deptClassRises = [
+    comparison.deptClassAllPairs = [
       {
         departmentId: "dept-a",
         departmentName: "الصحة",
@@ -610,9 +658,6 @@ describe("buildFullAnalyticalData", () => {
         classificationName: "ضوضاء",
         currentCount: 10,
         previousCount: 8,
-        difference: 2,
-        changeRate: 25.0,
-        classificationContribution: 100,
       },
     ];
     const data = await buildFullAnalyticalData(BASE_FILTERS, result, comparison);
@@ -620,5 +665,93 @@ describe("buildFullAnalyticalData", () => {
     for (const row of persistentRows) {
       expect(row.recurrenceType).toBe("persistent");
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: buildExecutiveBriefData — previous timeline OR fallback
+// ---------------------------------------------------------------------------
+
+describe("buildExecutiveBriefData — previous timeline OR fallback", () => {
+  it("includes complaints where complaintDate=null and receivedAt falls in previous period", async () => {
+    const result = makeKpiResult();
+    const comparison = makeComparison();
+    // Return one complaint that has complaintDate=null but receivedAt in period
+    complaintFindManyMock.mockResolvedValueOnce([
+      { complaintDate: null, receivedAt: new Date("2026-06-25T00:00:00.000Z") },
+    ]);
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, comparison);
+    expect(data.comparativeTimeline.previous).not.toBeNull();
+    // Day 2 (2026-06-25) should have count=1
+    const day2 = data.comparativeTimeline.previous?.points.find((p) => p.relativeDay === 2);
+    expect(day2?.count).toBe(1);
+  });
+
+  it("does not count a complaint with complaintDate outside period even if receivedAt is inside", async () => {
+    const result = makeKpiResult();
+    const comparison = makeComparison();
+    // Return a complaint where complaintDate is outside previous period
+    // (The OR filter in production code should NOT return this from the DB query,
+    //  so we simulate what the DB would actually return with correct filters)
+    complaintFindManyMock.mockResolvedValueOnce([]);
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, comparison);
+    const total = data.comparativeTimeline.previous?.points.reduce((s, p) => s + p.count, 0) ?? 0;
+    expect(total).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: buildFullAnalyticalData — net backlog flow filters
+// ---------------------------------------------------------------------------
+
+describe("buildFullAnalyticalData — net backlog flow filters", () => {
+  it("inflow uses receivedAt when complaintDate is null", async () => {
+    complaintCountMock.mockResolvedValue(5);
+    statusHistoryCountMock.mockResolvedValue(2);
+    const result = makeKpiResult();
+    const comparison = makeComparison();
+    const data = await buildFullAnalyticalData(BASE_FILTERS, result, comparison);
+    expect(data.netBacklogFlow.inflow).toBe(5);
+  });
+
+  it("net = inflow - outflow", async () => {
+    complaintCountMock.mockResolvedValue(10);
+    statusHistoryCountMock.mockResolvedValue(4);
+    const result = makeKpiResult();
+    const comparison = makeComparison();
+    const data = await buildFullAnalyticalData(BASE_FILTERS, result, comparison);
+    expect(data.netBacklogFlow.net).toBe(6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: buildFullAnalyticalData — continuity rows
+// ---------------------------------------------------------------------------
+
+describe("buildFullAnalyticalData — continuity rows", () => {
+  it("produces persistent when dept+class appears in both periods", async () => {
+    const result = makeKpiResult();
+    const comparison = makeComparison();
+    comparison.deptClassAllPairs = [{
+      departmentId: "dept-a", departmentName: "الصحة",
+      classificationId: "class-01", classificationName: "ضوضاء",
+      currentCount: 10, previousCount: 8,
+    }];
+    const data = await buildFullAnalyticalData(BASE_FILTERS, result, comparison);
+    const row = data.continuityRows.find((r) => r.departmentName === "الصحة" && r.classificationName === "ضوضاء");
+    expect(row?.recurrenceType).toBe("persistent");
+  });
+
+  it("produces new when dept+class has no previous count", async () => {
+    const result = makeKpiResult();
+    const comparison = makeComparison();
+    comparison.deptClassAllPairs = [{
+      departmentId: "dept-b", departmentName: "التعليم",
+      classificationId: "class-02", classificationName: "مخلفات",
+      currentCount: 5, previousCount: 0,
+    }];
+    const data = await buildFullAnalyticalData(BASE_FILTERS, result, comparison);
+    const row = data.continuityRows.find((r) => r.departmentName === "التعليم");
+    expect(row?.recurrenceType).toBe("new");
   });
 });

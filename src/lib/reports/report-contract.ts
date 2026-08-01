@@ -181,7 +181,11 @@ export type ReportMatrixSection = {
   rowTotals: number[];
   columnTotals: number[];
   grandTotal: number;
-  truncated: boolean;
+  totalRows: number;        // total rows before truncation
+  totalColumns: number;     // total columns before truncation
+  truncatedRows: boolean;   // rows were truncated
+  truncatedColumns: boolean; // columns were truncated
+  truncated: boolean;       // = truncatedRows || truncatedColumns (back-compat)
   maxRows: number;
   maxColumns: number;
 };

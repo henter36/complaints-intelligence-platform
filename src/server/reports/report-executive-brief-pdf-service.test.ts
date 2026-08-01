@@ -110,6 +110,7 @@ function makeReportData(mode: "DIGITAL_EXECUTIVE_BRIEF" | "PRINT_EXECUTIVE_BRIEF
       ],
       deptClassRises: [],
       deptClassRisesTotal: 0,
+      deptClassAllPairs: [],
       executiveSummaryPoints: ["استُقبلت خلال الفترة الحالية 100 شكوى."],
       warnings: [],
     },

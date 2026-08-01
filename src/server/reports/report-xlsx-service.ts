@@ -5,7 +5,9 @@ import type {
   ReportTable,
   ExecutiveBriefData,
 } from "./report-data-service";
+import { isFullAnalyticalData } from "./report-data-service";
 import type { ComparisonResult } from "./report-comparison";
+import type { NetBacklogFlow, PerfVolumeRow, ContinuityRow } from "@/lib/reports/report-contract";
 import { formatRiyadhDateTime } from "./report-time";
 
 const FORMULA_INJECTION_PATTERN = /^[=+\-@]/;
@@ -125,8 +127,8 @@ function buildKpiSheet(workbook: ExcelJS.Workbook, data: ReportData): void {
     const row = sheet.addRow({
       label: sanitizeText(KPI_LABELS[key] ?? key),
       current: kpiValue.currentValue,
-      previous: kpiValue.previousValue ?? "-",
-      change: kpiValue.percentageChange ?? "-",
+      previous: kpiValue.previousValue ?? null,
+      change: kpiValue.percentageChange ?? null,
     });
     row.getCell("change").numFmt = '0.0"%"';
   }
@@ -260,7 +262,7 @@ function buildRegionChangesSheet(workbook: ExcelJS.Workbook, comparison: Compari
       current: row.currentCount,
       previous: row.previousCount,
       difference: row.difference,
-      changeRate: row.changeRate ?? "-",
+      changeRate: row.changeRate ?? null,
       direction: sanitizeText(row.direction),
     });
     added.getCell("changeRate").numFmt = '0.0"%"';
@@ -288,7 +290,7 @@ function buildDeptClassRisesSheet(workbook: ExcelJS.Workbook, comparison: Compar
       current: row.currentCount,
       previous: row.previousCount,
       difference: row.difference,
-      changeRate: row.changeRate ?? "-",
+      changeRate: row.changeRate ?? null,
       contribution: row.classificationContribution,
     });
     added.getCell("changeRate").numFmt = '0.0"%"';
@@ -410,13 +412,22 @@ function buildComparativeTimelineSheet(workbook: ExcelJS.Workbook, briefData: Ex
   sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 3 } };
 
   const { current, previous } = briefData.comparativeTimeline;
-  const prevMap = new Map(previous?.points.map((p) => [p.relativeDay, p.count]) ?? []);
+  const currentMap = new Map(current.points.map((p) => [p.relativeDay, p.count]));
+  const previousMap = previous
+    ? new Map(previous.points.map((p) => [p.relativeDay, p.count]))
+    : null;
 
-  for (const point of current.points) {
+  const allDays = new Set([
+    ...current.points.map((p) => p.relativeDay),
+    ...(previous?.points.map((p) => p.relativeDay) ?? []),
+  ]);
+  const sortedDays = Array.from(allDays).sort((a, b) => a - b);
+
+  for (const day of sortedDays) {
     sheet.addRow({
-      day: point.relativeDay,
-      current: point.count,
-      previous: prevMap.get(point.relativeDay) ?? 0,
+      day,
+      current: currentMap.get(day) ?? null,
+      previous: previousMap ? (previousMap.get(day) ?? null) : null,
     });
   }
 }
@@ -450,6 +461,74 @@ function buildConcentrationSheet(workbook: ExcelJS.Workbook, briefData: Executiv
     row.getCell("top1").numFmt = '0.0"%"';
     row.getCell("top3").numFmt = '0.0"%"';
     row.getCell("top5").numFmt = '0.0"%"';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// FULL_ANALYTICAL-only XLSX sheets
+// ---------------------------------------------------------------------------
+
+function buildNetBacklogSheet(workbook: ExcelJS.Workbook, flow: NetBacklogFlow, usedNames: Set<string>): void {
+  const sheet = workbook.addWorksheet(sanitizeSheetName("صافي التدفق", usedNames));
+  applyRtlView(sheet);
+  sheet.columns = [
+    { header: "البيان", key: "label", width: 28 },
+    { header: "القيمة", key: "value", width: 16 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+  sheet.addRow({ label: "الوارد (inflow)", value: flow.inflow });
+  sheet.addRow({ label: "المغلق (outflow)", value: flow.outflow });
+  sheet.addRow({ label: "الصافي", value: flow.net });
+  sheet.addRow({ label: "أيام الفترة", value: flow.periodDays });
+}
+
+function buildPerfVolumeSheet(workbook: ExcelJS.Workbook, rows: PerfVolumeRow[], usedNames: Set<string>): void {
+  const sheet = workbook.addWorksheet(sanitizeSheetName("الأداء والحجم", usedNames));
+  applyRtlView(sheet);
+  sheet.columns = [
+    { header: "الجهة", key: "entity", width: 28 },
+    { header: "إجمالي الشكاوى", key: "total", width: 16 },
+    { header: "نسبة الالتزام%", key: "compliance", width: 16 },
+    { header: "متوسط الإغلاق (يوم)", key: "avgDays", width: 20 },
+    { header: "المتأخرة", key: "late", width: 14 },
+    { header: "الحصة%", key: "share", width: 12 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+  sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 6 } };
+  for (const row of rows) {
+    const added = sheet.addRow({
+      entity: sanitizeText(row.entityName),
+      total: row.totalComplaints,
+      compliance: row.complianceRate ?? null,
+      avgDays: row.averageResolutionDays ?? null,
+      late: row.currentlyLate,
+      share: row.share,
+    });
+    added.getCell("compliance").numFmt = '0.0"%"';
+    added.getCell("share").numFmt = '0.0"%"';
+  }
+}
+
+function buildContinuitySheet(workbook: ExcelJS.Workbook, rows: ContinuityRow[], usedNames: Set<string>): void {
+  const sheet = workbook.addWorksheet(sanitizeSheetName("الاستمرارية", usedNames));
+  applyRtlView(sheet);
+  sheet.columns = [
+    { header: "الإدارة", key: "dept", width: 28 },
+    { header: "التصنيف", key: "class", width: 28 },
+    { header: "الحالي", key: "current", width: 12 },
+    { header: "السابق", key: "previous", width: 12 },
+    { header: "نوع التكرار", key: "type", width: 16 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+  sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 5 } };
+  for (const row of rows) {
+    sheet.addRow({
+      dept: sanitizeText(row.departmentName),
+      class: sanitizeText(row.classificationName),
+      current: row.currentCount,
+      previous: row.previousCount,
+      type: sanitizeText(row.recurrenceType),
+    });
   }
 }
 
@@ -514,6 +593,26 @@ export async function renderReportXlsx(data: ReportData): Promise<XlsxRenderResu
         builder(workbook, data.briefData, usedNames);
       } catch {
         warnings.push(`تعذر إنشاء ورقة البيانات الإضافية (${key}).`);
+      }
+    }
+
+    // Additional sheets for FULL_ANALYTICAL mode only.
+    if (isFullAnalyticalData(data.briefData)) {
+      const fullData = data.briefData;
+      try {
+        buildNetBacklogSheet(workbook, fullData.netBacklogFlow, usedNames);
+      } catch {
+        warnings.push('تعذر إنشاء ورقة "صافي التدفق".');
+      }
+      try {
+        buildPerfVolumeSheet(workbook, fullData.perfVolumeRows, usedNames);
+      } catch {
+        warnings.push('تعذر إنشاء ورقة "الأداء والحجم".');
+      }
+      try {
+        buildContinuitySheet(workbook, fullData.continuityRows, usedNames);
+      } catch {
+        warnings.push('تعذر إنشاء ورقة "الاستمرارية".');
       }
     }
   }
