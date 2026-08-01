@@ -77,6 +77,11 @@ export type ComparisonWarning =
   | { code: "MISSING_DEPARTMENT"; count: number; message: string }
   | { code: "MISSING_CLASSIFICATION"; count: number; message: string };
 
+/**
+ * All dept+class pairs that appeared in either the current or the previous
+ * period. Used for continuity analysis (persistent / new / resolved) so that
+ * resolved pairs (present in previous only) are not lost in the "rises" list.
+ */
 export type DeptClassPeriodCount = {
   departmentId: string;
   departmentName: string;
@@ -93,6 +98,7 @@ export type ComparisonResult = {
   regionChanges: RegionChangeRow[];
   deptClassRises: DeptClassRiseRow[];
   deptClassRisesTotal: number;
+  /** All dept×class pairs with counts from both periods (used for continuity). */
   deptClassAllPairs: DeptClassPeriodCount[];
   executiveSummaryPoints: string[];
   warnings: ComparisonWarning[];

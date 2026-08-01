@@ -21,11 +21,11 @@ export type ReportMode =
   | "FULL_ANALYTICAL"          // Unlimited-page A4 portrait deep-dive
   | "PRINT_EXECUTIVE_BRIEF";   // 3-page A4 landscape print copy
 
-export const REPORT_MODES: readonly ReportMode[] = [
+export const REPORT_MODES = [
   "DIGITAL_EXECUTIVE_BRIEF",
   "FULL_ANALYTICAL",
   "PRINT_EXECUTIVE_BRIEF",
-] as const;
+] as const satisfies readonly ReportMode[];
 
 export function isReportMode(value: unknown): value is ReportMode {
   return typeof value === "string" && (REPORT_MODES as readonly string[]).includes(value);
@@ -87,7 +87,6 @@ export type RegionReferenceRow = {
 export type ClassificationBriefRow = {
   classificationId: string;
   classificationName: string;
-  categoryName: string;
   currentCount: number;
   previousCount: number;
   difference: number;
@@ -200,5 +199,5 @@ export type ContinuityRow = {
   currentCount: number;
   previousCount: number;
   appearsInBothPeriods: boolean;
-  recurrenceType: "persistent" | "new" | "resolved" | "absent";
+  recurrenceType: "persistent" | "new" | "resolved";
 };

@@ -13,6 +13,18 @@ import { renderExecutiveBriefPdf } from "./report-executive-brief-pdf-service";
 // Helpers
 // ---------------------------------------------------------------------------
 
+function utf16BeWithBom(value: string): Buffer {
+  return Buffer.from(`\uFEFF${value}`, "utf16le").swap16();
+}
+
+function firstMediaBox(buffer: Buffer): [number, number] {
+  const match = /\/MediaBox\s*\[\s*0\s+0\s+([\d.]+)\s+([\d.]+)\s*\]/.exec(
+    buffer.toString("binary")
+  );
+  expect(match).not.toBeNull();
+  return [Number(match![1]), Number(match![2])];
+}
+
 function makeBriefData(overrides: Partial<ExecutiveBriefData> = {}): ExecutiveBriefData {
   return {
     briefKpis: [
@@ -31,8 +43,8 @@ function makeBriefData(overrides: Partial<ExecutiveBriefData> = {}): ExecutiveBr
       { regionName: "مكة", currentCount: 20, previousCount: 10, difference: 10, changeRate: 100.0, complianceRate: 91.7, averageResolutionDays: 4.1, currentlyLate: 2, direction: "↑ ارتفاع" },
     ],
     topClassifications: [
-      { classificationId: "class-01", classificationName: "ضوضاء", categoryName: "بيئة", currentCount: 30, previousCount: 25, difference: 5, changeRate: 20.0, shareOfTotal: 30.0 },
-      { classificationId: "class-02", classificationName: "بنية تحتية", categoryName: "خدمات", currentCount: 25, previousCount: 20, difference: 5, changeRate: 25.0, shareOfTotal: 25.0 },
+      { classificationId: "class-01", classificationName: "ضوضاء", currentCount: 30, previousCount: 25, difference: 5, changeRate: 20.0, shareOfTotal: 30.0 },
+      { classificationId: "class-02", classificationName: "بنية تحتية", currentCount: 25, previousCount: 20, difference: 5, changeRate: 25.0, shareOfTotal: 25.0 },
     ],
     comparativeTimeline: {
       current: {
@@ -138,9 +150,7 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
   it("returns no warnings for a valid report", async () => {
     const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
     const result = await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
-    // Only soft warnings (chart rendering issues) are expected to be possible.
-    // Fatal errors would throw. We just verify warnings is an array.
-    expect(Array.isArray(result.warnings)).toBe(true);
+    expect(result.warnings).toEqual([]);
   });
 
   it("PDF contains at least 3 pages (one per section)", async () => {
@@ -155,9 +165,7 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
   it("PDF title matches data.title", async () => {
     const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
     const result = await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
-    // Title is encoded in the Info dictionary (UTF-16BE or UTF-8 in PDFKit).
-    // Check the raw buffer contains some representation of the title bytes.
-    expect(result.buffer.length).toBeGreaterThan(1000);
+    expect(result.buffer.includes(utf16BeWithBom(data.title))).toBe(true);
   });
 
   it("renders without error when briefData is empty allRegions", async () => {
@@ -245,15 +253,19 @@ describe("renderExecutiveBriefPdf — PRINT_EXECUTIVE_BRIEF", () => {
     expect(result.buffer.length).toBeGreaterThan(5_000);
   });
 
-  it("print and digital buffers differ (different page dimensions)", async () => {
+  it("print and digital PDFs use their intended page dimensions", async () => {
     const digital = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
     const print = makeReportData("PRINT_EXECUTIVE_BRIEF");
     const [digitalResult, printResult] = await Promise.all([
       renderExecutiveBriefPdf(digital, "DIGITAL_EXECUTIVE_BRIEF"),
       renderExecutiveBriefPdf(print, "PRINT_EXECUTIVE_BRIEF"),
     ]);
-    // Different page sizes → different raw buffer sizes
-    expect(digitalResult.buffer.length).not.toBe(printResult.buffer.length);
+    const [digitalWidth, digitalHeight] = firstMediaBox(digitalResult.buffer);
+    const [printWidth, printHeight] = firstMediaBox(printResult.buffer);
+    expect(digitalWidth).toBeCloseTo(1440, 2);
+    expect(digitalHeight).toBeCloseTo(810, 2);
+    expect(printWidth).toBeCloseTo(841.89, 2);
+    expect(printHeight).toBeCloseTo(595.28, 2);
   });
 
   it("renders without error when all sections are empty", async () => {

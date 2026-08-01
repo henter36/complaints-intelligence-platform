@@ -2,7 +2,7 @@
 //
 // Tests for the executive brief XLSX sheets.
 
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import ExcelJS from "exceljs";
 import type { ReportData, ExecutiveBriefData, FullAnalyticalData } from "./report-data-service";
 import type { ReportType } from "@prisma/client";
@@ -27,7 +27,7 @@ function makeBriefData(): ExecutiveBriefData {
       { regionName: "جدة", currentCount: 30, previousCount: 35, difference: -5, changeRate: -14.3, complianceRate: 95.0, averageResolutionDays: 3.5, currentlyLate: 2, direction: "↓ انخفاض" },
     ],
     topClassifications: [
-      { classificationId: "class-01", classificationName: "ضوضاء", categoryName: "بيئة", currentCount: 30, previousCount: 25, difference: 5, changeRate: 20.0, shareOfTotal: 30.0 },
+      { classificationId: "class-01", classificationName: "ضوضاء", currentCount: 30, previousCount: 25, difference: 5, changeRate: 20.0, shareOfTotal: 30.0 },
     ],
     comparativeTimeline: {
       current: {
@@ -104,49 +104,33 @@ function sheetNames(workbook: ExcelJS.Workbook): string[] {
 // ---------------------------------------------------------------------------
 
 describe("renderReportXlsx — executive brief mode", () => {
-  it("produces a valid XLSX buffer", async () => {
-    const report = makeReport();
-    const result = await renderReportXlsx(report);
-    expect(result.buffer).toBeInstanceOf(Buffer);
-    expect(result.buffer.length).toBeGreaterThan(0);
+  let briefBuffer: Buffer;
+  let briefWorkbook: ExcelJS.Workbook;
+
+  beforeAll(async () => {
+    const result = await renderReportXlsx(makeReport());
+    briefBuffer = result.buffer;
+    briefWorkbook = await readBack(result.buffer);
   });
 
-  it.each(BRIEF_SHEETS)("includes %s sheet", async (sheetName) => {
-    const report = makeReport();
-    const result = await renderReportXlsx(report);
-    const wb = await readBack(result.buffer);
-    const names = sheetNames(wb);
+  it("produces a valid XLSX buffer", async () => {
+    expect(briefBuffer).toBeInstanceOf(Buffer);
+    expect(briefBuffer.length).toBeGreaterThan(0);
+  });
+
+  it.each(BRIEF_SHEETS)("includes %s sheet", (sheetName) => {
+    const names = sheetNames(briefWorkbook);
     expect(names.some((n) => n.includes(sheetName))).toBe(true);
   });
 
-  it("المؤشرات التنفيذية has correct number of data rows", async () => {
-    const report = makeReport();
-    const result = await renderReportXlsx(report);
-    const wb = await readBack(result.buffer);
-    const sheet = wb.worksheets.find((ws) => ws.name.includes("المؤشرات التنفيذية"));
+  it.each([
+    ["المؤشرات التنفيذية", 3],
+    ["جميع المناطق", 3],
+    ["الاتجاه الزمني المقارن", 3],
+  ] as const)("%s has %i rows including its header", (sheetName, rowCount) => {
+    const sheet = briefWorkbook.worksheets.find((ws) => ws.name.includes(sheetName));
     expect(sheet).toBeDefined();
-    // 1 header row + 2 KPI cards = 3 rows total
-    expect(sheet!.rowCount).toBe(3);
-  });
-
-  it("جميع المناطق has correct number of data rows", async () => {
-    const report = makeReport();
-    const result = await renderReportXlsx(report);
-    const wb = await readBack(result.buffer);
-    const sheet = wb.worksheets.find((ws) => ws.name.includes("جميع المناطق"));
-    expect(sheet).toBeDefined();
-    // 1 header row + 2 region rows = 3 rows
-    expect(sheet!.rowCount).toBe(3);
-  });
-
-  it("الاتجاه الزمني المقارن has correct number of timeline rows", async () => {
-    const report = makeReport();
-    const result = await renderReportXlsx(report);
-    const wb = await readBack(result.buffer);
-    const sheet = wb.worksheets.find((ws) => ws.name.includes("الاتجاه الزمني المقارن"));
-    expect(sheet).toBeDefined();
-    // 1 header + 2 days = 3 rows
-    expect(sheet!.rowCount).toBe(3);
+    expect(sheet!.rowCount).toBe(rowCount);
   });
 
   it("no brief sheets when briefData is absent", async () => {
@@ -159,10 +143,7 @@ describe("renderReportXlsx — executive brief mode", () => {
   });
 
   it("التركز has correct column headers", async () => {
-    const report = makeReport();
-    const result = await renderReportXlsx(report);
-    const wb = await readBack(result.buffer);
-    const sheet = wb.worksheets.find((ws) => ws.name.includes("التركز"));
+    const sheet = briefWorkbook.worksheets.find((ws) => ws.name.includes("التركز"));
     expect(sheet).toBeDefined();
     const headerRow = sheet!.getRow(1);
     const headers = [1, 2, 3, 4, 5].map((col) => headerRow.getCell(col).value as string);
@@ -174,10 +155,7 @@ describe("renderReportXlsx — executive brief mode", () => {
   });
 
   it("brief KPIs sheet includes assessment column", async () => {
-    const report = makeReport();
-    const result = await renderReportXlsx(report);
-    const wb = await readBack(result.buffer);
-    const sheet = wb.worksheets.find((ws) => ws.name.includes("المؤشرات التنفيذية"));
+    const sheet = briefWorkbook.worksheets.find((ws) => ws.name.includes("المؤشرات التنفيذية"));
     expect(sheet).toBeDefined();
     const headerRow = sheet!.getRow(1);
     const headers = [1, 2, 3, 4, 5, 6].map((col) => headerRow.getCell(col).value as string);
@@ -185,10 +163,7 @@ describe("renderReportXlsx — executive brief mode", () => {
   });
 
   it("all regions sheet has 9 columns", async () => {
-    const report = makeReport();
-    const result = await renderReportXlsx(report);
-    const wb = await readBack(result.buffer);
-    const sheet = wb.worksheets.find((ws) => ws.name.includes("جميع المناطق"));
+    const sheet = briefWorkbook.worksheets.find((ws) => ws.name.includes("جميع المناطق"));
     expect(sheet).toBeDefined();
     const headerRow = sheet!.getRow(1);
     const headers: string[] = [];
@@ -210,42 +185,26 @@ const FULL_ANALYTICAL_SHEETS = [
 ] as const;
 
 describe("renderReportXlsx — FULL_ANALYTICAL mode", () => {
-  it.each(FULL_ANALYTICAL_SHEETS)("includes %s sheet", async (sheetName) => {
-    const report = makeReport(true, "FULL_ANALYTICAL");
-    const result = await renderReportXlsx(report);
-    const wb = await readBack(result.buffer);
-    const names = sheetNames(wb);
+  let fullWorkbook: ExcelJS.Workbook;
+
+  beforeAll(async () => {
+    const result = await renderReportXlsx(makeReport(true, "FULL_ANALYTICAL"));
+    fullWorkbook = await readBack(result.buffer);
+  });
+
+  it.each(FULL_ANALYTICAL_SHEETS)("includes %s sheet", (sheetName) => {
+    const names = sheetNames(fullWorkbook);
     expect(names.some((n) => n.includes(sheetName))).toBe(true);
   });
 
-  it("صافي التدفق has 4 data rows (inflow, outflow, net, periodDays)", async () => {
-    const report = makeReport(true, "FULL_ANALYTICAL");
-    const result = await renderReportXlsx(report);
-    const wb = await readBack(result.buffer);
-    const sheet = wb.worksheets.find((ws) => ws.name.includes("صافي التدفق"));
+  it.each([
+    ["صافي التدفق", 5],
+    ["الأداء والحجم", 3],
+    ["الاستمرارية", 3],
+  ] as const)("%s has %i rows including its header", (sheetName, rowCount) => {
+    const sheet = fullWorkbook.worksheets.find((ws) => ws.name.includes(sheetName));
     expect(sheet).toBeDefined();
-    // 1 header row + 4 data rows
-    expect(sheet!.rowCount).toBe(5);
-  });
-
-  it("الأداء والحجم has correct number of data rows", async () => {
-    const report = makeReport(true, "FULL_ANALYTICAL");
-    const result = await renderReportXlsx(report);
-    const wb = await readBack(result.buffer);
-    const sheet = wb.worksheets.find((ws) => ws.name.includes("الأداء والحجم"));
-    expect(sheet).toBeDefined();
-    // 1 header row + 2 perf rows
-    expect(sheet!.rowCount).toBe(3);
-  });
-
-  it("الاستمرارية has correct number of data rows", async () => {
-    const report = makeReport(true, "FULL_ANALYTICAL");
-    const result = await renderReportXlsx(report);
-    const wb = await readBack(result.buffer);
-    const sheet = wb.worksheets.find((ws) => ws.name.includes("الاستمرارية"));
-    expect(sheet).toBeDefined();
-    // 1 header row + 2 continuity rows
-    expect(sheet!.rowCount).toBe(3);
+    expect(sheet!.rowCount).toBe(rowCount);
   });
 
   it("does NOT include FULL_ANALYTICAL sheets when mode is DIGITAL_EXECUTIVE_BRIEF", async () => {
@@ -256,34 +215,5 @@ describe("renderReportXlsx — FULL_ANALYTICAL mode", () => {
     expect(names.some((n) => n.includes("صافي التدفق"))).toBe(false);
     expect(names.some((n) => n.includes("الأداء والحجم"))).toBe(false);
     expect(names.some((n) => n.includes("الاستمرارية"))).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// reportMode option schema tests
-// ---------------------------------------------------------------------------
-
-describe("reportOptionsSchema — reportMode field", () => {
-  it("accepts valid reportMode values", async () => {
-    const { reportOptionsSchema } = await import("./report-definition-service");
-    for (const mode of ["DIGITAL_EXECUTIVE_BRIEF", "FULL_ANALYTICAL", "PRINT_EXECUTIVE_BRIEF"]) {
-      const result = reportOptionsSchema.safeParse({ reportMode: mode });
-      expect(result.success).toBe(true);
-    }
-  });
-
-  it("rejects an invalid reportMode value", async () => {
-    const { reportOptionsSchema } = await import("./report-definition-service");
-    const result = reportOptionsSchema.safeParse({ reportMode: "INVALID_MODE" });
-    expect(result.success).toBe(false);
-  });
-
-  it("allows reportMode to be absent", async () => {
-    const { reportOptionsSchema } = await import("./report-definition-service");
-    const result = reportOptionsSchema.safeParse({});
-    expect(result.success).toBe(true);
-    if (result.success) {
-      expect(result.data.reportMode).toBeUndefined();
-    }
   });
 });

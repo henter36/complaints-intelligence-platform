@@ -384,10 +384,10 @@ function buildMatrixTruncationMessage(section: ReportMatrixSection): string | nu
   if (!section.truncated && !section.truncatedRows && !section.truncatedColumns) return null;
   const displayedRows = section.rowHeaders.length;
   const displayedCols = section.columnHeaders.length;
-  const totalRows = section.totalRows ?? section.grandTotal;
-  const totalCols = section.totalColumns ?? displayedCols;
-  const rowsTruncated = section.truncatedRows ?? (displayedRows < totalRows);
-  const colsTruncated = section.truncatedColumns ?? (displayedCols < totalCols);
+  const totalRows = section.totalRows;
+  const totalCols = section.totalColumns;
+  const rowsTruncated = section.truncatedRows;
+  const colsTruncated = section.truncatedColumns;
   if (rowsTruncated && colsTruncated) {
     return `تم عرض ${displayedRows} من أصل ${totalRows} صفاً، و${displayedCols} من أصل ${totalCols} عموداً.`;
   }

@@ -578,7 +578,7 @@ export async function renderReportXlsx(data: ReportData): Promise<XlsxRenderResu
     }
   }
 
-  // Extended sheets for brief and analytical modes (7 for brief, 17 for full).
+  // Five shared sheets for brief and analytical modes.
   if (data.briefData) {
     const briefSheetBuilders: Array<[string, (wb: ExcelJS.Workbook, bd: ExecutiveBriefData, used: Set<string>) => void]> = [
       ["brief_kpis", buildBriefKpisSheet],

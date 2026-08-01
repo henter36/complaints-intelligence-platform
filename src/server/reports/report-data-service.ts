@@ -21,6 +21,7 @@ import {
   type RegionChangeRow,
   type RegionTrendData,
 } from "./report-comparison";
+import { isReportMode } from "@/lib/reports/report-contract";
 import type {
   ReportMatrixSection,
   ReportMode,
@@ -157,6 +158,7 @@ export type FullAnalyticalData = ExecutiveBriefData & {
   continuityRows: ContinuityRow[];
 };
 
+/** Returns true when all FULL_ANALYTICAL-only payload fields are present. */
 export function isFullAnalyticalData(
   data: ExecutiveBriefData | FullAnalyticalData
 ): data is FullAnalyticalData {
@@ -176,7 +178,6 @@ export type {
   PerfVolumeRow,
   ContinuityRow,
 };
-
 const PREVIEW_TABLE_ROW_CAP = 100;
 
 function kpi(key: string, label: string, value: number, format: ReportKpiCard["format"] = "number"): ReportKpiCard {
@@ -446,7 +447,6 @@ async function buildExecutiveSummaryCore(
 
   const sections: ReportSection[] = [];
 
-  // 1. Auto-generated executive summary bullet points.
   if (comparison.executiveSummaryPoints.length > 0) {
     sections.push({
       id: "executive_summary_text",
@@ -456,10 +456,8 @@ async function buildExecutiveSummaryCore(
     });
   }
 
-  // 2. Headline KPIs.
   sections.push(executiveKpiSection(result));
 
-  // 3. Optional previous-period comparison KPI cards.
   if (options.includeComparison) {
     sections.push({
       id: "comparison",
@@ -472,7 +470,6 @@ async function buildExecutiveSummaryCore(
     });
   }
 
-  // 4-9. Region trend + change + rises + top groups (always present in executive summary).
   sections.push(
     regionTrendChartSection(comparison.regionTrend),
     {
@@ -511,7 +508,6 @@ async function buildExecutiveSummaryCore(
     }
   );
 
-  // 10. Optional overdue table.
   if (options.includeDetailedRows) {
     const overdueLimit = Math.min(options.maxRows ?? 50, 50);
     const overdueTable = await fetchOverdueTable(filters, overdueLimit, "preview");
@@ -524,8 +520,6 @@ async function buildExecutiveSummaryCore(
   const previousPeriod = comparison.previousPeriod
     ? {
         from: comparison.previousPeriod.from.toISOString().slice(0, 10),
-        // The stored period is half-open; subtract one day to present the
-        // inclusive last day to the reader.
         to: new Date(comparison.previousPeriod.toExclusive.getTime() - DAY_MS).toISOString().slice(0, 10),
       }
     : null;
@@ -568,15 +562,10 @@ async function buildExecutiveSummaryWithMode(
   let previousResult: Awaited<ReturnType<typeof getComplaintKpis>> | undefined;
   if (comparison.previousPeriod) {
     const prevParams = buildComplaintQueryParams(request.filters);
-    prevParams.set(
-      "from",
-      comparison.previousPeriod.from.toISOString().slice(0, 10)
-    );
+    prevParams.set("from", comparison.previousPeriod.from.toISOString().slice(0, 10));
     prevParams.set(
       "to",
-      new Date(comparison.previousPeriod.toExclusive.getTime() - DAY_MS)
-        .toISOString()
-        .slice(0, 10)
+      new Date(comparison.previousPeriod.toExclusive.getTime() - DAY_MS).toISOString().slice(0, 10)
     );
     previousResult = await getComplaintKpis(prevParams, now);
   }
@@ -594,14 +583,10 @@ async function buildExecutiveSummaryWithMode(
       request.filters,
       result,
       comparison,
-      previousResult
+      previousResult,
+      now
     );
-    return {
-      ...base,
-      title,
-      reportMode,
-      briefData: fullData,
-    };
+    return { ...base, title, reportMode, briefData: fullData };
   }
 
   // DIGITAL_EXECUTIVE_BRIEF / PRINT_EXECUTIVE_BRIEF
@@ -609,14 +594,10 @@ async function buildExecutiveSummaryWithMode(
     request.filters,
     result,
     comparison,
-    previousResult
+    previousResult,
+    now
   );
-  return {
-    ...base,
-    title,
-    reportMode,
-    briefData,
-  };
+  return { ...base, title, reportMode, briefData };
 }
 
 async function buildGroupPerformanceReport(
@@ -852,9 +833,8 @@ export async function buildReportData(
 ): Promise<ReportData> {
   switch (request.type) {
     case ReportType.EXECUTIVE_SUMMARY: {
-      const reportMode = request.options.reportMode as ReportMode | undefined;
-      if (reportMode === "DIGITAL_EXECUTIVE_BRIEF" || reportMode === "PRINT_EXECUTIVE_BRIEF" || reportMode === "FULL_ANALYTICAL") {
-        return buildExecutiveSummaryWithMode(request, mode, now, reportMode);
+      if (isReportMode(request.options.reportMode)) {
+        return buildExecutiveSummaryWithMode(request, mode, now, request.options.reportMode);
       }
       return buildExecutiveSummary(request, mode, now);
     }

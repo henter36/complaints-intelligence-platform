@@ -8,13 +8,16 @@
  *
  * Additional queries in this service:
  *  - One `groupBy` to obtain the all-time region reference list (Left Join).
- *  - One `findMany` on ComplaintStatusHistory for net-backlog-flow (FULL_ANALYTICAL only).
+ *  - One `findMany` on Complaint for previous-period timeline.
+ *  - Two count/groupBy calls for net-backlog-flow (FULL_ANALYTICAL only).
  */
 
+import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import type { ComplaintGroupMetrics, ComplaintKpiResult } from "@/server/complaints/complaint-kpi-service";
-import type { ComparisonResult, PeriodRange } from "./report-comparison";
-import type { ReportFilters } from "./report-definition-service";
+import { buildComplaintWhere, parseComplaintQuery } from "@/server/complaints/complaint-query-service";
+import type { DeptClassPeriodCount, ComparisonResult, PeriodRange } from "./report-comparison";
+import { buildComplaintQueryParams, type ReportFilters } from "./report-definition-service";
 import type {
   ExecutiveBriefData,
   FullAnalyticalData,
@@ -34,8 +37,35 @@ import type {
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TOP_CLASSIFICATIONS_LIMIT = 8;
-const MATRIX_MAX_ROWS = 10;
-const MATRIX_MAX_COLS = 8;
+
+// ---------------------------------------------------------------------------
+// Effective-date policy
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds a Prisma `WhereInput` fragment that applies the canonical date policy:
+ * use `complaintDate` when present; fall back to `receivedAt` only when
+ * `complaintDate` is null. A complaint is never counted twice.
+ */
+function buildEffectiveDateWhere(period: PeriodRange): Prisma.ComplaintWhereInput {
+  return {
+    OR: [
+      {
+        complaintDate: {
+          gte: period.from,
+          lt: period.toExclusive,
+        },
+      },
+      {
+        complaintDate: null,
+        receivedAt: {
+          gte: period.from,
+          lt: period.toExclusive,
+        },
+      },
+    ],
+  };
+}
 
 // ---------------------------------------------------------------------------
 // KPI cards with assessment
@@ -56,7 +86,7 @@ type KpiSpec = {
   value: number;
   previousValue: number | null;
   format: ExecutiveBriefKpiCard["format"];
-  higherIsBetter: boolean | null; // null = neutral regardless of direction
+  higherIsBetter: boolean | null;
 };
 
 function assessKpi(spec: KpiSpec): KpiAssessment {
@@ -178,7 +208,6 @@ async function fetchAllTimeRegions(): Promise<string[]> {
   });
   return groups
     .map((g) => g.region ?? UNSPECIFIED_REGION)
-    .filter((name, index, arr) => arr.indexOf(name) === index)
     .sort((a, b) => a.localeCompare(b, "ar"));
 }
 
@@ -195,12 +224,9 @@ function buildAllRegionsTable(
   comparison: ComparisonResult,
   currentDistributions: ComplaintGroupMetrics[]
 ): RegionReferenceRow[] {
-  // Map from regionName → comparison row (has current/previous counts)
   const changeMap = new Map(
     comparison.regionChanges.map((row) => [row.regionName, row])
   );
-
-  // Map from regionName → current-period metrics (for compliance/resolution)
   const metricsMap = new Map(
     currentDistributions.map((g) => [g.name, g])
   );
@@ -249,7 +275,6 @@ function buildTopClassifications(
     return {
       classificationId: group.id ?? group.name,
       classificationName: group.name,
-      categoryName: "",
       currentCount,
       previousCount,
       difference,
@@ -295,7 +320,8 @@ function buildDailyPointsForPeriod(
 
 async function buildComparativeTimeline(
   comparison: ComparisonResult,
-  filters: ReportFilters
+  filters: ReportFilters,
+  now: Date
 ): Promise<ComparativeTimelineData> {
   const { currentPeriod, previousPeriod } = comparison;
   const periodDays = Math.round(
@@ -314,34 +340,22 @@ async function buildComparativeTimeline(
     };
   }
 
-  // Previous period: need per-day counts. Query the DB.
-  const { buildComplaintQueryParams } = await import("./report-definition-service");
-  const { buildComplaintWhere, parseComplaintQuery } = await import("@/server/complaints/complaint-query-service");
-
+  // Previous period: query the DB with the same non-date filters as current.
   const params = buildComplaintQueryParams(filters);
   params.delete("from");
   params.delete("to");
   const query = parseComplaintQuery(params);
-  const where = buildComplaintWhere(query, new Date());
-  where.isDeleted = false;
-  where.OR = [
-    {
-      complaintDate: {
-        gte: previousPeriod.from,
-        lt: previousPeriod.toExclusive,
-      },
-    },
-    {
-      complaintDate: null,
-      receivedAt: {
-        gte: previousPeriod.from,
-        lt: previousPeriod.toExclusive,
-      },
-    },
-  ];
+  const baseWhere = buildComplaintWhere(query, now);
+
+  // Merge effective-date policy for the previous period.
+  const prevWhere: Prisma.ComplaintWhereInput = {
+    ...baseWhere,
+    isDeleted: false,
+    ...buildEffectiveDateWhere(previousPeriod),
+  };
 
   const prevComplaints = await db.complaint.findMany({
-    where,
+    where: prevWhere,
     select: { complaintDate: true, receivedAt: true },
   });
 
@@ -393,37 +407,49 @@ function computeConcentration(
 // Net backlog flow (FULL_ANALYTICAL only)
 // ---------------------------------------------------------------------------
 
+/**
+ * inflow  = complaints whose effective date (complaintDate ?? receivedAt)
+ *           falls in the current period, matching all report filters.
+ * outflow = distinct complaints closed/resolved in the current period,
+ *           scoped to complaints matching all non-date report filters.
+ *
+ * Outflow policy: a complaint that was closed multiple times within the period
+ * is counted once (groupBy deduplication).
+ */
 async function buildNetBacklogFlow(
+  filters: ReportFilters,
+  now: Date,
   currentPeriod: PeriodRange
 ): Promise<NetBacklogFlow> {
   const periodDays = Math.round(
     (currentPeriod.toExclusive.getTime() - currentPeriod.from.getTime()) / DAY_MS
   );
 
-  // Inflow: complaints with complaintDate (or receivedAt fallback) in the current period.
-  const inflow = await db.complaint.count({
-    where: {
-      isDeleted: false,
-      OR: [
-        {
-          complaintDate: {
-            gte: currentPeriod.from,
-            lt: currentPeriod.toExclusive,
-          },
-        },
-        {
-          complaintDate: null,
-          receivedAt: {
-            gte: currentPeriod.from,
-            lt: currentPeriod.toExclusive,
-          },
-        },
-      ],
-    },
-  });
+  // Build non-date complaint filters.
+  const params = buildComplaintQueryParams(filters);
+  params.delete("from");
+  params.delete("to");
+  const query = parseComplaintQuery(params);
+  const baseWhere = buildComplaintWhere(query, now);
 
-  // Outflow: status transitions to CLOSED or RESOLVED within the period.
-  const outflow = await db.complaintStatusHistory.count({
+  // Inflow: apply effective-date OR policy to current period.
+  const inflowWhere: Prisma.ComplaintWhereInput = {
+    ...baseWhere,
+    isDeleted: false,
+    ...buildEffectiveDateWhere(currentPeriod),
+  };
+  const inflow = await db.complaint.count({ where: inflowWhere });
+
+  // Non-date filters for outflow complaint scope (no date on complaint itself;
+  // the date axis here is changedAt on the status transition).
+  const nonDateComplaintFilters: Prisma.ComplaintWhereInput = {
+    ...baseWhere,
+    isDeleted: false,
+  };
+
+  // Outflow: deduplicated by complaint via groupBy.
+  const outflowGroups = await db.complaintStatusHistory.groupBy({
+    by: ["complaintId"],
     where: {
       toStatus: { in: ["CLOSED", "RESOLVED"] },
       changedAt: {
@@ -431,10 +457,11 @@ async function buildNetBacklogFlow(
         lt: currentPeriod.toExclusive,
       },
       complaint: {
-        is: { isDeleted: false },
+        is: nonDateComplaintFilters,
       },
     },
   });
+  const outflow = outflowGroups.length;
 
   return { inflow, outflow, net: inflow - outflow, periodDays };
 }
@@ -447,7 +474,7 @@ function buildPerfVolumeRows(
   distributions: ComplaintGroupMetrics[],
   totalComplaints: number
 ): PerfVolumeRow[] {
-  return distributions.map((group) => ({
+  const rows = distributions.map((group) => ({
     entityName: group.name,
     totalComplaints: group.total,
     complianceRate: group.complianceRate,
@@ -456,29 +483,34 @@ function buildPerfVolumeRows(
     currentlyLate: group.currentlyLate,
     share: totalComplaints > 0 ? roundRate((group.total / totalComplaints) * 100) : 0,
   }));
+  return rows.sort((a, b) => b.totalComplaints - a.totalComplaints);
 }
 
 // ---------------------------------------------------------------------------
 // Continuity analysis (re-occurrence of dept+classification pairs)
 // ---------------------------------------------------------------------------
 
-function buildContinuityRows(comparison: ComparisonResult): ContinuityRow[] {
+function buildContinuityRows(allPairs: DeptClassPeriodCount[]): ContinuityRow[] {
   const rows: ContinuityRow[] = [];
-  for (const pair of comparison.deptClassAllPairs) {
-    const { currentCount, previousCount } = pair;
-    if (currentCount === 0 && previousCount === 0) continue; // absent — skip
+
+  for (const pair of allPairs) {
+    if (pair.currentCount === 0 && pair.previousCount === 0) continue;
 
     let recurrenceType: ContinuityRow["recurrenceType"];
-    if (currentCount > 0 && previousCount > 0) recurrenceType = "persistent";
-    else if (currentCount > 0 && previousCount === 0) recurrenceType = "new";
-    else recurrenceType = "resolved"; // previousCount > 0 && currentCount === 0
+    if (pair.currentCount > 0 && pair.previousCount > 0) {
+      recurrenceType = "persistent";
+    } else if (pair.currentCount > 0) {
+      recurrenceType = "new";
+    } else {
+      recurrenceType = "resolved";
+    }
 
     rows.push({
       departmentName: pair.departmentName,
       classificationName: pair.classificationName,
-      currentCount,
-      previousCount,
-      appearsInBothPeriods: currentCount > 0 && previousCount > 0,
+      currentCount: pair.currentCount,
+      previousCount: pair.previousCount,
+      appearsInBothPeriods: recurrenceType === "persistent",
       recurrenceType,
     });
   }
@@ -498,13 +530,14 @@ export async function buildExecutiveBriefData(
   filters: ReportFilters,
   result: ComplaintKpiResult,
   comparison: ComparisonResult,
-  previousResult?: ComplaintKpiResult
+  previousResult?: ComplaintKpiResult,
+  now: Date = new Date()
 ): Promise<ExecutiveBriefData> {
   const hasPrevious = comparison.previousPeriod !== null;
 
   const [allTimeRegions, comparativeTimeline] = await Promise.all([
     fetchAllTimeRegions(),
-    buildComparativeTimeline(comparison, filters),
+    buildComparativeTimeline(comparison, filters, now),
   ]);
 
   const briefKpis = buildBriefKpis(result, hasPrevious);
@@ -540,11 +573,12 @@ export async function buildFullAnalyticalData(
   filters: ReportFilters,
   result: ComplaintKpiResult,
   comparison: ComparisonResult,
-  previousResult?: ComplaintKpiResult
+  previousResult?: ComplaintKpiResult,
+  now: Date = new Date()
 ): Promise<FullAnalyticalData> {
   const [briefData, netBacklogFlow] = await Promise.all([
-    buildExecutiveBriefData(filters, result, comparison, previousResult),
-    buildNetBacklogFlow(comparison.currentPeriod),
+    buildExecutiveBriefData(filters, result, comparison, previousResult, now),
+    buildNetBacklogFlow(filters, now, comparison.currentPeriod),
   ]);
 
   const perfVolumeRows = buildPerfVolumeRows(
@@ -552,7 +586,7 @@ export async function buildFullAnalyticalData(
     result.volume.total
   );
 
-  const continuityRows = buildContinuityRows(comparison);
+  const continuityRows = buildContinuityRows(comparison.deptClassAllPairs);
 
   return {
     ...briefData,

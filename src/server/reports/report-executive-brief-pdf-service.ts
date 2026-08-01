@@ -120,8 +120,9 @@ export async function renderExecutiveBriefPdf(
 
   const chunks: Buffer[] = [];
   doc.on("data", (chunk: Buffer) => chunks.push(chunk));
-  const done = new Promise<Buffer>((resolve) => {
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
+  const done = new Promise<Buffer>((resolve, reject) => {
+    doc.once("error", reject);
+    doc.once("end", () => resolve(Buffer.concat(chunks)));
   });
 
   const briefData = data.briefData;
@@ -256,8 +257,11 @@ async function renderPage1(
     for (const point of points) {
       if (!point?.trim()) continue;
       doc.font("Body").fontSize(9.5).fillColor(COLOR_MID);
-      doc.text(`• ${point}`, margin + 8, y, { width: contentW - 8, align: "right" });
-      y += 16;
+      const text = `• ${point}`;
+      const textOptions = { width: contentW - 8, align: "right" as const };
+      const pointHeight = doc.heightOfString(text, textOptions);
+      doc.text(text, margin + 8, y, textOptions);
+      y += pointHeight + 4;
     }
   }
 
@@ -266,13 +270,14 @@ async function renderPage1(
   // ── Comparative bar chart (current vs previous per region) ───────────────
   const comparisonSection = data.comparisonData;
   if (comparisonSection && y < pageSize[1] - margin - 40) {
-    const availableH = pageSize[1] - margin - 24 - y - 20;
-    const chartW = Math.round(contentW);
-    const chartH = Math.max(120, Math.round(availableH));
-
     doc.font("Bold").fontSize(11).fillColor(COLOR_DARK);
     doc.text("مقارنة الشكاوى بالمناطق", margin, y, { width: contentW, align: "right" });
     y += 16;
+
+    const availableH = pageSize[1] - margin - 24 - y - 20;
+    if (availableH < 80) return;
+    const chartW = Math.round(contentW);
+    const chartH = Math.round(availableH);
 
     // Build a simple chart from region changes
     const regionChanges = comparisonSection.regionChanges.slice(0, 8);
@@ -296,7 +301,7 @@ async function renderPage1(
 
       try {
         const png = await renderLineChartPng(chartSection, chartW, chartH);
-        doc.image(png, margin, y, { width: contentW, height: availableH });
+        doc.image(png, margin, y, { width: contentW, height: chartH });
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         warnings.push(`تعذر رسم مخطط المناطق: ${reason}`);
@@ -443,6 +448,11 @@ function renderPage2(
   });
 
   // Summary row
+  if (y + rowH + 12 > pageSize[1] - margin - 24) {
+    doc.addPage();
+    y = margin;
+    drawHeader();
+  }
   y += 4;
   doc.moveTo(margin, y).lineTo(pageSize[0] - margin, y).strokeColor("#94a3b8").stroke();
   doc.strokeColor("#000000");
@@ -571,12 +581,6 @@ async function renderPage3(
   y += 16;
 
   // ── Comparative timeline chart ─────────────────────────────────────────────
-  const availableH = pageSize[1] - margin - 24 - y - 20;
-  if (availableH < 60) {
-    // Not enough space — skip the chart
-    return;
-  }
-
   doc.font("Bold").fontSize(11).fillColor(COLOR_DARK);
   doc.text("الاتجاه الزمني المقارن (يوم بيوم)", margin, y, {
     width: contentW,
@@ -584,8 +588,11 @@ async function renderPage3(
   });
   y += 16;
 
+  const availableH = pageSize[1] - margin - 24 - y - 20;
+  if (availableH < 80) return;
+
   const chartW = Math.round(contentW);
-  const chartH = Math.max(80, Math.round(availableH));
+  const chartH = Math.round(availableH);
 
   const timelineSeries: Array<{ name: string; points: { x: string; y: number }[] }> = [
     {
@@ -619,7 +626,7 @@ async function renderPage3(
 
   try {
     const png = await renderLineChartPng(timelineSection, chartW, chartH);
-    doc.image(png, margin, y, { width: contentW, height: availableH });
+    doc.image(png, margin, y, { width: contentW, height: chartH });
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     warnings.push(`تعذر رسم المخطط الزمني المقارن: ${reason}`);
@@ -652,4 +659,3 @@ function drawBriefFooters(
     doc.fillColor("#000000");
   }
 }
-

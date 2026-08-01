@@ -29,6 +29,7 @@ import {
   AlertTriangle, Loader2, CalendarClock, PlayCircle,
 } from "lucide-react";
 import { formatNumber, formatDate, formatDateTime } from "@/lib/ar-utils";
+import type { ReportMatrixSection } from "@/lib/reports/report-contract";
 
 // =========================================================================
 // Types (mirrors src/server/reports/*)
@@ -70,16 +71,6 @@ type ReportTable = {
   rows: Record<string, unknown>[]; truncated: boolean; totalMatched: number;
 };
 type ChartSeries = { name: string; points: { x: string; y: number }[]; isOther?: boolean };
-type ReportMatrixSection = {
-  id: string; kind: "matrix"; title: string; description?: string;
-  rowLabel: string; columnLabel: string;
-  rowHeaders: string[]; columnHeaders: string[];
-  cells: number[][];
-  rowTotals: number[]; columnTotals: number[]; grandTotal: number;
-  totalRows?: number; totalColumns?: number;
-  truncatedRows?: boolean; truncatedColumns?: boolean;
-  truncated: boolean; maxRows: number; maxColumns: number;
-};
 type ReportSection =
   | { id: string; kind: "kpi"; title: string; cards: ReportKpiCard[] }
   | { id: string; kind: "table"; title: string; table: ReportTable }
@@ -1168,6 +1159,19 @@ function assertNeverReportSection(section: never): never {
   throw new Error(`نوع قسم التقرير غير معروف: ${JSON.stringify((section as ReportSection).kind)}`);
 }
 
+function matrixTruncationMessage(section: ReportMatrixSection): string | null {
+  if (section.truncatedRows && section.truncatedColumns) {
+    return `تم عرض ${section.rowHeaders.length} من أصل ${formatNumber(section.totalRows)} صفاً، و${section.columnHeaders.length} من أصل ${formatNumber(section.totalColumns)} عموداً.`;
+  }
+  if (section.truncatedRows) {
+    return `تم عرض ${section.rowHeaders.length} من أصل ${formatNumber(section.totalRows)} صفاً.`;
+  }
+  if (section.truncatedColumns) {
+    return `تم عرض ${section.columnHeaders.length} من أصل ${formatNumber(section.totalColumns)} عموداً.`;
+  }
+  return null;
+}
+
 function SectionBody({ section }: Readonly<{ section: ReportSection }>) {
   switch (section.kind) {
     case "kpi":
@@ -1255,9 +1259,9 @@ function SectionBody({ section }: Readonly<{ section: ReportSection }>) {
               ))}
             </TableBody>
           </Table>
-          {section.truncated && (
+          {matrixTruncationMessage(section) && (
             <div className="p-2 text-xs text-muted-foreground border-t">
-              تم عرض {section.rowHeaders.length} صفاً من أصل {formatNumber(section.totalRows ?? section.grandTotal)}.
+              {matrixTruncationMessage(section)}
             </div>
           )}
         </div>

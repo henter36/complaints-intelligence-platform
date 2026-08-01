@@ -6,6 +6,7 @@ import {
   listReportDefinitions,
   parseReportRequest,
   REPORT_DEFINITIONS,
+  reportOptionsSchema,
 } from "./report-definition-service";
 
 const VALID_FILTERS = { from: "2026-07-01", to: "2026-07-31" };
@@ -35,6 +36,26 @@ describe("report definitions", () => {
     expect(detail.maxRows).toBe(10_000);
     expect(detail.supportsPdf).toBe(false);
     expect(detail.supportsXlsx).toBe(true);
+  });
+});
+
+describe("reportOptionsSchema — reportMode field", () => {
+  it.each([
+    "DIGITAL_EXECUTIVE_BRIEF",
+    "FULL_ANALYTICAL",
+    "PRINT_EXECUTIVE_BRIEF",
+  ] as const)("accepts %s", (reportMode) => {
+    expect(reportOptionsSchema.safeParse({ reportMode }).success).toBe(true);
+  });
+
+  it("rejects an invalid reportMode value", () => {
+    expect(reportOptionsSchema.safeParse({ reportMode: "INVALID_MODE" }).success).toBe(false);
+  });
+
+  it("allows reportMode to be absent", () => {
+    const result = reportOptionsSchema.safeParse({});
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.reportMode).toBeUndefined();
   });
 });
 
