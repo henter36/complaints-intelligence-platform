@@ -4,7 +4,14 @@
 // All DB calls are mocked — no real SQLite instance required in CI.
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { buildExecutiveBriefData, buildFullAnalyticalData } from "./report-executive-brief-data-service";
+import {
+  buildExecutiveBriefData,
+  buildFullAnalyticalData,
+  computeThirteenMonthWindow,
+  groupComplaintsByMonth,
+  MONTHLY_WINDOW_SIZE,
+  ARABIC_MONTH_NAMES,
+} from "./report-executive-brief-data-service";
 import type { ReportFilters } from "./report-definition-service";
 import type { ComparisonResult, DeptClassPeriodCount, PeriodRange } from "./report-comparison";
 import type { ComplaintKpiResult } from "@/server/complaints/complaint-kpi-service";
@@ -483,18 +490,21 @@ describe("buildExecutiveBriefData — comparativeTimeline", () => {
     expect(data.comparativeTimeline.current.points[0].relativeDay).toBe(1);
   });
 
-  it("current period has periodDays points", async () => {
+  it("always returns exactly 13 monthly points regardless of period length", async () => {
+    // New implementation: buildComparativeTimeline always uses 13-month window
     const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
-    expect(data.comparativeTimeline.current.points).toHaveLength(data.comparativeTimeline.periodDays);
+    expect(data.comparativeTimeline.aggregation).toBe("monthly");
+    expect(data.comparativeTimeline.current.points).toHaveLength(13);
   });
 
   it.each([
-    { days: 31, aggregation: "daily", expectedPoints: 31 },
-    { days: 56, aggregation: "weekly", expectedPoints: 8 },
-    { days: 180, aggregation: "monthly", expectedPoints: 6 },
+    { days: 7 },
+    { days: 31 },
+    { days: 56 },
+    { days: 180 },
   ] as const)(
-    "uses $aggregation buckets for a $days-day reporting period",
-    async ({ days, aggregation, expectedPoints }) => {
+    "always uses monthly aggregation with 13 points for a $days-day period",
+    async ({ days }) => {
       const comparison = makeComparison(false);
       comparison.currentPeriod = {
         from: ISO("2026-01-01"),
@@ -507,8 +517,8 @@ describe("buildExecutiveBriefData — comparativeTimeline", () => {
         otherSeriesName: null,
       };
       const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
-      expect(data.comparativeTimeline.aggregation).toBe(aggregation);
-      expect(data.comparativeTimeline.current.points).toHaveLength(expectedPoints);
+      expect(data.comparativeTimeline.aggregation).toBe("monthly");
+      expect(data.comparativeTimeline.current.points).toHaveLength(13);
     }
   );
 
@@ -517,45 +527,53 @@ describe("buildExecutiveBriefData — comparativeTimeline", () => {
     expect(data.comparativeTimeline.previous).toBeNull();
   });
 
-  it("current counts match sum of region trend series", async () => {
+  it("current counts reflect complaints returned by DB (not regionTrend)", async () => {
+    // New implementation: fetchComplaintsForTimeline queries the DB directly.
+    // Two complaints in July 2026 bucket (month 1 of window starting July 2026).
+    dbMocks.complaintFindMany
+      .mockResolvedValueOnce([
+        { complaintDate: new Date("2026-07-02T00:00:00.000Z"), receivedAt: new Date("2026-07-02T00:00:00.000Z") },
+        { complaintDate: new Date("2026-07-05T00:00:00.000Z"), receivedAt: new Date("2026-07-05T00:00:00.000Z") },
+      ])
+      .mockResolvedValueOnce([]); // previous period
     const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
-    // Day 1 (2026-07-01): الرياض=5, جدة=4 → total=9
-    expect(data.comparativeTimeline.current.points.find((p) => p.relativeDay === 1)?.count).toBe(9);
-    // Day 2 (2026-07-02): الرياض=6, جدة=4 → total=10
-    expect(data.comparativeTimeline.current.points.find((p) => p.relativeDay === 2)?.count).toBe(10);
+    // Bucket 1 = July 2026 → should have 2 complaints
+    expect(data.comparativeTimeline.current.points[0].count).toBe(2);
+    // All other months → 0
+    for (let i = 1; i < data.comparativeTimeline.current.points.length; i++) {
+      expect(data.comparativeTimeline.current.points[i].count).toBe(0);
+    }
   });
 
   it("previous period queries DB with receivedAt fallback (null complaintDate)", async () => {
-    // Simulate two previous-period complaints: one with complaintDate, one with null+receivedAt
-    dbMocks.complaintFindMany.mockResolvedValue([
-      { complaintDate: new Date("2026-06-25T00:00:00.000Z"), receivedAt: new Date("2026-06-24T00:00:00.000Z") },
-      { complaintDate: null, receivedAt: new Date("2026-06-26T00:00:00.000Z") },
-    ]);
+    // Current period: no complaints
+    // Previous period: 2 complaints in June 2026 bucket (month 1 of previous window)
+    dbMocks.complaintFindMany
+      .mockResolvedValueOnce([])  // current period
+      .mockResolvedValueOnce([   // previous period
+        { complaintDate: new Date("2026-06-25T00:00:00.000Z"), receivedAt: new Date("2026-06-24T00:00:00.000Z") },
+        { complaintDate: null, receivedAt: new Date("2026-06-26T00:00:00.000Z") },
+      ]);
     const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
-    // Both complaints appear in the previous period timeline
     const prevPoints = data.comparativeTimeline.previous?.points ?? [];
-    const day2 = prevPoints.find((p) => p.relativeDay === 2); // 2026-06-25 = day 2
-    const day3 = prevPoints.find((p) => p.relativeDay === 3); // 2026-06-26 = day 3
-    expect(day2?.count).toBe(1); // complaintDate used
-    expect(day3?.count).toBe(1); // receivedAt used as fallback
+    // Both complaints fall in June 2026 (month bucket 1 of the previous window)
+    expect(prevPoints[0].count).toBe(2);
   });
 
-  it("now is passed from caller — does not use new Date() internally", async () => {
-    // Pass a fixed NOW; previous-period query should call findMany once.
+  it("now is passed from caller — findMany is called for both current and previous periods", async () => {
+    // New: buildComparativeTimeline calls findMany twice (current + previous period)
     await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
-    // If now were live, the result would be non-deterministic.
-    // We just verify the mock was called — actual determinism is contract-level.
-    expect(dbMocks.complaintFindMany).toHaveBeenCalledTimes(1);
+    expect(dbMocks.complaintFindMany).toHaveBeenCalledTimes(2);
   });
 
   it("complaintDate present but outside period is not counted by receivedAt", async () => {
-    // complaintDate is outside previous period; receivedAt is inside.
     // Effective-date policy: complaintDate takes precedence — this complaint must NOT be counted.
     // Service relies on Prisma OR clause — our mock returns only what Prisma would return.
-    // We verify that the mock was called (not that Prisma filters correctly — that's an integration test).
+    // We verify that the mock was called with the OR clause for the current period.
     await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
-    expect(dbMocks.complaintFindMany).toHaveBeenCalledTimes(1);
-    // Verify the WHERE passed to findMany includes the OR clause.
+    // findMany called 2 times: current period + previous period
+    expect(dbMocks.complaintFindMany).toHaveBeenCalledTimes(2);
+    // Verify the WHERE passed to first findMany (current period) includes the OR clause.
     const [[callArg]] = dbMocks.complaintFindMany.mock.calls;
     expect(callArg.where).toHaveProperty("OR");
     const orClauses: unknown[] = callArg.where.OR;
@@ -838,15 +856,20 @@ describe("buildExecutiveBriefData — previous timeline OR fallback", () => {
   it("includes complaints where complaintDate=null and receivedAt falls in previous period", async () => {
     const result = makeKpiResult();
     const comparison = makeComparison();
-    // Return one complaint that has complaintDate=null but receivedAt in period
-    dbMocks.complaintFindMany.mockResolvedValueOnce([
-      { complaintDate: null, receivedAt: new Date("2026-06-25T00:00:00.000Z") },
-    ]);
+    // New: buildComparativeTimeline calls findMany twice (current then previous).
+    // First call: current period (July 2026 window) → no complaints.
+    // Second call: previous period (June 2026 window) → one complaint in June.
+    dbMocks.complaintFindMany
+      .mockResolvedValueOnce([])  // current period
+      .mockResolvedValueOnce([   // previous period
+        { complaintDate: null, receivedAt: new Date("2026-06-25T00:00:00.000Z") },
+      ]);
     const data = await buildExecutiveBriefData(BASE_FILTERS, result, comparison);
     expect(data.comparativeTimeline.previous).not.toBeNull();
-    // Day 2 (2026-06-25) should have count=1
-    const day2 = data.comparativeTimeline.previous?.points.find((p) => p.relativeDay === 2);
-    expect(day2?.count).toBe(1);
+    // Previous period starts June 2026 → bucket 1 (relativeDay=1) covers all of June.
+    // 2026-06-25 falls in June 2026 → relativeDay === 1, count === 1.
+    const june = data.comparativeTimeline.previous?.points.find((p) => p.relativeDay === 1);
+    expect(june?.count).toBe(1);
   });
 
   it("does not count a complaint with complaintDate outside period even if receivedAt is inside", async () => {
@@ -916,11 +939,13 @@ describe("buildExecutiveBriefData — monthly timeline labels", () => {
     expect(labels[1]).toContain("فبراير");
   });
 
-  it("daily points do not carry a label (label is undefined)", async () => {
+  it("all timeline points carry an Arabic month label (monthly aggregation always)", async () => {
+    // New: buildComparativeTimeline always uses monthly aggregation → all points have labels
     const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(false), undefined, NOW);
-    expect(data.comparativeTimeline.aggregation).toBe("daily");
+    expect(data.comparativeTimeline.aggregation).toBe("monthly");
     for (const point of data.comparativeTimeline.current.points) {
-      expect(point.label).toBeUndefined();
+      expect(typeof point.label).toBe("string");
+      expect((point.label ?? "").length).toBeGreaterThan(0);
     }
   });
 
@@ -956,6 +981,274 @@ describe("buildExecutiveBriefData — monthly timeline labels", () => {
     expect(row!.direction).toBe("جديد");
     expect(row!.currentCount).toBe(7);
     expect(row!.previousCount).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: computeThirteenMonthWindow
+// ---------------------------------------------------------------------------
+
+describe("computeThirteenMonthWindow", () => {
+  it("returns exactly 13 months", () => {
+    const period = { from: new Date("2025-08-01T00:00:00.000Z"), toExclusive: new Date("2026-08-02T00:00:00.000Z") };
+    expect(computeThirteenMonthWindow(period)).toHaveLength(MONTHLY_WINDOW_SIZE);
+    expect(MONTHLY_WINDOW_SIZE).toBe(13);
+  });
+
+  it("months are in ascending order by monthKey", () => {
+    const period = { from: new Date("2025-08-01T00:00:00.000Z"), toExclusive: new Date("2026-08-02T00:00:00.000Z") };
+    const buckets = computeThirteenMonthWindow(period);
+    for (let i = 1; i < buckets.length; i++) {
+      expect(buckets[i].key > buckets[i - 1].key).toBe(true);
+    }
+  });
+
+  it("starts at the month of period.from", () => {
+    const period = { from: new Date("2025-08-03T00:00:00.000Z"), toExclusive: new Date("2026-08-02T00:00:00.000Z") };
+    const buckets = computeThirteenMonthWindow(period);
+    expect(buckets[0].key).toBe("2025-08");
+  });
+
+  it("spans the year boundary correctly", () => {
+    const period = { from: new Date("2025-11-01T00:00:00.000Z"), toExclusive: new Date("2026-11-01T00:00:00.000Z") };
+    const buckets = computeThirteenMonthWindow(period);
+    expect(buckets[0].key).toBe("2025-11");
+    expect(buckets[2].key).toBe("2026-01");
+    expect(buckets[12].key).toBe("2026-11");
+  });
+
+  it("bucket labels use Arabic month names and include the year", () => {
+    const period = { from: new Date("2026-01-01T00:00:00.000Z"), toExclusive: new Date("2027-01-01T00:00:00.000Z") };
+    const buckets = computeThirteenMonthWindow(period);
+    expect(buckets[0].label).toBe(`${ARABIC_MONTH_NAMES[0]} 2026`);  // يناير 2026
+    expect(buckets[11].label).toBe(`${ARABIC_MONTH_NAMES[11]} 2026`); // ديسمبر 2026
+  });
+
+  it("each bucket from is 1st of the month at midnight UTC", () => {
+    const period = { from: new Date("2025-08-03T00:00:00.000Z"), toExclusive: new Date("2026-08-02T00:00:00.000Z") };
+    const buckets = computeThirteenMonthWindow(period);
+    for (const b of buckets) {
+      expect(b.from.getUTCDate()).toBe(1);
+      expect(b.from.getUTCHours()).toBe(0);
+    }
+  });
+
+  it("consecutive bucket.from and previous bucket.toExclusive are equal", () => {
+    const period = { from: new Date("2025-08-01T00:00:00.000Z"), toExclusive: new Date("2026-08-01T00:00:00.000Z") };
+    const buckets = computeThirteenMonthWindow(period);
+    for (let i = 1; i < buckets.length; i++) {
+      expect(buckets[i].from.getTime()).toBe(buckets[i - 1].toExclusive.getTime());
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: groupComplaintsByMonth
+// ---------------------------------------------------------------------------
+
+describe("groupComplaintsByMonth", () => {
+  function bucket(key: string) {
+    const [y, m] = key.split("-").map(Number);
+    return {
+      key,
+      label: `${ARABIC_MONTH_NAMES[m - 1]} ${y}`,
+      from: new Date(Date.UTC(y, m - 1, 1)),
+      toExclusive: new Date(Date.UTC(y, m, 1)),
+    };
+  }
+
+  it("initialises all buckets to zero for complaints with no matching dates", () => {
+    const buckets = [bucket("2026-01"), bucket("2026-02"), bucket("2026-03")];
+    const result = groupComplaintsByMonth([], buckets);
+    for (const b of buckets) {
+      expect(result.get(b.key)).toBe(0);
+    }
+  });
+
+  it("uses complaintDate when available", () => {
+    const buckets = [bucket("2026-03")];
+    const complaints = [
+      { complaintDate: new Date("2026-03-15T00:00:00.000Z"), receivedAt: new Date("2026-01-01T00:00:00.000Z") },
+    ];
+    const result = groupComplaintsByMonth(complaints, buckets);
+    expect(result.get("2026-03")).toBe(1);
+  });
+
+  it("falls back to receivedAt when complaintDate is null", () => {
+    const buckets = [bucket("2026-04")];
+    const complaints = [
+      { complaintDate: null, receivedAt: new Date("2026-04-10T00:00:00.000Z") },
+    ];
+    const result = groupComplaintsByMonth(complaints, buckets);
+    expect(result.get("2026-04")).toBe(1);
+  });
+
+  it("does not count a complaint outside the window", () => {
+    const buckets = [bucket("2026-03")];
+    const complaints = [
+      { complaintDate: new Date("2026-05-01T00:00:00.000Z"), receivedAt: new Date("2026-05-01T00:00:00.000Z") },
+    ];
+    const result = groupComplaintsByMonth(complaints, buckets);
+    expect(result.get("2026-03")).toBe(0);
+  });
+
+  it("sum of all bucket counts equals number of complaints falling in window", () => {
+    const buckets = [bucket("2026-01"), bucket("2026-02"), bucket("2026-03")];
+    const complaints = [
+      { complaintDate: new Date("2026-01-05T00:00:00.000Z"), receivedAt: new Date("2026-01-01T00:00:00.000Z") },
+      { complaintDate: new Date("2026-02-10T00:00:00.000Z"), receivedAt: new Date("2026-01-01T00:00:00.000Z") },
+      { complaintDate: null, receivedAt: new Date("2026-02-20T00:00:00.000Z") },
+      { complaintDate: new Date("2026-04-01T00:00:00.000Z"), receivedAt: new Date("2026-04-01T00:00:00.000Z") }, // outside window
+    ];
+    const result = groupComplaintsByMonth(complaints, buckets);
+    const total = [...result.values()].reduce((s, v) => s + v, 0);
+    expect(total).toBe(3); // only 3 fall within the 3 buckets
+  });
+
+  it("multiple complaints in same bucket are summed", () => {
+    const buckets = [bucket("2026-06")];
+    const complaints = [
+      { complaintDate: new Date("2026-06-01T00:00:00.000Z"), receivedAt: new Date("2026-06-01T00:00:00.000Z") },
+      { complaintDate: new Date("2026-06-15T00:00:00.000Z"), receivedAt: new Date("2026-06-15T00:00:00.000Z") },
+      { complaintDate: null, receivedAt: new Date("2026-06-20T00:00:00.000Z") },
+    ];
+    const result = groupComplaintsByMonth(complaints, buckets);
+    expect(result.get("2026-06")).toBe(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: 13-month window — integration with buildExecutiveBriefData monthly mode
+// ---------------------------------------------------------------------------
+
+describe("13-month window via buildExecutiveBriefData", () => {
+  it("monthly mode returns exactly 13 timeline points", async () => {
+    const comparison = makeComparison(false);
+    // A ~13-month period triggers monthly aggregation in buildComparativeTimeline
+    comparison.currentPeriod = {
+      from: new Date("2025-08-03T00:00:00.000Z"),
+      toExclusive: new Date("2026-08-02T00:00:00.000Z"),
+    };
+    comparison.regionTrend = { allDates: [], series: [], truncated: false, otherSeriesName: null };
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
+    // buildComparativeTimeline is called when period is long enough for monthly
+    // The new 13-month window path sets aggregation = "monthly"
+    expect(data.comparativeTimeline.aggregation).toBe("monthly");
+    expect(data.comparativeTimeline.current.points).toHaveLength(13);
+  });
+
+  it("monthly points are in ascending order", async () => {
+    const comparison = makeComparison(false);
+    comparison.currentPeriod = {
+      from: new Date("2025-08-03T00:00:00.000Z"),
+      toExclusive: new Date("2026-08-02T00:00:00.000Z"),
+    };
+    comparison.regionTrend = { allDates: [], series: [], truncated: false, otherSeriesName: null };
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
+    const points = data.comparativeTimeline.current.points;
+    for (let i = 1; i < points.length; i++) {
+      expect(points[i].relativeDay).toBeGreaterThan(points[i - 1].relativeDay);
+    }
+  });
+
+  it("empty months (no complaints) have count 0 not undefined", async () => {
+    dbMocks.complaintFindMany.mockResolvedValue([]); // no complaints at all
+    const comparison = makeComparison(false);
+    comparison.currentPeriod = {
+      from: new Date("2025-08-03T00:00:00.000Z"),
+      toExclusive: new Date("2026-08-02T00:00:00.000Z"),
+    };
+    comparison.regionTrend = { allDates: [], series: [], truncated: false, otherSeriesName: null };
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
+    for (const point of data.comparativeTimeline.current.points) {
+      expect(point.count).toBe(0);
+    }
+  });
+
+  it("monthly sum equals total complaints returned by DB for that period", async () => {
+    // DB returns 5 complaints, all in Jan 2026
+    dbMocks.complaintFindMany.mockResolvedValue([
+      { complaintDate: new Date("2026-01-05T00:00:00.000Z"), receivedAt: new Date("2026-01-05T00:00:00.000Z") },
+      { complaintDate: new Date("2026-01-10T00:00:00.000Z"), receivedAt: new Date("2026-01-10T00:00:00.000Z") },
+      { complaintDate: null, receivedAt: new Date("2026-01-15T00:00:00.000Z") },
+      { complaintDate: new Date("2026-01-20T00:00:00.000Z"), receivedAt: new Date("2026-01-20T00:00:00.000Z") },
+      { complaintDate: new Date("2026-01-25T00:00:00.000Z"), receivedAt: new Date("2026-01-25T00:00:00.000Z") },
+    ]);
+    const comparison = makeComparison(false);
+    comparison.currentPeriod = {
+      from: new Date("2025-08-03T00:00:00.000Z"),
+      toExclusive: new Date("2026-08-02T00:00:00.000Z"),
+    };
+    comparison.regionTrend = { allDates: [], series: [], truncated: false, otherSeriesName: null };
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
+    const total = data.comparativeTimeline.current.points.reduce((s, p) => s + p.count, 0);
+    expect(total).toBe(5);
+  });
+
+  it("previous period timeline also returns 13 points in monthly mode", async () => {
+    // First call: current period complaints; second call: previous period complaints
+    dbMocks.complaintFindMany
+      .mockResolvedValueOnce([])  // current period: no complaints
+      .mockResolvedValueOnce([]); // previous period: no complaints
+    const comparison = makeComparison(true);
+    comparison.currentPeriod = {
+      from: new Date("2025-08-03T00:00:00.000Z"),
+      toExclusive: new Date("2026-08-02T00:00:00.000Z"),
+    };
+    comparison.previousPeriod = {
+      from: new Date("2024-08-03T00:00:00.000Z"),
+      toExclusive: new Date("2025-08-03T00:00:00.000Z"),
+    };
+    comparison.regionTrend = { allDates: [], series: [], truncated: false, otherSeriesName: null };
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
+    expect(data.comparativeTimeline.previous?.points).toHaveLength(13);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: buildExecutiveBriefData — conclusions and notes with zero previous period
+// ---------------------------------------------------------------------------
+
+describe("buildExecutiveBriefData — conclusions/notes with zero previous data", () => {
+  it("does not generate comparative rise/fall conclusions when all previous counts are zero", async () => {
+    const comparison = makeComparison(true);
+    // All previous counts are zero — simulates import-date issue
+    comparison.regionChanges = comparison.regionChanges.map((r) => ({
+      ...r, previousCount: 0, difference: r.currentCount, changeRate: null,
+    }));
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
+    const conclusions = data.conclusions ?? [];
+    // No "أعلى زيادة" or "أعلى انخفاض" conclusions should appear
+    for (const c of conclusions) {
+      expect(c).not.toContain("أعلى زيادة");
+      expect(c).not.toContain("أعلى انخفاض");
+    }
+  });
+
+  it("adds a data-quality note when previous period exists but all previous counts are zero", async () => {
+    const comparison = makeComparison(true);
+    comparison.regionChanges = comparison.regionChanges.map((r) => ({
+      ...r, previousCount: 0, difference: r.currentCount, changeRate: null,
+    }));
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
+    const hasZeroNote = (data.notes ?? []).some(
+      (n) => n.includes("صفرية") || n.includes("استيراد") || n.includes("غياب تاريخ")
+    );
+    expect(hasZeroNote).toBe(true);
+  });
+
+  it("does not add zero-data note when previous period actually has data", async () => {
+    const comparison = makeComparison(true);
+    // Previous counts are meaningful
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
+    const hasZeroNote = (data.notes ?? []).some((n) => n.includes("صفرية"));
+    expect(hasZeroNote).toBe(false);
+  });
+
+  it("adds no-previous-period note when previousPeriod is null", async () => {
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(false), undefined, NOW);
+    const hasNote = (data.notes ?? []).some((n) => n.includes("لا تتوفر فترة سابقة"));
+    expect(hasNote).toBe(true);
   });
 });
 

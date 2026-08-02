@@ -281,6 +281,12 @@ function buildEntityRows(
   }));
 }
 
+function hasMeaningfulPreviousData(comparison: ComparisonResult): boolean {
+  if (!comparison.previousPeriod) return false;
+  const total = comparison.regionChanges.reduce((s, r) => s + r.previousCount, 0);
+  return total > 0;
+}
+
 function buildConclusions(
   result: ComplaintKpiResult,
   comparison: ComparisonResult
@@ -288,18 +294,24 @@ function buildConclusions(
   const points: string[] = [];
   const topRegion = result.distributions.byRegion[0];
   if (topRegion && result.volume.total > 0) {
-    points.push(`${topRegion.name} الأعلى حجماً بعدد ${topRegion.total}، وتمثل ${roundRate(topRegion.total / result.volume.total * 100)}% من الإجمالي.`);
+    points.push(
+      `${topRegion.name} الأعلى حجماً بعدد ${topRegion.total} شكوى،` +
+      ` وتمثل ${roundRate(topRegion.total / result.volume.total * 100)}% من الإجمالي.`
+    );
   }
-  if (comparison.previousPeriod) {
-    const rise = comparison.regionChanges.filter((row) => row.difference > 0)
+  // Only generate comparative conclusions when previous data actually exists.
+  if (hasMeaningfulPreviousData(comparison)) {
+    const rise = comparison.regionChanges.filter((r) => r.difference > 0)
       .sort((a, b) => b.difference - a.difference)[0];
-    const fall = comparison.regionChanges.filter((row) => row.difference < 0)
+    const fall = comparison.regionChanges.filter((r) => r.difference < 0)
       .sort((a, b) => a.difference - b.difference)[0];
-    if (rise) points.push(`أعلى زيادة مطلقة في ${rise.regionName}: ${rise.difference} شكوى.`);
-    if (fall) points.push(`أعلى انخفاض مطلق في ${fall.regionName}: ${Math.abs(fall.difference)} شكوى.`);
+    if (rise) points.push(`أعلى زيادة في ${rise.regionName}: +${rise.difference} شكوى مقارنة بالفترة السابقة.`);
+    if (fall) points.push(`أعلى انخفاض في ${fall.regionName}: ${Math.abs(fall.difference)} شكوى مقارنة بالفترة السابقة.`);
   }
   const openDepartment = [...result.distributions.byDepartment].sort((a, b) => b.open - a.open)[0];
-  if (openDepartment?.open) points.push(`${openDepartment.name} الأعلى في الحالات المفتوحة بعدد ${openDepartment.open}.`);
+  if (openDepartment?.open) {
+    points.push(`${openDepartment.name} الأعلى في الحالات المفتوحة بعدد ${openDepartment.open}.`);
+  }
   const lateClassification = [...result.distributions.byClassification]
     .sort((a, b) => b.currentlyLate - a.currentlyLate)[0];
   if (lateClassification?.currentlyLate) {
@@ -311,13 +323,23 @@ function buildConclusions(
 function buildNotes(result: ComplaintKpiResult, comparison: ComparisonResult): string[] {
   const notes: string[] = [];
   if (result.kpis.unclassifiedComplaints.currentValue > 0) {
-    notes.push(`${result.kpis.unclassifiedComplaints.currentValue} شكوى بلا تصنيف، ما يحد من دقة تحليل الأسباب.`);
+    notes.push(
+      `${result.kpis.unclassifiedComplaints.currentValue} شكوى بلا تصنيف، ما يحد من دقة تحليل الأسباب.`
+    );
   }
   if (result.kpis.withoutDueDate.currentValue > 0) {
-    notes.push(`${result.kpis.withoutDueDate.currentValue} شكوى بلا موعد مستهدف ولا تدخل في مقام الالتزام.`);
+    notes.push(
+      `${result.kpis.withoutDueDate.currentValue} شكوى بلا موعد مستهدف ولا تدخل في مقام الالتزام.`
+    );
   }
-  if (!comparison.previousPeriod) notes.push("لا تتوفر فترة سابقة صالحة للمقارنة الزمنية.");
-  return notes.slice(0, 3);
+  if (!comparison.previousPeriod) {
+    notes.push("لا تتوفر فترة سابقة صالحة للمقارنة الزمنية.");
+  } else if (!hasMeaningfulPreviousData(comparison)) {
+    notes.push(
+      "بيانات الفترة السابقة صفرية — قد يكون سبب ذلك غياب تاريخ الشكوى أو استيراد البيانات بتاريخ موحد."
+    );
+  }
+  return notes.slice(0, 4);
 }
 
 // ---------------------------------------------------------------------------
@@ -351,82 +373,98 @@ function buildTopClassifications(
 }
 
 // ---------------------------------------------------------------------------
-// Comparative timeline (current vs previous, relative-day axis)
+// Monthly timeline — 13-month fixed window
+//
+// Contract:
+//   monthKey  = "YYYY-MM"          (canonical, zero-padded)
+//   monthLabel = "يناير 2026"       (Arabic display name)
+//   currentCount  = complaints with effective date in that calendar month
+//   previousCount = complaints in the CORRESPONDING month of the previous period
+//
+// Both current and previous series share the SAME 13 labels so the bar chart
+// renders them as side-by-side columns under each month name.
+//
+// Why 13 months? A 12-month period spans from the first day of month M through
+// the last day of month M+11 (inclusive). Month M may be partially inside the
+// period (e.g. Aug 3 → Aug 31) and month M+12 may appear if the period ends
+// on or after the 1st of that month. We always show exactly 13 buckets so the
+// full period is covered without gaps.
 // ---------------------------------------------------------------------------
 
-function sumDailyCounts(
-  trend: ComparisonResult["regionTrend"]
-): Map<string, number> {
-  const totals = new Map<string, number>();
-  for (const series of trend.series) {
-    for (const point of series.points) {
-      totals.set(point.date, (totals.get(point.date) ?? 0) + point.count);
-    }
-  }
-  return totals;
-}
-
-function buildDailyPointsForPeriod(
-  period: PeriodRange,
-  dailyTotals: Map<string, number>
-): ComparativeTimelinePoint[] {
-  const points: ComparativeTimelinePoint[] = [];
-  const startMs = Date.UTC(
-    period.from.getUTCFullYear(),
-    period.from.getUTCMonth(),
-    period.from.getUTCDate()
-  );
-  let relativeDay = 1;
-  for (let ms = startMs; ms < period.toExclusive.getTime(); ms += DAY_MS, relativeDay++) {
-    const dateStr = new Date(ms).toISOString().slice(0, 10);
-    points.push({ relativeDay, count: dailyTotals.get(dateStr) ?? 0 });
-  }
-  return points;
-}
-
-function resolveTimelineAggregation(periodDays: number): {
-  aggregation: "daily" | "weekly" | "monthly";
-} {
-  if (periodDays <= 31) return { aggregation: "daily" };
-  if (periodDays <= 120) return { aggregation: "weekly" };
-  return { aggregation: "monthly" };
-}
-
-const ARABIC_MONTH_NAMES = [
+export const ARABIC_MONTH_NAMES: readonly string[] = [
   "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
   "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر",
 ];
 
-function aggregateTimelinePoints(
-  points: readonly ComparativeTimelinePoint[],
-  aggregation: "daily" | "weekly" | "monthly",
-  periodStart: Date
-): ComparativeTimelinePoint[] {
-  if (aggregation === "daily") return [...points];
-  if (aggregation === "monthly") {
-    const monthly = new Map<string, ComparativeTimelinePoint>();
-    for (const point of points) {
-      const date = new Date(periodStart.getTime() + (point.relativeDay - 1) * DAY_MS);
-      const monthKey = `${date.getUTCFullYear()}-${date.getUTCMonth()}`;
-      const bucket = monthly.get(monthKey);
-      if (bucket) {
-        bucket.count += point.count;
-      } else {
-        const monthName = ARABIC_MONTH_NAMES[date.getUTCMonth()];
-        const label = `${monthName} ${date.getUTCFullYear()}`;
-        monthly.set(monthKey, { relativeDay: point.relativeDay, count: point.count, label });
-      }
-    }
-    return [...monthly.values()];
-  }
-  const aggregated: ComparativeTimelinePoint[] = [];
-  for (let index = 0; index < points.length; index += 7) {
-    aggregated.push({
-      relativeDay: index + 1,
-      count: points.slice(index, index + 7).reduce((sum, point) => sum + point.count, 0),
+export const MONTHLY_WINDOW_SIZE = 13;
+
+/** One bucket in the 13-month window. */
+export type MonthlyTrendPoint = {
+  monthKey: string;
+  monthLabel: string;
+  currentCount: number;
+  previousCount: number | null;
+};
+
+type MonthBucket = { key: string; label: string; from: Date; toExclusive: Date };
+
+/** Returns 13 consecutive calendar months starting from the month that contains
+ *  `period.from`. Month indices follow UTC calendar months. */
+export function computeThirteenMonthWindow(period: PeriodRange): MonthBucket[] {
+  const startYear = period.from.getUTCFullYear();
+  const startMonthIdx = period.from.getUTCMonth(); // 0-based
+  const buckets: MonthBucket[] = [];
+  for (let i = 0; i < MONTHLY_WINDOW_SIZE; i++) {
+    const totalMonths = startMonthIdx + i;
+    const year = startYear + Math.floor(totalMonths / 12);
+    const month = totalMonths % 12;
+    const key = `${year}-${String(month + 1).padStart(2, "0")}`;
+    const label = `${ARABIC_MONTH_NAMES[month]} ${year}`;
+    buckets.push({
+      key,
+      label,
+      from: new Date(Date.UTC(year, month, 1)),
+      toExclusive: new Date(Date.UTC(year, month + 1, 1)),
     });
   }
-  return aggregated;
+  return buckets;
+}
+
+/** Counts complaints (by effective date) that fall in each month bucket.
+ *  Buckets not covered by any complaint stay at 0. */
+export function groupComplaintsByMonth(
+  complaints: Array<{ complaintDate: Date | null; receivedAt: Date }>,
+  buckets: readonly MonthBucket[]
+): Map<string, number> {
+  const result = new Map<string, number>();
+  for (const b of buckets) result.set(b.key, 0);
+  for (const c of complaints) {
+    const date = c.complaintDate ?? c.receivedAt;
+    const year = date.getUTCFullYear();
+    const month = date.getUTCMonth();
+    const key = `${year}-${String(month + 1).padStart(2, "0")}`;
+    const prev = result.get(key);
+    if (prev !== undefined) result.set(key, prev + 1);
+  }
+  return result;
+}
+
+async function fetchComplaintsForTimeline(
+  period: PeriodRange,
+  filters: ReportFilters,
+  now: Date
+): Promise<Array<{ complaintDate: Date | null; receivedAt: Date }>> {
+  const params = buildComplaintQueryParams(filters);
+  params.delete("from");
+  params.delete("to");
+  const query = parseComplaintQuery(params);
+  const baseWhere = buildComplaintWhere(query, now);
+  const where: Prisma.ComplaintWhereInput = {
+    ...baseWhere,
+    isDeleted: false,
+    ...buildEffectiveDateWhere(period),
+  };
+  return db.complaint.findMany({ where, select: { complaintDate: true, receivedAt: true } });
 }
 
 async function buildComparativeTimeline(
@@ -438,66 +476,48 @@ async function buildComparativeTimeline(
   const periodDays = Math.round(
     (currentPeriod.toExclusive.getTime() - currentPeriod.from.getTime()) / DAY_MS
   );
-  const { aggregation } = resolveTimelineAggregation(periodDays);
 
-  // Current period: sum across all series in the existing trend data.
-  const currentDailyTotals = sumDailyCounts(comparison.regionTrend);
-  const currentPoints = aggregateTimelinePoints(
-    buildDailyPointsForPeriod(currentPeriod, currentDailyTotals),
-    aggregation,
-    currentPeriod.from
-  );
+  // Always use the 13-month calendar window for consistency.
+  const currentBuckets = computeThirteenMonthWindow(currentPeriod);
+
+  const currentComplaints = await fetchComplaintsForTimeline(currentPeriod, filters, now);
+  const currentCounts = groupComplaintsByMonth(currentComplaints, currentBuckets);
+
+  const currentPoints: ComparativeTimelinePoint[] = currentBuckets.map((b, i) => ({
+    relativeDay: i + 1,
+    count: currentCounts.get(b.key) ?? 0,
+    label: b.label,
+  }));
 
   if (!previousPeriod) {
     return {
       current: { label: "الفترة الحالية", points: currentPoints },
       previous: null,
       periodDays,
-      aggregation,
+      aggregation: "monthly",
     };
   }
 
-  // Previous period: query the DB with the same non-date filters as current.
-  const params = buildComplaintQueryParams(filters);
-  params.delete("from");
-  params.delete("to");
-  const query = parseComplaintQuery(params);
-  const baseWhere = buildComplaintWhere(query, now);
+  const previousBuckets = computeThirteenMonthWindow(previousPeriod);
+  const previousComplaints = await fetchComplaintsForTimeline(previousPeriod, filters, now);
+  const previousCounts = groupComplaintsByMonth(previousComplaints, previousBuckets);
 
-  // Merge effective-date policy for the previous period.
-  const prevWhere: Prisma.ComplaintWhereInput = {
-    ...baseWhere,
-    isDeleted: false,
-    ...buildEffectiveDateWhere(previousPeriod),
-  };
-
-  const prevComplaints = await db.complaint.findMany({
-    where: prevWhere,
-    select: { complaintDate: true, receivedAt: true },
-  });
-
-  const prevDailyTotals = new Map<string, number>();
-  for (const complaint of prevComplaints) {
-    const date = (complaint.complaintDate ?? complaint.receivedAt).toISOString().slice(0, 10);
-    prevDailyTotals.set(date, (prevDailyTotals.get(date) ?? 0) + 1);
-  }
-
-  const previousPoints = aggregateTimelinePoints(
-    buildDailyPointsForPeriod(previousPeriod, prevDailyTotals),
-    aggregation,
-    previousPeriod.from
-  );
+  // Previous points use the SAME labels as current (aligned by index) so that
+  // the bar chart renders both series as side-by-side columns per month.
+  const previousPoints: ComparativeTimelinePoint[] = currentBuckets.map((currentB, i) => ({
+    relativeDay: i + 1,
+    count: previousCounts.get(previousBuckets[i]?.key ?? "") ?? 0,
+    label: currentB.label,
+  }));
 
   const prevFrom = previousPeriod.from.toISOString().slice(0, 10);
-  const prevTo = new Date(previousPeriod.toExclusive.getTime() - DAY_MS)
-    .toISOString()
-    .slice(0, 10);
+  const prevTo = new Date(previousPeriod.toExclusive.getTime() - DAY_MS).toISOString().slice(0, 10);
 
   return {
     current: { label: "الفترة الحالية", points: currentPoints },
     previous: { label: `الفترة السابقة (${prevFrom} → ${prevTo})`, points: previousPoints },
     periodDays,
-    aggregation,
+    aggregation: "monthly",
   };
 }
 

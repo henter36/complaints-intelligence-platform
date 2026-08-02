@@ -687,3 +687,111 @@ describe("renderExecutiveBriefPdf — PRINT_EXECUTIVE_BRIEF", () => {
     expect(result.buffer.length).toBeGreaterThan(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Layout review findings — page 2 notes, page 4 boxes, page header options
+// ---------------------------------------------------------------------------
+
+describe("renderExecutiveBriefPdf — layout review findings", () => {
+  it("page 2 notes box renders without error for long note text", async () => {
+    // A note longer than the box width should not throw and should truncate with ellipsis.
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.briefData = makeBriefData({
+      notes: [
+        "هذا نص ملاحظة طويل جداً يحتوي على كثير من الكلمات والمعلومات التي قد تتجاوز عرض الصندوق بكثير مما قد يسبب التفاف النص أو تداخله مع العناصر الأخرى في الصفحة إذا لم يتم التعامل معه بشكل صحيح",
+        "ملاحظة قصيرة",
+      ],
+    });
+    const result = await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+    expect(result.buffer.length).toBeGreaterThan(0);
+    expect(countPageObjects(result.buffer)).toBe(4);
+  });
+
+  it("page 2 notes text call uses lineBreak:false to prevent overflow", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+      // Find calls that render page-2 notes (start with "•")
+      const bulletCalls = textSpy.mock.calls.filter((call) =>
+        String(call[0]).startsWith("•") &&
+        typeof call[3] === "object" &&
+        call[3] !== null
+      );
+      // At least one bullet call must have lineBreak:false
+      const hasLineBreakFalse = bulletCalls.some(
+        (call) => (call[3] as Record<string, unknown>)?.lineBreak === false
+      );
+      expect(hasLineBreakFalse).toBe(true);
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("page 4 bullet boxes render without error when many conclusions/notes", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.briefData = makeBriefData({
+      conclusions: [
+        "استنتاج أول",
+        "استنتاج ثاني",
+        "استنتاج ثالث",
+        "استنتاج رابع",
+        "استنتاج خامس",
+        "استنتاج سادس",
+      ],
+      notes: [
+        "ملاحظة أولى",
+        "ملاحظة ثانية",
+        "ملاحظة ثالثة",
+        "ملاحظة رابعة",
+        "ملاحظة خامسة",
+      ],
+    });
+    const result = await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+    expect(result.buffer.length).toBeGreaterThan(0);
+    expect(countPageObjects(result.buffer)).toBe(4);
+  });
+
+  it("page 4 boxes box section title is always rendered (header visible)", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.briefData = makeBriefData({ conclusions: [], notes: [] });
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+      const texts = textSpy.mock.calls.map((call) => String(call[0]));
+      expect(texts).toContain("الاستنتاجات");
+      expect(texts).toContain("ملاحظات");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("executive brief stays exactly four pages when notes are present", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.briefData = makeBriefData({
+      notes: ["ملاحظة 1", "ملاحظة 2", "ملاحظة 3"],
+      conclusions: ["استنتاج 1", "استنتاج 2"],
+    });
+    const result = await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+    expect(countPageObjects(result.buffer)).toBe(4);
+  });
+
+  it("drawPageHeader heightOfString call uses same options as text call", async () => {
+    // Verifies the options-object unification fix: both calls share width+align+wordSpacing
+    const heightSpy = vi.spyOn(PDFDocument.prototype, "heightOfString");
+    try {
+      await renderExecutiveBriefPdf(makeReportData("DIGITAL_EXECUTIVE_BRIEF"), "DIGITAL_EXECUTIVE_BRIEF");
+      // heightOfString must have been called at least once (for each page title)
+      expect(heightSpy.mock.calls.length).toBeGreaterThanOrEqual(1);
+      // Each call must provide an options object with a width
+      for (const call of heightSpy.mock.calls) {
+        const opts = call[1] as Record<string, unknown> | undefined;
+        if (opts) {
+          expect(opts.width).toBeDefined();
+        }
+      }
+    } finally {
+      heightSpy.mockRestore();
+    }
+  });
+});

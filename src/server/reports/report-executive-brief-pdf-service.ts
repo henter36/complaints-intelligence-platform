@@ -252,13 +252,18 @@ function drawPageHeader(
   // Page title (right-aligned, below banner)
   const titleY = Math.round(bannerH * 0.82);
   const titleSize = fontSize(layout, REPORT_DESIGN_TOKENS.fontSize.reportTitle, 20);
+  const pageTitleOptions = {
+    width: contentWidth,
+    align: "right" as const,
+    wordSpacing: ARABIC_WORD_SPACING,
+  };
   doc.font("Bold").fontSize(titleSize).fillColor(COLORS.primary).text(
     pageTitle,
     margin,
     titleY,
-    { width: contentWidth, align: "right", wordSpacing: ARABIC_WORD_SPACING }
+    pageTitleOptions
   );
-  const titleH = doc.heightOfString(pageTitle, { width: contentWidth });
+  const titleH = doc.heightOfString(pageTitle, pageTitleOptions);
 
   // Gold separator with diamond below title
   const sepY = titleY + titleH + 14;
@@ -484,8 +489,11 @@ function drawPage2Notes(context: ExecutiveBriefRenderContext, startY: number): v
   notes.forEach((note, index) => {
     doc.text(`• ${note}`, layout.margin + 12, titleY + 9 + index * noteLineH, {
       width: layout.contentWidth - 24,
+      height: noteLineH,
       align: "right",
       wordSpacing: ARABIC_WORD_SPACING,
+      lineBreak: false,
+      ellipsis: true,
     });
   });
 }
@@ -926,10 +934,11 @@ function drawBulletBox(doc: PDFKit.PDFDocument, options: DrawBulletBoxOptions): 
   displayPoints.forEach((point, idx) => {
     doc.text(`• ${point}`, x + 10, bodyY + idx * lineH, {
       width: width - 20,
-      align: "right",
       height: lineH - 2,
-      ellipsis: true,
+      align: "right",
       wordSpacing: ARABIC_WORD_SPACING,
+      lineBreak: false,
+      ellipsis: true,
     });
   });
 
@@ -1085,7 +1094,8 @@ function renderPage4(context: ExecutiveBriefRenderContext): void {
   const contentLinesMax = Math.max(conclusions.length, notes.length, 1);
   const contentBasedH = boxHeaderH + boxPaddingV + contentLinesMax * boxLineH;
   const availableH = layout.pageSize[1] - layout.margin * 2 - 26 - y;
-  const boxH = Math.max(contentBasedH, Math.min(contentBasedH, availableH));
+  const minimumBoxH = boxHeaderH + boxPaddingV + boxLineH;
+  const boxH = Math.max(minimumBoxH, Math.min(contentBasedH, availableH));
 
   // Right: الاستنتاجات
   drawBulletBox(doc, { title: "الاستنتاجات", points: conclusions, x: rightX, y, width: halfW, height: boxH, layout });

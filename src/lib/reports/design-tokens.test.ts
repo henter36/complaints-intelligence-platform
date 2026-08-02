@@ -62,7 +62,11 @@ describe("report design tokens", () => {
     expect(source).not.toMatch(/[↑↓]/);
   });
 
-  it("wordSpacing is 0 — non-zero value causes Arabic word-order reversal in PDFKit", () => {
-    expect(REPORT_DESIGN_TOKENS.typography.wordSpacing).toBe(0);
+  it("wordSpacing is 1 — PDFKit drops the leading visual space in Arabic BiDi rendering when Tw=0, causing word concatenation", () => {
+    // wordSpacing:0 (Tw=0 in PDF) strips the first visual space in RTL-reordered Arabic text,
+    // causing words to appear concatenated (e.g. "الشكاوىتقرير" instead of "الشكاوى تقرير").
+    // wordSpacing:1 ensures the space advance width is preserved and words stay separated.
+    // Word ORDER is unaffected by this value in PDFKit 0.19.x.
+    expect(REPORT_DESIGN_TOKENS.typography.wordSpacing).toBe(1);
   });
 });

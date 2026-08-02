@@ -112,14 +112,17 @@ export function drawComplaintsReportCover(options: ReportCoverOptions): void {
 
   // ── Main title ────────────────────────────────────────────────────────────
   const titleY = bannerH + 28;
-  doc.font("Bold").fontSize(80).fillColor(COLORS.primary).text(title, margin, titleY, {
+  const titleOptions = {
     width: CW,
-    align: "center",
+    align: "center" as const,
     wordSpacing: WORD_SPACING,
-  });
+  };
+  doc.font("Bold").fontSize(80).fillColor(COLORS.primary);
+  const titleHeight = doc.heightOfString(title, titleOptions);
+  doc.text(title, margin, titleY, titleOptions);
 
   // ── Gold separator with diamond ───────────────────────────────────────────
-  const sepY = titleY + 106;
+  const sepY = titleY + titleHeight + 18;
   goldSeparator(doc, PW / 2, sepY, CW * 0.28);
 
   // ── Period text ───────────────────────────────────────────────────────────

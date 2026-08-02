@@ -31,14 +31,18 @@ export const REPORT_DESIGN_TOKENS = {
   fontSize: {
     reportTitle: 28,
     pageTitle: 20,
-    sectionTitle: 15,
-    kpiValue: 24,
-    body: 11,
-    table: 11,
+    sectionTitle: 17,
+    kpiValue: 26,
+    body: 12,
+    table: 11.5,
+    tableHeader: 12.5,
     footer: 9,
   },
   typography: {
-    wordSpacing: 0,
+    // wordSpacing:1 keeps spaces visible between Arabic words in PDFKit's BiDi layout.
+    // With wordSpacing:0 the leading visual space (= last logical space after RTL reorder)
+    // is stripped by PDFKit's line-trimming, causing word concatenation.
+    wordSpacing: 1,
   },
 } as const;
 
