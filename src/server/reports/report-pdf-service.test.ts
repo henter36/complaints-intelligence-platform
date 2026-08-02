@@ -4,6 +4,7 @@
 // globals; under the project's default jsdom environment those checks fail
 // with "Not a supported font format", so this file opts back into node.
 import PDFDocument from "pdfkit";
+import fs from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type { ReportData, ReportSection } from "./report-data-service";
 import { renderReportPdf } from "./report-pdf-service";
@@ -115,6 +116,47 @@ describe("PDF report rendering", () => {
   it("stays within a reasonable file size for a moderate report", async () => {
     const { buffer } = await renderReportPdf(baseReport());
     expect(buffer.length).toBeLessThan(500 * 1024);
+  });
+
+  it("does not load or reserve the application Z logo in report renderers", () => {
+    const standardSource = fs.readFileSync(new URL("./report-pdf-service.ts", import.meta.url), "utf8");
+    const briefSource = fs.readFileSync(new URL("./report-executive-brief-pdf-service.ts", import.meta.url), "utf8");
+    expect(`${standardSource}\n${briefSource}`).not.toMatch(/logo\.svg|LOGO_PATH|loadLogoPng/);
+  });
+
+  it("uses the analytical cover page for content and omits continuity without a reference period", async () => {
+    const report = baseReport({
+      title: "التقرير التحليلي الكامل",
+      reportMode: "FULL_ANALYTICAL",
+      previousPeriod: null,
+      briefData: {
+        briefKpis: [],
+        allRegions: [],
+        topClassifications: [],
+        comparativeTimeline: {
+          current: { label: "الحالي", points: [] },
+          previous: null,
+          periodDays: 31,
+        },
+        concentrationBands: [],
+        netBacklogFlow: { inflow: 3, outflow: 1, net: 2, periodDays: 31 },
+        perfVolumeRows: [{
+          entityName: "إدارة الاختبار",
+          totalComplaints: 3,
+          complianceRate: 100,
+          averageResolutionDays: 8,
+          currentlyLate: 1,
+          share: 100,
+        }],
+        continuityRows: [],
+      },
+    });
+    const { buffer } = await renderReportPdf(report);
+    const pageCount = (buffer.toString("binary").match(/\/Type\s*\/Page\s*\/Parent/g) ?? []).length;
+    expect(pageCount).toBe(1);
+    expect(bufferContainsText(buffer, "صافي تدفق التراكم")).toBe(true);
+    expect(bufferContainsText(buffer, "الأداء مقابل الحجم")).toBe(true);
+    expect(bufferContainsText(buffer, "الاستمرارية")).toBe(false);
   });
 
   it("does not throw when a table section is empty", async () => {

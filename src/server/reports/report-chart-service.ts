@@ -3,6 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
 import type { ReportChartSection } from "./report-data-service";
+import {
+  formatReportNumber,
+  REPORT_DESIGN_TOKENS,
+} from "@/lib/reports/design-tokens";
 
 // ---------------------------------------------------------------------------
 // Pure server-side SVG line-chart renderer -> PNG (via sharp/librsvg).
@@ -73,18 +77,20 @@ export const MIN_CHART_HEIGHT = 300;
 
 type SeriesStyle = { color: string; dash: string; width: number };
 
+const COLORS = REPORT_DESIGN_TOKENS.colors;
+
 const SERIES_STYLES: SeriesStyle[] = [
-  { color: "#1e40af", dash: "0", width: 2 },
-  { color: "#b45309", dash: "6,3", width: 2 },
-  { color: "#065f46", dash: "2,3", width: 2 },
-  { color: "#7c3aed", dash: "6,3,2,3", width: 2 },
-  { color: "#be123c", dash: "10,4", width: 2 },
-  { color: "#0e7490", dash: "4,2", width: 2 },
-  { color: "#92400e", dash: "2,2", width: 2 },
-  { color: "#374151", dash: "0", width: 1 },
+  { color: COLORS.primary, dash: "0", width: 2 },
+  { color: COLORS.neutral, dash: "6,3", width: 2 },
+  { color: COLORS.primary, dash: "2,3", width: 2 },
+  { color: COLORS.neutral, dash: "6,3,2,3", width: 2 },
+  { color: COLORS.primary, dash: "10,4", width: 2 },
+  { color: COLORS.neutral, dash: "4,2", width: 2 },
+  { color: COLORS.primary, dash: "2,2", width: 2 },
+  { color: COLORS.neutral, dash: "0", width: 1 },
 ];
 
-const OTHER_STYLE: SeriesStyle = { color: "#6b7280", dash: "5,3", width: 1.5 };
+const OTHER_STYLE: SeriesStyle = { color: COLORS.neutral, dash: "5,3", width: 1.5 };
 
 function seriesStyle(index: number, isOther: boolean): SeriesStyle {
   if (isOther) return OTHER_STYLE;
@@ -161,14 +167,14 @@ function yForValue(geo: ChartGeometry, value: number, yMax: number): number {
 function renderAxes(geo: ChartGeometry, yTicks: number[], yMax: number, dates: string[]): string {
   const parts: string[] = [];
   parts.push(
-    `<line x1="${geo.plotLeft}" y1="${geo.plotTop}" x2="${geo.plotLeft}" y2="${geo.plotBottom}" stroke="#94a3b8" stroke-width="1"/>`,
-    `<line x1="${geo.plotLeft}" y1="${geo.plotBottom}" x2="${geo.plotRight}" y2="${geo.plotBottom}" stroke="#94a3b8" stroke-width="1"/>`
+    `<line x1="${geo.plotLeft}" y1="${geo.plotTop}" x2="${geo.plotLeft}" y2="${geo.plotBottom}" stroke="${COLORS.border}" stroke-width="1"/>`,
+    `<line x1="${geo.plotLeft}" y1="${geo.plotBottom}" x2="${geo.plotRight}" y2="${geo.plotBottom}" stroke="${COLORS.border}" stroke-width="1"/>`
   );
   for (const tick of yTicks) {
     const y = yForValue(geo, tick, yMax);
     parts.push(
-      `<line x1="${geo.plotLeft}" y1="${y}" x2="${geo.plotRight}" y2="${y}" stroke="#eef2f7" stroke-width="1"/>`,
-      `<text x="${geo.plotRight + 6}" y="${y + 4}" text-anchor="start" font-size="10" fill="#475569">${tick}</text>`
+      `<line x1="${geo.plotLeft}" y1="${y}" x2="${geo.plotRight}" y2="${y}" stroke="${COLORS.border}" stroke-width="1"/>`,
+      `<text x="${geo.plotRight + 6}" y="${y + 4}" text-anchor="start" font-size="10" fill="${COLORS.neutral}">${formatReportNumber(tick)}</text>`
     );
   }
   const maxLabels = 12;
@@ -177,7 +183,7 @@ function renderAxes(geo: ChartGeometry, yTicks: number[], yMax: number, dates: s
     if (index % step !== 0 && index !== dates.length - 1) return;
     const x = xForIndex(geo, index);
     parts.push(
-      `<text x="${x}" y="${geo.plotBottom + 16}" text-anchor="middle" font-size="9" fill="#475569">${escapeXml(shortDateLabel(date))}</text>`
+      `<text x="${x}" y="${geo.plotBottom + 16}" text-anchor="middle" font-size="9" fill="${COLORS.neutral}">${escapeXml(shortDateLabel(date))}</text>`
     );
   });
   return parts.join("\n");
@@ -220,7 +226,7 @@ function renderLegend(section: ReportChartSection, width: number, legendTop: num
     const dashAttr = style.dash === "0" ? "" : ` stroke-dasharray="${style.dash}"`;
     parts.push(
       `<line x1="${currentX - swatchWidth}" y1="${lineY}" x2="${currentX}" y2="${lineY}" stroke="${style.color}" stroke-width="${style.width}"${dashAttr}/>`,
-      `<text x="${currentX - swatchWidth - 4}" y="${lineY + 4}" text-anchor="end" font-size="10" fill="#334155" direction="rtl">${escapeXml(series.name)}</text>`
+      `<text x="${currentX - swatchWidth - 4}" y="${lineY + 4}" text-anchor="end" font-size="10" fill="${COLORS.primary}" direction="rtl">${escapeXml(series.name)}</text>`
     );
     currentX -= columnWidth;
   });
@@ -246,8 +252,8 @@ function buildChartSvg(section: ReportChartSection, width: number, height: numbe
   const title = escapeXml(section.title);
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
     ${fontStyleBlock()}
-    <rect width="${width}" height="${height}" fill="#ffffff" stroke="#e2e8f0"/>
-    <text x="${width - 12}" y="24" text-anchor="end" font-size="14" fill="#0f172a" direction="rtl">${title}</text>
+    <rect width="${width}" height="${height}" fill="${COLORS.white}" stroke="${COLORS.border}"/>
+    <text x="${width - 12}" y="24" text-anchor="end" font-size="14" fill="${COLORS.primary}" direction="rtl">${title}</text>
     ${renderAxes(geo, ticks, yMax, dates)}
     ${renderSeries(geo, section, yMax)}
     ${renderLegend(section, width, geo.plotBottom + 28)}
@@ -258,8 +264,8 @@ function emptyChartSvg(section: ReportChartSection, width: number, height: numbe
   const message = escapeXml(section.emptyState ?? "لا توجد بيانات");
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
     ${fontStyleBlock()}
-    <rect width="${width}" height="${height}" fill="#ffffff" stroke="#e2e8f0"/>
-    <text x="${width / 2}" y="${height / 2}" text-anchor="middle" font-size="16" fill="#64748b" direction="rtl">${message}</text>
+    <rect width="${width}" height="${height}" fill="${COLORS.white}" stroke="${COLORS.border}"/>
+    <text x="${width / 2}" y="${height / 2}" text-anchor="middle" font-size="16" fill="${COLORS.neutral}" direction="rtl">${message}</text>
   </svg>`;
 }
 

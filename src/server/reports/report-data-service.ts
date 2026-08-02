@@ -571,12 +571,17 @@ async function buildExecutiveSummaryWithMode(
   }
 
   const modeTitle: Record<ReportMode, string> = {
+    STANDARD: getReportDefinition(ReportType.EXECUTIVE_SUMMARY).title,
     DIGITAL_EXECUTIVE_BRIEF: "تقرير تنفيذي مختصر — عرض رقمي",
-    PRINT_EXECUTIVE_BRIEF: "تقرير تنفيذي مختصر — نسخة طباعة",
+    PRINT_EXECUTIVE_BRIEF: "تقرير تنفيذي مختصر — طباعة",
     FULL_ANALYTICAL: "التقرير التحليلي الكامل",
   };
 
   const title = request.title ?? modeTitle[reportMode];
+
+  if (reportMode === "STANDARD") {
+    return { ...base, title, reportMode };
+  }
 
   if (reportMode === "FULL_ANALYTICAL") {
     const fullData = await buildFullAnalyticalData(

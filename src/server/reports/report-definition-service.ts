@@ -291,6 +291,9 @@ export function parseReportRequest(input: unknown): ReportRequest {
     parsed.data.options.maxRows ?? definition.maxRows,
     definition.maxRows
   );
+  const reportMode = parsed.data.type === ReportType.EXECUTIVE_SUMMARY
+    ? parsed.data.options.reportMode ?? "STANDARD"
+    : "STANDARD";
 
   if (parsed.data.options.columns) {
     const allowed = new Set(definition.defaultColumns);
@@ -306,7 +309,7 @@ export function parseReportRequest(input: unknown): ReportRequest {
 
   return {
     ...parsed.data,
-    options: { ...parsed.data.options, maxRows: effectiveMaxRows },
+    options: { ...parsed.data.options, maxRows: effectiveMaxRows, reportMode },
   };
 }
 

@@ -91,13 +91,22 @@ describe("runReport orchestration", () => {
 
     const { runReport } = await import("./report-export-service");
     const now = new Date("2026-08-01T00:00:00Z");
-    const result = await runReport({ request: buildRequest(), formats: [ReportFormat.PDF], requestedBy: "admin" }, now);
+    const request = {
+      ...buildRequest(),
+      options: { ...buildRequest().options, reportMode: "DIGITAL_EXECUTIVE_BRIEF" as const },
+    };
+    const result = await runReport({ request, formats: [ReportFormat.PDF], requestedBy: "admin" }, now);
 
     expect(result.status).toBe("COMPLETED");
     expect(result.artifacts).toHaveLength(1);
     expect(dbMocks.runUpdate).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: "run_1" }, data: expect.objectContaining({ status: "COMPLETED" }) })
     );
+    expect(dbMocks.runCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        optionsSnapshot: expect.objectContaining({ reportMode: "DIGITAL_EXECUTIVE_BRIEF" }),
+      }),
+    }));
 
     // Retention: expiresAt must be exactly reportRetentionDays (90) after `now`.
     const artifactCreateArgs = dbMocks.artifactCreate.mock.calls[0][0];

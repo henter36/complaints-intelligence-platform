@@ -93,6 +93,96 @@ describe("ReportsCenter", () => {
     expect(screen.getByRole("button", { name: /تصدير XLSX/ })).toBeInTheDocument();
   });
 
+  it("shows all report modes for executive reports with digital selected by default", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", routedFetch());
+    render(<ReportsCenter />);
+    await user.click(await screen.findByText("التقرير التنفيذي الشامل"));
+
+    expect(screen.getByText("نمط التقرير")).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /التقرير التنفيذي المختصر — عرض رقمي/ })).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByRole("radio", { name: /التقرير التنفيذي المختصر — طباعة/ })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /التقرير التحليلي الكامل/ })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: /التقرير القياسي/ })).toBeInTheDocument();
+    expect(screen.getByText("مقترح")).toBeInTheDocument();
+    expect(screen.getByText(/ثلاث صفحات أفقية احترافية/)).toBeInTheDocument();
+  });
+
+  it("hides report modes and resets the hidden value after changing report type", async () => {
+    const user = userEvent.setup();
+    const fetchMock = routedFetch({
+      "/api/reports/preview": () => jsonResponse({ report: {
+        type: "DEPARTMENT_PERFORMANCE", title: "الإدارات", generatedAt: new Date().toISOString(),
+        period: { from: "2026-07-01", to: "2026-07-31" }, filters: {}, sections: [], warnings: [], rowCount: 0,
+      } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ReportsCenter />);
+    await user.click(await screen.findByText("التقرير التنفيذي الشامل"));
+    await user.click(screen.getByRole("radio", { name: /التقرير التنفيذي المختصر — طباعة/ }));
+    await user.click(screen.getByText("تقرير أداء الإدارات"));
+    expect(screen.queryByText("نمط التقرير")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /معاينة/ }));
+    const previewCall = fetchMock.mock.calls.find(([input]) => String(input).includes("/api/reports/preview"));
+    const body = JSON.parse(previewCall?.[1]?.body as string);
+    expect(body.options.reportMode).toBe("STANDARD");
+  });
+
+  it("sends the selected mode in preview and presents a three-page 16:9 preview", async () => {
+    const user = userEvent.setup();
+    const fetchMock = routedFetch({
+      "/api/reports/preview": () => jsonResponse({ report: {
+        type: "EXECUTIVE_SUMMARY", reportMode: "DIGITAL_EXECUTIVE_BRIEF", title: "المختصر الرقمي",
+        generatedAt: new Date().toISOString(), period: { from: "2026-07-01", to: "2026-07-31" },
+        filters: {}, sections: [], warnings: [], rowCount: 0,
+      } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ReportsCenter />);
+    await user.click(await screen.findByText("التقرير التنفيذي الشامل"));
+    await user.click(screen.getByRole("button", { name: /معاينة/ }));
+    expect(await screen.findByText("معاينة رقمية بنسبة 16:9 — ثلاث صفحات")).toBeInTheDocument();
+    expect(screen.getAllByLabelText(/صفحة [123] من 3/)).toHaveLength(3);
+    const previewCall = fetchMock.mock.calls.find(([input]) => String(input).includes("/api/reports/preview"));
+    expect(JSON.parse(previewCall?.[1]?.body as string).options.reportMode).toBe("DIGITAL_EXECUTIVE_BRIEF");
+  });
+
+  it("preserves the selected FULL_ANALYTICAL mode when saving a template", async () => {
+    const user = userEvent.setup();
+    const fetchMock = routedFetch({
+      "/api/reports/templates": () => jsonResponse({ template: { id: "tpl-1" } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ReportsCenter />);
+    await user.click(await screen.findByText("التقرير التنفيذي الشامل"));
+    await user.click(screen.getByRole("radio", { name: /التقرير التحليلي الكامل/ }));
+    await user.click(screen.getByRole("button", { name: /حفظ كقالب/ }));
+    await user.type(screen.getByPlaceholderText("مثال: التقرير التنفيذي الشهري"), "قالب تحليلي");
+    await user.click(screen.getByRole("button", { name: /^حفظ$/ }));
+    const createCall = fetchMock.mock.calls.find(([input, init]) =>
+      String(input).includes("/api/reports/templates") && init?.method === "POST"
+    );
+    expect(JSON.parse(createCall?.[1]?.body as string).options.reportMode).toBe("FULL_ANALYTICAL");
+  });
+
+  it("sends PRINT_EXECUTIVE_BRIEF when running an export", async () => {
+    const user = userEvent.setup();
+    const fetchMock = routedFetch({
+      "/api/reports/run": () => jsonResponse({ run: { artifacts: [] } }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ReportsCenter />);
+    await user.click(await screen.findByText("التقرير التنفيذي الشامل"));
+    await user.click(screen.getByRole("radio", { name: /التقرير التنفيذي المختصر — طباعة/ }));
+    await user.click(screen.getByRole("button", { name: /تصدير PDF/ }));
+    const runCall = await vi.waitFor(() => {
+      const call = fetchMock.mock.calls.find(([input]) => String(input).includes("/api/reports/run"));
+      expect(call).toBeDefined();
+      return call;
+    });
+    expect(JSON.parse(runCall?.[1]?.body as string).options.reportMode).toBe("PRINT_EXECUTIVE_BRIEF");
+  });
+
   it("shows a report preview after clicking Preview, using a correctly-shaped POST request", async () => {
     const user = userEvent.setup();
     const fetchMock = routedFetch({
@@ -147,6 +237,21 @@ describe("ReportsCenter", () => {
     await user.click(templatesTab);
 
     expect(await screen.findByText("لا توجد قوالب محفوظة بعد")).toBeInTheDocument();
+  });
+
+  it("reads and labels reportMode from a saved template", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", routedFetch({
+      "/api/reports/templates": () => jsonResponse({ templates: [{
+        id: "tpl-digital", name: "قالب الإدارة", description: null,
+        reportType: "EXECUTIVE_SUMMARY", isActive: true, lastRunAt: null,
+        createdAt: new Date().toISOString(), schedules: [],
+        options: { reportMode: "DIGITAL_EXECUTIVE_BRIEF" },
+      }] }),
+    }));
+    render(<ReportsCenter />);
+    await user.click(await screen.findByRole("tab", { name: /القوالب/ }));
+    expect(await screen.findByText("التقرير التنفيذي المختصر — عرض رقمي")).toBeInTheDocument();
   });
 
   it("shows an empty state on the Run History tab when none exist", async () => {

@@ -17,11 +17,13 @@
  * and ReportRun — no schema migration required.
  */
 export type ReportMode =
+  | "STANDARD"                 // Existing full-section report
   | "DIGITAL_EXECUTIVE_BRIEF"  // 3-page 16:9 digital slides (1440×810 pt)
   | "FULL_ANALYTICAL"          // Unlimited-page A4 portrait deep-dive
   | "PRINT_EXECUTIVE_BRIEF";   // 3-page A4 landscape print copy
 
 export const REPORT_MODES = [
+  "STANDARD",
   "DIGITAL_EXECUTIVE_BRIEF",
   "FULL_ANALYTICAL",
   "PRINT_EXECUTIVE_BRIEF",

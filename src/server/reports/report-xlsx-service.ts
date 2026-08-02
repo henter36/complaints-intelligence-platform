@@ -10,6 +10,7 @@ import { isFullAnalyticalData } from "./report-data-service";
 import type { ComparisonResult } from "./report-comparison";
 import type { NetBacklogFlow, PerfVolumeRow, ContinuityRow } from "@/lib/reports/report-contract";
 import { formatRiyadhDateTime } from "./report-time";
+import { REPORT_XLSX_NUMBER_FORMATS } from "@/lib/reports/design-tokens";
 
 const FORMULA_INJECTION_PATTERN = /^[=+\-@]/;
 
@@ -85,6 +86,7 @@ function buildSummarySheet(workbook: ExcelJS.Workbook, data: ReportData): ExcelJ
   const rows: [string, string][] = [
     ["عنوان التقرير", data.title],
     ["نوع التقرير", definition.title],
+    ["نمط التقرير", data.reportMode ?? "STANDARD"],
     ["الوصف", definition.description],
     ["الفترة من", data.period.from],
     ["الفترة إلى", data.period.to],
@@ -131,15 +133,15 @@ function buildKpiSheet(workbook: ExcelJS.Workbook, data: ReportData): void {
       previous: kpiValue.previousValue ?? null,
       change: kpiValue.percentageChange ?? null,
     });
-    row.getCell("change").numFmt = '0.0"%"';
+    row.getCell("change").numFmt = REPORT_XLSX_NUMBER_FORMATS.percent;
   }
 }
 
 function columnNumFmt(format: ReportTable["columns"][number]["format"]): string | undefined {
-  if (format === "percent") return '0.0"%"';
+  if (format === "percent") return REPORT_XLSX_NUMBER_FORMATS.percent;
   if (format === "date") return "yyyy-mm-dd";
-  if (format === "number") return "#,##0.##";
-  if (format === "signed-number") return '+#,##0;-#,##0;0';
+  if (format === "number") return REPORT_XLSX_NUMBER_FORMATS.number;
+  if (format === "signed-number") return REPORT_XLSX_NUMBER_FORMATS.signedNumber;
   return undefined;
 }
 
@@ -266,7 +268,7 @@ function buildRegionChangesSheet(workbook: ExcelJS.Workbook, comparison: Compari
       changeRate: row.changeRate ?? null,
       direction: sanitizeText(row.direction),
     });
-    added.getCell("changeRate").numFmt = '0.0"%"';
+    added.getCell("changeRate").numFmt = REPORT_XLSX_NUMBER_FORMATS.percent;
   }
 }
 
@@ -294,8 +296,8 @@ function buildDeptClassRisesSheet(workbook: ExcelJS.Workbook, comparison: Compar
       changeRate: row.changeRate ?? null,
       contribution: row.classificationContribution,
     });
-    added.getCell("changeRate").numFmt = '0.0"%"';
-    added.getCell("contribution").numFmt = '0.0"%"';
+    added.getCell("changeRate").numFmt = REPORT_XLSX_NUMBER_FORMATS.percent;
+    added.getCell("contribution").numFmt = REPORT_XLSX_NUMBER_FORMATS.percent;
   }
 }
 
@@ -334,7 +336,7 @@ function buildBriefKpisSheet(workbook: ExcelJS.Workbook, briefData: ExecutiveBri
       assessment: sanitizeText(assessmentLabels[card.assessment] ?? card.assessment),
     });
     if (typeof card.changeRate === "number") {
-      row.getCell("changeRate").numFmt = '+0.0"%";-0.0"%";0"%"';
+      row.getCell("changeRate").numFmt = REPORT_XLSX_NUMBER_FORMATS.signedPercent;
     }
   }
 }
@@ -368,8 +370,8 @@ function buildAllRegionsSheet(workbook: ExcelJS.Workbook, briefData: ExecutiveBr
       currentlyLate: row.currentlyLate,
       direction: sanitizeText(row.direction),
     });
-    if (typeof row.changeRate === "number") added.getCell("changeRate").numFmt = '0.0"%"';
-    if (typeof row.complianceRate === "number") added.getCell("complianceRate").numFmt = '0.0"%"';
+    if (typeof row.changeRate === "number") added.getCell("changeRate").numFmt = REPORT_XLSX_NUMBER_FORMATS.percent;
+    if (typeof row.complianceRate === "number") added.getCell("complianceRate").numFmt = REPORT_XLSX_NUMBER_FORMATS.percent;
   }
 }
 
@@ -396,8 +398,8 @@ function buildTopClassificationsSheet(workbook: ExcelJS.Workbook, briefData: Exe
       changeRate: row.changeRate ?? null,
       shareOfTotal: row.shareOfTotal,
     });
-    if (typeof row.changeRate === "number") added.getCell("changeRate").numFmt = '0.0"%"';
-    added.getCell("shareOfTotal").numFmt = '0.0"%"';
+    if (typeof row.changeRate === "number") added.getCell("changeRate").numFmt = REPORT_XLSX_NUMBER_FORMATS.percent;
+    added.getCell("shareOfTotal").numFmt = REPORT_XLSX_NUMBER_FORMATS.percent;
   }
 }
 
@@ -459,9 +461,9 @@ function buildConcentrationSheet(workbook: ExcelJS.Workbook, briefData: Executiv
       top5: band.top5SharePercent,
       total: band.totalEntities,
     });
-    row.getCell("top1").numFmt = '0.0"%"';
-    row.getCell("top3").numFmt = '0.0"%"';
-    row.getCell("top5").numFmt = '0.0"%"';
+    row.getCell("top1").numFmt = REPORT_XLSX_NUMBER_FORMATS.percent;
+    row.getCell("top3").numFmt = REPORT_XLSX_NUMBER_FORMATS.percent;
+    row.getCell("top5").numFmt = REPORT_XLSX_NUMBER_FORMATS.percent;
   }
 }
 
@@ -505,8 +507,8 @@ function buildPerfVolumeSheet(workbook: ExcelJS.Workbook, rows: PerfVolumeRow[],
       late: row.currentlyLate,
       share: row.share,
     });
-    added.getCell("compliance").numFmt = '0.0"%"';
-    added.getCell("share").numFmt = '0.0"%"';
+    added.getCell("compliance").numFmt = REPORT_XLSX_NUMBER_FORMATS.percent;
+    added.getCell("share").numFmt = REPORT_XLSX_NUMBER_FORMATS.percent;
   }
 }
 

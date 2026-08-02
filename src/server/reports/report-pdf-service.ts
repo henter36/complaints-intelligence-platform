@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import PDFDocument from "pdfkit";
-import sharp from "sharp";
 import { ReportType } from "@prisma/client";
 import { getReportDefinition } from "./report-definition-service";
 import { renderExecutiveBriefPdf } from "./report-executive-brief-pdf-service";
@@ -15,16 +14,19 @@ import type {
   ReportTableColumn,
   ReportTextSection,
 } from "./report-data-service";
+import { isFullAnalyticalData } from "./report-data-service";
 import { renderLineChartPng } from "./report-chart-service";
 import { formatRiyadhDateTime } from "./report-time";
 import { MAX_TREND_SERIES, DEPT_CLASS_RISES_LIMIT } from "./report-comparison";
 import { buildMatrixTruncationMessage } from "@/lib/reports/matrix-truncation";
+import {
+  formatReportNumber,
+  REPORT_DESIGN_TOKENS,
+} from "@/lib/reports/design-tokens";
 
 const ASSETS_DIR = path.join(process.cwd(), "src/server/reports/assets");
 const FONT_REGULAR_PATH = path.join(ASSETS_DIR, "fonts/Amiri-Regular.ttf");
 const FONT_BOLD_PATH = path.join(ASSETS_DIR, "fonts/Amiri-Bold.ttf");
-const LOGO_PATH = path.join(process.cwd(), "public/logo.svg");
-
 const PAGE_MARGIN = 40;
 const PAGE_SIZE: [number, number] = [595.28, 841.89]; // A4 points
 const CONTENT_WIDTH = PAGE_SIZE[0] - PAGE_MARGIN * 2;
@@ -40,23 +42,12 @@ const TABLE_ROW_MAX_LINES = 2;
 
 let fontRegularBuffer: Buffer | null = null;
 let fontBoldBuffer: Buffer | null = null;
-let logoPngBuffer: Buffer | null | undefined;
+const COLORS = REPORT_DESIGN_TOKENS.colors;
 
 function loadFonts(): { regular: Buffer; bold: Buffer } {
   if (!fontRegularBuffer) fontRegularBuffer = fs.readFileSync(FONT_REGULAR_PATH);
   if (!fontBoldBuffer) fontBoldBuffer = fs.readFileSync(FONT_BOLD_PATH);
   return { regular: fontRegularBuffer, bold: fontBoldBuffer };
-}
-
-async function loadLogoPng(): Promise<Buffer | null> {
-  if (logoPngBuffer !== undefined) return logoPngBuffer;
-  try {
-    const svg = fs.readFileSync(LOGO_PATH);
-    logoPngBuffer = await sharp(svg).resize(64, 64, { fit: "contain" }).png().toBuffer();
-  } catch {
-    logoPngBuffer = null;
-  }
-  return logoPngBuffer;
 }
 
 const KPI_FORMAT_SUFFIX: Record<ReportKpiCard["format"], string> = {
@@ -67,7 +58,7 @@ const KPI_FORMAT_SUFFIX: Record<ReportKpiCard["format"], string> = {
 };
 
 function formatKpiValue(card: ReportKpiCard): string {
-  const value = Number.isInteger(card.value) ? String(card.value) : card.value.toFixed(1);
+  const value = formatReportNumber(card.value);
   return `${value}${KPI_FORMAT_SUFFIX[card.format]}`;
 }
 
@@ -104,14 +95,16 @@ function toDisplayText(value: unknown): string {
 function formatSignedNumber(value: unknown): string {
   const n = Number(value);
   if (!Number.isFinite(n)) return "";
-  if (n > 0) return `+${n}`;
-  return String(n);
+  return formatReportNumber(n, { sign: true });
 }
 
 function formatCellValue(value: unknown, format?: ReportTableColumn["format"]): string {
   if (value === null || value === undefined || value === "") return "-";
-  if (format === "percent") return `${toDisplayText(value)}%`;
+  if (format === "percent" && typeof value === "number") {
+    return formatReportNumber(value, { percent: true });
+  }
   if (format === "signed-number") return formatSignedNumber(value);
+  if (format === "number" && typeof value === "number") return formatReportNumber(value);
   if (format === "date") {
     const date = new Date(toDisplayText(value));
     if (Number.isNaN(date.getTime())) return "-";
@@ -147,8 +140,9 @@ export async function renderReportPdf(data: ReportData): Promise<PdfRenderResult
   // Info strings as UTF-16BE literals (searchable in the raw buffer), whereas
   // on-page text is glyph-subsetted and NOT searchable. This makes the report's
   // structure discoverable to tooling/tests without a PDF-parsing dependency.
-  const keywordParts = data.sections.map((section) => section.title);
-  if (data.type === ReportType.EXECUTIVE_SUMMARY) {
+  const fullAnalyticalSections = buildFullAnalyticalPdfSections(data);
+  const keywordParts = [...data.sections, ...fullAnalyticalSections].map((section) => section.title);
+  if (data.type === ReportType.EXECUTIVE_SUMMARY && data.reportMode !== "FULL_ANALYTICAL") {
     keywordParts.push("منهجية الاحتساب");
   }
   const sectionTitles = keywordParts.join(" | ");
@@ -175,19 +169,24 @@ export async function renderReportPdf(data: ReportData): Promise<PdfRenderResult
     doc.on("end", () => resolve(Buffer.concat(chunks)));
   });
 
-  const logo = await loadLogoPng();
+  renderCoverPage(doc, data);
 
-  renderCoverPage(doc, data, logo);
+  const visibleSections = [
+    ...data.sections,
+    ...fullAnalyticalSections,
+  ].filter(sectionHasRenderableContent);
+  const hasBody = visibleSections.length > 0
+    || (data.type === ReportType.EXECUTIVE_SUMMARY && data.reportMode !== "FULL_ANALYTICAL")
+    || warnings.length > 0;
+  const continueBelowCover = data.reportMode === "FULL_ANALYTICAL";
+  if (hasBody && !continueBelowCover) doc.addPage();
 
-  // Body sections start on a fresh page after the cover.
-  doc.addPage();
-
-  for (const section of data.sections) {
+  for (const section of visibleSections) {
     await renderSection(doc, section, warnings);
     doc.moveDown(0.8);
   }
 
-  if (data.type === ReportType.EXECUTIVE_SUMMARY) {
+  if (data.type === ReportType.EXECUTIVE_SUMMARY && data.reportMode !== "FULL_ANALYTICAL") {
     renderMethodologyNote(doc);
   }
 
@@ -235,9 +234,9 @@ async function renderSection(
   }
   if (section.table.truncated) {
     doc.moveDown(0.2);
-    doc.font("Body").fontSize(8).fillColor("#b45309");
+    doc.font("Body").fontSize(8).fillColor(COLORS.danger);
     doc.text(`تم عرض ${section.table.rows.length} من أصل ${section.table.totalMatched} صفاً.`, { align: "right" });
-    doc.fillColor("#000000");
+    doc.fillColor(COLORS.primary);
   }
 }
 
@@ -248,34 +247,99 @@ function ensureSpace(doc: PDFKit.PDFDocument, needed: number): void {
   }
 }
 
+function sectionHasRenderableContent(section: ReportSection): boolean {
+  if (section.kind === "kpi") return section.cards.length > 0;
+  if (section.kind === "text") return section.points.some((point) => point.trim().length > 0);
+  if (section.kind === "chart") {
+    return section.series.some((series) => series.points.some((point) => point.y !== 0));
+  }
+  if (section.kind === "matrix") {
+    return section.rowHeaders.length > 0 && section.columnHeaders.length > 0;
+  }
+  return section.table.columns.length > 0 && section.table.rows.length > 0;
+}
+
+function buildFullAnalyticalPdfSections(data: ReportData): ReportSection[] {
+  if (data.reportMode !== "FULL_ANALYTICAL" || !data.briefData || !isFullAnalyticalData(data.briefData)) {
+    return [];
+  }
+  const full = data.briefData;
+  const sections: ReportSection[] = [
+    {
+      id: "full_net_backlog_flow",
+      kind: "kpi",
+      title: "صافي تدفق التراكم",
+      cards: [
+        { key: "inflow", label: "الوارد", value: full.netBacklogFlow.inflow, format: "number" },
+        { key: "outflow", label: "المغلق خلال الفترة", value: full.netBacklogFlow.outflow, format: "number" },
+        { key: "net", label: "صافي التغير", value: full.netBacklogFlow.net, format: "number" },
+      ],
+    },
+    {
+      id: "full_performance_volume",
+      kind: "table",
+      title: "الأداء مقابل الحجم",
+      table: {
+        id: "full_performance_volume",
+        title: "الأداء مقابل الحجم",
+        columns: [
+          { key: "entityName", label: "الجهة", format: "text" },
+          { key: "totalComplaints", label: "إجمالي الشكاوى", format: "number" },
+          { key: "complianceRate", label: "الالتزام", format: "percent" },
+          { key: "averageResolutionDays", label: "متوسط الإغلاق", format: "number" },
+          { key: "currentlyLate", label: "المتأخرة", format: "number" },
+          { key: "share", label: "المساهمة", format: "percent" },
+        ],
+        rows: full.perfVolumeRows,
+        truncated: false,
+        totalMatched: full.perfVolumeRows.length,
+      },
+    },
+  ];
+  if (data.previousPeriod && full.continuityRows.length > 0) {
+    sections.push({
+      id: "full_continuity",
+      kind: "table",
+      title: "الاستمرارية",
+      table: {
+        id: "full_continuity",
+        title: "الاستمرارية",
+        columns: [
+          { key: "departmentName", label: "الإدارة", format: "text" },
+          { key: "classificationName", label: "التصنيف", format: "text" },
+          { key: "currentCount", label: "الحالي", format: "number" },
+          { key: "previousCount", label: "السابق", format: "number" },
+          { key: "recurrenceType", label: "النوع", format: "text" },
+        ],
+        rows: full.continuityRows,
+        truncated: false,
+        totalMatched: full.continuityRows.length,
+      },
+    });
+  }
+  return sections;
+}
+
 // ---------------------------------------------------------------------------
 // Cover page
 // ---------------------------------------------------------------------------
 
-function renderCoverPage(doc: PDFKit.PDFDocument, data: ReportData, logo: Buffer | null): void {
+function renderCoverPage(doc: PDFKit.PDFDocument, data: ReportData): void {
   const definition = getReportDefinition(data.type);
   const top = doc.y;
 
-  if (logo) {
-    try {
-      doc.image(logo, PAGE_MARGIN, top, { width: 48, height: 48 });
-    } catch {
-      // Logo is decorative; a failure here must not fail the report.
-    }
-  }
-
-  doc.font("Bold").fontSize(12).fillColor("#334155");
-  doc.text("نظام ذكاء الشكاوى", PAGE_MARGIN, top + 6, { width: CONTENT_WIDTH - 56, align: "right" });
+  doc.font("Bold").fontSize(12).fillColor(COLORS.primary);
+  doc.text("نظام ذكاء الشكاوى", PAGE_MARGIN, top + 6, { width: CONTENT_WIDTH, align: "right" });
 
   doc.moveDown(1.2);
-  doc.font("Bold").fontSize(22).fillColor("#0f172a");
+  doc.font("Bold").fontSize(22).fillColor(COLORS.primary);
   doc.text(data.title, { width: CONTENT_WIDTH, align: "right" });
 
-  doc.font("Body").fontSize(11).fillColor("#475569");
+  doc.font("Body").fontSize(11).fillColor(COLORS.neutral);
   doc.text(definition.description, { width: CONTENT_WIDTH, align: "right" });
   doc.moveDown(0.8);
 
-  doc.fontSize(10).fillColor("#0f172a");
+  doc.fontSize(10).fillColor(COLORS.primary);
   const metaLines: string[] = [
     `نوع التقرير: ${REPORT_TYPE_LABEL[data.type]}`,
     `الفترة الحالية: من ${data.period.from} إلى ${data.period.to}`,
@@ -292,38 +356,25 @@ function renderCoverPage(doc: PDFKit.PDFDocument, data: ReportData, logo: Buffer
 
   renderFilterLine(doc, data);
 
-  doc.fillColor("#000000");
+  doc.fillColor(COLORS.primary);
   doc.moveDown(0.5);
   separator(doc);
   doc.moveDown(0.5);
 
-  // Mini KPI overview on the cover (4 per row).
-  const kpiSection = data.sections.find((section) => section.kind === "kpi");
-  if (kpiSection?.kind === "kpi") {
-    drawSectionTitle(doc, "لمحة سريعة");
-    drawKpiGrid(doc, kpiSection.cards, 4);
-  }
-
-  // Executive summary bullet points on the cover.
-  const textSection = data.sections.find((section) => section.kind === "text");
-  if (textSection?.kind === "text") {
-    doc.moveDown(0.4);
-    drawTextSection(doc, textSection);
-  }
 }
 
 function renderFilterLine(doc: PDFKit.PDFDocument, data: ReportData): void {
   const entries = Object.entries(data.filters).filter(([key, value]) => key !== "from" && key !== "to" && value);
   if (entries.length === 0) return;
   const text = entries.map(([key, value]) => `${FILTER_LABELS[key] ?? key}: ${toDisplayText(value)}`).join(" | ");
-  doc.font("Body").fontSize(9).fillColor("#475569");
+  doc.font("Body").fontSize(9).fillColor(COLORS.neutral);
   doc.text(`الفلاتر المطبقة: ${text}`, { width: CONTENT_WIDTH, align: "right" });
-  doc.fillColor("#0f172a");
+  doc.fillColor(COLORS.primary);
 }
 
 function separator(doc: PDFKit.PDFDocument): void {
-  doc.moveTo(PAGE_MARGIN, doc.y).lineTo(PAGE_SIZE[0] - PAGE_MARGIN, doc.y).strokeColor("#cbd5e1").stroke();
-  doc.strokeColor("#000000");
+  doc.moveTo(PAGE_MARGIN, doc.y).lineTo(PAGE_SIZE[0] - PAGE_MARGIN, doc.y).strokeColor(COLORS.border).stroke();
+  doc.strokeColor(COLORS.primary);
 }
 
 // ---------------------------------------------------------------------------
@@ -332,13 +383,13 @@ function separator(doc: PDFKit.PDFDocument): void {
 
 function renderWarnings(doc: PDFKit.PDFDocument, warnings: string[]): void {
   ensureSpace(doc, 20 + warnings.length * 14);
-  doc.font("Bold").fontSize(9).fillColor("#92400e");
+  doc.font("Bold").fontSize(9).fillColor(COLORS.danger);
   doc.text("تنبيهات:", { width: CONTENT_WIDTH, align: "right" });
   doc.font("Body").fontSize(9);
   for (const warning of warnings) {
     doc.text(`• ${warning}`, { width: CONTENT_WIDTH, align: "right" });
   }
-  doc.fillColor("#000000");
+  doc.fillColor(COLORS.primary);
   doc.moveDown(0.6);
 }
 
@@ -353,32 +404,32 @@ function renderMethodologyNote(doc: PDFKit.PDFDocument): void {
   ];
   ensureSpace(doc, 30 + bullets.length * 26);
   drawSectionTitle(doc, "منهجية الاحتساب");
-  doc.font("Body").fontSize(9).fillColor("#334155");
+  doc.font("Body").fontSize(9).fillColor(COLORS.primary);
   for (const bullet of bullets) {
     doc.text(`• ${bullet}`, { width: CONTENT_WIDTH, align: "right" });
     doc.moveDown(0.2);
   }
-  doc.fillColor("#000000");
+  doc.fillColor(COLORS.primary);
 }
 
 function drawSectionTitle(doc: PDFKit.PDFDocument, title: string): void {
   ensureSpace(doc, 24);
-  doc.font("Bold").fontSize(13).fillColor("#0f172a");
+  doc.font("Bold").fontSize(13).fillColor(COLORS.primary);
   doc.text(title, { width: CONTENT_WIDTH, align: "right" });
-  doc.fillColor("#000000");
+  doc.fillColor(COLORS.primary);
   doc.moveDown(0.3);
 }
 
 function drawTextSection(doc: PDFKit.PDFDocument, section: ReportTextSection): void {
   drawSectionTitle(doc, section.title);
-  doc.font("Body").fontSize(10.5).fillColor("#1f2937");
+  doc.font("Body").fontSize(10.5).fillColor(COLORS.primary);
   for (const point of section.points) {
     if (!point?.trim()) continue;
     ensureSpace(doc, 18);
     doc.text(`•  ${point}`, PAGE_MARGIN + 8, doc.y, { width: CONTENT_WIDTH - 8, align: "right" });
     doc.moveDown(0.2);
   }
-  doc.fillColor("#000000");
+  doc.fillColor(COLORS.primary);
 }
 
 function drawMatrixSection(
@@ -387,17 +438,17 @@ function drawMatrixSection(
 ): void {
   drawSectionTitle(doc, section.title);
   if (section.description) {
-    doc.font("Body").fontSize(9).fillColor("#64748b");
+    doc.font("Body").fontSize(9).fillColor(COLORS.neutral);
     doc.text(section.description, { width: CONTENT_WIDTH, align: "right" });
-    doc.fillColor("#000000");
+    doc.fillColor(COLORS.primary);
     doc.moveDown(0.2);
   }
 
   const { rowHeaders, columnHeaders, cells } = section;
   if (rowHeaders.length === 0 || columnHeaders.length === 0) {
-    doc.font("Body").fontSize(9).fillColor("#64748b");
+    doc.font("Body").fontSize(9).fillColor(COLORS.neutral);
     doc.text("لا توجد بيانات لعرضها.", { width: CONTENT_WIDTH, align: "right" });
-    doc.fillColor("#000000");
+    doc.fillColor(COLORS.primary);
     return;
   }
 
@@ -416,7 +467,7 @@ function drawMatrixSection(
 
   function drawColumnHeaders(): void {
     const top = doc.y;
-    doc.font("Bold").fontSize(fontSize).fillColor("#0f172a");
+    doc.font("Bold").fontSize(fontSize).fillColor(COLORS.primary);
     // Row/column label in the top-right corner cell
     doc.text(`${section.rowLabel} / ${section.columnLabel}`, rowLabelX + 2, top + 4, {
       width: headerColWidth - 4,
@@ -439,9 +490,9 @@ function drawMatrixSection(
     doc.y = top + headerHeight;
     doc.moveTo(PAGE_MARGIN, doc.y)
       .lineTo(tableRight, doc.y)
-      .strokeColor("#94a3b8")
+      .strokeColor(COLORS.border)
       .stroke();
-    doc.strokeColor("#000000");
+    doc.strokeColor(COLORS.primary);
   }
 
   ensureSpace(doc, headerHeight + rowHeight * Math.min(rowHeaders.length + 1, 12));
@@ -454,11 +505,11 @@ function drawMatrixSection(
     }
     const rowTop = doc.y;
     if (ri % 2 === 1) {
-      doc.rect(PAGE_MARGIN, rowTop, CONTENT_WIDTH, rowHeight).fill("#f8fafc");
-      doc.fillColor("#000000");
+      doc.rect(PAGE_MARGIN, rowTop, CONTENT_WIDTH, rowHeight).fill(COLORS.tableRowAlternate);
+      doc.fillColor(COLORS.primary);
     }
     // Row label at the right
-    doc.font("Bold").fontSize(fontSize).fillColor("#0f172a");
+    doc.font("Bold").fontSize(fontSize).fillColor(COLORS.primary);
     doc.text(rowHeader, rowLabelX + 2, rowTop + 3, {
       width: headerColWidth - 4,
       height: rowHeight - 3,
@@ -467,11 +518,11 @@ function drawMatrixSection(
       ellipsis: true,
     });
     // Data cells extend leftward
-    doc.font("Body").fontSize(fontSize).fillColor("#1f2937");
+    doc.font("Body").fontSize(fontSize).fillColor(COLORS.primary);
     const row = cells[ri] ?? [];
     row.forEach((cellValue, ci) => {
       const x = rowLabelX - (ci + 1) * cellWidth;
-      doc.text(cellValue > 0 ? String(cellValue) : "-", x + 2, rowTop + 3, {
+      doc.text(formatReportNumber(cellValue), x + 2, rowTop + 3, {
         width: cellWidth - 4,
         height: rowHeight - 3,
         align: "center",
@@ -484,9 +535,9 @@ function drawMatrixSection(
   const truncMsg = buildMatrixTruncationMessage(section);
   if (truncMsg) {
     doc.moveDown(0.2);
-    doc.font("Body").fontSize(8).fillColor("#b45309");
+    doc.font("Body").fontSize(8).fillColor(COLORS.danger);
     doc.text(truncMsg, { width: CONTENT_WIDTH, align: "right" });
-    doc.fillColor("#000000");
+    doc.fillColor(COLORS.primary);
   }
 }
 
@@ -497,9 +548,9 @@ async function drawChartSection(
 ): Promise<void> {
   drawSectionTitle(doc, section.title);
   if (section.description) {
-    doc.font("Body").fontSize(9).fillColor("#64748b");
+    doc.font("Body").fontSize(9).fillColor(COLORS.neutral);
     doc.text(section.description, { width: CONTENT_WIDTH, align: "right" });
-    doc.fillColor("#000000");
+    doc.fillColor(COLORS.primary);
     doc.moveDown(0.2);
   }
 
@@ -519,19 +570,19 @@ async function drawChartSection(
     // Never leave a silent blank space: draw a visible placeholder box.
     const boxHeight = 60;
     const top = doc.y;
-    doc.rect(PAGE_MARGIN, top, CONTENT_WIDTH, boxHeight).fillAndStroke("#fef2f2", "#fca5a5");
-    doc.font("Body").fontSize(11).fillColor("#991b1b");
+    doc.rect(PAGE_MARGIN, top, CONTENT_WIDTH, boxHeight).fillAndStroke(COLORS.background, COLORS.danger);
+    doc.font("Body").fontSize(11).fillColor(COLORS.danger);
     doc.text("تعذر عرض الرسم البياني", PAGE_MARGIN + 8, top + 22, { width: CONTENT_WIDTH - 16, align: "center" });
-    doc.fillColor("#000000");
+    doc.fillColor(COLORS.primary);
     doc.y = top + boxHeight;
     warnings.push(`تعذر عرض الرسم البياني "${section.title}": ${reason}`);
   }
 
   if (section.truncated && section.truncatedMessage) {
     doc.moveDown(0.2);
-    doc.font("Body").fontSize(8).fillColor("#b45309");
+    doc.font("Body").fontSize(8).fillColor(COLORS.danger);
     doc.text(section.truncatedMessage, { width: CONTENT_WIDTH, align: "right" });
-    doc.fillColor("#000000");
+    doc.fillColor(COLORS.primary);
   }
 }
 
@@ -548,8 +599,8 @@ function drawKpiGrid(doc: PDFKit.PDFDocument, cards: ReportKpiCard[], columns = 
       // Right-to-left grid: first card sits at the rightmost slot.
       const slot = columns - 1 - index;
       const x = PAGE_MARGIN + slot * (cardWidth + gap);
-      doc.roundedRect(x, rowTop, cardWidth, cardHeight, 4).fillAndStroke("#f8fafc", "#e2e8f0");
-      doc.font("Body").fontSize(8).fillColor("#64748b");
+      doc.roundedRect(x, rowTop, cardWidth, cardHeight, REPORT_DESIGN_TOKENS.card.radius).fillAndStroke(COLORS.background, COLORS.border);
+      doc.font("Body").fontSize(8).fillColor(COLORS.neutral);
       doc.text(card.label, x + 6, rowTop + 6, {
         width: cardWidth - 12,
         height: 14,
@@ -557,7 +608,7 @@ function drawKpiGrid(doc: PDFKit.PDFDocument, cards: ReportKpiCard[], columns = 
         lineBreak: false,
         ellipsis: true,
       });
-      doc.font("Bold").fontSize(14).fillColor("#0f172a");
+      doc.font("Bold").fontSize(14).fillColor(COLORS.primary);
       doc.text(formatKpiValue(card), x + 6, rowTop + 20, {
         width: cardWidth - 12,
         height: 18,
@@ -566,7 +617,7 @@ function drawKpiGrid(doc: PDFKit.PDFDocument, cards: ReportKpiCard[], columns = 
         ellipsis: true,
       });
     });
-    doc.fillColor("#000000").strokeColor("#000000");
+    doc.fillColor(COLORS.primary).strokeColor(COLORS.primary);
     doc.y = rowTop + cardHeight + 8;
   }
 }
@@ -624,9 +675,9 @@ function estimateLines(doc: PDFKit.PDFDocument, text: string, width: number, fon
 
 function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
   if (table.columns.length === 0 || table.rows.length === 0) {
-    doc.font("Body").fontSize(9).fillColor("#64748b");
+    doc.font("Body").fontSize(9).fillColor(COLORS.neutral);
     doc.text("لا توجد بيانات لعرضها.", { width: CONTENT_WIDTH, align: "right" });
-    doc.fillColor("#000000");
+    doc.fillColor(COLORS.primary);
     return;
   }
 
@@ -648,7 +699,7 @@ function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
 
   function drawHeaderRow(): void {
     const top = doc.y;
-    doc.font("Bold").fontSize(8.5).fillColor("#0f172a");
+    doc.font("Bold").fontSize(8.5).fillColor(COLORS.primary);
     columns.forEach((column, index) => {
       doc.text(column.label, xOffsets[index] + 2, top + 5, {
         width: widths[index] - 4,
@@ -659,9 +710,9 @@ function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
       });
     });
     doc.y = top + headerHeight;
-    doc.moveTo(PAGE_MARGIN, doc.y).lineTo(PAGE_SIZE[0] - PAGE_MARGIN, doc.y).strokeColor("#94a3b8").stroke();
-    doc.strokeColor("#000000");
-    doc.fillColor("#000000");
+    doc.moveTo(PAGE_MARGIN, doc.y).lineTo(PAGE_SIZE[0] - PAGE_MARGIN, doc.y).strokeColor(COLORS.border).stroke();
+    doc.strokeColor(COLORS.primary);
+    doc.fillColor(COLORS.primary);
   }
 
   ensureSpace(doc, headerHeight + 24);
@@ -685,8 +736,8 @@ function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
     }
     const top = doc.y;
     if (rowIndex % 2 === 1) {
-      doc.rect(PAGE_MARGIN, top, CONTENT_WIDTH, rowHeight).fill("#f8fafc");
-      doc.fillColor("#000000");
+      doc.rect(PAGE_MARGIN, top, CONTENT_WIDTH, rowHeight).fill(COLORS.tableRowAlternate);
+      doc.fillColor(COLORS.primary);
     }
     columns.forEach((column, index) => {
       doc.text(cellTexts[index], xOffsets[index] + 2, top + cellPadding, {
@@ -708,11 +759,15 @@ function drawFooters(doc: PDFKit.PDFDocument, title: string, runId: string): voi
     doc.switchToPage(i);
     const pageNumber = i - range.start + 1;
     const y = doc.page.height - PAGE_MARGIN - 14;
-    doc.font("Body").fontSize(8).fillColor("#64748b");
+    const originalBottomMargin = doc.page.margins.bottom;
+    doc.page.margins.bottom = 0;
+    doc.font("Body").fontSize(8).fillColor(COLORS.neutral);
     doc.text(`${title}${runPart} — صفحة ${pageNumber} من ${range.count}`, PAGE_MARGIN, y, {
       width: CONTENT_WIDTH,
       align: "center",
+      lineBreak: false,
     });
-    doc.fillColor("#000000");
+    doc.page.margins.bottom = originalBottomMargin;
+    doc.fillColor(COLORS.primary);
   }
 }

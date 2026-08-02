@@ -6,8 +6,12 @@ import { describe, expect, it } from "vitest";
 import { REPORT_MODES, isReportMode } from "./report-contract";
 
 describe("REPORT_MODES", () => {
-  it("contains exactly 3 modes", () => {
-    expect(REPORT_MODES).toHaveLength(3);
+  it("contains exactly 4 modes", () => {
+    expect(REPORT_MODES).toHaveLength(4);
+  });
+
+  it("contains STANDARD", () => {
+    expect(REPORT_MODES).toContain("STANDARD");
   });
 
   it("contains DIGITAL_EXECUTIVE_BRIEF", () => {
@@ -28,6 +32,9 @@ describe("REPORT_MODES", () => {
 });
 
 describe("isReportMode", () => {
+  it("returns true for STANDARD", () => {
+    expect(isReportMode("STANDARD")).toBe(true);
+  });
   it("returns true for DIGITAL_EXECUTIVE_BRIEF", () => {
     expect(isReportMode("DIGITAL_EXECUTIVE_BRIEF")).toBe(true);
   });
