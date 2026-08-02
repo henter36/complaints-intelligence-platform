@@ -391,8 +391,8 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
       expect(usedColors).toContain("#004B3A");
       expect(usedColors).toContain("#B88919");
       expect(usedColors).toContain("#46534E");
-      // Region name is now white text inside a dark green header strip
-      expect(colorImmediatelyBefore("منطقة صاعدة")).toBe("#FFFFFF");
+      // Region name is rendered with the "منطقة" prefix stripped, so "منطقة صاعدة" → "صاعدة"
+      expect(colorImmediatelyBefore("صاعدة")).toBe("#FFFFFF");
     } finally {
       textSpy.mockRestore();
       fillColorSpy.mockRestore();

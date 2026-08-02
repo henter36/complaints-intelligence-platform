@@ -78,6 +78,7 @@ type DrawTableOptions<Row> = {
   width: number;
   rowHeight: number;
   fontSize: number;
+  headerFontSize?: number;
   maxRows: number;
   formatCell: (row: Row, key: keyof Row) => string;
   directionForRow?: (row: Row) => ExecutiveDirection;
@@ -277,9 +278,10 @@ function drawSectionTitle(
   width: number,
   layout: BriefPageLayout
 ): number {
-  doc.font("Bold").fontSize(fontSize(layout, 15, 11)).fillColor(COLORS.primary);
+  const sz = fontSize(layout, REPORT_DESIGN_TOKENS.fontSize.sectionTitle, 13);
+  doc.font("Bold").fontSize(sz).fillColor(COLORS.primary);
   doc.text(title, x, y, { width, align: "right", wordSpacing: ARABIC_WORD_SPACING });
-  return y + fontSize(layout, 25, 18);
+  return y + sz + 10;
 }
 
 // ── Commitment gauge ─────────────────────────────────────────────────────────
@@ -337,16 +339,16 @@ function drawKpiCard(
   if (hasGauge) {
     gaugeWidth = layout.compact ? 60 : 86;
   }
-  doc.font("Body").fontSize(fontSize(layout, 10.5, 8.5)).fillColor(COLORS.neutral);
+  doc.font("Body").fontSize(fontSize(layout, 13, 10)).fillColor(COLORS.neutral);
   doc.text(card.label, x + padding + gaugeWidth, y + padding, {
     width: width - padding * 2 - gaugeWidth,
     align: "right",
     wordSpacing: ARABIC_WORD_SPACING,
-    height: fontSize(layout, 18, 13),
+    height: fontSize(layout, 20, 14),
     ellipsis: true,
   });
-  doc.font("Bold").fontSize(fontSize(layout, 24, 17)).fillColor(COLORS.primary);
-  doc.text(formatKpiValue(card), x + padding + gaugeWidth, y + fontSize(layout, 34, 25), {
+  doc.font("Bold").fontSize(fontSize(layout, REPORT_DESIGN_TOKENS.fontSize.kpiValue, 18)).fillColor(COLORS.primary);
+  doc.text(formatKpiValue(card), x + padding + gaugeWidth, y + fontSize(layout, 38, 27), {
     width: width - padding * 2 - gaugeWidth,
     align: "right",
     height: fontSize(layout, 32, 22),
@@ -382,7 +384,7 @@ function drawKpiGrid(
   const selectedCards = cards.slice(0, 8);
   const columns = 4;
   const gap = layout.compact ? 8 : 12;
-  const cardHeight = layout.compact ? 72 : 98;
+  const cardHeight = layout.compact ? 82 : 112;
   const width = (layout.contentWidth - gap * (columns - 1)) / columns;
   selectedCards.forEach((card, index) => {
     const row = Math.floor(index / columns);
@@ -474,11 +476,13 @@ function drawPage2Notes(context: ExecutiveBriefRenderContext, startY: number): v
   const { doc, layout } = context;
   const titleY = drawSectionTitle(doc, "ملاحظات", layout.margin, startY, layout.contentWidth, layout);
   const notes = buildPage2Notes(context);
-  doc.roundedRect(layout.margin, titleY, layout.contentWidth, 58, REPORT_DESIGN_TOKENS.card.radius)
+  const noteLineH = 24;
+  const noteBoxH = Math.max(58, 16 + notes.length * noteLineH);
+  doc.roundedRect(layout.margin, titleY, layout.contentWidth, noteBoxH, REPORT_DESIGN_TOKENS.card.radius)
     .fillAndStroke(COLORS.background, COLORS.border);
-  doc.font("Body").fontSize(11).fillColor(COLORS.text);
+  doc.font("Body").fontSize(REPORT_DESIGN_TOKENS.fontSize.body).fillColor(COLORS.text);
   notes.forEach((note, index) => {
-    doc.text(`• ${note}`, layout.margin + 12, titleY + 9 + index * 22, {
+    doc.text(`• ${note}`, layout.margin + 12, titleY + 9 + index * noteLineH, {
       width: layout.contentWidth - 24,
       align: "right",
       wordSpacing: ARABIC_WORD_SPACING,
@@ -549,8 +553,9 @@ function formatRegionCell(row: RegionReferenceRow, key: keyof RegionReferenceRow
 function drawRtlTable<Row>(options: DrawTableOptions<Row>): number {
   const {
     doc, rows, columns, x, y, width, rowHeight, fontSize: tableFontSize,
-    maxRows, formatCell, directionForRow, directionKey, darkHeader,
+    headerFontSize, maxRows, formatCell, directionForRow, directionKey, darkHeader,
   } = options;
+  const hdrFontSize = headerFontSize ?? tableFontSize;
   const shownRows = rows.slice(0, maxRows);
   const totalWeight = columns.reduce((sum, column) => sum + column.weight, 0);
   const widths = columns.map((column) => width * column.weight / totalWeight);
@@ -566,11 +571,11 @@ function drawRtlTable<Row>(options: DrawTableOptions<Row>): number {
   if (darkHeader) {
     // Dark green header with white text
     doc.roundedRect(x, y, width, headerHeight, r).fill(COLORS.primary);
-    doc.font("Bold").fontSize(tableFontSize).fillColor(COLORS.white);
+    doc.font("Bold").fontSize(hdrFontSize).fillColor(COLORS.white);
   } else {
     doc.roundedRect(x, y, width, headerHeight, r)
       .fillAndStroke(COLORS.background, COLORS.border);
-    doc.font("Bold").fontSize(tableFontSize).fillColor(COLORS.primary);
+    doc.font("Bold").fontSize(hdrFontSize).fillColor(COLORS.primary);
   }
 
   columns.forEach((column, index) => {
@@ -671,9 +676,9 @@ function drawAllRegionCards(
       .closePath()
       .fill(COLORS.primary);
 
-    // Region name in header (white text)
-    doc.font("Bold").fontSize(11).fillColor(COLORS.white).text(
-      region.regionName,
+    // Region name in header (white text) — use short name (strip prefix)
+    doc.font("Bold").fontSize(12).fillColor(COLORS.white).text(
+      stripRegionPrefix(region.regionName),
       x + 8,
       y + (headerH - 13) / 2,
       {
@@ -702,16 +707,16 @@ function drawAllRegionCards(
           .strokeColor(COLORS.border).lineWidth(0.5).stroke();
         doc.lineWidth(1);
       }
-      doc.font("Body").fontSize(9).fillColor(COLORS.neutral).text(
+      doc.font("Body").fontSize(11).fillColor(COLORS.neutral).text(
         metric.label,
         mx + 2,
         bodyY + 8,
         { width: metricW - 4, align: "center", wordSpacing: ARABIC_WORD_SPACING }
       );
-      doc.font("Bold").fontSize(16).fillColor(COLORS.primary).text(
+      doc.font("Bold").fontSize(18).fillColor(COLORS.primary).text(
         formatReportNumber(metric.value),
         mx + 2,
-        bodyY + 22,
+        bodyY + 24,
         { width: metricW - 4, align: "center", wordSpacing: ARABIC_WORD_SPACING }
       );
     });
@@ -795,7 +800,8 @@ async function renderPage3(context: ExecutiveBriefRenderContext): Promise<void> 
     y,
     width: layout.contentWidth,
     rowHeight,
-    fontSize: 10.5,
+    fontSize: REPORT_DESIGN_TOKENS.fontSize.table,
+    headerFontSize: REPORT_DESIGN_TOKENS.fontSize.tableHeader,
     maxRows: tableRows.length,
     formatCell: formatRegionCell,
     darkHeader: true,
@@ -871,16 +877,18 @@ function formatDeptCell(row: DeptTableRow, key: keyof DeptTableRow): string {
   return typeof value === "number" ? formatReportNumber(value) : String(value);
 }
 
-function drawBulletBox(
-  doc: PDFKit.PDFDocument,
-  title: string,
-  points: string[],
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  layout: BriefPageLayout
-): void {
+type DrawBulletBoxOptions = {
+  title: string;
+  points: readonly string[];
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  layout: BriefPageLayout;
+};
+
+function drawBulletBox(doc: PDFKit.PDFDocument, options: DrawBulletBoxOptions): void {
+  const { title, points, x, y, width, height, layout } = options;
   const r = REPORT_DESIGN_TOKENS.card.radius;
   const headerH = 30;
 
@@ -908,11 +916,12 @@ function drawBulletBox(
   );
 
   // Bullet points
-  doc.font("Body").fontSize(10.5).fillColor(COLORS.text);
+  const bodyFontSize = REPORT_DESIGN_TOKENS.fontSize.body;
+  const lineH = Math.ceil(bodyFontSize * 2);
+  doc.font("Body").fontSize(bodyFontSize).fillColor(COLORS.text);
   const bodyY = y + headerH + 8;
   const bodyH = height - headerH - 12;
-  const lineH = 22;
-  const maxLines = Math.floor(bodyH / lineH);
+  const maxLines = Math.max(1, Math.floor(bodyH / lineH));
   const displayPoints = points.slice(0, maxLines);
   displayPoints.forEach((point, idx) => {
     doc.text(`• ${point}`, x + 10, bodyY + idx * lineH, {
@@ -925,7 +934,7 @@ function drawBulletBox(
   });
 
   if (displayPoints.length === 0) {
-    doc.font("Body").fontSize(10.5).fillColor(COLORS.neutral).text(
+    doc.font("Body").fontSize(bodyFontSize).fillColor(COLORS.neutral).text(
       "لا توجد بيانات.",
       x + 10,
       bodyY,
@@ -995,7 +1004,8 @@ function renderPage4(context: ExecutiveBriefRenderContext): void {
       y,
       width: layout.contentWidth,
       rowHeight: rowH,
-      fontSize: 10.5,
+      fontSize: REPORT_DESIGN_TOKENS.fontSize.table,
+      headerFontSize: REPORT_DESIGN_TOKENS.fontSize.tableHeader,
       maxRows: 8,
       formatCell: formatRiseCell,
       darkHeader: true,
@@ -1032,7 +1042,8 @@ function renderPage4(context: ExecutiveBriefRenderContext): void {
     y: rightTableY,
     width: halfW,
     rowHeight: rowH,
-    fontSize: 10.5,
+    fontSize: REPORT_DESIGN_TOKENS.fontSize.table,
+    headerFontSize: REPORT_DESIGN_TOKENS.fontSize.tableHeader,
     maxRows: 8,
     formatCell: formatClassificationCell,
     darkHeader: true,
@@ -1053,7 +1064,8 @@ function renderPage4(context: ExecutiveBriefRenderContext): void {
     y: leftTableY,
     width: halfW,
     rowHeight: rowH,
-    fontSize: 10.5,
+    fontSize: REPORT_DESIGN_TOKENS.fontSize.table,
+    headerFontSize: REPORT_DESIGN_TOKENS.fontSize.tableHeader,
     maxRows: 8,
     formatCell: formatDeptCell,
     darkHeader: true,
@@ -1062,23 +1074,23 @@ function renderPage4(context: ExecutiveBriefRenderContext): void {
   y = Math.max(classBottom, deptBottom) + gap;
 
   // ── Section 3: Two side-by-side boxes (الاستنتاجات + ملاحظات) ────────────
-  const boxH = Math.max(
-    160,
-    Math.min(
-      280,
-      Math.floor(layout.pageSize[1] - layout.margin - 26 - y)
-    )
-  );
-
   const conclusions = (brief.conclusions ?? []).slice(0, 6);
   const notes = (brief.notes ?? []).length > 0
     ? (brief.notes ?? []).slice(0, 5)
     : buildAttentionItems(context).map((item) => item.text).slice(0, 5);
 
+  const boxLineH = Math.ceil(REPORT_DESIGN_TOKENS.fontSize.body * 2);
+  const boxHeaderH = 30;
+  const boxPaddingV = 8 + 12;
+  const contentLinesMax = Math.max(conclusions.length, notes.length, 1);
+  const contentBasedH = boxHeaderH + boxPaddingV + contentLinesMax * boxLineH;
+  const availableH = layout.pageSize[1] - layout.margin * 2 - 26 - y;
+  const boxH = Math.max(contentBasedH, Math.min(contentBasedH, availableH));
+
   // Right: الاستنتاجات
-  drawBulletBox(doc, "الاستنتاجات", conclusions, rightX, y, halfW, boxH, layout);
+  drawBulletBox(doc, { title: "الاستنتاجات", points: conclusions, x: rightX, y, width: halfW, height: boxH, layout });
   // Left: ملاحظات
-  drawBulletBox(doc, "ملاحظات", notes, leftX, y, halfW, boxH, layout);
+  drawBulletBox(doc, { title: "ملاحظات", points: notes, x: leftX, y, width: halfW, height: boxH, layout });
 }
 
 // ── Footers ───────────────────────────────────────────────────────────────────
