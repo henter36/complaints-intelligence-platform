@@ -1,6 +1,6 @@
 import { normalizeArabic } from "@/server/imports/arabic-normalize";
 
-const UNSPECIFIED_REGION = "غير محدد";
+export const UNSPECIFIED_REGION = "غير محدد";
 
 /** Canonical display names prevent variants such as الرياض/منطقة الرياض. */
 const SAUDI_REGION_NAMES = [

@@ -45,6 +45,7 @@ export const REPORT_DESIGN_TOKENS = {
 
 export const DIGITAL_EXECUTIVE_PAGE_SIZE = [900, 1200] as const;
 export const PRINT_EXECUTIVE_PAGE_SIZE = [900, 1200] as const;
+export const REPORT_UNAVAILABLE_LABEL = "غير متاح";
 
 /** Display formats keep Excel cells numeric while matching the report policy. */
 export const REPORT_XLSX_NUMBER_FORMATS = {
@@ -104,5 +105,5 @@ export function formatNullableReportNumber(
   value: number | null,
   options: ReportNumberOptions = {}
 ): string {
-  return value === null ? "غير متاح" : formatReportNumber(value, options);
+  return value === null ? REPORT_UNAVAILABLE_LABEL : formatReportNumber(value, options);
 }

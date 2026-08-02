@@ -22,12 +22,14 @@ import {
 import type { ExecutiveBriefData, ReportData } from "./report-data-service";
 import { renderLineChartPng } from "./report-chart-service";
 import { formatRiyadhDateTime } from "./report-time";
+import { drawComplaintsReportCover } from "./report-cover";
 
 const ASSETS_DIR = path.join(process.cwd(), "src/server/reports/assets");
 const FONT_REGULAR_PATH = path.join(ASSETS_DIR, "fonts/Amiri-Regular.ttf");
 const FONT_BOLD_PATH = path.join(ASSETS_DIR, "fonts/Amiri-Bold.ttf");
 const COLORS = REPORT_DESIGN_TOKENS.colors;
 const PAGE_COUNT = 4;
+const MAX_EXECUTIVE_REGION_ROWS = 100;
 const ARABIC_WORD_SPACING = REPORT_DESIGN_TOKENS.typography.wordSpacing;
 
 let fontRegularBuffer: Buffer | null = null;
@@ -102,7 +104,8 @@ function createLayout(mode: ExecutiveBriefMode, regionCount: number): BriefPageL
   const baseSize = mode === "PRINT_EXECUTIVE_BRIEF"
     ? PRINT_EXECUTIVE_PAGE_SIZE
     : DIGITAL_EXECUTIVE_PAGE_SIZE;
-  const requiredHeight = 940 + Math.ceil(regionCount / 3) * 78 + (regionCount + 1) * 31;
+  const safeRegionCount = Math.min(regionCount, MAX_EXECUTIVE_REGION_ROWS);
+  const requiredHeight = 940 + Math.ceil(safeRegionCount / 3) * 78 + (safeRegionCount + 1) * 31;
   const pageSize = [baseSize[0], Math.max(baseSize[1], requiredHeight)] as const;
   const margin = 42;
   return {
@@ -111,6 +114,10 @@ function createLayout(mode: ExecutiveBriefMode, regionCount: number): BriefPageL
     contentWidth: pageSize[0] - margin * 2,
     compact,
   };
+}
+
+function visibleRegionRows(brief: ExecutiveBriefData): readonly RegionReferenceRow[] {
+  return brief.allRegions.slice(0, MAX_EXECUTIVE_REGION_ROWS);
 }
 
 function fontSize(layout: BriefPageLayout, digital: number, print: number): number {
@@ -173,13 +180,14 @@ function drawPageHeader(
   const { margin, contentWidth } = layout;
   const titleSize = fontSize(layout, REPORT_DESIGN_TOKENS.fontSize.reportTitle, 20);
   doc.font("Bold").fontSize(titleSize).fillColor(COLORS.primary);
-  doc.text(pageTitle, margin, margin, {
+  const titleOptions = {
     width: contentWidth,
-    align: "right",
+    align: "right" as const,
     wordSpacing: ARABIC_WORD_SPACING,
-  });
+  };
+  doc.text(pageTitle, margin, margin, titleOptions);
 
-  const titleHeight = doc.heightOfString(pageTitle, { width: contentWidth, align: "right" });
+  const titleHeight = doc.heightOfString(pageTitle, titleOptions);
   const lineY = margin + titleHeight + 10;
   doc.moveTo(margin, lineY)
     .lineTo(margin + contentWidth, lineY)
@@ -248,7 +256,7 @@ function drawKpiCard(
   const padding = layout.compact ? 8 : REPORT_DESIGN_TOKENS.card.padding;
   doc.roundedRect(x, y, width, height, radius)
     .fillAndStroke(COLORS.background, COLORS.border);
-  const hasGauge = card.key === "complianceRate";
+  const hasGauge = card.key === "complianceRate" && card.value !== null;
   let gaugeWidth = 0;
   if (hasGauge) {
     gaugeWidth = layout.compact ? 60 : 86;
@@ -269,7 +277,7 @@ function drawKpiCard(
     lineBreak: false,
     wordSpacing: ARABIC_WORD_SPACING,
   });
-  if (hasGauge && card.value !== null) drawCommitmentGauge(doc, card, x + padding, y + 5, layout.compact);
+  if (hasGauge) drawCommitmentGauge(doc, card, x + padding, y + 5, layout.compact);
   if (card.difference !== null) {
     const direction = directionFromAssessment(card.assessment);
     const deltaY = y + height - fontSize(layout, 25, 18);
@@ -400,50 +408,8 @@ function drawPage2Notes(context: ExecutiveBriefRenderContext, startY: number): v
   });
 }
 
-function drawCoverMetric(
-  context: ExecutiveBriefRenderContext,
-  label: string,
-  key: string,
-  x: number,
-  y: number,
-  width: number
-): void {
-  const { doc, brief } = context;
-  const card = brief.briefKpis.find((item) => item.key === key);
-  doc.roundedRect(x, y, width, 104, REPORT_DESIGN_TOKENS.card.radius)
-    .fillAndStroke(COLORS.background, COLORS.border);
-  doc.font("Body").fontSize(12).fillColor(COLORS.neutral)
-    .text(label, x + 12, y + 18, {
-      width: width - 24,
-      align: "center",
-      wordSpacing: ARABIC_WORD_SPACING,
-    });
-  doc.font("Bold").fontSize(28).fillColor(COLORS.primary)
-    .text(card ? formatKpiValue(card) : "غير متاح", x + 12, y + 50, {
-      width: width - 24,
-      align: "center",
-      lineBreak: false,
-    });
-}
-
 function renderCoverPage(context: ExecutiveBriefRenderContext): void {
-  const { doc, data, layout } = context;
-  doc.rect(0, 0, layout.pageSize[0], layout.pageSize[1]).fill(COLORS.background);
-  doc.rect(layout.pageSize[0] - 32, 0, 32, layout.pageSize[1]).fill(COLORS.primary);
-  doc.rect(0, 0, 10, layout.pageSize[1]).fill(COLORS.gold);
-  const titleY = layout.pageSize[1] * 0.26;
-  doc.font("Bold").fontSize(36).fillColor(COLORS.primary)
-    .text("تقرير الشكاوى", layout.margin, titleY, {
-      width: layout.contentWidth,
-      align: "center",
-      wordSpacing: ARABIC_WORD_SPACING,
-    });
-  doc.font("Body").fontSize(16).fillColor(COLORS.text)
-    .text(`الفترة من ${data.period.from} إلى ${data.period.to}`, layout.margin, titleY + 72, {
-      width: layout.contentWidth,
-      align: "center",
-      wordSpacing: ARABIC_WORD_SPACING,
-    });
+  const { doc, data, brief, layout } = context;
   let comparison = "لا تتوفر فترة زمنية للمقارنة";
   if (data.previousPeriod) {
     const comparisonLabel = data.comparisonMode === "SAME_PERIOD_LAST_YEAR"
@@ -451,23 +417,23 @@ function renderCoverPage(context: ExecutiveBriefRenderContext): void {
       : "مقارنة مع الفترة السابقة المماثلة في المدة";
     comparison = `${comparisonLabel}: ${data.previousPeriod.from} إلى ${data.previousPeriod.to}`;
   }
-  doc.text(comparison, layout.margin, titleY + 108, {
-    width: layout.contentWidth,
-    align: "center",
-    wordSpacing: ARABIC_WORD_SPACING,
+  const valueFor = (key: string): number | null => (
+    brief.briefKpis.find((item) => item.key === key)?.value ?? null
+  );
+  drawComplaintsReportCover({
+    doc,
+    pageSize: layout.pageSize,
+    margin: layout.margin,
+    title: "تقرير الشكاوى",
+    periodText: `الفترة من ${data.period.from} إلى ${data.period.to}`,
+    comparisonText: comparison,
+    generatedText: `تاريخ الإنشاء: ${formatRiyadhDateTime(new Date(data.generatedAt))}`,
+    metrics: [
+      { label: "إجمالي الشكاوى", value: valueFor("total") },
+      { label: "المفتوحة", value: valueFor("open") },
+      { label: "المغلقة", value: valueFor("closed") },
+    ],
   });
-  doc.fontSize(12).fillColor(COLORS.neutral)
-    .text(`تاريخ الإنشاء: ${formatRiyadhDateTime(new Date(data.generatedAt))}`, layout.margin, titleY + 150, {
-      width: layout.contentWidth,
-      align: "center",
-      wordSpacing: ARABIC_WORD_SPACING,
-    });
-  const gap = 18;
-  const width = (layout.contentWidth - gap * 2) / 3;
-  const cardsY = titleY + 230;
-  drawCoverMetric(context, "إجمالي الشكاوى", "total", layout.margin + (width + gap) * 2, cardsY, width);
-  drawCoverMetric(context, "المفتوحة", "open", layout.margin + width + gap, cardsY, width);
-  drawCoverMetric(context, "المغلقة", "closed", layout.margin, cardsY, width);
 }
 
 async function renderPage2(context: ExecutiveBriefRenderContext): Promise<void> {
@@ -475,10 +441,10 @@ async function renderPage2(context: ExecutiveBriefRenderContext): Promise<void> 
   y = drawSectionTitle(context.doc, "ملخص المؤشرات", context.layout.margin, y, context.layout.contentWidth, context.layout);
   y = drawKpiGrid(context.doc, context.brief.briefKpis, context.layout, y);
   const notesHeight = 100;
-  const chartHeight = Math.max(
+  const chartHeight = Math.min(600, Math.max(
     340,
     Math.floor(context.layout.pageSize[1] - context.layout.margin - 26 - notesHeight - y)
-  );
+  ));
   const chartBottom = await drawTimelineVisual(context, y, chartHeight);
   drawPage2Notes(context, chartBottom + 8);
 }
@@ -589,11 +555,12 @@ function drawAllRegionCards(
   startY: number
 ): number {
   const { doc, brief, layout } = context;
+  const regions = visibleRegionRows(brief);
   const columns = 3;
   const gap = 10;
   const width = (layout.contentWidth - gap * (columns - 1)) / columns;
   const height = 82;
-  brief.allRegions.forEach((region, index) => {
+  regions.forEach((region, index) => {
     const row = Math.floor(index / columns);
     const column = index % columns;
     const x = layout.margin + (columns - 1 - column) * (width + gap);
@@ -635,7 +602,7 @@ function drawAllRegionCards(
       wordSpacing: ARABIC_WORD_SPACING,
     });
   });
-  return startY + Math.ceil(brief.allRegions.length / columns) * (height + gap);
+  return startY + Math.ceil(regions.length / columns) * (height + gap);
 }
 
 async function drawRegionComparisonChart(
@@ -643,9 +610,10 @@ async function drawRegionComparisonChart(
   startY: number
 ): Promise<number> {
   const { doc, brief, layout, warnings } = context;
+  const regions = visibleRegionRows(brief);
   const titleY = drawSectionTitle(doc, "مقارنة المناطق", layout.margin, startY, layout.contentWidth, layout);
   const chartHeight = 360;
-  const currentPoints = brief.allRegions.map((row) => ({
+  const currentPoints = regions.map((row) => ({
     x: row.regionName,
     y: row.currentCount,
   }));
@@ -653,7 +621,7 @@ async function drawRegionComparisonChart(
   if (hasReferencePeriod(context)) {
     series.push({
       name: "الفترة المقارنة",
-      points: brief.allRegions.map((row) => ({ x: row.regionName, y: row.previousCount })),
+      points: regions.map((row) => ({ x: row.regionName, y: row.previousCount })),
     });
   }
   try {
@@ -695,9 +663,9 @@ async function renderPage3(context: ExecutiveBriefRenderContext): Promise<void> 
   y = drawSectionTitle(doc, "بطاقات المناطق", layout.margin, y, layout.contentWidth, layout);
   y = drawAllRegionCards(context, y) + 8;
   y = drawSectionTitle(doc, "جميع المناطق", layout.margin, y, layout.contentWidth, layout);
-  const regionCount = brief.allRegions.length;
+  const tableRows = visibleRegionRows(brief);
+  const regionCount = tableRows.length;
   const rowHeight = resolveRegionRowHeight(layout, regionCount);
-  const tableRows = brief.allRegions;
   const rowsForDisplay = hasReferencePeriod(context)
     ? tableRows
     : tableRows.map((row) => ({ ...row, previousCount: 0, difference: 0, changeRate: null }));
@@ -875,7 +843,7 @@ function drawRisingPairs(
   x: number,
   y: number,
   width: number
-): void {
+): number {
   const { doc, data, layout } = context;
   if (!hasReferencePeriod(context)) {
     doc.roundedRect(x, y, width, fontSize(layout, 100, 70), REPORT_DESIGN_TOKENS.card.radius)
@@ -886,7 +854,7 @@ function drawRisingPairs(
       align: "center",
       wordSpacing: ARABIC_WORD_SPACING,
     });
-    return;
+    return y + fontSize(layout, 100, 70);
   }
   const rows = data.comparisonData?.deptClassRises.slice(0, 4) ?? [];
   if (rows.length === 0) {
@@ -896,7 +864,7 @@ function drawRisingPairs(
       align: "center",
       wordSpacing: ARABIC_WORD_SPACING,
     });
-    return;
+    return y + 58;
   }
   const rowHeight = layout.compact ? 29 : 38;
   rows.forEach((row, index) => {
@@ -917,6 +885,7 @@ function drawRisingPairs(
       lineBreak: false,
     });
   });
+  return y + rows.length * rowHeight;
 }
 
 function drawDepartmentRows(
@@ -987,15 +956,23 @@ function renderPage4(context: ExecutiveBriefRenderContext): void {
   const lowerWidth = (layout.contentWidth - gap) / 2;
   const attentionX = layout.margin + lowerWidth + gap;
   const attentionY = drawSectionTitle(doc, "ملاحظات", attentionX, lowerY, lowerWidth, layout);
-  const noteItems = (brief.notes ?? []).map((text) => ({ text, assessment: "warning" as const }));
-  drawAttentionCards(context, noteItems.length > 0 ? noteItems : buildAttentionItems(context).slice(0, 3), attentionX, attentionY, lowerWidth);
+  const noteItems = (brief.notes ?? []).slice(0, 3)
+    .map((text) => ({ text, assessment: "warning" as const }));
+  const attentionBottom = drawAttentionCards(
+    context,
+    noteItems.length > 0 ? noteItems : buildAttentionItems(context).slice(0, 3),
+    attentionX,
+    attentionY,
+    lowerWidth
+  );
   const departmentsY = drawSectionTitle(doc, "أبرز الإدارات", layout.margin, lowerY, lowerWidth, layout);
   const departmentBottom = drawDepartmentRows(context, layout.margin, departmentsY, lowerWidth);
+  let leftColumnBottom = departmentBottom;
   if (hasReferencePeriod(context)) {
     const pairsY = drawSectionTitle(doc, "أبرز الارتفاعات", layout.margin, departmentBottom + 8, lowerWidth, layout);
-    drawRisingPairs(context, layout.margin, pairsY, lowerWidth);
+    leftColumnBottom = drawRisingPairs(context, layout.margin, pairsY, lowerWidth);
   }
-  const conclusionY = Math.max(lowerY + 230, departmentBottom + 175);
+  const conclusionY = Math.max(attentionBottom, leftColumnBottom) + gap;
   const conclusionsStart = drawSectionTitle(doc, "الاستنتاجات", layout.margin, conclusionY, layout.contentWidth, layout);
   doc.font("Body").fontSize(11).fillColor(COLORS.text);
   (brief.conclusions ?? []).slice(0, 5).forEach((point, index) => {
@@ -1076,6 +1053,11 @@ export async function renderExecutiveBriefPdf(
     warnings,
     layout,
   };
+  if (brief.allRegions.length > MAX_EXECUTIVE_REGION_ROWS) {
+    warnings.push(
+      `تم عرض أول ${MAX_EXECUTIVE_REGION_ROWS} تسمية منطقة فقط بسبب وجود عدد غير اعتيادي من التسميات.`
+    );
+  }
   renderCoverPage(context);
   doc.addPage();
   await renderPage2(context);

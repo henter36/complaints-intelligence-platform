@@ -5,6 +5,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export type InclusiveDateRange = { from: Date; to: Date };
 export type HalfOpenDateRange = { from: Date; toExclusive: Date };
 
+function startOfUtcDay(date: Date): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+}
+
 export function previousHalfOpenPeriod(from: Date, toExclusive: Date): HalfOpenDateRange | null {
   const duration = toExclusive.getTime() - from.getTime();
   if (duration <= 0) return null;
@@ -39,8 +43,14 @@ export function previousInclusivePeriod(
   to: Date,
   mode: ComparisonMode = "PREVIOUS_EQUIVALENT_PERIOD"
 ): InclusiveDateRange | null {
-  if (to.getTime() < from.getTime()) return null;
-  const previous = comparisonHalfOpenPeriod(from, new Date(to.getTime() + DAY_MS), mode);
+  const normalizedFrom = startOfUtcDay(from);
+  const normalizedTo = startOfUtcDay(to);
+  if (normalizedTo.getTime() < normalizedFrom.getTime()) return null;
+  const previous = comparisonHalfOpenPeriod(
+    normalizedFrom,
+    new Date(normalizedTo.getTime() + DAY_MS),
+    mode
+  );
   if (!previous) return null;
   return { from: previous.from, to: new Date(previous.toExclusive.getTime() - DAY_MS) };
 }

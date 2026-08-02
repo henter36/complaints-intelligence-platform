@@ -210,15 +210,13 @@ function buildBriefKpis(
 // All-regions reference table (Left Join against all-time region list)
 // ---------------------------------------------------------------------------
 
-const UNSPECIFIED_REGION = "غير محدد";
-
 async function fetchAllTimeRegions(): Promise<string[]> {
   const groups = await db.complaint.groupBy({
     by: ["region"],
     where: { isDeleted: false },
   });
   return groups
-    .map((g) => normalizeRegionName(g.region ?? UNSPECIFIED_REGION))
+    .map((g) => normalizeRegionName(g.region))
     .filter((name, index, values) => values.indexOf(name) === index)
     .sort((a, b) => a.localeCompare(b, "ar"));
 }

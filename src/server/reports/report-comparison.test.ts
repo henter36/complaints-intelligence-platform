@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { previousInclusivePeriod } from "@/lib/reports/period-range";
 
 const dbMocks = vi.hoisted(() => ({
   findMany: vi.fn(),
@@ -60,6 +61,15 @@ async function loadModule() {
 }
 
 describe("derivePreviousPeriodRange", () => {
+  it("normalizes inclusive boundaries to midnight UTC before shifting", () => {
+    const previous = previousInclusivePeriod(
+      new Date("2026-07-08T14:30:00Z"),
+      new Date("2026-07-14T22:15:00Z")
+    );
+    expect(previous?.from.toISOString()).toBe("2026-07-01T00:00:00.000Z");
+    expect(previous?.to.toISOString()).toBe("2026-07-07T00:00:00.000Z");
+  });
+
   it("weekly period: previous is exactly 7 days before, no overlap", async () => {
     const { derivePreviousPeriodRange } = await loadModule();
     const from = new Date("2026-07-08T00:00:00Z");
@@ -157,6 +167,8 @@ describe("buildComparisonResult temporal comparison source", () => {
     expect(dbMocks.findMany).toHaveBeenCalledTimes(2);
     const previousQuery = dbMocks.findMany.mock.calls[1][0];
     const serialized = JSON.stringify(previousQuery);
+    expect(previousQuery.where.AND).toHaveLength(2);
+    expect(previousQuery.where.AND[1]).toHaveProperty("OR");
     expect(serialized).toContain("2025-07-08");
     expect(serialized).toContain("complaintDate");
     expect(serialized).not.toMatch(/importBatch|uploadedAt|createdAt/);

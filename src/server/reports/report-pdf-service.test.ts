@@ -302,8 +302,30 @@ describe("PDF report — comparative executive sections", () => {
   });
 
   it("omits the removed methodology wording", async () => {
-    const { buffer } = await renderReportPdf(executiveReport());
-    expect(bufferContainsText(buffer, "منهجية الاحتساب")).toBe(false);
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderReportPdf(executiveReport());
+      const drawnText = textSpy.mock.calls.map((call) => String(call[0]));
+      expect(drawnText).not.toContain("منهجية الاحتساب");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("uses the actual report title and preserves unavailable cover metrics", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderReportPdf(baseReport({
+        title: "تقرير أداء الإدارات",
+        sections: [],
+        kpis: {} as ReportData["kpis"],
+      }));
+      const drawnText = textSpy.mock.calls.map((call) => String(call[0]));
+      expect(drawnText).toContain("تقرير أداء الإدارات");
+      expect(drawnText.filter((text) => text === "غير متاح")).toHaveLength(3);
+    } finally {
+      textSpy.mockRestore();
+    }
   });
 
   it("renders a visible placeholder instead of crashing when a chart has no data", async () => {

@@ -19,8 +19,8 @@
 export type ReportMode =
   | "STANDARD"                 // Existing full-section report
   | "DIGITAL_EXECUTIVE_BRIEF"  // 3-page 16:9 digital slides (1440×810 pt)
-  | "FULL_ANALYTICAL"          // Unlimited-page A4 portrait deep-dive
-  | "PRINT_EXECUTIVE_BRIEF";   // 3-page A4 landscape print copy
+  | "FULL_ANALYTICAL"          // Unlimited-page portrait deep-dive on the readable report canvas
+  | "PRINT_EXECUTIVE_BRIEF";   // 4-page print-oriented complaints report
 
 export const REPORT_MODES = [
   "STANDARD",

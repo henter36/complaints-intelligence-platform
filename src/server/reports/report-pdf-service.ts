@@ -21,6 +21,7 @@ import {
   formatReportNumber,
   REPORT_DESIGN_TOKENS,
 } from "@/lib/reports/design-tokens";
+import { drawComplaintsReportCover } from "./report-cover";
 
 const ASSETS_DIR = path.join(process.cwd(), "src/server/reports/assets");
 const FONT_REGULAR_PATH = path.join(ASSETS_DIR, "fonts/Amiri-Regular.ttf");
@@ -290,60 +291,31 @@ function buildFullAnalyticalPdfSections(data: ReportData): ReportSection[] {
 // ---------------------------------------------------------------------------
 
 function renderCoverPage(doc: PDFKit.PDFDocument, data: ReportData): void {
-  doc.rect(0, 0, PAGE_SIZE[0], PAGE_SIZE[1]).fill(COLORS.background);
-  doc.rect(PAGE_SIZE[0] - 32, 0, 32, PAGE_SIZE[1]).fill(COLORS.primary);
-  doc.rect(0, 0, 10, PAGE_SIZE[1]).fill(COLORS.gold);
-  const titleY = 315;
-  doc.font("Bold").fontSize(36).fillColor(COLORS.primary)
-    .text("تقرير الشكاوى", PAGE_MARGIN, titleY, {
-      width: CONTENT_WIDTH,
-      align: "center",
-      wordSpacing: ARABIC_WORD_SPACING,
-    });
-  doc.font("Body").fontSize(16).fillColor(COLORS.text)
-    .text(`الفترة من ${data.period.from} إلى ${data.period.to}`, PAGE_MARGIN, titleY + 72, {
-      width: CONTENT_WIDTH,
-      align: "center",
-      wordSpacing: ARABIC_WORD_SPACING,
-    });
-  if (data.previousPeriod) {
-    doc.text(
-      `مقارنة مع الفترة المماثلة السابقة: ${data.previousPeriod.from} إلى ${data.previousPeriod.to}`,
-      PAGE_MARGIN,
-      titleY + 108,
-      { width: CONTENT_WIDTH, align: "center", wordSpacing: ARABIC_WORD_SPACING }
-    );
-  }
-  doc.fontSize(12).fillColor(COLORS.neutral)
-    .text(`تاريخ الإنشاء: ${formatRiyadhDateTime(new Date(data.generatedAt))}`, PAGE_MARGIN, titleY + 150, {
-      width: CONTENT_WIDTH,
-      align: "center",
-      wordSpacing: ARABIC_WORD_SPACING,
-    });
   const sectionCards = data.sections.find((section) => section.kind === "kpi");
-  const fallbackValue = (key: string): number => {
-    if (sectionCards?.kind !== "kpi") return 0;
-    return sectionCards.cards.find((card) => card.key === key)?.value ?? 0;
+  const fallbackValue = (key: string): number | null => {
+    if (sectionCards?.kind !== "kpi") return null;
+    return sectionCards.cards.find((card) => card.key === key)?.value ?? null;
   };
-  const cards = [
-    ["إجمالي الشكاوى", data.kpis.totalComplaints?.currentValue ?? fallbackValue("total")],
-    ["المفتوحة", data.kpis.openComplaints?.currentValue ?? fallbackValue("open")],
-    ["المغلقة", data.kpis.closedComplaints?.currentValue ?? fallbackValue("closed")],
-  ] as const;
-  const gap = 18;
-  const width = (CONTENT_WIDTH - gap * 2) / 3;
-  cards.forEach(([label, value], index) => {
-    const x = PAGE_MARGIN + (2 - index) * (width + gap);
-    doc.roundedRect(x, titleY + 230, width, 104, REPORT_DESIGN_TOKENS.card.radius)
-      .fillAndStroke(COLORS.background, COLORS.border);
-    doc.font("Body").fontSize(12).fillColor(COLORS.neutral)
-      .text(label, x + 10, titleY + 248, {
-        width: width - 20,
-        align: "center",
-        wordSpacing: ARABIC_WORD_SPACING,
-      });
-    doc.font("Bold").fontSize(28).fillColor(COLORS.primary)
-      .text(formatReportNumber(value), x + 10, titleY + 280, { width: width - 20, align: "center" });
+  let comparisonText = "لا تتوفر فترة زمنية للمقارنة";
+  if (data.previousPeriod) {
+    const label = data.comparisonMode === "SAME_PERIOD_LAST_YEAR"
+      ? "مقارنة مع الفترة المماثلة من السنة السابقة"
+      : "مقارنة مع الفترة السابقة المماثلة في المدة";
+    comparisonText = `${label}: ${data.previousPeriod.from} إلى ${data.previousPeriod.to}`;
+  }
+  drawComplaintsReportCover({
+    doc,
+    pageSize: PAGE_SIZE,
+    margin: PAGE_MARGIN,
+    title: data.title,
+    periodText: `الفترة من ${data.period.from} إلى ${data.period.to}`,
+    comparisonText,
+    generatedText: `تاريخ الإنشاء: ${formatRiyadhDateTime(new Date(data.generatedAt))}`,
+    metrics: [
+      { label: "إجمالي الشكاوى", value: data.kpis.totalComplaints?.currentValue ?? fallbackValue("total") },
+      { label: "المفتوحة", value: data.kpis.openComplaints?.currentValue ?? fallbackValue("open") },
+      { label: "المغلقة", value: data.kpis.closedComplaints?.currentValue ?? fallbackValue("closed") },
+    ],
   });
 }
 
@@ -662,12 +634,13 @@ function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
   }
 
   const headerHeight = 22;
-  const lineHeight = 11;
+  const bodyFontSize = 10.5;
+  const lineHeight = bodyFontSize * 1.2;
   const cellPadding = 4;
 
   function drawHeaderRow(): void {
     const top = doc.y;
-    doc.font("Bold").fontSize(10.5).fillColor(COLORS.primary);
+    doc.font("Bold").fontSize(bodyFontSize).fillColor(COLORS.primary);
     columns.forEach((column, index) => {
       doc.text(column.label, xOffsets[index] + 2, top + 5, {
         width: widths[index] - 4,
@@ -686,12 +659,12 @@ function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
   ensureSpace(doc, headerHeight + 24);
   drawHeaderRow();
 
-  doc.font("Body").fontSize(10.5);
+  doc.font("Body").fontSize(bodyFontSize);
   table.rows.forEach((row, rowIndex) => {
     // Compute dynamic row height (up to 2 lines).
     const cellTexts = columns.map((column) => formatCellValue(row[column.key], column.format));
     const maxLines = columns.reduce(
-      (max, column, index) => Math.max(max, estimateLines(doc, cellTexts[index], widths[index], 10.5)),
+      (max, column, index) => Math.max(max, estimateLines(doc, cellTexts[index], widths[index], bodyFontSize)),
       1
     );
     const rowHeight = maxLines * lineHeight + cellPadding * 2;
@@ -700,7 +673,7 @@ function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
     if (doc.y + rowHeight > doc.page.height - doc.page.margins.bottom) {
       doc.addPage();
       drawHeaderRow();
-      doc.font("Body").fontSize(10.5);
+      doc.font("Body").fontSize(bodyFontSize);
     }
     const top = doc.y;
     if (rowIndex % 2 === 1) {

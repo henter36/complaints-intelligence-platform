@@ -18,7 +18,6 @@ import type { ComparisonMode } from "@/lib/reports/report-contract";
 const DAY_MS = 24 * 60 * 60 * 1000;
 export const DEPT_CLASS_RISES_LIMIT = 20;
 export const DEFAULT_MINIMUM_INCREASE_COUNT = 1;
-const UNSPECIFIED_REGION_LABEL = "غير محدد";
 
 export type PeriodRange = { from: Date; toExclusive: Date };
 
@@ -122,9 +121,9 @@ type ComparisonComplaint = Prisma.ComplaintGetPayload<{ select: typeof compariso
  * complaint-query-service's `buildComplaintWhere` so the SAME non-date filters
  * (region/department/classification/priority/status/...) are applied to both
  * periods — the comparison must be apples-to-apples. The date window is then
- * overridden with a half-open [from, toExclusive) range on complaintDate,
- * falling back to receivedAt for rows without a complaintDate is NOT done here
- * because the KPI service and query layer both key on complaintDate.
+ * combined with a half-open [from, toExclusive) effective-date range. A row
+ * uses complaintDate when present and receivedAt only when complaintDate is
+ * null, matching the shared report/KPI date policy.
  */
 function buildPeriodWhere(filters: ReportFilters, period: PeriodRange, now: Date): Prisma.ComplaintWhereInput {
   const params = buildComplaintQueryParams(filters);
@@ -135,12 +134,16 @@ function buildPeriodWhere(filters: ReportFilters, period: PeriodRange, now: Date
   const where = buildComplaintWhere(query, now);
   const { complaintDate: _ignoredDate, ...nonDateWhere } = where;
   return {
-    ...nonDateWhere,
-    OR: [
-      { complaintDate: { gte: period.from, lt: period.toExclusive } },
+    AND: [
+      nonDateWhere,
       {
-        complaintDate: null,
-        receivedAt: { gte: period.from, lt: period.toExclusive },
+        OR: [
+          { complaintDate: { gte: period.from, lt: period.toExclusive } },
+          {
+            complaintDate: null,
+            receivedAt: { gte: period.from, lt: period.toExclusive },
+          },
+        ],
       },
     ],
   };
@@ -155,7 +158,7 @@ function complaintDay(complaint: ComparisonComplaint): string {
 }
 
 function regionName(complaint: ComparisonComplaint): string {
-  return normalizeRegionName(complaint.region ?? UNSPECIFIED_REGION_LABEL);
+  return normalizeRegionName(complaint.region);
 }
 
 function roundRate(value: number): number {

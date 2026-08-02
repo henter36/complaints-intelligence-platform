@@ -228,8 +228,10 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
   });
 
   it("contains safe report metadata without forbidden internal wording", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.reportRunId = "run-sensitive-internal-id";
     const result = await renderExecutiveBriefPdf(
-      makeReportData("DIGITAL_EXECUTIVE_BRIEF"),
+      data,
       "DIGITAL_EXECUTIVE_BRIEF"
     );
     for (const title of ["الشكاوى", "المؤشرات", "المناطق", "التصنيفات"]) {
@@ -317,9 +319,9 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
     expect(result.buffer.length).toBeGreaterThan(0);
   });
 
-  it("renders many regions without crashing", async () => {
+  it("bounds malformed region cardinality without unbounded page or chart growth", async () => {
     const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
-    const manyRegions = Array.from({ length: 50 }, (_, i) => ({
+    const manyRegions = Array.from({ length: 250 }, (_, i) => ({
       regionName: `منطقة ${i + 1}`,
       currentCount: 10 + i,
       previousCount: 8 + i,
@@ -333,6 +335,11 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
     data.briefData = makeBriefData({ allRegions: manyRegions });
     const result = await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
     expect(result.buffer.length).toBeGreaterThan(0);
+    expect(result.warnings).toContain(
+      "تم عرض أول 100 تسمية منطقة فقط بسبب وجود عدد غير اعتيادي من التسميات."
+    );
+    const [, pageHeight] = firstMediaBox(result.buffer);
+    expect(pageHeight).toBeLessThan(7_000);
   });
 
   it("renders positive, negative, zero, and no-rate KPI deltas with all region directions", async () => {

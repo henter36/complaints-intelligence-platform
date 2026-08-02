@@ -483,8 +483,8 @@ async function buildExecutiveSummaryCore(
       kind: "kpi",
       title: "مقارنة بالفترة السابقة",
       cards: [
-        kpi("previousTotal", "إجمالي الفترة السابقة", result.trend.previousTotal ?? 0),
-        kpi("growthRate", "نسبة التغير%", result.trend.growthRate ?? 0, "percent"),
+        kpi("previousTotal", "إجمالي الفترة السابقة", result.trend.previousTotal),
+        kpi("growthRate", "نسبة التغير%", result.trend.growthRate, "percent"),
       ],
     });
   }
