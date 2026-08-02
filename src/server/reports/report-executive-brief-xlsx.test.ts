@@ -118,6 +118,14 @@ describe("renderReportXlsx — executive brief mode", () => {
     expect(briefBuffer.length).toBeGreaterThan(0);
   });
 
+  it("records the selected report mode in the summary sheet", () => {
+    const summary = briefWorkbook.getWorksheet("الملخص")!;
+    const values = summary.getSheetValues().flat();
+
+    expect(values).toContain("نمط التقرير");
+    expect(values).toContain("DIGITAL_EXECUTIVE_BRIEF");
+  });
+
   it.each(BRIEF_SHEETS)("includes %s sheet", (sheetName) => {
     const names = sheetNames(briefWorkbook);
     expect(names.some((n) => n.includes(sheetName))).toBe(true);

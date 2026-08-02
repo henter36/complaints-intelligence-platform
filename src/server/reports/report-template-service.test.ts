@@ -9,6 +9,12 @@ const dbMocks = vi.hoisted(() => ({
   auditLogCreate: vi.fn(),
 }));
 
+const exportMocks = vi.hoisted(() => ({ runReport: vi.fn() }));
+
+vi.mock("./report-export-service", () => ({
+  runReport: exportMocks.runReport,
+}));
+
 vi.mock("@/lib/db", () => ({
   db: {
     reportTemplate: {
@@ -53,6 +59,7 @@ describe("report template mutation guards", () => {
     dbMocks.templateUpdate.mockReset();
     dbMocks.runCount.mockReset();
     dbMocks.auditLogCreate.mockReset().mockResolvedValue({ id: "audit_1" });
+    exportMocks.runReport.mockReset();
   });
 
   it("rejects an HTML-bearing template name", async () => {
@@ -128,5 +135,30 @@ describe("report template mutation guards", () => {
       caught = error;
     }
     expect(isReportTemplateError(caught)).toBe(true);
+  });
+
+  it("preserves reportMode when running a saved template", async () => {
+    dbMocks.templateFindUnique.mockResolvedValue({
+      id: "tpl_mode",
+      name: "قالب رقمي",
+      reportType: ReportType.EXECUTIVE_SUMMARY,
+      filters: { from: "2026-07-01", to: "2026-07-31" },
+      options: { reportMode: "DIGITAL_EXECUTIVE_BRIEF" },
+      isActive: true,
+      schedules: [],
+    });
+    exportMocks.runReport.mockResolvedValue({ status: "COMPLETED", artifacts: [], warnings: [] });
+    const { runReportTemplate } = await import("./report-template-service");
+    const scheduledFor = new Date("2026-08-02T06:00:00.000Z");
+    await runReportTemplate("tpl_mode", "admin", { scheduledFor });
+    expect(exportMocks.runReport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        request: expect.objectContaining({
+          options: expect.objectContaining({ reportMode: "DIGITAL_EXECUTIVE_BRIEF" }),
+        }),
+        scheduledFor,
+      }),
+      expect.any(Date)
+    );
   });
 });

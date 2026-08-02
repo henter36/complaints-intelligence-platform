@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import { PageHeader } from "@/components/shared/page-header";
 import {
   Card, CardContent, CardHeader, CardTitle, CardDescription,
@@ -28,8 +35,17 @@ import {
   Plus, Building2, MapPin, Layers, RefreshCw, History, Eye, XCircle,
   AlertTriangle, Loader2, CalendarClock, PlayCircle,
 } from "lucide-react";
-import { formatNumber, formatDate, formatDateTime } from "@/lib/ar-utils";
-import type { ReportMatrixSection } from "@/lib/reports/report-contract";
+import { formatDate, formatDateTime } from "@/lib/ar-utils";
+import {
+  EXECUTIVE_BRIEF_PAGE_PLAN,
+  type ExecutiveBriefPreviewPage,
+  type ReportMatrixSection,
+  type ReportMode,
+} from "@/lib/reports/report-contract";
+import {
+  formatReportNumber as formatNumber,
+  REPORT_DESIGN_TOKENS,
+} from "@/lib/reports/design-tokens";
 import { buildMatrixTruncationMessage } from "@/lib/reports/matrix-truncation";
 
 // =========================================================================
@@ -72,11 +88,16 @@ type ReportTable = {
   rows: Record<string, unknown>[]; truncated: boolean; totalMatched: number;
 };
 type ChartSeries = { name: string; points: { x: string; y: number }[]; isOther?: boolean };
+type ReportSectionPreviewMetadata = {
+  previewPage?: ExecutiveBriefPreviewPage;
+  previewOrder?: number;
+};
+
 type ReportSection =
-  | { id: string; kind: "kpi"; title: string; cards: ReportKpiCard[] }
-  | { id: string; kind: "table"; title: string; table: ReportTable }
-  | { id: string; kind: "text"; title: string; points: string[] }
-  | { id: string; kind: "chart"; chartType: "line"; title: string; series: ChartSeries[]; description?: string; emptyState?: string; unit?: string; truncated?: boolean; truncatedMessage?: string }
+  | (ReportSectionPreviewMetadata & { id: string; kind: "kpi"; title: string; cards: ReportKpiCard[] })
+  | (ReportSectionPreviewMetadata & { id: string; kind: "table"; title: string; table: ReportTable })
+  | (ReportSectionPreviewMetadata & { id: string; kind: "text"; title: string; points: string[] })
+  | (ReportSectionPreviewMetadata & { id: string; kind: "chart"; chartType: "line"; title: string; series: ChartSeries[]; description?: string; emptyState?: string; unit?: string; truncated?: boolean; truncatedMessage?: string })
   | ReportMatrixSection;
 
 type ReportData = {
@@ -88,6 +109,7 @@ type ReportData = {
   sections: ReportSection[];
   warnings: string[];
   rowCount: number;
+  reportMode?: ReportMode;
 };
 
 type ReportTemplate = {
@@ -98,6 +120,7 @@ type ReportTemplate = {
   isActive: boolean;
   lastRunAt: string | null;
   createdAt: string;
+  options?: { reportMode?: ReportMode };
   schedules: ReportSchedule[];
 };
 
@@ -124,6 +147,7 @@ type ReportRunRow = {
   failedAt: string | null;
   errorMessage: string | null;
   createdAt: string;
+  optionsSnapshot?: { reportMode?: ReportMode } | null;
   reportTemplate?: { id: string; name: string } | null;
   artifacts: { id: string; format: "PDF" | "XLSX"; fileName: string; fileSize: number }[];
 };
@@ -147,10 +171,136 @@ const FILTER_KEYS: ReportFilterKey[] = [
 ];
 
 type OptionsForm = {
+  reportMode: ReportMode;
   includeComparison: boolean;
   includeCharts: boolean;
   includeDetailedRows: boolean;
 };
+
+const REPORT_MODE_OPTIONS: readonly {
+  value: ReportMode;
+  label: string;
+  description: string;
+  recommended?: boolean;
+}[] = [
+  {
+    value: "DIGITAL_EXECUTIVE_BRIEF",
+    label: "التقرير التنفيذي المختصر — عرض رقمي",
+    description: "ثلاث صفحات أفقية احترافية مناسبة للشاشة والاجتماعات التنفيذية.",
+    recommended: true,
+  },
+  {
+    value: "PRINT_EXECUTIVE_BRIEF",
+    label: "التقرير التنفيذي المختصر — طباعة",
+    description: "ثلاث صفحات أفقية محسنة للطباعة.",
+  },
+  {
+    value: "FULL_ANALYTICAL",
+    label: "التقرير التحليلي الكامل",
+    description: "تقرير موسع يتضمن الجداول والتحليلات التفصيلية.",
+  },
+  {
+    value: "STANDARD",
+    label: "التقرير القياسي",
+    description: "التقرير التقليدي بكامل الأقسام المعتادة.",
+  },
+];
+
+const REPORT_MODE_LEGEND_ID = "report-mode-legend";
+
+function ReportModeRadioGroup({
+  value,
+  onChange,
+}: Readonly<{
+  value: ReportMode;
+  onChange: (value: ReportMode) => void;
+}>) {
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  function selectAndFocus(index: number): void {
+    const option = REPORT_MODE_OPTIONS[index];
+    if (!option) return;
+    onChange(option.value);
+    optionRefs.current[index]?.focus();
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLButtonElement>, currentIndex: number): void {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      nextIndex = (currentIndex + 1) % REPORT_MODE_OPTIONS.length;
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      nextIndex = (currentIndex - 1 + REPORT_MODE_OPTIONS.length) % REPORT_MODE_OPTIONS.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = REPORT_MODE_OPTIONS.length - 1;
+    }
+    if (nextIndex === null) return;
+    event.preventDefault();
+    selectAndFocus(nextIndex);
+  }
+
+  return (
+    <fieldset className="space-y-3">
+      <legend id={REPORT_MODE_LEGEND_ID} className="text-sm font-semibold">
+        نمط التقرير
+      </legend>
+      <div
+        role="radiogroup"
+        aria-labelledby={REPORT_MODE_LEGEND_ID}
+        className="grid gap-3 md:grid-cols-2"
+      >
+        {REPORT_MODE_OPTIONS.map((modeOption, index) => {
+          const selected = value === modeOption.value;
+          return (
+            <button
+              key={modeOption.value}
+              ref={(element) => { optionRefs.current[index] = element; }}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              tabIndex={selected ? 0 : -1}
+              onClick={() => onChange(modeOption.value)}
+              onKeyDown={(event) => handleKeyDown(event, index)}
+              className="rounded-lg border p-4 text-right transition-colors"
+              style={{
+                borderColor: selected
+                  ? REPORT_DESIGN_TOKENS.colors.primary
+                  : REPORT_DESIGN_TOKENS.colors.border,
+                backgroundColor: selected
+                  ? REPORT_DESIGN_TOKENS.colors.background
+                  : REPORT_DESIGN_TOKENS.colors.white,
+              }}
+            >
+              <span className="flex items-center justify-between gap-2">
+                <span className="font-medium">{modeOption.label}</span>
+                {modeOption.recommended && <Badge aria-hidden="true">مقترح</Badge>}
+              </span>
+              <span className="mt-1 block text-xs text-muted-foreground">
+                {modeOption.description}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </fieldset>
+  );
+}
+
+const REPORT_MODE_LABELS = Object.fromEntries(
+  REPORT_MODE_OPTIONS.map((option) => [option.value, option.label])
+) as Record<ReportMode, string>;
+
+function defaultOptions(reportType: ReportType | null): OptionsForm {
+  return {
+    reportMode: reportType === "EXECUTIVE_SUMMARY"
+      ? "DIGITAL_EXECUTIVE_BRIEF"
+      : "STANDARD",
+    includeComparison: true,
+    includeCharts: true,
+    includeDetailedRows: false,
+  };
+}
 
 type InitialData = { definitions: ReportDefinition[]; filtersData: FiltersData };
 
@@ -201,7 +351,8 @@ function formatKpiValue(card: ReportKpiCard): string {
 
 function toDisplayText(value: unknown): string {
   if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (typeof value === "number") return formatNumber(value);
+  if (typeof value === "boolean") return String(value);
   if (value instanceof Date) return value.toISOString();
   return JSON.stringify(value);
 }
@@ -209,13 +360,14 @@ function toDisplayText(value: unknown): string {
 function formatSignedNumber(value: unknown): string {
   const n = Number(value);
   if (!Number.isFinite(n)) return "";
-  if (n > 0) return `+${n}`;
-  return String(n);
+  return formatNumber(n, { sign: true });
 }
 
 function formatCell(value: unknown, format?: ReportTableColumn["format"]): string {
   if (value === null || value === undefined || value === "") return "—";
-  if (format === "percent") return `${toDisplayText(value)}%`;
+  if (format === "percent" && typeof value === "number") {
+    return formatNumber(value, { percent: true });
+  }
   if (format === "signed-number") return formatSignedNumber(value);
   if (format === "date") {
     const date = new Date(toDisplayText(value));
@@ -400,9 +552,7 @@ export function ReportsCenter() {
   const [initialState, setInitialState] = useState<ResourceState<InitialData>>({ status: "loading" });
   const [selectedType, setSelectedType] = useState<ReportType | null>(null);
   const [filters, setFilters] = useState<FiltersForm>(defaultFilters());
-  const [options, setOptions] = useState<OptionsForm>({
-    includeComparison: true, includeCharts: true, includeDetailedRows: false,
-  });
+  const [options, setOptions] = useState<OptionsForm>(() => defaultOptions(null));
 
   const [previewing, setPreviewing] = useState(false);
   const [previewData, setPreviewData] = useState<ReportData | null>(null);
@@ -508,7 +658,7 @@ export function ReportsCenter() {
     const definition = definitions?.find((d) => d.type === type) ?? null;
     setSelectedType(type);
     setPreviewData(null);
-    setOptions({ includeComparison: true, includeCharts: true, includeDetailedRows: false });
+    setOptions(defaultOptions(type));
     if (definition) {
       setFilters((prev) => resetUnsupportedFilters(prev, definition));
     }
@@ -517,7 +667,10 @@ export function ReportsCenter() {
   const buildRequestBody = () => ({
     type: selectedType,
     filters: selectedDefinition ? buildSupportedFiltersPayload(filters, selectedDefinition) : {},
-    options,
+    options: {
+      ...options,
+      reportMode: selectedType === "EXECUTIVE_SUMMARY" ? options.reportMode : "STANDARD",
+    },
   });
 
   const handlePreview = async () => {
@@ -589,7 +742,7 @@ export function ReportsCenter() {
           name: templateName.trim(),
           reportType: selectedType,
           filters: buildSupportedFiltersPayload(filters, selectedDefinition),
-          options,
+          options: buildRequestBody().options,
         }),
       });
       toast({ title: "تم الحفظ", description: `تم حفظ القالب "${templateName.trim()}"` });
@@ -841,6 +994,18 @@ export function ReportsCenter() {
 
                 <Separator />
 
+                {selectedType === "EXECUTIVE_SUMMARY" && (
+                  <ReportModeRadioGroup
+                    value={options.reportMode}
+                    onChange={(reportMode) => setOptions((previous) => ({
+                      ...previous,
+                      reportMode,
+                    }))}
+                  />
+                )}
+
+                {selectedType === "EXECUTIVE_SUMMARY" && <Separator />}
+
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                   <label className="flex items-center gap-2 cursor-pointer text-sm">
                     <Checkbox checked={options.includeComparison} onCheckedChange={() => setOptions((p) => ({ ...p, includeComparison: !p.includeComparison }))} />
@@ -917,7 +1082,14 @@ export function ReportsCenter() {
                         return (
                           <TableRow key={tpl.id}>
                             <TableCell className="font-medium">{tpl.name}</TableCell>
-                            <TableCell>{definitions?.find((d) => d.type === tpl.reportType)?.title ?? tpl.reportType}</TableCell>
+                            <TableCell>
+                              <div>{definitions?.find((d) => d.type === tpl.reportType)?.title ?? tpl.reportType}</div>
+                              {tpl.options?.reportMode && (
+                                <div className="text-xs text-muted-foreground">
+                                  {REPORT_MODE_LABELS[tpl.options.reportMode]}
+                                </div>
+                              )}
+                            </TableCell>
                             <TableCell className="text-sm text-muted-foreground">{tpl.lastRunAt ? formatDateTime(tpl.lastRunAt) : "لم يُشغَّل بعد"}</TableCell>
                             <TableCell>
                               <Badge variant={tpl.isActive ? "secondary" : "outline"}>{tpl.isActive ? "مفعّل" : "معطّل"}</Badge>
@@ -1038,6 +1210,11 @@ export function ReportsCenter() {
                           <TableCell className="font-medium">
                             {definitions?.find((d) => d.type === run.reportType)?.title ?? run.reportType}
                             {run.reportTemplate && <div className="text-xs text-muted-foreground">قالب: {run.reportTemplate.name}</div>}
+                            {run.optionsSnapshot?.reportMode && (
+                              <div className="text-xs text-muted-foreground">
+                                {REPORT_MODE_LABELS[run.optionsSnapshot.reportMode]}
+                              </div>
+                            )}
                           </TableCell>
                           <TableCell>
                             <Badge variant={runStatusBadgeVariant(run.status)}>
@@ -1288,7 +1465,81 @@ function ReportChartPreview({ section }: Readonly<{ section: Extract<ReportSecti
   );
 }
 
+function isBriefReportMode(mode: ReportMode | undefined): boolean {
+  return mode === "DIGITAL_EXECUTIVE_BRIEF" || mode === "PRINT_EXECUTIVE_BRIEF";
+}
+
+function executivePreviewPages(data: ReportData): readonly ReportSection[][] {
+  const pages: Array<Array<{ section: ReportSection; sourceOrder: number }>> = [[], [], []];
+  data.sections.forEach((section, sourceOrder) => {
+    const page = section.previewPage ?? 3;
+    if (section.previewPage === undefined && process.env.NODE_ENV === "development") {
+      console.warn("Executive brief preview section has no page metadata", { sectionId: section.id });
+    }
+    pages[page - 1].push({ section, sourceOrder });
+  });
+  return pages.map((entries) => {
+    const sortedEntries = [...entries];
+    sortedEntries.sort((left, right) => {
+      const orderDifference = (left.section.previewOrder ?? Number.MAX_SAFE_INTEGER)
+        - (right.section.previewOrder ?? Number.MAX_SAFE_INTEGER);
+      return orderDifference || left.sourceOrder - right.sourceOrder;
+    });
+    return sortedEntries.map(({ section }) => section);
+  });
+}
+
+function ExecutiveReportPreview({ data }: Readonly<{ data: ReportData }>) {
+  const pages = executivePreviewPages(data);
+  const digital = data.reportMode === "DIGITAL_EXECUTIVE_BRIEF";
+  const pageTitles = EXECUTIVE_BRIEF_PAGE_PLAN.map((page) => page.title);
+  return (
+    <Card id="report-preview">
+      <CardHeader className="border-b bg-muted/30">
+        <CardTitle>{data.title}</CardTitle>
+        <CardDescription>
+          معاينة {digital ? "رقمية بنسبة 16:9" : "طباعة أفقية"} — ثلاث صفحات
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-5 p-4 md:p-6">
+        {pages.map((sections, pageIndex) => (
+          <article
+            key={pageTitles[pageIndex]}
+            aria-label={`صفحة ${pageIndex + 1} من 3`}
+            className="mx-auto flex w-full max-w-6xl flex-col overflow-hidden rounded-lg border bg-white p-5 shadow-sm"
+            style={{
+              aspectRatio: digital ? "16 / 9" : `${841.89} / ${595.28}`,
+              borderColor: REPORT_DESIGN_TOKENS.colors.border,
+              color: REPORT_DESIGN_TOKENS.colors.primary,
+            }}
+          >
+            <header className="mb-3 flex items-center justify-between border-b pb-2">
+              <span className="text-xs text-muted-foreground">صفحة {pageIndex + 1} من 3</span>
+              <h3 className="text-base font-semibold">{pageTitles[pageIndex]}</h3>
+            </header>
+            <div className="min-h-0 flex-1 space-y-3 overflow-auto text-right" dir="rtl">
+              {sections.length === 0 ? (
+                <div className="flex h-full items-center justify-center rounded-lg bg-muted/20 text-sm text-muted-foreground">
+                  لا توجد بيانات كافية لهذا القسم.
+                </div>
+              ) : sections.map((section) => (
+                <section key={section.id} className="space-y-1">
+                  <h4 className="text-sm font-semibold">{section.title}</h4>
+                  <SectionBody section={section} />
+                </section>
+              ))}
+            </div>
+          </article>
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
 function ReportPreview({ data }: Readonly<{ data: ReportData }>) {
+  if (isBriefReportMode(data.reportMode)) {
+    return <ExecutiveReportPreview data={data} />;
+  }
   return (
     <Card id="report-preview">
       <CardHeader className="border-b bg-muted/30">

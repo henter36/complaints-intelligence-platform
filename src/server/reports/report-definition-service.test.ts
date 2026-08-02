@@ -41,6 +41,7 @@ describe("report definitions", () => {
 
 describe("reportOptionsSchema — reportMode field", () => {
   it.each([
+    "STANDARD",
     "DIGITAL_EXECUTIVE_BRIEF",
     "FULL_ANALYTICAL",
     "PRINT_EXECUTIVE_BRIEF",
@@ -56,6 +57,23 @@ describe("reportOptionsSchema — reportMode field", () => {
     const result = reportOptionsSchema.safeParse({});
     expect(result.success).toBe(true);
     if (result.success) expect(result.data.reportMode).toBeUndefined();
+  });
+
+  it("treats an absent executive reportMode as STANDARD", () => {
+    const request = parseReportRequest({
+      type: "EXECUTIVE_SUMMARY",
+      filters: VALID_FILTERS,
+    });
+    expect(request.options.reportMode).toBe("STANDARD");
+  });
+
+  it("resets an unsupported hidden mode on non-executive reports", () => {
+    const request = parseReportRequest({
+      type: "DEPARTMENT_PERFORMANCE",
+      filters: VALID_FILTERS,
+      options: { reportMode: "DIGITAL_EXECUTIVE_BRIEF" },
+    });
+    expect(request.options.reportMode).toBe("STANDARD");
   });
 });
 

@@ -21,7 +21,10 @@ import {
   type RegionChangeRow,
   type RegionTrendData,
 } from "./report-comparison";
-import { isReportMode } from "@/lib/reports/report-contract";
+import {
+  getExecutiveBriefSectionPlacement,
+  isReportMode,
+} from "@/lib/reports/report-contract";
 import type {
   ReportMatrixSection,
   ReportMode,
@@ -33,6 +36,7 @@ import type {
   NetBacklogFlow,
   PerfVolumeRow,
   ContinuityRow,
+  ExecutiveBriefPreviewPage,
 } from "@/lib/reports/report-contract";
 // Types that are only re-exported (not used locally) — direct re-export avoids a redundant import.
 export type { KpiAssessment, ComparativeTimelinePoint, ComparativeTimelineSeries } from "@/lib/reports/report-contract";
@@ -88,7 +92,12 @@ export type ChartSeries = {
   isOther?: boolean;
 };
 
-export type ReportChartSection = {
+type ReportSectionPreviewMetadata = {
+  previewPage?: ExecutiveBriefPreviewPage;
+  previewOrder?: number;
+};
+
+export type ReportChartSection = ReportSectionPreviewMetadata & {
   id: string;
   kind: "chart";
   chartType: "line";
@@ -103,7 +112,7 @@ export type ReportChartSection = {
   unit?: string;
 };
 
-export type ReportTextSection = {
+export type ReportTextSection = ReportSectionPreviewMetadata & {
   id: string;
   kind: "text";
   title: string;
@@ -111,8 +120,8 @@ export type ReportTextSection = {
 };
 
 export type ReportSection =
-  | { id: string; kind: "kpi"; title: string; cards: ReportKpiCard[] }
-  | { id: string; kind: "table"; title: string; table: ReportTable }
+  | ({ id: string; kind: "kpi"; title: string; cards: ReportKpiCard[] } & ReportSectionPreviewMetadata)
+  | ({ id: string; kind: "table"; title: string; table: ReportTable } & ReportSectionPreviewMetadata)
   | ReportTextSection
   | ReportChartSection
   | ReportMatrixSection;
@@ -524,6 +533,11 @@ async function buildExecutiveSummaryCore(
       }
     : null;
 
+  const sectionsWithPreviewMetadata = sections.map((section) => {
+    const placement = getExecutiveBriefSectionPlacement(section.id);
+    return placement ? { ...section, ...placement } : section;
+  });
+
   const data: ReportData = {
     type: ReportType.EXECUTIVE_SUMMARY,
     title: request.title ?? getReportDefinition(ReportType.EXECUTIVE_SUMMARY).title,
@@ -532,7 +546,7 @@ async function buildExecutiveSummaryCore(
     previousPeriod,
     filters,
     kpis: result.kpis,
-    sections,
+    sections: sectionsWithPreviewMetadata,
     warnings,
     rowCount: 0,
     comparisonData: comparison,
@@ -558,7 +572,20 @@ async function buildExecutiveSummaryWithMode(
 ): Promise<ReportData> {
   const { data: base, kpiResult: result, comparison } = await buildExecutiveSummaryCore(request, mode, now);
 
-  // Optionally fetch previous-period distributions for richer classification data.
+  const modeTitle: Record<ReportMode, string> = {
+    STANDARD: getReportDefinition(ReportType.EXECUTIVE_SUMMARY).title,
+    DIGITAL_EXECUTIVE_BRIEF: "تقرير تنفيذي مختصر — عرض رقمي",
+    PRINT_EXECUTIVE_BRIEF: "تقرير تنفيذي مختصر — طباعة",
+    FULL_ANALYTICAL: "التقرير التحليلي الكامل",
+  };
+
+  const title = request.title ?? modeTitle[reportMode];
+
+  if (reportMode === "STANDARD") {
+    return { ...base, title, reportMode };
+  }
+
+  // Only enhanced modes need the reference-period KPI distributions.
   let previousResult: Awaited<ReturnType<typeof getComplaintKpis>> | undefined;
   if (comparison.previousPeriod) {
     const prevParams = buildComplaintQueryParams(request.filters);
@@ -569,14 +596,6 @@ async function buildExecutiveSummaryWithMode(
     );
     previousResult = await getComplaintKpis(prevParams, now);
   }
-
-  const modeTitle: Record<ReportMode, string> = {
-    DIGITAL_EXECUTIVE_BRIEF: "تقرير تنفيذي مختصر — عرض رقمي",
-    PRINT_EXECUTIVE_BRIEF: "تقرير تنفيذي مختصر — نسخة طباعة",
-    FULL_ANALYTICAL: "التقرير التحليلي الكامل",
-  };
-
-  const title = request.title ?? modeTitle[reportMode];
 
   if (reportMode === "FULL_ANALYTICAL") {
     const fullData = await buildFullAnalyticalData(

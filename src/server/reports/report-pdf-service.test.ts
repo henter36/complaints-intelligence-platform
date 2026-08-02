@@ -4,9 +4,11 @@
 // globals; under the project's default jsdom environment those checks fail
 // with "Not a supported font format", so this file opts back into node.
 import PDFDocument from "pdfkit";
+import fs from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type { ReportData, ReportSection } from "./report-data-service";
 import { renderReportPdf } from "./report-pdf-service";
+import * as chartService from "./report-chart-service";
 
 /** PDFKit stores Info strings (Title/Keywords) as UTF-16BE literals, so a
  * title is discoverable in the raw buffer via its UTF-16BE byte sequence.
@@ -115,6 +117,47 @@ describe("PDF report rendering", () => {
   it("stays within a reasonable file size for a moderate report", async () => {
     const { buffer } = await renderReportPdf(baseReport());
     expect(buffer.length).toBeLessThan(500 * 1024);
+  });
+
+  it("does not load or reserve the application Z logo in report renderers", () => {
+    const standardSource = fs.readFileSync(new URL("./report-pdf-service.ts", import.meta.url), "utf8");
+    const briefSource = fs.readFileSync(new URL("./report-executive-brief-pdf-service.ts", import.meta.url), "utf8");
+    expect(`${standardSource}\n${briefSource}`).not.toMatch(/logo\.svg|LOGO_PATH|loadLogoPng/);
+  });
+
+  it("uses the analytical cover page for content and omits continuity without a reference period", async () => {
+    const report = baseReport({
+      title: "التقرير التحليلي الكامل",
+      reportMode: "FULL_ANALYTICAL",
+      previousPeriod: null,
+      briefData: {
+        briefKpis: [],
+        allRegions: [],
+        topClassifications: [],
+        comparativeTimeline: {
+          current: { label: "الحالي", points: [] },
+          previous: null,
+          periodDays: 31,
+        },
+        concentrationBands: [],
+        netBacklogFlow: { inflow: 3, outflow: 1, net: 2, periodDays: 31 },
+        perfVolumeRows: [{
+          entityName: "إدارة الاختبار",
+          totalComplaints: 3,
+          complianceRate: 100,
+          averageResolutionDays: 8,
+          currentlyLate: 1,
+          share: 100,
+        }],
+        continuityRows: [],
+      },
+    });
+    const { buffer } = await renderReportPdf(report);
+    const pageCount = (buffer.toString("binary").match(/\/Type\s*\/Page\s*\/Parent/g) ?? []).length;
+    expect(pageCount).toBe(1);
+    expect(bufferContainsText(buffer, "صافي تدفق التراكم")).toBe(true);
+    expect(bufferContainsText(buffer, "الأداء مقابل الحجم")).toBe(true);
+    expect(bufferContainsText(buffer, "الاستمرارية")).toBe(false);
   });
 
   it("does not throw when a table section is empty", async () => {
@@ -279,5 +322,53 @@ describe("PDF report — comparative executive sections", () => {
     const { buffer } = await renderReportPdf(report);
     // Empty series still renders (empty-state PNG), producing a valid PDF.
     expect(buffer.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+  });
+
+  it("keeps a chart whose valid points all have zero values", async () => {
+    const chartSpy = vi.spyOn(chartService, "renderLineChartPng");
+    try {
+      const report = baseReport({
+        sections: [{
+          id: "zero_trend",
+          kind: "chart",
+          chartType: "line",
+          title: "اتجاه صفري صالح",
+          series: [{
+            name: "الفترة الحالية",
+            points: Array.from({ length: 7 }, (_, index) => ({
+              x: `2026-07-${String(index + 1).padStart(2, "0")}`,
+              y: 0,
+            })),
+          }],
+        }],
+      });
+
+      await renderReportPdf(report);
+
+      expect(chartSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      chartSpy.mockRestore();
+    }
+  });
+
+  it("omits a chart when every series has no points", async () => {
+    const chartSpy = vi.spyOn(chartService, "renderLineChartPng");
+    try {
+      const report = baseReport({
+        sections: [{
+          id: "empty_trend",
+          kind: "chart",
+          chartType: "line",
+          title: "اتجاه بلا نقاط",
+          series: [{ name: "الفترة الحالية", points: [] }],
+        }],
+      });
+
+      await renderReportPdf(report);
+
+      expect(chartSpy).not.toHaveBeenCalled();
+    } finally {
+      chartSpy.mockRestore();
+    }
   });
 });

@@ -19,6 +19,20 @@ function utf16BeWithBom(value: string): Buffer {
   return Buffer.from(`\uFEFF${value}`, "utf16le").swap16();
 }
 
+function utf16Be(value: string): Buffer {
+  const raw = Buffer.from(value, "utf16le").swap16();
+  const escaped: number[] = [];
+  for (const byte of raw) {
+    if (byte === 0x28 || byte === 0x29 || byte === 0x5c) escaped.push(0x5c);
+    escaped.push(byte);
+  }
+  return Buffer.from(escaped);
+}
+
+function countPageObjects(buffer: Buffer): number {
+  return (buffer.toString("binary").match(/\/Type\s*\/Page\s*\/Parent/g) ?? []).length;
+}
+
 function firstMediaBox(buffer: Buffer): [number, number] {
   const match = /\/MediaBox\s*\[\s*0\s+0\s+([\d.]+)\s+([\d.]+)\s*\]/.exec(
     buffer.toString("binary")
@@ -90,6 +104,7 @@ function makeReportData(mode: "DIGITAL_EXECUTIVE_BRIEF" | "PRINT_EXECUTIVE_BRIEF
     title: mode === "DIGITAL_EXECUTIVE_BRIEF" ? "تقرير تنفيذي مختصر — عرض رقمي" : "تقرير تنفيذي مختصر — نسخة طباعة",
     generatedAt: new Date("2026-07-31T04:00:00Z").toISOString(),
     period: { from: "2026-07-01", to: "2026-07-07" },
+    previousPeriod: { from: "2026-06-24", to: "2026-06-30" },
     filters: { from: "2026-07-01", to: "2026-07-07" },
     kpis: {
       totalComplaints: { currentValue: 100, previousValue: 80, absoluteChange: 20, percentageChange: 25.0, trend: "up", direction: "neutral" },
@@ -155,19 +170,41 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
     expect(result.warnings).toEqual([]);
   });
 
-  it("PDF contains at least 3 pages (one per section)", async () => {
+  it("PDF contains exactly 3 pages (one per section)", async () => {
     const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
     const result = await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
-    // Count /Page (singular, not /Pages) objects in the raw PDF.
-    const pdfText = result.buffer.toString("binary");
-    const pageMatches = pdfText.match(/\/Type\s*\/Page[^s]/g) ?? [];
-    expect(pageMatches.length).toBeGreaterThanOrEqual(3);
+    expect(countPageObjects(result.buffer)).toBe(3);
   });
 
   it("PDF title matches data.title", async () => {
     const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
     const result = await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
     expect(result.buffer.includes(utf16BeWithBom(data.title))).toBe(true);
+  });
+
+  it("writes actual three-page footer labels", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefPdf(makeReportData("DIGITAL_EXECUTIVE_BRIEF"), "DIGITAL_EXECUTIVE_BRIEF");
+      const footerTexts = textSpy.mock.calls
+        .map((call) => String(call[0]))
+        .filter((text) => text.includes("صفحة") && text.includes("من 3"));
+      expect(footerTexts).toHaveLength(3);
+      expect(footerTexts[0]).toContain("صفحة 1 من 3");
+      expect(footerTexts[2]).toContain("صفحة 3 من 3");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("contains each fixed page purpose in PDF metadata", async () => {
+    const result = await renderExecutiveBriefPdf(
+      makeReportData("DIGITAL_EXECUTIVE_BRIEF"),
+      "DIGITAL_EXECUTIVE_BRIEF"
+    );
+    for (const title of ["النظرة التنفيذية", "المقارنة والأداء", "التصنيفات والاستنتاجات", "المنهجية"]) {
+      expect(result.buffer.includes(utf16Be(title))).toBe(true);
+    }
   });
 
   it("renders without error when briefData is empty allRegions", async () => {
@@ -186,6 +223,8 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
 
   it("renders without error when no previous period in timeline", async () => {
     const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.previousPeriod = null;
+    if (data.comparisonData) data.comparisonData.previousPeriod = null;
     data.briefData = makeBriefData({
       comparativeTimeline: {
         current: { label: "الفترة الحالية", points: [{ relativeDay: 1, count: 10 }] },
@@ -195,6 +234,22 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
     });
     const result = await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
     expect(result.buffer.length).toBeGreaterThan(0);
+  });
+
+  it("shows no-reference guidance without fake previous values or continuity labels", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.previousPeriod = null;
+    if (data.comparisonData) data.comparisonData.previousPeriod = null;
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+      const texts = textSpy.mock.calls.map((call) => String(call[0]));
+      expect(texts.some((text) => text.includes("لا تتوفر فترة مرجعية للمقارنة"))).toBe(true);
+      expect(texts.some((text) => text.includes("جديد"))).toBe(false);
+      expect(texts.some((text) => text.includes("persistent") || text.includes("resolved"))).toBe(false);
+    } finally {
+      textSpy.mockRestore();
+    }
   });
 
   it("renders without error when briefData is undefined", async () => {
@@ -240,16 +295,17 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
 
     const textSpy = vi.spyOn(PDFDocument.prototype, "text");
     const fillColorSpy = vi.spyOn(PDFDocument.prototype, "fillColor");
+    const strokeColorSpy = vi.spyOn(PDFDocument.prototype, "strokeColor");
     try {
       const result = await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
       expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
       expect(result.warnings).toEqual([]);
 
       const renderedText = textSpy.mock.calls.map((call) => call[0]);
-      expect(renderedText).toContain("+5  (+10%)");
-      expect(renderedText).toContain("-5  (-10%)");
-      expect(renderedText).toContain("0  (0%)");
-      expect(renderedText).toContain("+5");
+      expect(renderedText.some((text) => String(text).startsWith("+5  (+10%)"))).toBe(true);
+      expect(renderedText.some((text) => String(text).startsWith("−5  (−10%)"))).toBe(true);
+      expect(renderedText.some((text) => String(text).startsWith("0  (0%)"))).toBe(true);
+      expect(renderedText.some((text) => String(text).startsWith("+5"))).toBe(true);
 
       const colorImmediatelyBefore = (text: string): string | undefined => {
         const textIndex = textSpy.mock.calls.findIndex((call) => call[0] === text);
@@ -263,13 +319,18 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
         return colorIndex === -1 ? undefined : String(fillColorSpy.mock.calls[colorIndex][0]);
       };
 
-      expect(colorImmediatelyBefore("↑ صاعد")).toBe("#b91c1c");
-      expect(colorImmediatelyBefore("↓ هابط")).toBe("#15803d");
-      expect(colorImmediatelyBefore("= ثابت")).toBe("#64748b");
-      expect(colorImmediatelyBefore("منطقة صاعدة")).toBe("#0f172a");
+      const usedColors = [
+        ...fillColorSpy.mock.calls.map((call) => String(call[0])),
+        ...strokeColorSpy.mock.calls.map((call) => String(call[0])),
+      ];
+      expect(usedColors).toContain("#DC2626");
+      expect(usedColors).toContain("#16A34A");
+      expect(usedColors).toContain("#6B7280");
+      expect(colorImmediatelyBefore("منطقة صاعدة")).toBe("#1F2937");
     } finally {
       textSpy.mockRestore();
       fillColorSpy.mockRestore();
+      strokeColorSpy.mockRestore();
     }
   });
 
@@ -285,11 +346,103 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
       const displayHeights = imageSpy.mock.calls
         .map((call) => (call[3] as { height?: number } | undefined)?.height)
         .filter((height): height is number => typeof height === "number");
-      expect(rasterHeights.length).toBeGreaterThanOrEqual(2);
+      expect(rasterHeights.length).toBeGreaterThanOrEqual(1);
       expect(displayHeights.slice(0, rasterHeights.length)).toEqual(rasterHeights);
     } finally {
       chartSpy.mockRestore();
       imageSpy.mockRestore();
+    }
+  });
+
+  it.each([0, 50, 75, 100])(
+    "keeps the %s%% compliance gauge within one semicircle",
+    async (value) => {
+      const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+      data.briefData = makeBriefData({
+        briefKpis: makeBriefData().briefKpis.map((card) => (
+          card.key === "complianceRate" ? { ...card, value } : card
+        )),
+      });
+      const pathSpy = vi.spyOn(PDFDocument.prototype, "path");
+      try {
+        await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+        const gaugeArcs = pathSpy.mock.calls
+          .map((call) => String(call[0]))
+          .filter((path) => path.includes("A 34 34"));
+        expect(gaugeArcs).toHaveLength(2);
+        expect(gaugeArcs.every((path) => path.includes("A 34 34 0 0 1"))).toBe(true);
+        expect(gaugeArcs.some((path) => path.includes("A 34 34 0 1 1"))).toBe(false);
+      } finally {
+        pathSpy.mockRestore();
+      }
+    }
+  );
+
+  it("does not infer a reference period from missing comparisonData", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.previousPeriod = null;
+    data.comparisonData = undefined;
+    const chartSpy = vi.spyOn(chartService, "renderLineChartPng");
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+      expect(chartSpy).not.toHaveBeenCalled();
+      expect(textSpy.mock.calls.some((call) => String(call[0]).includes("لا تتوفر فترة مرجعية"))).toBe(true);
+    } finally {
+      chartSpy.mockRestore();
+      textSpy.mockRestore();
+    }
+  });
+
+  it("does not render a comparison visual when previousPeriod is null", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.previousPeriod = null;
+    const chartSpy = vi.spyOn(chartService, "renderLineChartPng");
+    try {
+      await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+      expect(chartSpy).not.toHaveBeenCalled();
+    } finally {
+      chartSpy.mockRestore();
+    }
+  });
+
+  it("renders a useful comparison when the authoritative previousPeriod exists", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.comparisonData = undefined;
+    const chartSpy = vi.spyOn(chartService, "renderLineChartPng");
+    try {
+      await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+      expect(chartSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      chartSpy.mockRestore();
+    }
+  });
+
+  it("acceptance fixture stays three pages and replaces a low-value large chart", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.briefData = makeBriefData({
+      briefKpis: [
+        { key: "total", label: "إجمالي الشكاوى", value: 3, previousValue: 1, difference: 2, changeRate: 200, format: "number", assessment: "negative" },
+        { key: "open", label: "المفتوحة أو تحت الإجراء", value: 2, previousValue: 1, difference: 1, changeRate: 100, format: "number", assessment: "negative" },
+        { key: "closed", label: "المغلقة", value: 1, previousValue: 0, difference: 1, changeRate: null, format: "number", assessment: "positive" },
+        { key: "currentlyLate", label: "المتأخرة حاليًا", value: 1, previousValue: 0, difference: 1, changeRate: null, format: "number", assessment: "negative" },
+        { key: "complianceRate", label: "نسبة الالتزام بالمهلة", value: 100, previousValue: null, difference: 0, changeRate: null, format: "percent", assessment: "positive" },
+        { key: "averageResolutionDays", label: "متوسط زمن الإغلاق", value: 8, previousValue: null, difference: 0, changeRate: null, format: "days", assessment: "neutral" },
+      ],
+      allRegions: [
+        { regionName: "الرياض", currentCount: 2, previousCount: 0, difference: 2, changeRate: null, complianceRate: 100, averageResolutionDays: 8, currentlyLate: 1, direction: "ارتفاع" },
+        { regionName: "مكة المكرمة", currentCount: 1, previousCount: 0, difference: 1, changeRate: null, complianceRate: 100, averageResolutionDays: null, currentlyLate: 0, direction: "ارتفاع" },
+        { regionName: "المنطقة الشرقية", currentCount: 0, previousCount: 1, difference: -1, changeRate: -100, complianceRate: null, averageResolutionDays: null, currentlyLate: 0, direction: "انخفاض" },
+      ],
+    });
+    const chartSpy = vi.spyOn(chartService, "renderLineChartPng");
+    try {
+      const result = await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+      expect(countPageObjects(result.buffer)).toBe(3);
+      expect(chartSpy).not.toHaveBeenCalled();
+      expect(result.warnings).toEqual([]);
+    } finally {
+      chartSpy.mockRestore();
     }
   });
 });
@@ -312,12 +465,10 @@ describe("renderExecutiveBriefPdf — PRINT_EXECUTIVE_BRIEF", () => {
     expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
   });
 
-  it("PDF contains at least 3 pages (one per section)", async () => {
+  it("PDF contains exactly 3 pages (one per section)", async () => {
     const data = makeReportData("PRINT_EXECUTIVE_BRIEF");
     const result = await renderExecutiveBriefPdf(data, "PRINT_EXECUTIVE_BRIEF");
-    const pdfText = result.buffer.toString("binary");
-    const pageMatches = pdfText.match(/\/Type\s*\/Page[^s]/g) ?? [];
-    expect(pageMatches.length).toBeGreaterThanOrEqual(3);
+    expect(countPageObjects(result.buffer)).toBe(3);
   });
 
   it("print PDF buffer is reasonably sized (> 5 KB)", async () => {

@@ -17,11 +17,13 @@
  * and ReportRun — no schema migration required.
  */
 export type ReportMode =
+  | "STANDARD"                 // Existing full-section report
   | "DIGITAL_EXECUTIVE_BRIEF"  // 3-page 16:9 digital slides (1440×810 pt)
   | "FULL_ANALYTICAL"          // Unlimited-page A4 portrait deep-dive
   | "PRINT_EXECUTIVE_BRIEF";   // 3-page A4 landscape print copy
 
 export const REPORT_MODES = [
+  "STANDARD",
   "DIGITAL_EXECUTIVE_BRIEF",
   "FULL_ANALYTICAL",
   "PRINT_EXECUTIVE_BRIEF",
@@ -29,6 +31,57 @@ export const REPORT_MODES = [
 
 export function isReportMode(value: unknown): value is ReportMode {
   return typeof value === "string" && (REPORT_MODES as readonly string[]).includes(value);
+}
+
+// ---------------------------------------------------------------------------
+// Executive brief page plan
+// ---------------------------------------------------------------------------
+
+export type ExecutiveBriefPreviewPage = 1 | 2 | 3;
+
+export type ExecutiveBriefPagePlanEntry = {
+  page: ExecutiveBriefPreviewPage;
+  title: string;
+  sectionIds: readonly string[];
+};
+
+/**
+ * Shared page ownership for the three-page executive brief. Renderers own the
+ * visual layout, while data builders and previews share this stable metadata.
+ */
+export const EXECUTIVE_BRIEF_PAGE_PLAN = [
+  {
+    page: 1,
+    title: "النظرة التنفيذية",
+    sectionIds: ["kpi_overview", "executive_summary_text", "region_trend_chart"],
+  },
+  {
+    page: 2,
+    title: "المقارنة والأداء",
+    sectionIds: ["comparison", "region_changes", "top_regions", "top_departments"],
+  },
+  {
+    page: 3,
+    title: "التصنيفات والاستنتاجات",
+    sectionIds: ["top_classifications", "dept_class_rises", "overdue_table"],
+  },
+] as const satisfies readonly ExecutiveBriefPagePlanEntry[];
+
+export type ExecutiveBriefSectionPlacement = {
+  previewPage: ExecutiveBriefPreviewPage;
+  previewOrder: number;
+};
+
+export function getExecutiveBriefSectionPlacement(
+  sectionId: string
+): ExecutiveBriefSectionPlacement | null {
+  for (const pagePlan of EXECUTIVE_BRIEF_PAGE_PLAN) {
+    const previewOrder = (pagePlan.sectionIds as readonly string[]).indexOf(sectionId);
+    if (previewOrder >= 0) {
+      return { previewPage: pagePlan.page, previewOrder };
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +240,8 @@ export type ReportMatrixSection = {
   truncated: boolean;       // = truncatedRows || truncatedColumns (back-compat)
   maxRows: number;
   maxColumns: number;
+  previewPage?: ExecutiveBriefPreviewPage;
+  previewOrder?: number;
 };
 
 // ---------------------------------------------------------------------------

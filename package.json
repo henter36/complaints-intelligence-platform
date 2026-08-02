@@ -22,6 +22,7 @@
     "auth:init-admin": "tsx scripts/init-admin.ts",
     "reports:run-due": "tsx scripts/reports-run-due.ts",
     "reports:cleanup": "tsx scripts/reports-cleanup.ts",
+    "reports:render-review": "tsx scripts/render-report-review-artifacts.ts",
     "ai:cleanup": "tsx scripts/ai-cleanup.ts",
     "backup:create": "tsx scripts/backup-create.ts",
     "backup:verify": "tsx scripts/backup-verify.ts",

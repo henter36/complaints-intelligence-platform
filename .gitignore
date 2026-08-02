@@ -31,6 +31,9 @@ storage/
 tmp/
 temp/
 .cache/
+.playwright-cli/
+output/pdf/
+output/playwright/
 .DS_Store
 
 .idea/
