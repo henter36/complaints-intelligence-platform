@@ -67,6 +67,13 @@ function applyRtlView(worksheet: ExcelJS.Worksheet): void {
   worksheet.views = [{ rightToLeft: true, state: "frozen", ySplit: 1 }];
 }
 
+function comparisonModeLabel(data: ReportData): string {
+  if (!data.previousPeriod) return "لا توجد فترة مقارنة";
+  return data.comparisonMode === "SAME_PERIOD_LAST_YEAR"
+    ? "الفترة المماثلة من السنة السابقة"
+    : "الفترة السابقة المماثلة في المدة";
+}
+
 function buildSummarySheet(workbook: ExcelJS.Workbook, data: ReportData): ExcelJS.Worksheet {
   const sheet = workbook.addWorksheet("الملخص");
   applyRtlView(sheet);
@@ -87,6 +94,7 @@ function buildSummarySheet(workbook: ExcelJS.Workbook, data: ReportData): ExcelJ
     ["عنوان التقرير", data.title],
     ["نوع التقرير", definition.title],
     ["نمط التقرير", data.reportMode ?? "STANDARD"],
+    ["نوع المقارنة", comparisonModeLabel(data)],
     ["الوصف", definition.description],
     ["الفترة من", data.period.from],
     ["الفترة إلى", data.period.to],

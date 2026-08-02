@@ -1,6 +1,6 @@
 import { ComplaintPriority, ComplaintStatus } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getComplaintKpis } from "./complaint-kpi-service";
+import { getComplaintKpis, getPreviousPeriodRange } from "./complaint-kpi-service";
 
 const dbMocks = vi.hoisted(() => ({
   findMany: vi.fn(),
@@ -238,5 +238,25 @@ describe("complaint KPI service", () => {
     expect(result.distributions.byRegion).toEqual([
       expect.objectContaining({ name: "منطقة الرياض", total: 2 }),
     ]);
+  });
+
+  it("derives the same dates from the previous year when requested", () => {
+    const previous = getPreviousPeriodRange(
+      new Date("2026-01-03T00:00:00Z"),
+      new Date("2026-08-02T00:00:00Z"),
+      "SAME_PERIOD_LAST_YEAR"
+    );
+    expect(previous?.from.toISOString()).toBe("2025-01-03T00:00:00.000Z");
+    expect(previous?.to.toISOString()).toBe("2025-08-02T00:00:00.000Z");
+  });
+
+  it("does not query comparison data when comparison is disabled", async () => {
+    dbMocks.findMany.mockResolvedValueOnce([]);
+    await getComplaintKpis(
+      new URLSearchParams("from=2026-07-01&to=2026-07-31"),
+      new Date("2026-07-31T00:00:00Z"),
+      { includeComparison: false }
+    );
+    expect(dbMocks.findMany).toHaveBeenCalledTimes(1);
   });
 });

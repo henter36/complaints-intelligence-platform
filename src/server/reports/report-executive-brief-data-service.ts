@@ -302,7 +302,12 @@ function buildConclusions(
   }
   const openDepartment = [...result.distributions.byDepartment].sort((a, b) => b.open - a.open)[0];
   if (openDepartment?.open) points.push(`${openDepartment.name} الأعلى في الحالات المفتوحة بعدد ${openDepartment.open}.`);
-  return points.slice(0, 4);
+  const lateClassification = [...result.distributions.byClassification]
+    .sort((a, b) => b.currentlyLate - a.currentlyLate)[0];
+  if (lateClassification?.currentlyLate) {
+    points.push(`${lateClassification.name} الأعلى في الحالات المتأخرة بعدد ${lateClassification.currentlyLate}.`);
+  }
+  return points.slice(0, 5);
 }
 
 function buildNotes(result: ComplaintKpiResult, comparison: ComparisonResult): string[] {

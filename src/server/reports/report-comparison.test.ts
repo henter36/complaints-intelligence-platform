@@ -78,14 +78,25 @@ describe("derivePreviousPeriodRange", () => {
     expect(duration).toBe(3 * 24 * 60 * 60 * 1000);
   });
 
-  it("monthly period compares with the previous calendar month", async () => {
+  it("monthly selection compares with the immediately previous equal-duration period", async () => {
     const { derivePreviousPeriodRange } = await loadModule();
     const prev = derivePreviousPeriodRange(
       new Date("2026-07-01T00:00:00Z"),
       new Date("2026-08-01T00:00:00Z")
     )!;
-    expect(prev.from.toISOString()).toBe("2026-06-01T00:00:00.000Z");
+    expect(prev.from.toISOString()).toBe("2026-05-31T00:00:00.000Z");
     expect(prev.toExclusive.toISOString()).toBe("2026-07-01T00:00:00.000Z");
+  });
+
+  it("supports the same inclusive dates from the previous year", async () => {
+    const { derivePreviousPeriodRange } = await loadModule();
+    const prev = derivePreviousPeriodRange(
+      new Date("2026-01-03T00:00:00Z"),
+      new Date("2026-08-03T00:00:00Z"),
+      "SAME_PERIOD_LAST_YEAR"
+    )!;
+    expect(prev.from.toISOString()).toBe("2025-01-03T00:00:00.000Z");
+    expect(prev.toExclusive.toISOString()).toBe("2025-08-03T00:00:00.000Z");
   });
 
   it("no overlap: previous.toExclusive === current.from", async () => {
@@ -132,6 +143,23 @@ describe("buildComparisonResult without a reference period", () => {
     expect(result.deptClassAllPairs).toEqual([
       expect.objectContaining({ currentCount: 1, previousCount: 0 }),
     ]);
+  });
+});
+
+describe("buildComparisonResult temporal comparison source", () => {
+  it("uses complaint dates for previous-year comparison and never import metadata", async () => {
+    const { buildComparisonResult } = await loadModule();
+    mockPeriods([row()], [row({ complaintDate: new Date("2025-07-10T00:00:00Z") })]);
+    await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"), {
+      comparisonMode: "SAME_PERIOD_LAST_YEAR",
+      includeComparison: true,
+    });
+    expect(dbMocks.findMany).toHaveBeenCalledTimes(2);
+    const previousQuery = dbMocks.findMany.mock.calls[1][0];
+    const serialized = JSON.stringify(previousQuery);
+    expect(serialized).toContain("2025-07-08");
+    expect(serialized).toContain("complaintDate");
+    expect(serialized).not.toMatch(/importBatch|uploadedAt|createdAt/);
   });
 });
 

@@ -46,14 +46,6 @@ export type ExecutiveBriefPdfResult = {
 
 type ExecutiveBriefMode = "DIGITAL_EXECUTIVE_BRIEF" | "PRINT_EXECUTIVE_BRIEF";
 
-type ExecutiveVisual =
-  | "comparison-cards"
-  | "bar-chart"
-  | "line-chart"
-  | "status-distribution"
-  | "category-donut"
-  | "commitment-gauge";
-
 type BriefPageLayout = {
   pageSize: readonly [number, number];
   margin: number;
@@ -110,7 +102,7 @@ function createLayout(mode: ExecutiveBriefMode, regionCount: number): BriefPageL
   const baseSize = mode === "PRINT_EXECUTIVE_BRIEF"
     ? PRINT_EXECUTIVE_PAGE_SIZE
     : DIGITAL_EXECUTIVE_PAGE_SIZE;
-  const requiredHeight = 650 + Math.ceil(regionCount / 3) * 78 + (regionCount + 1) * 31;
+  const requiredHeight = 940 + Math.ceil(regionCount / 3) * 78 + (regionCount + 1) * 31;
   const pageSize = [baseSize[0], Math.max(baseSize[1], requiredHeight)] as const;
   const margin = 42;
   return {
@@ -177,7 +169,7 @@ function drawPageHeader(
   context: ExecutiveBriefRenderContext,
   pageTitle: string
 ): number {
-  const { doc, data, layout } = context;
+  const { doc, layout } = context;
   const { margin, contentWidth } = layout;
   const titleSize = fontSize(layout, REPORT_DESIGN_TOKENS.fontSize.reportTitle, 20);
   doc.font("Bold").fontSize(titleSize).fillColor(COLORS.primary);
@@ -188,30 +180,13 @@ function drawPageHeader(
   });
 
   const titleHeight = doc.heightOfString(pageTitle, { width: contentWidth, align: "right" });
-  const metaY = margin + titleHeight + 10;
-  doc.font("Body").fontSize(fontSize(layout, 10.5, 8.5)).fillColor(COLORS.neutral);
-  const previous = data.previousPeriod
-    ? ` | الفترة السابقة: ${data.previousPeriod.from} – ${data.previousPeriod.to}`
-    : " | لا تتوفر فترة سابقة للمقارنة";
-  const meta = `الفترة: ${data.period.from} – ${data.period.to}${previous}`;
-  doc.text(meta, margin, metaY, {
-    width: contentWidth,
-    align: "right",
-    wordSpacing: ARABIC_WORD_SPACING,
-  });
-  const generated = `تاريخ الإنشاء: ${formatRiyadhDateTime(new Date(data.generatedAt))}`;
-  doc.text(generated, margin, metaY + fontSize(layout, 18, 14), {
-    width: contentWidth,
-    align: "right",
-    wordSpacing: ARABIC_WORD_SPACING,
-  });
-  const lineY = metaY + fontSize(layout, 42, 32);
+  const lineY = margin + titleHeight + 10;
   doc.moveTo(margin, lineY)
     .lineTo(margin + contentWidth, lineY)
     .strokeColor(COLORS.border)
     .stroke();
   resetInk(doc);
-  return lineY + fontSize(layout, 16, 10);
+  return lineY + fontSize(layout, 14, 10);
 }
 
 function drawSectionTitle(
@@ -323,7 +298,7 @@ function drawKpiGrid(
   const selectedCards = cards.slice(0, 8);
   const columns = 4;
   const gap = layout.compact ? 8 : 12;
-  const cardHeight = layout.compact ? 68 : 92;
+  const cardHeight = layout.compact ? 72 : 98;
   const width = (layout.contentWidth - gap * (columns - 1)) / columns;
   selectedCards.forEach((card, index) => {
     const row = Math.floor(index / columns);
@@ -344,67 +319,39 @@ function briefPageTitle(page: ExecutiveBriefPreviewPage): string {
   return EXECUTIVE_BRIEF_PAGE_PLAN[page - 1].title;
 }
 
-function selectPage1Visual(context: ExecutiveBriefRenderContext): ExecutiveVisual {
-  const points = context.brief.comparativeTimeline.current.points;
-  const total = points.reduce((sum, point) => sum + point.count, 0);
-  return points.length >= 3 && total >= 5
-    ? "line-chart"
-    : "comparison-cards";
+function timelinePointLabel(
+  aggregation: ExecutiveBriefData["comparativeTimeline"]["aggregation"],
+  relativeDay: number
+): string {
+  if (aggregation === "monthly") return `الشهر ${Math.floor((relativeDay - 1) / 30) + 1}`;
+  if (aggregation === "weekly") return `الأسبوع ${Math.floor((relativeDay - 1) / 7) + 1}`;
+  return `اليوم ${relativeDay}`;
 }
 
-async function drawPage1Visual(
+async function drawTimelineVisual(
   context: ExecutiveBriefRenderContext,
-  startY: number
-): Promise<void> {
-  const { doc, data, warnings, layout } = context;
-  const visual = selectPage1Visual(context);
+  startY: number,
+  chartHeight: number
+): Promise<number> {
+  const { doc, warnings, layout } = context;
   const titleY = drawSectionTitle(
     doc,
-    visual === "line-chart" ? "الاتجاه الزمني للشكاوى" : "قراءة سريعة للأداء الحالي",
+    "الاتجاه الزمني للشكاوى",
     layout.margin,
     startY,
     layout.contentWidth,
     layout
   );
-  const available = layout.pageSize[1] - layout.margin - 34 - titleY;
-  if (visual === "comparison-cards") {
-    const cards = [
-      context.brief.briefKpis.find((card) => card.key === "total"),
-      context.brief.briefKpis.find((card) => card.key === "currentlyLate"),
-      context.brief.briefKpis.find((card) => card.key === "complianceRate"),
-    ].filter((card): card is ExecutiveBriefKpiCard => card !== undefined);
-    const gap = 12;
-    const width = (layout.contentWidth - gap * 2) / 3;
-    cards.forEach((card, index) => {
-      const x = layout.margin + (2 - index) * (width + gap);
-      doc.roundedRect(x, titleY, width, 126, REPORT_DESIGN_TOKENS.card.radius)
-        .fillAndStroke(COLORS.background, COLORS.border);
-      doc.font("Body").fontSize(11).fillColor(COLORS.neutral)
-        .text(card.label, x + 12, titleY + 22, { width: width - 24, align: "center" });
-      doc.font("Bold").fontSize(25).fillColor(COLORS.primary)
-        .text(formatKpiValue(card), x + 12, titleY + 62, { width: width - 24, align: "center" });
-    });
-    doc.font("Body").fontSize(11).fillColor(COLORS.neutral).text(
-      data.previousPeriod
-        ? "حجم البيانات لا يكفي لإظهار اتجاه زمني موثوق."
-        : "لا تتوفر فترة سابقة، ويعرض هذا الملخص قيم الفترة الحالية فقط.",
-      layout.margin,
-      titleY + 148,
-      { width: layout.contentWidth, align: "center" }
-    );
-    return;
-  }
   const timeline = context.brief.comparativeTimeline;
-  const chartHeight = Math.max(90, Math.round(available));
   const chart = {
-    id: "executive-region-comparison",
+    id: "executive-time-series",
     kind: "chart" as const,
     chartType: "line" as const,
     title: timeline.previous ? "الفترة الحالية مقارنة بالفترة السابقة" : "اتجاه الفترة الحالية",
     series: [
-      { name: timeline.current.label, points: timeline.current.points.map((point) => ({ x: String(point.relativeDay), y: point.count })) },
+      { name: timeline.current.label, points: timeline.current.points.map((point) => ({ x: timelinePointLabel(timeline.aggregation, point.relativeDay), y: point.count })) },
       ...(hasReferencePeriod(context) && timeline.previous
-        ? [{ name: timeline.previous.label, points: timeline.previous.points.map((point) => ({ x: String(point.relativeDay), y: point.count })) }]
+        ? [{ name: timeline.previous.label, points: timeline.previous.points.map((point) => ({ x: timelinePointLabel(timeline.aggregation, point.relativeDay), y: point.count })) }]
         : []),
     ],
   };
@@ -416,8 +363,41 @@ async function drawPage1Visual(
     });
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    warnings.push(`تعذر رسم مخطط المناطق: ${reason}`);
+    warnings.push(`تعذر رسم مخطط الاتجاه الزمني: ${reason}`);
   }
+  return titleY + chartHeight;
+}
+
+function buildPage2Notes(context: ExecutiveBriefRenderContext): string[] {
+  const total = context.brief.briefKpis.find((card) => card.key === "total");
+  const compliance = context.brief.briefKpis.find((card) => card.key === "complianceRate");
+  const notes: string[] = [];
+  if (total?.difference != null && hasReferencePeriod(context)) {
+    notes.push(`صافي التغير في إجمالي الشكاوى ${formatReportNumber(total.difference, { sign: true })}.`);
+  }
+  if (compliance?.value === null) {
+    notes.push("لا يتوفر مقام صالح لاحتساب الالتزام ضمن المهلة.");
+  }
+  if (notes.length === 0) {
+    notes.push("يعرض الاتجاه إجمالي الشكاوى مجمعاً وفق طول الفترة المحددة.");
+  }
+  return notes.slice(0, 2);
+}
+
+function drawPage2Notes(context: ExecutiveBriefRenderContext, startY: number): void {
+  const { doc, layout } = context;
+  const titleY = drawSectionTitle(doc, "ملاحظات", layout.margin, startY, layout.contentWidth, layout);
+  const notes = buildPage2Notes(context);
+  doc.roundedRect(layout.margin, titleY, layout.contentWidth, 58, REPORT_DESIGN_TOKENS.card.radius)
+    .fillAndStroke(COLORS.background, COLORS.border);
+  doc.font("Body").fontSize(11).fillColor(COLORS.text);
+  notes.forEach((note, index) => {
+    doc.text(`• ${note}`, layout.margin + 12, titleY + 9 + index * 22, {
+      width: layout.contentWidth - 24,
+      align: "right",
+      wordSpacing: ARABIC_WORD_SPACING,
+    });
+  });
 }
 
 function drawCoverMetric(
@@ -464,9 +444,13 @@ function renderCoverPage(context: ExecutiveBriefRenderContext): void {
       align: "center",
       wordSpacing: ARABIC_WORD_SPACING,
     });
-  const comparison = data.previousPeriod
-    ? `مقارنة مع الفترة المماثلة السابقة: ${data.previousPeriod.from} إلى ${data.previousPeriod.to}`
-    : "لا تتوفر فترة مماثلة سابقة للمقارنة";
+  let comparison = "لا تتوفر فترة زمنية للمقارنة";
+  if (data.previousPeriod) {
+    const comparisonLabel = data.comparisonMode === "SAME_PERIOD_LAST_YEAR"
+      ? "مقارنة مع الفترة المماثلة من السنة السابقة"
+      : "مقارنة مع الفترة السابقة المماثلة في المدة";
+    comparison = `${comparisonLabel}: ${data.previousPeriod.from} إلى ${data.previousPeriod.to}`;
+  }
   doc.text(comparison, layout.margin, titleY + 108, {
     width: layout.contentWidth,
     align: "center",
@@ -490,7 +474,13 @@ async function renderPage2(context: ExecutiveBriefRenderContext): Promise<void> 
   let y = drawPageHeader(context, briefPageTitle(2));
   y = drawSectionTitle(context.doc, "ملخص المؤشرات", context.layout.margin, y, context.layout.contentWidth, context.layout);
   y = drawKpiGrid(context.doc, context.brief.briefKpis, context.layout, y);
-  await drawPage1Visual(context, y);
+  const notesHeight = 100;
+  const chartHeight = Math.max(
+    340,
+    Math.floor(context.layout.pageSize[1] - context.layout.margin - 26 - notesHeight - y)
+  );
+  const chartBottom = await drawTimelineVisual(context, y, chartHeight);
+  drawPage2Notes(context, chartBottom + 8);
 }
 
 function regionDirection(row: RegionReferenceRow): ExecutiveDirection {
@@ -585,13 +575,12 @@ const REGION_COLUMNS: readonly ColumnDefinition<RegionReferenceRow>[] = [
   { key: "openCount", label: "المفتوحة", weight: 0.9 },
   { key: "closedCount", label: "المغلقة", weight: 0.9 },
   { key: "currentlyLate", label: "المتأخرة", weight: 0.9 },
-  { key: "complianceRate", label: "الالتزام", weight: 1 },
   { key: "direction", label: "الاتجاه", weight: 0.75 },
 ];
 
 function resolveRegionRowHeight(layout: BriefPageLayout, regionCount: number): number {
-  if (regionCount <= 3) return layout.compact ? 30 : 58;
-  if (regionCount <= 5) return layout.compact ? 25 : 40;
+  if (regionCount <= 3) return layout.compact ? 34 : 66;
+  if (regionCount <= 5) return layout.compact ? 28 : 46;
   return layout.compact ? 22 : 28;
 }
 
@@ -603,7 +592,7 @@ function drawAllRegionCards(
   const columns = 3;
   const gap = 10;
   const width = (layout.contentWidth - gap * (columns - 1)) / columns;
-  const height = 68;
+  const height = 82;
   brief.allRegions.forEach((region, index) => {
     const row = Math.floor(index / columns);
     const column = index % columns;
@@ -638,7 +627,7 @@ function drawAllRegionCards(
     const comparison = hasReferencePeriod(context)
       ? `المتأخرة ${formatReportNumber(region.currentlyLate)} | الفرق ${formatReportNumber(region.difference, { sign: true })} | ${changeDescription}`
       : `المتأخرة ${formatReportNumber(region.currentlyLate)} | لا تتوفر مقارنة`;
-    doc.text(comparison, x + 8, y + 48, {
+    doc.text(comparison, x + 8, y + 54, {
       width: width - 16,
       align: "right",
       lineBreak: false,
@@ -649,7 +638,47 @@ function drawAllRegionCards(
   return startY + Math.ceil(brief.allRegions.length / columns) * (height + gap);
 }
 
-function renderPage3(context: ExecutiveBriefRenderContext): void {
+async function drawRegionComparisonChart(
+  context: ExecutiveBriefRenderContext,
+  startY: number
+): Promise<number> {
+  const { doc, brief, layout, warnings } = context;
+  const titleY = drawSectionTitle(doc, "مقارنة المناطق", layout.margin, startY, layout.contentWidth, layout);
+  const chartHeight = 360;
+  const currentPoints = brief.allRegions.map((row) => ({
+    x: row.regionName,
+    y: row.currentCount,
+  }));
+  const series = [{ name: "الفترة الحالية", points: currentPoints }];
+  if (hasReferencePeriod(context)) {
+    series.push({
+      name: "الفترة المقارنة",
+      points: brief.allRegions.map((row) => ({ x: row.regionName, y: row.previousCount })),
+    });
+  }
+  try {
+    const png = await renderLineChartPng({
+      id: "executive-region-comparison",
+      kind: "chart",
+      chartType: "bar",
+      title: hasReferencePeriod(context)
+        ? "الحالي مقارنة بالفترة المرجعية حسب المنطقة"
+        : "إجمالي الفترة الحالية حسب المنطقة",
+      series,
+      emptyState: "لا توجد بيانات مناطق ضمن الفترة المحددة.",
+    }, Math.round(layout.contentWidth), chartHeight);
+    doc.image(png, layout.margin, titleY, {
+      width: layout.contentWidth,
+      height: chartHeight,
+    });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    warnings.push(`تعذر رسم مقارنة المناطق: ${reason}`);
+  }
+  return titleY + chartHeight + 10;
+}
+
+async function renderPage3(context: ExecutiveBriefRenderContext): Promise<void> {
   const { doc, brief, layout } = context;
   let y = drawPageHeader(context, briefPageTitle(3));
   if (!hasReferencePeriod(context)) {
@@ -662,6 +691,7 @@ function renderPage3(context: ExecutiveBriefRenderContext): void {
     });
     y += fontSize(layout, 66, 48);
   }
+  y = await drawRegionComparisonChart(context, y);
   y = drawSectionTitle(doc, "بطاقات المناطق", layout.margin, y, layout.contentWidth, layout);
   y = drawAllRegionCards(context, y) + 8;
   y = drawSectionTitle(doc, "جميع المناطق", layout.margin, y, layout.contentWidth, layout);
@@ -968,7 +998,7 @@ function renderPage4(context: ExecutiveBriefRenderContext): void {
   const conclusionY = Math.max(lowerY + 230, departmentBottom + 175);
   const conclusionsStart = drawSectionTitle(doc, "الاستنتاجات", layout.margin, conclusionY, layout.contentWidth, layout);
   doc.font("Body").fontSize(11).fillColor(COLORS.text);
-  (brief.conclusions ?? []).slice(0, 4).forEach((point, index) => {
+  (brief.conclusions ?? []).slice(0, 5).forEach((point, index) => {
     doc.text(`• ${point}`, layout.margin, conclusionsStart + index * 28, {
       width: layout.contentWidth,
       align: "right",
@@ -1050,7 +1080,7 @@ export async function renderExecutiveBriefPdf(
   doc.addPage();
   await renderPage2(context);
   doc.addPage();
-  renderPage3(context);
+  await renderPage3(context);
   doc.addPage();
   renderPage4(context);
   drawBriefFooters(doc, data, layout);

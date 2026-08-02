@@ -33,6 +33,20 @@ export function isReportMode(value: unknown): value is ReportMode {
   return typeof value === "string" && (REPORT_MODES as readonly string[]).includes(value);
 }
 
+export type ComparisonMode =
+  | "PREVIOUS_EQUIVALENT_PERIOD"
+  | "SAME_PERIOD_LAST_YEAR";
+
+export const COMPARISON_MODES = [
+  "PREVIOUS_EQUIVALENT_PERIOD",
+  "SAME_PERIOD_LAST_YEAR",
+] as const satisfies readonly ComparisonMode[];
+
+export function isComparisonMode(value: unknown): value is ComparisonMode {
+  return typeof value === "string"
+    && (COMPARISON_MODES as readonly string[]).includes(value);
+}
+
 // ---------------------------------------------------------------------------
 // Executive brief page plan
 // ---------------------------------------------------------------------------

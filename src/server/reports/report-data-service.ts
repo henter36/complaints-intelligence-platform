@@ -27,6 +27,7 @@ import {
 import type {
   ReportMatrixSection,
   ReportMode,
+  ComparisonMode,
   ExecutiveBriefKpiCard,
   RegionReferenceRow,
   ClassificationBriefRow,
@@ -100,7 +101,7 @@ type ReportSectionPreviewMetadata = {
 export type ReportChartSection = ReportSectionPreviewMetadata & {
   id: string;
   kind: "chart";
-  chartType: "line";
+  chartType: "line" | "bar";
   title: string;
   description?: string;
   xAxisLabel?: string;
@@ -148,6 +149,7 @@ export type ReportData = {
   comparisonData?: ComparisonResult;
   // Mode-specific extended data (only present for the new report modes).
   reportMode?: ReportMode;
+  comparisonMode?: ComparisonMode;
   briefData?: ExecutiveBriefData | FullAnalyticalData;
 };
 
@@ -181,6 +183,7 @@ export function isFullAnalyticalData(
 export type {
   ReportMatrixSection,
   ReportMode,
+  ComparisonMode,
   ExecutiveBriefKpiCard,
   RegionReferenceRow,
   ClassificationBriefRow,
@@ -451,8 +454,14 @@ async function buildExecutiveSummaryCore(
 ): Promise<ExecutiveSummaryCore> {
   const { filters, options } = request;
   const params = buildComplaintQueryParams(filters);
-  const result = await getComplaintKpis(params, now);
-  const comparison = await buildComparisonResult(filters, now);
+  const result = await getComplaintKpis(params, now, {
+    comparisonMode: options.comparisonMode ?? "PREVIOUS_EQUIVALENT_PERIOD",
+    includeComparison: options.includeComparison,
+  });
+  const comparison = await buildComparisonResult(filters, now, {
+    comparisonMode: options.comparisonMode ?? "PREVIOUS_EQUIVALENT_PERIOD",
+    includeComparison: options.includeComparison,
+  });
   const warnings: string[] = comparison.warnings.map(comparisonWarningMessage);
 
   const sections: ReportSection[] = [];
@@ -551,6 +560,7 @@ async function buildExecutiveSummaryCore(
     warnings,
     rowCount: 0,
     comparisonData: comparison,
+    comparisonMode: options.comparisonMode ?? "PREVIOUS_EQUIVALENT_PERIOD",
   };
   return { data, kpiResult: result, comparison };
 }
@@ -595,7 +605,7 @@ async function buildExecutiveSummaryWithMode(
       "to",
       new Date(comparison.previousPeriod.toExclusive.getTime() - DAY_MS).toISOString().slice(0, 10)
     );
-    previousResult = await getComplaintKpis(prevParams, now);
+    previousResult = await getComplaintKpis(prevParams, now, { includeComparison: false });
   }
 
   if (reportMode === "FULL_ANALYTICAL") {

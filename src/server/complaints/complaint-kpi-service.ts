@@ -4,6 +4,7 @@ import { roundToTenth } from "@/lib/complaint-metrics";
 import { buildComplaintTiming } from "./complaint-timing";
 import { normalizeRegionName } from "@/lib/reports/region-normalization";
 import { previousInclusivePeriod } from "@/lib/reports/period-range";
+import type { ComparisonMode } from "@/lib/reports/report-contract";
 import {
   buildComplaintWhere,
   parseComplaintQuery,
@@ -213,10 +214,21 @@ const KPI_METRIC_KEYS = [
   "reopenCount",
 ] as const satisfies readonly (keyof ComplaintKpiSummary)[];
 
-export async function getComplaintKpis(params: URLSearchParams, now = new Date()): Promise<ComplaintKpiResult> {
+type ComplaintKpiOptions = {
+  comparisonMode?: ComparisonMode;
+  includeComparison?: boolean;
+};
+
+export async function getComplaintKpis(
+  params: URLSearchParams,
+  now = new Date(),
+  options: ComplaintKpiOptions = {}
+): Promise<ComplaintKpiResult> {
   const query = parseComplaintQuery(params);
   const currentWhere = buildComplaintWhere(query, now);
-  const previousWhere = buildPreviousWhere(query, now);
+  const previousWhere = options.includeComparison === false
+    ? null
+    : buildPreviousWhere(query, now, options.comparisonMode);
   const [current, previous] = await Promise.all([
     db.complaint.findMany({ where: currentWhere, select: kpiSelect }),
     previousWhere ? db.complaint.findMany({ where: previousWhere, select: kpiSelect }) : Promise.resolve(null),
@@ -224,13 +236,21 @@ export async function getComplaintKpis(params: URLSearchParams, now = new Date()
   return buildKpiResult(current, previous, now, query);
 }
 
-export function getPreviousPeriodRange(from: Date, to: Date): { from: Date; to: Date } | null {
-  return previousInclusivePeriod(from, to);
+export function getPreviousPeriodRange(
+  from: Date,
+  to: Date,
+  mode: ComparisonMode = "PREVIOUS_EQUIVALENT_PERIOD"
+): { from: Date; to: Date } | null {
+  return previousInclusivePeriod(from, to, mode);
 }
 
-function buildPreviousWhere(query: ComplaintQuery, now: Date): Prisma.ComplaintWhereInput | null {
+function buildPreviousWhere(
+  query: ComplaintQuery,
+  now: Date,
+  mode: ComparisonMode = "PREVIOUS_EQUIVALENT_PERIOD"
+): Prisma.ComplaintWhereInput | null {
   if (!query.from || !query.to) return null;
-  const previousRange = getPreviousPeriodRange(query.from, query.to);
+  const previousRange = getPreviousPeriodRange(query.from, query.to, mode);
   if (!previousRange) return null;
   const previousQuery = { ...query, from: previousRange.from, to: previousRange.to };
   return buildComplaintWhere(previousQuery, now);

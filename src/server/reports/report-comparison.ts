@@ -3,7 +3,8 @@ import { db } from "@/lib/db";
 import { buildComplaintWhere, parseComplaintQuery } from "@/server/complaints/complaint-query-service";
 import { buildComplaintQueryParams, type ReportFilters } from "./report-definition-service";
 import { normalizeRegionName } from "@/lib/reports/region-normalization";
-import { previousHalfOpenPeriod } from "@/lib/reports/period-range";
+import { comparisonHalfOpenPeriod } from "@/lib/reports/period-range";
+import type { ComparisonMode } from "@/lib/reports/report-contract";
 
 // ---------------------------------------------------------------------------
 // Centralized period-comparison module.
@@ -28,8 +29,12 @@ export type PeriodRange = { from: Date; toExclusive: Date };
  * The current period is [from, toExclusive) using half-open intervals.
  * Returns null when the range is invalid (duration <= 0).
  */
-export function derivePreviousPeriodRange(from: Date, toExclusive: Date): PeriodRange | null {
-  return previousHalfOpenPeriod(from, toExclusive);
+export function derivePreviousPeriodRange(
+  from: Date,
+  toExclusive: Date,
+  mode: ComparisonMode = "PREVIOUS_EQUIVALENT_PERIOD"
+): PeriodRange | null {
+  return comparisonHalfOpenPeriod(from, toExclusive, mode);
 }
 
 export type RegionDayPoint = { date: string; count: number };
@@ -499,6 +504,8 @@ function buildExecutiveSummaryPoints(
 
 export type BuildComparisonOptions = {
   minimumIncreaseCount?: number;
+  comparisonMode?: ComparisonMode;
+  includeComparison?: boolean;
 };
 
 /**
@@ -511,6 +518,7 @@ export async function buildComparisonResult(
   options: BuildComparisonOptions = {}
 ): Promise<ComparisonResult> {
   const minimumIncreaseCount = options.minimumIncreaseCount ?? DEFAULT_MINIMUM_INCREASE_COUNT;
+  const comparisonMode = options.comparisonMode ?? "PREVIOUS_EQUIVALENT_PERIOD";
 
   // The report's own filters express the current period as inclusive date-only
   // strings [from, to]. Convert to a half-open UTC interval [from, toExclusive)
@@ -518,7 +526,9 @@ export async function buildComparisonResult(
   const currentFrom = new Date(`${filters.from}T00:00:00.000Z`);
   const currentToExclusive = new Date(new Date(`${filters.to}T00:00:00.000Z`).getTime() + DAY_MS);
   const currentPeriod: PeriodRange = { from: currentFrom, toExclusive: currentToExclusive };
-  const previousPeriod = derivePreviousPeriodRange(currentPeriod.from, currentPeriod.toExclusive);
+  const previousPeriod = options.includeComparison === false
+    ? null
+    : derivePreviousPeriodRange(currentPeriod.from, currentPeriod.toExclusive, comparisonMode);
 
   const warnings: ComparisonWarning[] = [];
 

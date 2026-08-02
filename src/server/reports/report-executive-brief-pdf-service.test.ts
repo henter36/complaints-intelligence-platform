@@ -123,6 +123,7 @@ function makeReportData(mode: "DIGITAL_EXECUTIVE_BRIEF" | "PRINT_EXECUTIVE_BRIEF
     warnings: [],
     rowCount: 0,
     reportMode: mode,
+    comparisonMode: "PREVIOUS_EQUIVALENT_PERIOD",
     briefData: makeBriefData(),
     comparisonData: {
       currentPeriod: { from: new Date("2026-07-01T00:00:00Z"), toExclusive: new Date("2026-07-08T00:00:00Z") },
@@ -192,6 +193,35 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
       expect(footerTexts).toHaveLength(4);
       expect(footerTexts[0]).toContain("صفحة 1 من 4");
       expect(footerTexts[3]).toContain("صفحة 4 من 4");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("draws period, comparison, and generation metadata on the cover only", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefPdf(makeReportData("DIGITAL_EXECUTIVE_BRIEF"), "DIGITAL_EXECUTIVE_BRIEF");
+      const texts = textSpy.mock.calls.map((call) => String(call[0]));
+      expect(texts.filter((text) => text.startsWith("الفترة من "))).toHaveLength(1);
+      expect(texts.filter((text) => text.startsWith("مقارنة مع الفترة"))).toHaveLength(1);
+      expect(texts.filter((text) => text.startsWith("تاريخ الإنشاء:"))).toHaveLength(1);
+      expect(texts.some((text) => text.startsWith("الفترة:"))).toBe(false);
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("labels a previous-year comparison explicitly on the cover", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.comparisonMode = "SAME_PERIOD_LAST_YEAR";
+    data.previousPeriod = { from: "2025-07-01", to: "2025-07-07" };
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+      expect(textSpy.mock.calls.some((call) => String(call[0]).startsWith(
+        "مقارنة مع الفترة المماثلة من السنة السابقة"
+      ))).toBe(true);
     } finally {
       textSpy.mockRestore();
     }
@@ -414,9 +444,9 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
     const textSpy = vi.spyOn(PDFDocument.prototype, "text");
     try {
       await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
-      expect(chartSpy).toHaveBeenCalledTimes(1);
-      const chart = chartSpy.mock.calls[0][0];
-      expect(chart.series).toHaveLength(1);
+      expect(chartSpy).toHaveBeenCalledTimes(2);
+      const charts = chartSpy.mock.calls.map((call) => call[0]);
+      expect(charts.every((chart) => chart.series.length === 1)).toBe(true);
       expect(textSpy.mock.calls.some((call) => String(call[0]).includes("لا تتوفر فترة"))).toBe(true);
     } finally {
       chartSpy.mockRestore();
@@ -430,8 +460,8 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
     const chartSpy = vi.spyOn(chartService, "renderLineChartPng");
     try {
       await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
-      expect(chartSpy).toHaveBeenCalledTimes(1);
-      expect(chartSpy.mock.calls[0][0].series).toHaveLength(1);
+      expect(chartSpy).toHaveBeenCalledTimes(2);
+      expect(chartSpy.mock.calls.every((call) => call[0].series.length === 1)).toBe(true);
     } finally {
       chartSpy.mockRestore();
     }
@@ -443,13 +473,14 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
     const chartSpy = vi.spyOn(chartService, "renderLineChartPng");
     try {
       await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
-      expect(chartSpy).toHaveBeenCalledTimes(1);
+      expect(chartSpy).toHaveBeenCalledTimes(2);
+      expect(chartSpy.mock.calls.every((call) => call[0].series.length === 2)).toBe(true);
     } finally {
       chartSpy.mockRestore();
     }
   });
 
-  it("acceptance fixture stays four pages and replaces a low-value large chart", async () => {
+  it("acceptance fixture stays four pages and keeps the timeline and region visuals", async () => {
     const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
     data.briefData = makeBriefData({
       briefKpis: [
@@ -475,7 +506,8 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
     try {
       const result = await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
       expect(countPageObjects(result.buffer)).toBe(4);
-      expect(chartSpy).not.toHaveBeenCalled();
+      expect(chartSpy).toHaveBeenCalledTimes(2);
+      expect(chartSpy.mock.calls.map((call) => call[0].chartType)).toEqual(["line", "bar"]);
       expect(result.warnings).toEqual([]);
     } finally {
       chartSpy.mockRestore();

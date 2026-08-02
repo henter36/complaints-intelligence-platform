@@ -137,13 +137,16 @@ describe("report template mutation guards", () => {
     expect(isReportTemplateError(caught)).toBe(true);
   });
 
-  it("preserves reportMode when running a saved template", async () => {
+  it("preserves report and comparison modes when running a saved template", async () => {
     dbMocks.templateFindUnique.mockResolvedValue({
       id: "tpl_mode",
       name: "قالب رقمي",
       reportType: ReportType.EXECUTIVE_SUMMARY,
       filters: { from: "2026-07-01", to: "2026-07-31" },
-      options: { reportMode: "DIGITAL_EXECUTIVE_BRIEF" },
+      options: {
+        reportMode: "DIGITAL_EXECUTIVE_BRIEF",
+        comparisonMode: "SAME_PERIOD_LAST_YEAR",
+      },
       isActive: true,
       schedules: [],
     });
@@ -154,7 +157,10 @@ describe("report template mutation guards", () => {
     expect(exportMocks.runReport).toHaveBeenCalledWith(
       expect.objectContaining({
         request: expect.objectContaining({
-          options: expect.objectContaining({ reportMode: "DIGITAL_EXECUTIVE_BRIEF" }),
+          options: expect.objectContaining({
+            reportMode: "DIGITAL_EXECUTIVE_BRIEF",
+            comparisonMode: "SAME_PERIOD_LAST_YEAR",
+          }),
         }),
         scheduledFor,
       }),

@@ -38,6 +38,7 @@ import {
 import { formatDate, formatDateTime } from "@/lib/ar-utils";
 import {
   EXECUTIVE_BRIEF_PAGE_PLAN,
+  type ComparisonMode,
   type ExecutiveBriefPreviewPage,
   type ReportMatrixSection,
   type ReportMode,
@@ -97,7 +98,7 @@ type ReportSection =
   | (ReportSectionPreviewMetadata & { id: string; kind: "kpi"; title: string; cards: ReportKpiCard[] })
   | (ReportSectionPreviewMetadata & { id: string; kind: "table"; title: string; table: ReportTable })
   | (ReportSectionPreviewMetadata & { id: string; kind: "text"; title: string; points: string[] })
-  | (ReportSectionPreviewMetadata & { id: string; kind: "chart"; chartType: "line"; title: string; series: ChartSeries[]; description?: string; emptyState?: string; unit?: string; truncated?: boolean; truncatedMessage?: string })
+  | (ReportSectionPreviewMetadata & { id: string; kind: "chart"; chartType: "line" | "bar"; title: string; series: ChartSeries[]; description?: string; emptyState?: string; unit?: string; truncated?: boolean; truncatedMessage?: string })
   | ReportMatrixSection;
 
 type ReportData = {
@@ -105,11 +106,13 @@ type ReportData = {
   title: string;
   generatedAt: string;
   period: { from: string; to: string };
+  previousPeriod?: { from: string; to: string } | null;
   filters: Record<string, unknown>;
   sections: ReportSection[];
   warnings: string[];
   rowCount: number;
   reportMode?: ReportMode;
+  comparisonMode?: ComparisonMode;
 };
 
 type ReportTemplate = {
@@ -120,7 +123,7 @@ type ReportTemplate = {
   isActive: boolean;
   lastRunAt: string | null;
   createdAt: string;
-  options?: { reportMode?: ReportMode };
+  options?: { reportMode?: ReportMode; comparisonMode?: ComparisonMode };
   schedules: ReportSchedule[];
 };
 
@@ -147,7 +150,7 @@ type ReportRunRow = {
   failedAt: string | null;
   errorMessage: string | null;
   createdAt: string;
-  optionsSnapshot?: { reportMode?: ReportMode } | null;
+  optionsSnapshot?: { reportMode?: ReportMode; comparisonMode?: ComparisonMode } | null;
   reportTemplate?: { id: string; name: string } | null;
   artifacts: { id: string; format: "PDF" | "XLSX"; fileName: string; fileSize: number }[];
 };
@@ -172,6 +175,7 @@ const FILTER_KEYS: ReportFilterKey[] = [
 
 type OptionsForm = {
   reportMode: ReportMode;
+  comparisonMode: ComparisonMode;
   includeComparison: boolean;
   includeCharts: boolean;
   includeDetailedRows: boolean;
@@ -186,13 +190,13 @@ const REPORT_MODE_OPTIONS: readonly {
   {
     value: "DIGITAL_EXECUTIVE_BRIEF",
     label: "التقرير التنفيذي المختصر — عرض رقمي",
-    description: "ثلاث صفحات أفقية احترافية مناسبة للشاشة والاجتماعات التنفيذية.",
+    description: "أربع صفحات عربية منظمة للعرض والمراجعة.",
     recommended: true,
   },
   {
     value: "PRINT_EXECUTIVE_BRIEF",
     label: "التقرير التنفيذي المختصر — طباعة",
-    description: "ثلاث صفحات أفقية محسنة للطباعة.",
+    description: "أربع صفحات محسنة للطباعة بخطوط وجداول واضحة.",
   },
   {
     value: "FULL_ANALYTICAL",
@@ -205,6 +209,11 @@ const REPORT_MODE_OPTIONS: readonly {
     description: "التقرير التقليدي بكامل الأقسام المعتادة.",
   },
 ];
+
+const COMPARISON_MODE_LABELS: Record<ComparisonMode, string> = {
+  PREVIOUS_EQUIVALENT_PERIOD: "الفترة السابقة المماثلة في المدة",
+  SAME_PERIOD_LAST_YEAR: "الفترة المماثلة من السنة السابقة",
+};
 
 const REPORT_MODE_LEGEND_ID = "report-mode-legend";
 
@@ -296,6 +305,7 @@ function defaultOptions(reportType: ReportType | null): OptionsForm {
     reportMode: reportType === "EXECUTIVE_SUMMARY"
       ? "DIGITAL_EXECUTIVE_BRIEF"
       : "STANDARD",
+    comparisonMode: "PREVIOUS_EQUIVALENT_PERIOD",
     includeComparison: true,
     includeCharts: true,
     includeDetailedRows: false,
@@ -1007,10 +1017,30 @@ export function ReportsCenter() {
 
                 {selectedType === "EXECUTIVE_SUMMARY" && <Separator />}
 
+                {selectedType === "EXECUTIVE_SUMMARY" && options.includeComparison && (
+                  <div className="space-y-2">
+                    <Label htmlFor="comparison-mode">نوع المقارنة الزمنية</Label>
+                    <select
+                      id="comparison-mode"
+                      aria-label="نوع المقارنة الزمنية"
+                      className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+                      value={options.comparisonMode}
+                      onChange={(event) => setOptions((previous) => ({
+                        ...previous,
+                        comparisonMode: event.target.value as ComparisonMode,
+                      }))}
+                    >
+                      {Object.entries(COMPARISON_MODE_LABELS).map(([value, label]) => (
+                        <option key={value} value={value}>{label}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                   <label className="flex items-center gap-2 cursor-pointer text-sm">
                     <Checkbox checked={options.includeComparison} onCheckedChange={() => setOptions((p) => ({ ...p, includeComparison: !p.includeComparison }))} />
-                    مقارنة بالفترة السابقة
+                    تضمين مقارنة زمنية
                   </label>
                   <label className="flex items-center gap-2 cursor-pointer text-sm">
                     <Checkbox checked={options.includeCharts} onCheckedChange={() => setOptions((p) => ({ ...p, includeCharts: !p.includeCharts }))} />
@@ -1088,6 +1118,11 @@ export function ReportsCenter() {
                               {tpl.options?.reportMode && (
                                 <div className="text-xs text-muted-foreground">
                                   {REPORT_MODE_LABELS[tpl.options.reportMode]}
+                                </div>
+                              )}
+                              {tpl.options?.comparisonMode && (
+                                <div className="text-xs text-muted-foreground">
+                                  {COMPARISON_MODE_LABELS[tpl.options.comparisonMode]}
                                 </div>
                               )}
                             </TableCell>
@@ -1214,6 +1249,11 @@ export function ReportsCenter() {
                             {run.optionsSnapshot?.reportMode && (
                               <div className="text-xs text-muted-foreground">
                                 {REPORT_MODE_LABELS[run.optionsSnapshot.reportMode]}
+                              </div>
+                            )}
+                            {run.optionsSnapshot?.comparisonMode && (
+                              <div className="text-xs text-muted-foreground">
+                                {COMPARISON_MODE_LABELS[run.optionsSnapshot.comparisonMode]}
                               </div>
                             )}
                           </TableCell>
@@ -1502,6 +1542,12 @@ function executivePreviewPageContent(
       <div className="flex h-full flex-col items-center justify-center gap-6 text-center">
         <h4 className="text-3xl font-bold">تقرير الشكاوى</h4>
         <p>الفترة من {data.period.from} إلى {data.period.to}</p>
+        <p className="text-sm text-muted-foreground">
+          {data.previousPeriod
+            ? `${data.comparisonMode === "SAME_PERIOD_LAST_YEAR" ? "مقارنة مع الفترة المماثلة من السنة السابقة" : "مقارنة مع الفترة السابقة المماثلة في المدة"}: ${data.previousPeriod.from} إلى ${data.previousPeriod.to}`
+            : "لا تتوفر فترة زمنية للمقارنة"}
+        </p>
+        <p className="text-xs text-muted-foreground">تاريخ الإنشاء: {formatDateTime(data.generatedAt)}</p>
         <div className="grid w-full grid-cols-3 gap-3">
           {coverCards.map((card) => (
             <div key={card.key} className="rounded-lg border p-3">

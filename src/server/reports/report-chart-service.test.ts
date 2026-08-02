@@ -83,6 +83,22 @@ describe("Arabic font rendering smoke test", () => {
     expect(buffer.length).toBeGreaterThan(0);
   });
 
+  it("renders an Arabic grouped bar chart for all regions", async () => {
+    const section: ReportChartSection = {
+      id: "regions",
+      kind: "chart",
+      chartType: "bar",
+      title: "مقارنة المناطق",
+      series: [
+        { name: "الفترة الحالية", points: [{ x: "منطقة الرياض", y: 10 }, { x: "منطقة مكة المكرمة", y: 7 }] },
+        { name: "الفترة المقارنة", points: [{ x: "منطقة الرياض", y: 8 }, { x: "منطقة مكة المكرمة", y: 9 }] },
+      ],
+    };
+    const buffer = await renderLineChartPng(section, 900, 360);
+    expect(buffer.slice(1, 4).toString()).toBe("PNG");
+    expect(buffer.length).toBeGreaterThan(0);
+  });
+
   it("SVG does not embed @font-face or base64 font data", async () => {
     // Import the internals indirectly via the exported functions.
     // The test verifies the SVG we generate does not use the old approach.

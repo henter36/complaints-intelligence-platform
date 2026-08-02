@@ -77,6 +77,36 @@ describe("reportOptionsSchema — reportMode field", () => {
   });
 });
 
+describe("reportOptionsSchema — comparisonMode field", () => {
+  it.each([
+    "PREVIOUS_EQUIVALENT_PERIOD",
+    "SAME_PERIOD_LAST_YEAR",
+  ] as const)("accepts %s", (comparisonMode) => {
+    const request = parseReportRequest({
+      type: "EXECUTIVE_SUMMARY",
+      filters: VALID_FILTERS,
+      options: { comparisonMode },
+    });
+    expect(request.options.comparisonMode).toBe(comparisonMode);
+  });
+
+  it("defaults to the immediately previous equal-duration period", () => {
+    const request = parseReportRequest({
+      type: "EXECUTIVE_SUMMARY",
+      filters: VALID_FILTERS,
+    });
+    expect(request.options.comparisonMode).toBe("PREVIOUS_EQUIVALENT_PERIOD");
+  });
+
+  it("rejects an invalid comparison mode", () => {
+    expect(() => parseReportRequest({
+      type: "EXECUTIVE_SUMMARY",
+      filters: VALID_FILTERS,
+      options: { comparisonMode: "IMPORT_BATCH" },
+    })).toThrow();
+  });
+});
+
 describe("report request contract validation", () => {
   it("accepts a valid request", () => {
     const request = parseReportRequest({

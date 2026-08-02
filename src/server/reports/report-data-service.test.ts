@@ -97,7 +97,11 @@ describe("report data service — parity with the central KPI service", () => {
     const request = parseReportRequest({ type: "EXECUTIVE_SUMMARY", filters: VALID_FILTERS });
     const now = new Date("2026-07-31T00:00:00Z");
 
-    const directKpis = await getComplaintKpis(buildComplaintQueryParams(request.filters), now);
+    const directKpis = await getComplaintKpis(
+      buildComplaintQueryParams(request.filters),
+      now,
+      { includeComparison: request.options.includeComparison }
+    );
     const report = await buildReportData(request, "preview", now);
 
     // The report's headline KPI object must be identical to the central
