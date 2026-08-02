@@ -186,7 +186,7 @@ export type ExecutiveEntityRow = {
  * `relativeDay` starts at 1 (first day of each period) regardless of the
  * absolute calendar date, allowing a direct visual overlay of both periods.
  */
-export type ComparativeTimelinePoint = { relativeDay: number; count: number };
+export type ComparativeTimelinePoint = { relativeDay: number; count: number; label?: string };
 
 export type ComparativeTimelineSeries = {
   label: string;

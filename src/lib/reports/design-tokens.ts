@@ -38,8 +38,7 @@ export const REPORT_DESIGN_TOKENS = {
     footer: 9,
   },
   typography: {
-    /** Keeps shaped Arabic words visually distinct in PDFKit output. */
-    wordSpacing: 1.2,
+    wordSpacing: 0,
   },
 } as const;
 

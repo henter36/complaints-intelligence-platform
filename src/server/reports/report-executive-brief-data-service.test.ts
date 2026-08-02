@@ -895,6 +895,71 @@ describe("buildFullAnalyticalData — net backlog flow filters", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Tests: monthly timeline points carry Arabic month labels
+// ---------------------------------------------------------------------------
+
+describe("buildExecutiveBriefData — monthly timeline labels", () => {
+  it("monthly points carry Arabic month name labels", async () => {
+    const comparison = makeComparison(false);
+    // 180-day period → monthly aggregation
+    const start = ISO("2026-01-01");
+    comparison.currentPeriod = {
+      from: start,
+      toExclusive: new Date(start.getTime() + 180 * 86_400_000),
+    };
+    comparison.regionTrend = { allDates: [], series: [], truncated: false, otherSeriesName: null };
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
+    expect(data.comparativeTimeline.aggregation).toBe("monthly");
+    const labels = data.comparativeTimeline.current.points.map((p) => p.label).filter(Boolean);
+    expect(labels.length).toBeGreaterThan(0);
+    expect(labels[0]).toContain("يناير");
+    expect(labels[1]).toContain("فبراير");
+  });
+
+  it("daily points do not carry a label (label is undefined)", async () => {
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(false), undefined, NOW);
+    expect(data.comparativeTimeline.aggregation).toBe("daily");
+    for (const point of data.comparativeTimeline.current.points) {
+      expect(point.label).toBeUndefined();
+    }
+  });
+
+  it("monthly labels include the year", async () => {
+    const comparison = makeComparison(false);
+    const start = ISO("2025-11-01");
+    comparison.currentPeriod = {
+      from: start,
+      toExclusive: new Date(start.getTime() + 180 * 86_400_000),
+    };
+    comparison.regionTrend = { allDates: [], series: [], truncated: false, otherSeriesName: null };
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
+    const labels = data.comparativeTimeline.current.points.map((p) => p.label).filter(Boolean) as string[];
+    expect(labels.some((label) => label.includes("2025"))).toBe(true);
+    expect(labels.some((label) => label.includes("2026"))).toBe(true);
+  });
+
+  it("allRegions: changeRate is null and direction is 'جديد' when previousCount=0 and currentCount>0", async () => {
+    dbMocks.complaintGroupBy.mockResolvedValue([{ region: "منطقة جديدة" }]);
+    const comparison = makeComparison();
+    comparison.regionChanges.push({
+      regionName: "منطقة جديدة",
+      currentCount: 7,
+      previousCount: 0,
+      difference: 7,
+      changeRate: null,
+      direction: "جديد",
+    });
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
+    const row = data.allRegions.find((r) => r.regionName === "منطقة جديدة");
+    expect(row).toBeDefined();
+    expect(row!.changeRate).toBeNull();
+    expect(row!.direction).toBe("جديد");
+    expect(row!.currentCount).toBe(7);
+    expect(row!.previousCount).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Tests: buildFullAnalyticalData — continuity rows
 // ---------------------------------------------------------------------------
 

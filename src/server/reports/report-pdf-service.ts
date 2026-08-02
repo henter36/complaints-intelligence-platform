@@ -15,7 +15,6 @@ import type {
 } from "./report-data-service";
 import { isFullAnalyticalData } from "./report-data-service";
 import { renderLineChartPng } from "./report-chart-service";
-import { formatRiyadhDateTime } from "./report-time";
 import { buildMatrixTruncationMessage } from "@/lib/reports/matrix-truncation";
 import {
   formatReportNumber,
@@ -305,7 +304,6 @@ function renderCoverPage(doc: PDFKit.PDFDocument, data: ReportData): void {
     title: data.title,
     periodText: `الفترة من ${data.period.from} إلى ${data.period.to}`,
     comparisonText,
-    generatedText: `تاريخ الإنشاء: ${formatRiyadhDateTime(new Date(data.generatedAt))}`,
     metrics: [
       { label: "إجمالي الشكاوى", value: data.kpis.totalComplaints?.currentValue ?? fallbackValue("total") },
       { label: "المفتوحة", value: data.kpis.openComplaints?.currentValue ?? fallbackValue("open") },

@@ -392,6 +392,11 @@ function resolveTimelineAggregation(periodDays: number): {
   return { aggregation: "monthly" };
 }
 
+const ARABIC_MONTH_NAMES = [
+  "يناير", "فبراير", "مارس", "أبريل", "مايو", "يونيو",
+  "يوليو", "أغسطس", "سبتمبر", "أكتوبر", "نوفمبر", "ديسمبر",
+];
+
 function aggregateTimelinePoints(
   points: readonly ComparativeTimelinePoint[],
   aggregation: "daily" | "weekly" | "monthly",
@@ -404,8 +409,13 @@ function aggregateTimelinePoints(
       const date = new Date(periodStart.getTime() + (point.relativeDay - 1) * DAY_MS);
       const monthKey = `${date.getUTCFullYear()}-${date.getUTCMonth()}`;
       const bucket = monthly.get(monthKey);
-      if (bucket) bucket.count += point.count;
-      else monthly.set(monthKey, { relativeDay: point.relativeDay, count: point.count });
+      if (bucket) {
+        bucket.count += point.count;
+      } else {
+        const monthName = ARABIC_MONTH_NAMES[date.getUTCMonth()];
+        const label = `${monthName} ${date.getUTCFullYear()}`;
+        monthly.set(monthKey, { relativeDay: point.relativeDay, count: point.count, label });
+      }
     }
     return [...monthly.values()];
   }

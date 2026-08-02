@@ -21,7 +21,6 @@ import {
 } from "@/lib/reports/design-tokens";
 import type { ExecutiveBriefData, ReportData } from "./report-data-service";
 import { renderLineChartPng } from "./report-chart-service";
-import { formatRiyadhDateTime } from "./report-time";
 import { drawComplaintsReportCover } from "./report-cover";
 import { getComparisonModeDescription } from "@/lib/reports/comparison-mode-labels";
 
@@ -358,9 +357,9 @@ async function drawTimelineVisual(
     chartType: "line" as const,
     title: timeline.previous ? "الفترة الحالية مقارنة بالفترة السابقة" : "اتجاه الفترة الحالية",
     series: [
-      { name: timeline.current.label, points: timeline.current.points.map((point) => ({ x: timelinePointLabel(timeline.aggregation, point.relativeDay), y: point.count })) },
+      { name: timeline.current.label, points: timeline.current.points.map((point) => ({ x: point.label ?? timelinePointLabel(timeline.aggregation, point.relativeDay), y: point.count })) },
       ...(hasReferencePeriod(context) && timeline.previous
-        ? [{ name: timeline.previous.label, points: timeline.previous.points.map((point) => ({ x: timelinePointLabel(timeline.aggregation, point.relativeDay), y: point.count })) }]
+        ? [{ name: timeline.previous.label, points: timeline.previous.points.map((point) => ({ x: point.label ?? timelinePointLabel(timeline.aggregation, point.relativeDay), y: point.count })) }]
         : []),
     ],
   };
@@ -419,10 +418,9 @@ function renderCoverPage(context: ExecutiveBriefRenderContext): void {
     doc,
     pageSize: layout.pageSize,
     margin: layout.margin,
-    title: "تقرير الشكاوى",
+    title: data.title,
     periodText: `الفترة من ${data.period.from} إلى ${data.period.to}`,
     comparisonText: comparison,
-    generatedText: `تاريخ الإنشاء: ${formatRiyadhDateTime(new Date(data.generatedAt))}`,
     metrics: [
       { label: "إجمالي الشكاوى", value: valueFor("total") },
       { label: "المفتوحة", value: valueFor("open") },
@@ -458,9 +456,11 @@ function classificationDirection(row: ClassificationBriefRow): ExecutiveDirectio
 
 function formatRegionCell(row: RegionReferenceRow, key: keyof RegionReferenceRow): string {
   if (key === "direction") return "";
-  if (key === "changeRate" || key === "complianceRate") {
-    return formatNullableReportNumber(row[key], { percent: true });
+  if (key === "changeRate") {
+    if (row.changeRate === null && row.previousCount === 0 && row.currentCount > 0) return "جديد";
+    return formatNullableReportNumber(row.changeRate, { percent: true });
   }
+  if (key === "complianceRate") return formatNullableReportNumber(row.complianceRate, { percent: true });
   if (key === "difference") return formatReportNumber(row.difference, { sign: true });
   if (key === "averageResolutionDays") return formatNullableReportNumber(row.averageResolutionDays);
   const value = row[key];
@@ -600,6 +600,10 @@ function drawAllRegionCards(
   return startY + Math.ceil(regions.length / columns) * (height + gap);
 }
 
+function stripRegionPrefix(name: string): string {
+  return name.replace(/^منطقة\s+/, "").replace(/^المنطقة\s+/, "");
+}
+
 async function drawRegionComparisonChart(
   context: ExecutiveBriefRenderContext,
   startY: number
@@ -609,14 +613,14 @@ async function drawRegionComparisonChart(
   const titleY = drawSectionTitle(doc, "مقارنة المناطق", layout.margin, startY, layout.contentWidth, layout);
   const chartHeight = 360;
   const currentPoints = regions.map((row) => ({
-    x: row.regionName,
+    x: stripRegionPrefix(row.regionName),
     y: row.currentCount,
   }));
   const series = [{ name: "الفترة الحالية", points: currentPoints }];
   if (hasReferencePeriod(context)) {
     series.push({
       name: "الفترة المقارنة",
-      points: regions.map((row) => ({ x: row.regionName, y: row.previousCount })),
+      points: regions.map((row) => ({ x: stripRegionPrefix(row.regionName), y: row.previousCount })),
     });
   }
   try {

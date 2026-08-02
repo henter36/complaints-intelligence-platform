@@ -16,7 +16,6 @@ type ReportCoverOptions = {
   title: string;
   periodText: string;
   comparisonText: string;
-  generatedText: string;
   metrics: readonly [ReportCoverMetric, ReportCoverMetric, ReportCoverMetric];
 };
 
@@ -32,7 +31,6 @@ export function drawComplaintsReportCover(options: ReportCoverOptions): void {
     title,
     periodText,
     comparisonText,
-    generatedText,
     metrics,
   } = options;
   const contentWidth = pageSize[0] - margin * 2;
@@ -58,27 +56,21 @@ export function drawComplaintsReportCover(options: ReportCoverOptions): void {
       align: "center",
       wordSpacing: WORD_SPACING,
     });
-  doc.fontSize(12).fillColor(COLORS.neutral)
-    .text(generatedText, margin, titleY + 150, {
-      width: contentWidth,
-      align: "center",
-      wordSpacing: WORD_SPACING,
-    });
 
   const gap = 18;
   const width = (contentWidth - gap * 2) / 3;
   metrics.forEach((metric, index) => {
     const x = margin + (2 - index) * (width + gap);
-    doc.roundedRect(x, titleY + 230, width, 104, REPORT_DESIGN_TOKENS.card.radius)
+    doc.roundedRect(x, titleY + 164, width, 104, REPORT_DESIGN_TOKENS.card.radius)
       .fillAndStroke(COLORS.background, COLORS.border);
     doc.font("Body").fontSize(12).fillColor(COLORS.neutral)
-      .text(metric.label, x + 10, titleY + 248, {
+      .text(metric.label, x + 10, titleY + 182, {
         width: width - 20,
         align: "center",
         wordSpacing: WORD_SPACING,
       });
     doc.font("Bold").fontSize(28).fillColor(COLORS.primary)
-      .text(formatNullableReportNumber(metric.value), x + 10, titleY + 280, {
+      .text(formatNullableReportNumber(metric.value), x + 10, titleY + 214, {
         width: width - 20,
         align: "center",
       });

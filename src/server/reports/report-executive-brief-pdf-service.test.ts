@@ -198,14 +198,14 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
     }
   });
 
-  it("draws period, comparison, and generation metadata on the cover only", async () => {
+  it("draws period and comparison metadata on the cover — no generated-date line", async () => {
     const textSpy = vi.spyOn(PDFDocument.prototype, "text");
     try {
       await renderExecutiveBriefPdf(makeReportData("DIGITAL_EXECUTIVE_BRIEF"), "DIGITAL_EXECUTIVE_BRIEF");
       const texts = textSpy.mock.calls.map((call) => String(call[0]));
       expect(texts.filter((text) => text.startsWith("الفترة من "))).toHaveLength(1);
       expect(texts.filter((text) => text.startsWith("مقارنة مع الفترة"))).toHaveLength(1);
-      expect(texts.filter((text) => text.startsWith("تاريخ الإنشاء:"))).toHaveLength(1);
+      expect(texts.filter((text) => text.startsWith("تاريخ الإنشاء:"))).toHaveLength(0);
       expect(texts.some((text) => text.startsWith("الفترة:"))).toBe(false);
     } finally {
       textSpy.mockRestore();
@@ -521,6 +521,113 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
     }
   });
 });
+
+  // ── Cover page: title and date ──────────────────────────────────────────
+
+  it("cover title uses data.title, not a hardcoded string", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.title = "تقرير اختبار المناطق";
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+      const texts = textSpy.mock.calls.map((call) => String(call[0]));
+      expect(texts).toContain("تقرير اختبار المناطق");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("cover does not render a generated-date line", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefPdf(makeReportData("DIGITAL_EXECUTIVE_BRIEF"), "DIGITAL_EXECUTIVE_BRIEF");
+      const texts = textSpy.mock.calls.map((call) => String(call[0]));
+      expect(texts.every((text) => !text.startsWith("تاريخ الإنشاء:"))).toBe(true);
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  // ── Region chart: prefix stripping ─────────────────────────────────────
+
+  it("region chart series use short names without 'منطقة ' prefix", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.briefData = makeBriefData({
+      allRegions: [
+        { regionName: "منطقة الرياض", currentCount: 20, previousCount: 10, difference: 10, changeRate: 100, complianceRate: 95, averageResolutionDays: 3, currentlyLate: 1, direction: "↑ ارتفاع" },
+        { regionName: "منطقة مكة المكرمة", currentCount: 10, previousCount: 12, difference: -2, changeRate: -16.7, complianceRate: 90, averageResolutionDays: 4, currentlyLate: 0, direction: "↓ انخفاض" },
+      ],
+    });
+    const chartSpy = vi.spyOn(chartService, "renderLineChartPng");
+    try {
+      await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+      const regionChart = chartSpy.mock.calls.find((call) => call[0].chartType === "bar");
+      expect(regionChart).toBeDefined();
+      const points = regionChart![0].series[0].points;
+      expect(points.every((point) => !point.x.startsWith("منطقة "))).toBe(true);
+      expect(points.some((point) => point.x === "الرياض")).toBe(true);
+    } finally {
+      chartSpy.mockRestore();
+    }
+  });
+
+  it("region chart strips 'المنطقة ' prefix as well", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.briefData = makeBriefData({
+      allRegions: [
+        { regionName: "المنطقة الشرقية", currentCount: 8, previousCount: 5, difference: 3, changeRate: 60, complianceRate: 85, averageResolutionDays: 5, currentlyLate: 2, direction: "↑ ارتفاع" },
+      ],
+    });
+    const chartSpy = vi.spyOn(chartService, "renderLineChartPng");
+    try {
+      await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+      const regionChart = chartSpy.mock.calls.find((call) => call[0].chartType === "bar");
+      expect(regionChart).toBeDefined();
+      const points = regionChart![0].series[0].points;
+      expect(points.some((point) => point.x === "الشرقية")).toBe(true);
+    } finally {
+      chartSpy.mockRestore();
+    }
+  });
+
+  // ── Region table: "جديد" for zero-previous rows ──────────────────────
+
+  it("region table shows 'جديد' in changeRate column when previous=0 and current>0", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.briefData = makeBriefData({
+      allRegions: [
+        { regionName: "الرياض", currentCount: 15, previousCount: 0, difference: 15, changeRate: null, complianceRate: 90, averageResolutionDays: 3, currentlyLate: 1, direction: "جديد" },
+      ],
+    });
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+      const texts = textSpy.mock.calls.map((call) => String(call[0]));
+      expect(texts).toContain("جديد");
+      expect(texts.every((text) => text !== "غير متاح")).toBe(true);
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("region table does not show 'غير متاح' for new regions even with no previousCount", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.briefData = makeBriefData({
+      allRegions: [
+        { regionName: "جدة", currentCount: 5, previousCount: 0, difference: 5, changeRate: null, complianceRate: null, averageResolutionDays: null, currentlyLate: 0, direction: "جديد" },
+        { regionName: "مكة", currentCount: 3, previousCount: 2, difference: 1, changeRate: 50, complianceRate: 80, averageResolutionDays: 2, currentlyLate: 0, direction: "↑ ارتفاع" },
+      ],
+    });
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+      const texts = textSpy.mock.calls.map((call) => String(call[0]));
+      // "جديد" must appear for the zero-previous row
+      expect(texts).toContain("جديد");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
 
 // ---------------------------------------------------------------------------
 // PRINT_EXECUTIVE_BRIEF tests

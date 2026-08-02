@@ -61,4 +61,8 @@ describe("report design tokens", () => {
     expect(source.match(/function drawDirectionIcon/g)).toHaveLength(1);
     expect(source).not.toMatch(/[↑↓]/);
   });
+
+  it("wordSpacing is 0 — non-zero value causes Arabic word-order reversal in PDFKit", () => {
+    expect(REPORT_DESIGN_TOKENS.typography.wordSpacing).toBe(0);
+  });
 });
