@@ -266,7 +266,10 @@ function drawKpiCard(
   doc.roundedRect(x, y, width, height, radius)
     .fillAndStroke(COLORS.background, COLORS.border);
   const hasGauge = card.key === "complianceRate";
-  const gaugeWidth = hasGauge ? (layout.compact ? 60 : 86) : 0;
+  let gaugeWidth = 0;
+  if (hasGauge) {
+    gaugeWidth = layout.compact ? 60 : 86;
+  }
   doc.font("Body").fontSize(fontSize(layout, 10.5, 8.5)).fillColor(COLORS.neutral);
   doc.text(card.label, x + padding + gaugeWidth, y + padding, {
     width: width - padding * 2 - gaugeWidth,
