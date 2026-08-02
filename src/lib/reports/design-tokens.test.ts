@@ -13,20 +13,21 @@ import {
 describe("report design tokens", () => {
   it("uses the approved limited report palette", () => {
     expect(REPORT_DESIGN_TOKENS.colors).toEqual({
-      primary: "#1F2937",
-      success: "#16A34A",
-      danger: "#DC2626",
-      neutral: "#6B7280",
-      background: "#F9FAFB",
-      tableRowAlternate: "#F3F4F6",
-      border: "#E5E7EB",
+      primary: "#004B3A",
+      gold: "#B88919",
+      success: "#004B3A",
+      danger: "#C62828",
+      neutral: "#46534E",
+      text: "#073B31",
+      background: "#FCFAF5",
+      tableRowAlternate: "#F7F2E7",
+      border: "#D8BE7A",
       white: "#FFFFFF",
     });
   });
 
-  it("keeps the digital canvas at 16:9 and outside A4 geometry", () => {
-    expect(DIGITAL_EXECUTIVE_PAGE_SIZE[0] / DIGITAL_EXECUTIVE_PAGE_SIZE[1]).toBeCloseTo(16 / 9);
-    expect(DIGITAL_EXECUTIVE_PAGE_SIZE).toEqual([1440, 810]);
+  it("uses the readable portrait reference canvas instead of compressed A4", () => {
+    expect(DIGITAL_EXECUTIVE_PAGE_SIZE).toEqual([900, 1200]);
   });
 
   it("formats Latin digits, one decimal at most, and a true minus sign", () => {

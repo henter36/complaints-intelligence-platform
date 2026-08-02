@@ -92,7 +92,6 @@ function buildSummarySheet(workbook: ExcelJS.Workbook, data: ReportData): ExcelJ
     ["الفترة إلى", data.period.to],
     ["تاريخ الإنشاء", formatRiyadhDateTime(new Date(data.generatedAt))],
     ["الفلاتر المطبقة", filtersText],
-    ["ملاحظة", "تقرير مولّد آلياً بواسطة نظام ذكاء الشكاوى"],
   ];
   for (const [field, value] of rows) {
     sheet.addRow({ field: sanitizeText(field), value: sanitizeText(value) });
@@ -306,7 +305,7 @@ function buildDeptClassRisesSheet(workbook: ExcelJS.Workbook, comparison: Compar
 // ---------------------------------------------------------------------------
 
 function buildBriefKpisSheet(workbook: ExcelJS.Workbook, briefData: ExecutiveBriefData, usedNames: Set<string>): void {
-  const sheet = workbook.addWorksheet(sanitizeSheetName("المؤشرات التنفيذية", usedNames));
+  const sheet = workbook.addWorksheet(sanitizeSheetName("المؤشرات المختصرة", usedNames));
   applyRtlView(sheet);
   sheet.columns = [
     { header: "المؤشر", key: "label", width: 28 },
@@ -359,16 +358,17 @@ function buildAllRegionsSheet(workbook: ExcelJS.Workbook, briefData: ExecutiveBr
   sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: 9 } };
 
   for (const row of briefData.allRegions) {
+    const hasPrevious = briefData.comparativeTimeline.previous !== null;
     const added = sheet.addRow({
       regionName: sanitizeText(row.regionName),
       current: row.currentCount,
-      previous: row.previousCount,
-      difference: row.difference,
-      changeRate: row.changeRate ?? null,
+      previous: hasPrevious ? row.previousCount : null,
+      difference: hasPrevious ? row.difference : null,
+      changeRate: hasPrevious ? (row.changeRate ?? null) : null,
       complianceRate: row.complianceRate ?? null,
       avgResolution: row.averageResolutionDays ?? null,
       currentlyLate: row.currentlyLate,
-      direction: sanitizeText(row.direction),
+      direction: hasPrevious ? sanitizeText(row.direction) : "لا تتوفر مقارنة",
     });
     if (typeof row.changeRate === "number") added.getCell("changeRate").numFmt = REPORT_XLSX_NUMBER_FORMATS.percent;
     if (typeof row.complianceRate === "number") added.getCell("complianceRate").numFmt = REPORT_XLSX_NUMBER_FORMATS.percent;
@@ -613,7 +613,7 @@ const FULL_ANALYTICAL_SHEET_BUILDERS: readonly FullAnalyticalSheetDefinition[] =
 
 function createWorkbookContext(data: ReportData): WorkbookBuildContext {
   const workbook = new ExcelJS.Workbook();
-  workbook.creator = "نظام ذكاء الشكاوى";
+  workbook.creator = "تقارير الشكاوى";
   workbook.created = new Date();
   workbook.calcProperties.fullCalcOnLoad = false;
   return {

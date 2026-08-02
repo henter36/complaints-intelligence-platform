@@ -78,6 +78,16 @@ describe("derivePreviousPeriodRange", () => {
     expect(duration).toBe(3 * 24 * 60 * 60 * 1000);
   });
 
+  it("monthly period compares with the previous calendar month", async () => {
+    const { derivePreviousPeriodRange } = await loadModule();
+    const prev = derivePreviousPeriodRange(
+      new Date("2026-07-01T00:00:00Z"),
+      new Date("2026-08-01T00:00:00Z")
+    )!;
+    expect(prev.from.toISOString()).toBe("2026-06-01T00:00:00.000Z");
+    expect(prev.toExclusive.toISOString()).toBe("2026-07-01T00:00:00.000Z");
+  });
+
   it("no overlap: previous.toExclusive === current.from", async () => {
     const { derivePreviousPeriodRange } = await loadModule();
     const from = new Date("2026-07-08T00:00:00Z");
@@ -203,7 +213,7 @@ describe("RegionChangeRow", () => {
     );
     expect(rows.find((r) => r.regionName === R_MAKKAH)!.difference).toBe(2);
     expect(rows.find((r) => r.regionName === R_RIYADH)!.difference).toBe(0);
-    expect(rows.find((r) => r.regionName === R_SHARQIYA)!.difference).toBe(-1);
+    expect(rows.find((r) => r.regionName === "المنطقة الشرقية")!.difference).toBe(-1);
   });
 
   it("sort order: ارتفاع first, then جديد, then دون تغير, then انخفاض, then دون شكاوى", async () => {
@@ -387,7 +397,7 @@ describe("RegionTrendData", () => {
     expect(data.otherSeriesName).toBeNull();
   });
 
-  it("9 regions: top 8 shown, 9th aggregated into مناطق أخرى, counting each complaint once", async () => {
+  it("uses one readable total series without grouping regions as مناطق أخرى", async () => {
     const inRange = new Date("2026-07-10T00:00:00Z");
     const rows: Row[] = [];
     for (let i = 0; i < 9; i++) {
@@ -395,31 +405,30 @@ describe("RegionTrendData", () => {
       for (let j = 0; j < count; j++) rows.push(row({ region: `منطقة ${i}`, complaintDate: inRange, receivedAt: inRange }));
     }
     const data = await trend(rows);
-    expect(data.truncated).toBe(true);
-    expect(data.otherSeriesName).toBe("مناطق أخرى");
-    // 8 named + 1 aggregated = 9 series.
-    expect(data.series).toHaveLength(9);
-    const other = data.series.find((s) => s.regionName === "مناطق أخرى")!;
-    const otherTotal = other.points.reduce((sum, p) => sum + p.count, 0);
-    // The 9th region (index 8) has 1 complaint.
-    expect(otherTotal).toBe(1);
+    expect(data.truncated).toBe(false);
+    expect(data.otherSeriesName).toBeNull();
+    expect(data.series).toHaveLength(1);
+    expect(data.series[0].regionName).toBe("إجمالي الشكاوى");
+    expect(data.series[0].points.reduce((sum, point) => sum + point.count, 0)).toBe(45);
   });
 
   it("empty data: empty series, allDates spans full period", async () => {
     const data = await trend([]);
-    expect(data.series).toHaveLength(0);
+    expect(data.series).toHaveLength(1);
+    expect(data.series[0].points.every((point) => point.count === 0)).toBe(true);
     expect(data.allDates).toHaveLength(7);
   });
 
-  it("series sorted by total count descending", async () => {
+  it("keeps the total trend independent of region ordering", async () => {
     const rows = [
-      row({ region: R_RIYADH }),
-      row({ region: R_MAKKAH }),
-      row({ region: R_MAKKAH }),
-      row({ region: R_MAKKAH }),
+      row({ region: R_RIYADH, complaintDate: new Date("2026-07-10T00:00:00Z") }),
+      row({ region: R_MAKKAH, complaintDate: new Date("2026-07-10T00:00:00Z") }),
+      row({ region: R_MAKKAH, complaintDate: new Date("2026-07-10T00:00:00Z") }),
+      row({ region: R_MAKKAH, complaintDate: new Date("2026-07-10T00:00:00Z") }),
     ];
     const data = await trend(rows);
-    expect(data.series[0].regionName).toBe(R_MAKKAH);
+    expect(data.series[0].regionName).toBe("إجمالي الشكاوى");
+    expect(data.series[0].points.reduce((sum, point) => sum + point.count, 0)).toBe(4);
   });
 });
 

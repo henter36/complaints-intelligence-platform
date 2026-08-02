@@ -154,7 +154,7 @@ describe("PDF report rendering", () => {
     });
     const { buffer } = await renderReportPdf(report);
     const pageCount = (buffer.toString("binary").match(/\/Type\s*\/Page\s*\/Parent/g) ?? []).length;
-    expect(pageCount).toBe(1);
+    expect(pageCount).toBe(2);
     expect(bufferContainsText(buffer, "صافي تدفق التراكم")).toBe(true);
     expect(bufferContainsText(buffer, "الأداء مقابل الحجم")).toBe(true);
     expect(bufferContainsText(buffer, "الاستمرارية")).toBe(false);
@@ -301,9 +301,9 @@ describe("PDF report — comparative executive sections", () => {
     expect(buffer.toString("binary")).not.toContain("[object Object]");
   });
 
-  it("renders a methodology note only for executive summaries", async () => {
+  it("omits the removed methodology wording", async () => {
     const { buffer } = await renderReportPdf(executiveReport());
-    expect(bufferContainsText(buffer, "منهجية الاحتساب")).toBe(true);
+    expect(bufferContainsText(buffer, "منهجية الاحتساب")).toBe(false);
   });
 
   it("renders a visible placeholder instead of crashing when a chart has no data", async () => {

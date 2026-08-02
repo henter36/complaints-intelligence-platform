@@ -123,11 +123,11 @@ describe("report data service — parity with the central KPI service", () => {
     // Comparison data is threaded through for the XLSX/PDF renderers.
     expect(report.comparisonData).toBeDefined();
     expect(report.sections.find((section) => section.id === "kpi_overview"))
-      .toMatchObject({ previewPage: 1, previewOrder: 0 });
+      .toMatchObject({ previewPage: 2, previewOrder: 0 });
     expect(report.sections.find((section) => section.id === "region_changes"))
-      .toMatchObject({ previewPage: 2, previewOrder: 1 });
-    expect(report.sections.find((section) => section.id === "top_classifications"))
       .toMatchObject({ previewPage: 3, previewOrder: 0 });
+    expect(report.sections.find((section) => section.id === "top_classifications"))
+      .toMatchObject({ previewPage: 4, previewOrder: 0 });
   });
 
   it("STANDARD skips the unused reference-period KPI query", async () => {

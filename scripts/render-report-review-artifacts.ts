@@ -15,12 +15,13 @@ const briefData: ExecutiveBriefData = {
     { key: "currentlyLate", label: "المتأخرة حاليًا", value: 1, previousValue: 0, difference: 1, changeRate: null, format: "number", assessment: "negative" },
     { key: "complianceRate", label: "نسبة الالتزام بالمهلة", value: 100, previousValue: 90, difference: 10, changeRate: 11.1, format: "percent", assessment: "positive" },
     { key: "averageResolutionDays", label: "متوسط زمن الإغلاق", value: 8, previousValue: 10, difference: -2, changeRate: -20, format: "days", assessment: "positive" },
-    { key: "highPriorityOpen", label: "عالية الأولوية المفتوحة", value: 1, previousValue: 0, difference: 1, changeRate: null, format: "number", assessment: "warning" },
+    { key: "closedLate", label: "المغلقة بعد المهلة", value: 0, previousValue: 0, difference: 0, changeRate: 0, format: "number", assessment: "neutral" },
+    { key: "netChange", label: "صافي التغير", value: 2, previousValue: null, difference: null, changeRate: null, format: "number", assessment: "neutral" },
   ],
   allRegions: [
-    { regionName: "الرياض", currentCount: 2, previousCount: 0, difference: 2, changeRate: null, complianceRate: 100, averageResolutionDays: 8, currentlyLate: 1, direction: "ارتفاع" },
-    { regionName: "مكة المكرمة", currentCount: 1, previousCount: 0, difference: 1, changeRate: null, complianceRate: 100, averageResolutionDays: null, currentlyLate: 0, direction: "ارتفاع" },
-    { regionName: "المنطقة الشرقية", currentCount: 0, previousCount: 1, difference: -1, changeRate: -100, complianceRate: null, averageResolutionDays: null, currentlyLate: 0, direction: "انخفاض" },
+    { regionName: "منطقة الرياض", currentCount: 2, previousCount: 0, difference: 2, changeRate: null, complianceRate: 100, averageResolutionDays: 8, openCount: 1, closedCount: 1, currentlyLate: 1, direction: "ارتفاع" },
+    { regionName: "منطقة مكة المكرمة", currentCount: 1, previousCount: 0, difference: 1, changeRate: null, complianceRate: null, averageResolutionDays: null, openCount: 1, closedCount: 0, currentlyLate: 0, direction: "ارتفاع" },
+    { regionName: "المنطقة الشرقية", currentCount: 0, previousCount: 1, difference: -1, changeRate: -100, complianceRate: null, averageResolutionDays: null, openCount: 0, closedCount: 0, currentlyLate: 0, direction: "انخفاض" },
   ],
   topClassifications: [
     { classificationId: "c1", classificationName: "طلب نقل", currentCount: 2, previousCount: 0, difference: 2, changeRate: null, shareOfTotal: 66.7 },
@@ -35,28 +36,34 @@ const briefData: ExecutiveBriefData = {
   concentrationBands: [
     { entityType: "classification", top1SharePercent: 66.7, top3SharePercent: 100, top5SharePercent: 100, totalEntities: 3 },
   ],
+  topDepartments: [
+    { name: "إدارة المتابعة", total: 2, open: 1, closed: 1, currentlyLate: 1, shareOfTotal: 66.7 },
+    { name: "إدارة الخدمات", total: 1, open: 1, closed: 0, currentlyLate: 0, shareOfTotal: 33.3 },
+  ],
+  conclusions: [
+    "منطقة الرياض الأعلى حجماً بعدد شكويين وتمثل 66.7% من الإجمالي.",
+    "أعلى زيادة مطلقة في منطقة الرياض: شكويان.",
+  ],
+  notes: ["شكوى واحدة بلا موعد مستهدف ولا تدخل في مقام الالتزام."],
 };
 
 function baseReport(mode: "DIGITAL_EXECUTIVE_BRIEF" | "PRINT_EXECUTIVE_BRIEF"): ReportData {
   return {
     type: ReportType.EXECUTIVE_SUMMARY,
-    title: mode === "DIGITAL_EXECUTIVE_BRIEF"
-      ? "تقرير تنفيذي مختصر — عرض رقمي"
-      : "تقرير تنفيذي مختصر — طباعة",
+    title: "تقرير الشكاوى",
     generatedAt: "2026-08-02T08:00:00.000Z",
     period: { from: "2026-07-01", to: "2026-07-31" },
     previousPeriod: { from: "2026-06-01", to: "2026-06-30" },
-    reportRunId: "run-review-001",
     filters: { from: "2026-07-01", to: "2026-07-31" },
     kpis: {} as ReportData["kpis"],
     sections: [{
       id: "executive_summary",
       kind: "text",
-      title: "الملخص التنفيذي",
+      title: "الملخص",
       points: [
         "ارتفع إجمالي الشكاوى من شكوى واحدة إلى ثلاث شكاوى.",
         "تركز الارتفاع في الرياض ومكة المكرمة.",
-        "تحتاج الشكوى المتأخرة إلى متابعة تنفيذية مباشرة.",
+        "توجد شكوى متأخرة حاليًا.",
         "يمثل الحفاظ على الالتزام الكامل بالمهلة فرصة لتعزيز الأداء.",
       ],
     }],
@@ -109,7 +116,7 @@ function fullReport(): ReportData {
   const base = baseReport("DIGITAL_EXECUTIVE_BRIEF");
   return {
     ...base,
-    title: "التقرير التحليلي الكامل",
+    title: "تقرير الشكاوى",
     reportMode: "FULL_ANALYTICAL",
     briefData: fullData,
     sections: [
@@ -117,7 +124,7 @@ function fullReport(): ReportData {
         { key: "total", label: "إجمالي الشكاوى", value: 3, format: "number" },
         { key: "late", label: "المتأخرة", value: 1, format: "number" },
       ] },
-      { id: "summary", kind: "text", title: "الملخص التنفيذي", points: ["قراءة تحليلية موسعة للفترة المحددة."] },
+      { id: "summary", kind: "text", title: "الملخص", points: ["قراءة تحليلية موسعة للفترة المحددة."] },
       { id: "regions", kind: "table", title: "مقارنة المناطق", table: {
         id: "regions", title: "مقارنة المناطق",
         columns: [

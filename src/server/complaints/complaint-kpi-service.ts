@@ -2,6 +2,8 @@ import { ComplaintPriority, ComplaintStatus, type Prisma } from "@prisma/client"
 import { db } from "@/lib/db";
 import { roundToTenth } from "@/lib/complaint-metrics";
 import { buildComplaintTiming } from "./complaint-timing";
+import { normalizeRegionName } from "@/lib/reports/region-normalization";
+import { previousInclusivePeriod } from "@/lib/reports/period-range";
 import {
   buildComplaintWhere,
   parseComplaintQuery,
@@ -60,6 +62,7 @@ export type KpiValue = {
   percentageChange: number | null;
   trend: "up" | "down" | "flat" | "none";
   direction: "positive" | "negative" | "neutral";
+  available?: boolean;
 };
 
 type MetricTrend = KpiValue["trend"];
@@ -117,7 +120,8 @@ export type ComplaintKpiResult = {
   };
   performance: {
     closureRate: number;
-    onTimeRate: number;
+    onTimeRate: number | null;
+    onTimeEligibleClosed: number;
     lateRate: number;
     avgFirstResponseHours: number;
     avgProcessingHours: number;
@@ -185,9 +189,29 @@ type RawMetrics = {
   medianResolutionDays: number;
   averageOpenAgeDays: number;
   dueDateComplianceRate: number;
+  dueDateEligibleClosed: number;
   closureRate: number;
   reopenCount: number;
 };
+
+const KPI_METRIC_KEYS = [
+  "totalComplaints",
+  "openComplaints",
+  "closedComplaints",
+  "cancelledComplaints",
+  "currentlyLateComplaints",
+  "closedLateComplaints",
+  "closedWithinDueDate",
+  "withoutDueDate",
+  "unclassifiedComplaints",
+  "highPriorityOpenComplaints",
+  "averageResolutionDays",
+  "medianResolutionDays",
+  "averageOpenAgeDays",
+  "dueDateComplianceRate",
+  "closureRate",
+  "reopenCount",
+] as const satisfies readonly (keyof ComplaintKpiSummary)[];
 
 export async function getComplaintKpis(params: URLSearchParams, now = new Date()): Promise<ComplaintKpiResult> {
   const query = parseComplaintQuery(params);
@@ -201,12 +225,7 @@ export async function getComplaintKpis(params: URLSearchParams, now = new Date()
 }
 
 export function getPreviousPeriodRange(from: Date, to: Date): { from: Date; to: Date } | null {
-  const duration = to.getTime() - from.getTime();
-  if (duration < 0) return null;
-  return {
-    from: new Date(from.getTime() - duration - DAY_MS),
-    to: new Date(from.getTime() - DAY_MS),
-  };
+  return previousInclusivePeriod(from, to);
 }
 
 function buildPreviousWhere(query: ComplaintQuery, now: Date): Prisma.ComplaintWhereInput | null {
@@ -226,6 +245,7 @@ function buildKpiResult(
   const currentRaw = calculateRawMetrics(current, now);
   const previousRaw = previous ? calculateRawMetrics(previous, now) : null;
   const kpis = buildKpiValues(currentRaw, previousRaw);
+  kpis.dueDateComplianceRate.available = currentRaw.dueDateEligibleClosed > 0;
   const firstResponses = current
     .filter((complaint) => complaint.firstActionAt)
     .map((complaint) => hoursBetween(complaint.complaintDate ?? complaint.receivedAt, complaint.firstActionAt!));
@@ -240,7 +260,7 @@ function buildKpiResult(
     kpis,
     volume: {
       total: currentRaw.totalComplaints,
-      open: current.filter((complaint) => complaint.status === ComplaintStatus.NEW || complaint.status === ComplaintStatus.OPEN).length,
+      open: currentRaw.openComplaints,
       inProgress: current.filter((complaint) =>
         complaint.status === ComplaintStatus.IN_PROGRESS || complaint.status === ComplaintStatus.AWAITING_RESPONSE
       ).length,
@@ -255,7 +275,10 @@ function buildKpiResult(
     },
     performance: {
       closureRate: currentRaw.closureRate,
-      onTimeRate: currentRaw.dueDateComplianceRate,
+      onTimeRate: currentRaw.dueDateEligibleClosed > 0
+        ? currentRaw.dueDateComplianceRate
+        : null,
+      onTimeEligibleClosed: currentRaw.dueDateEligibleClosed,
       lateRate: rate(currentRaw.currentlyLateComplaints, currentRaw.totalComplaints),
       avgFirstResponseHours: roundToTenth(average(firstResponses)),
       avgProcessingHours: roundToTenth(average(processingHours)),
@@ -322,6 +345,7 @@ function calculateRawMetrics(complaints: KpiComplaint[], now: Date): RawMetrics 
     medianResolutionDays: roundToTenth(median(resolutionDays)),
     averageOpenAgeDays: roundToTenth(average(openAgeDays)),
     dueDateComplianceRate: rate(timing.filter((item) => item.isClosedWithinDueDate).length, dueClosedDenominator),
+    dueDateEligibleClosed: dueClosedDenominator,
     closureRate: rate(complaints.filter((complaint) => isClosedComplaintStatus(complaint.status)).length, complaints.length),
     reopenCount: countReopenTransitions(complaints),
   };
@@ -338,7 +362,7 @@ function countReopenTransitions(complaints: KpiComplaint[]): number {
 
 function buildKpiValues(current: RawMetrics, previous: RawMetrics | null): ComplaintKpiSummary {
   return Object.fromEntries(
-    (Object.keys(current) as Array<keyof RawMetrics>).map((key) => [
+    KPI_METRIC_KEYS.map((key) => [
       key,
       compareMetric(current[key], previous?.[key] ?? null, negativeWhenHigher(key)),
     ])
@@ -391,7 +415,7 @@ function negativeWhenHigher(key: keyof RawMetrics): boolean {
 
 function buildDistributions(complaints: KpiComplaint[], now: Date): ComplaintKpiResult["distributions"] {
   return {
-    byRegion: groupMetrics(complaints, now, (complaint) => ({ name: complaint.region ?? UNSPECIFIED_LABEL })),
+    byRegion: groupMetrics(complaints, now, (complaint) => ({ name: normalizeRegionName(complaint.region) })),
     byFacility: groupMetrics(complaints, now, (complaint) => ({ name: complaint.facility ?? UNSPECIFIED_LABEL })),
     byDepartment: groupMetrics(complaints, now, (complaint) => ({ name: complaint.department ?? UNSPECIFIED_LABEL })),
     byClassification: groupMetrics(complaints, now, (complaint) => ({
@@ -440,7 +464,7 @@ function groupMetrics(
         currentlyLate: raw.currentlyLateComplaints,
         closedLate: raw.closedLateComplaints,
         withinDueDate: raw.closedWithinDueDate,
-        complianceRate: raw.dueDateComplianceRate,
+        complianceRate: raw.dueDateEligibleClosed > 0 ? raw.dueDateComplianceRate : null,
         averageResolutionDays: raw.averageResolutionDays,
         highPriorityOpen: raw.highPriorityOpenComplaints,
         unclassified: raw.unclassifiedComplaints,

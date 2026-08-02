@@ -33,7 +33,9 @@ import type {
   NetBacklogFlow,
   PerfVolumeRow,
   ContinuityRow,
+  ExecutiveEntityRow,
 } from "@/lib/reports/report-contract";
+import { normalizeRegionName } from "@/lib/reports/region-normalization";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TOP_CLASSIFICATIONS_LIMIT = 8;
@@ -83,14 +85,14 @@ function computeChangeRate(current: number, previous: number): number | null {
 type KpiSpec = {
   key: string;
   label: string;
-  value: number;
+  value: number | null;
   previousValue: number | null;
   format: ExecutiveBriefKpiCard["format"];
   higherIsBetter: boolean | null;
 };
 
 function assessKpi(spec: KpiSpec): KpiAssessment {
-  if (spec.previousValue === null || spec.higherIsBetter === null) return "neutral";
+  if (spec.value === null || spec.previousValue === null || spec.higherIsBetter === null) return "neutral";
   const diff = spec.value - spec.previousValue;
   if (diff === 0) return "neutral";
   const improved = spec.higherIsBetter ? diff > 0 : diff < 0;
@@ -99,9 +101,9 @@ function assessKpi(spec: KpiSpec): KpiAssessment {
 
 function buildBriefKpiCard(spec: KpiSpec): ExecutiveBriefKpiCard {
   const difference =
-    spec.previousValue !== null ? spec.value - spec.previousValue : null;
+    spec.value !== null && spec.previousValue !== null ? spec.value - spec.previousValue : null;
   const changeRate =
-    spec.previousValue !== null
+    spec.value !== null && spec.previousValue !== null
       ? computeChangeRate(spec.value, spec.previousValue)
       : null;
   return {
@@ -118,10 +120,12 @@ function buildBriefKpiCard(spec: KpiSpec): ExecutiveBriefKpiCard {
 
 function buildBriefKpis(
   result: ComplaintKpiResult,
+  previousResult: ComplaintKpiResult | undefined,
   hasPrevious: boolean
 ): ExecutiveBriefKpiCard[] {
   const p = hasPrevious;
   const kpis = result.kpis;
+  const previousKpis = previousResult?.kpis;
   const perf = result.performance;
   const vol = result.volume;
 
@@ -130,7 +134,7 @@ function buildBriefKpis(
       key: "total",
       label: "إجمالي الشكاوى",
       value: vol.total,
-      previousValue: p ? (kpis.totalComplaints.previousValue ?? null) : null,
+      previousValue: p ? (previousKpis?.totalComplaints.currentValue ?? kpis.totalComplaints.previousValue) : null,
       format: "number",
       higherIsBetter: null,
     },
@@ -138,7 +142,7 @@ function buildBriefKpis(
       key: "open",
       label: "المفتوحة",
       value: vol.open,
-      previousValue: p ? (kpis.openComplaints.previousValue ?? null) : null,
+      previousValue: p ? (previousKpis?.openComplaints.currentValue ?? kpis.openComplaints.previousValue) : null,
       format: "number",
       higherIsBetter: false,
     },
@@ -146,7 +150,7 @@ function buildBriefKpis(
       key: "closed",
       label: "المغلقة",
       value: vol.closed,
-      previousValue: p ? (kpis.closedComplaints.previousValue ?? null) : null,
+      previousValue: p ? (previousKpis?.closedComplaints.currentValue ?? kpis.closedComplaints.previousValue) : null,
       format: "number",
       higherIsBetter: true,
     },
@@ -154,39 +158,43 @@ function buildBriefKpis(
       key: "currentlyLate",
       label: "المتأخرة حالياً",
       value: kpis.currentlyLateComplaints.currentValue,
-      previousValue: p ? (kpis.currentlyLateComplaints.previousValue ?? null) : null,
+      previousValue: p ? (previousKpis?.currentlyLateComplaints.currentValue ?? kpis.currentlyLateComplaints.previousValue) : null,
+      format: "number",
+      higherIsBetter: false,
+    },
+    {
+      key: "closedLate",
+      label: "المغلقة بعد المهلة",
+      value: kpis.closedLateComplaints.currentValue,
+      previousValue: p ? (previousKpis?.closedLateComplaints.currentValue ?? kpis.closedLateComplaints.previousValue) : null,
       format: "number",
       higherIsBetter: false,
     },
     {
       key: "complianceRate",
-      label: "نسبة الالتزام%",
-      value: roundRate(perf.onTimeRate),
-      previousValue: p ? (kpis.dueDateComplianceRate.previousValue ?? null) : null,
+      label: "الالتزام ضمن المهلة",
+      value: perf.onTimeRate,
+      previousValue: p && previousKpis?.dueDateComplianceRate.available !== false
+        ? (previousKpis?.dueDateComplianceRate.currentValue ?? kpis.dueDateComplianceRate.previousValue)
+        : null,
       format: "percent",
       higherIsBetter: true,
     },
     {
       key: "averageResolutionDays",
-      label: "متوسط زمن الإغلاق (يوم)",
-      value: roundRate(perf.averageResolutionDays),
-      previousValue: p ? (kpis.averageResolutionDays.previousValue ?? null) : null,
+      label: "متوسط الإغلاق",
+      value: vol.closed > 0 ? roundRate(perf.averageResolutionDays) : null,
+      previousValue: p && (previousResult ? previousResult.volume.closed > 0 : true)
+        ? (previousKpis?.averageResolutionDays.currentValue ?? kpis.averageResolutionDays.previousValue)
+        : null,
       format: "days",
       higherIsBetter: false,
     },
     {
-      key: "highPriorityOpen",
-      label: "عالية الأولوية المفتوحة",
-      value: kpis.highPriorityOpenComplaints.currentValue,
-      previousValue: p ? (kpis.highPriorityOpenComplaints.previousValue ?? null) : null,
-      format: "number",
-      higherIsBetter: false,
-    },
-    {
-      key: "unclassified",
-      label: "غير المصنفة",
-      value: kpis.unclassifiedComplaints.currentValue,
-      previousValue: p ? (kpis.unclassifiedComplaints.previousValue ?? null) : null,
+      key: "netChange",
+      label: "صافي التغير",
+      value: p ? (vol.total - (previousResult?.volume.total ?? kpis.totalComplaints.previousValue ?? 0)) : null,
+      previousValue: null,
       format: "number",
       higherIsBetter: null,
     },
@@ -207,7 +215,8 @@ async function fetchAllTimeRegions(): Promise<string[]> {
     where: { isDeleted: false },
   });
   return groups
-    .map((g) => g.region ?? UNSPECIFIED_REGION)
+    .map((g) => normalizeRegionName(g.region ?? UNSPECIFIED_REGION))
+    .filter((name, index, values) => values.indexOf(name) === index)
     .sort((a, b) => a.localeCompare(b, "ar"));
 }
 
@@ -225,10 +234,10 @@ function buildAllRegionsTable(
   currentDistributions: ComplaintGroupMetrics[]
 ): RegionReferenceRow[] {
   const changeMap = new Map(
-    comparison.regionChanges.map((row) => [row.regionName, row])
+    comparison.regionChanges.map((row) => [normalizeRegionName(row.regionName), row])
   );
   const metricsMap = new Map(
-    currentDistributions.map((g) => [g.name, g])
+    currentDistributions.map((g) => [normalizeRegionName(g.name), g])
   );
 
   return allTimeRegions.map((regionName) => {
@@ -248,10 +257,61 @@ function buildAllRegionsTable(
         metrics?.averageResolutionDays != null && metrics.averageResolutionDays > 0
           ? roundRate(metrics.averageResolutionDays)
           : null,
+      openCount: metrics?.open ?? 0,
+      closedCount: metrics?.closed ?? 0,
       currentlyLate: metrics?.currentlyLate ?? 0,
       direction: directionLabel(currentCount, previousCount),
     };
   });
+}
+
+function buildEntityRows(
+  groups: ComplaintGroupMetrics[],
+  total: number,
+  limit = 8
+): ExecutiveEntityRow[] {
+  return groups.slice(0, limit).map((group) => ({
+    name: group.name,
+    total: group.total,
+    open: group.open,
+    closed: group.closed,
+    currentlyLate: group.currentlyLate,
+    shareOfTotal: total > 0 ? roundRate(group.total / total * 100) : 0,
+  }));
+}
+
+function buildConclusions(
+  result: ComplaintKpiResult,
+  comparison: ComparisonResult
+): string[] {
+  const points: string[] = [];
+  const topRegion = result.distributions.byRegion[0];
+  if (topRegion && result.volume.total > 0) {
+    points.push(`${topRegion.name} الأعلى حجماً بعدد ${topRegion.total}، وتمثل ${roundRate(topRegion.total / result.volume.total * 100)}% من الإجمالي.`);
+  }
+  if (comparison.previousPeriod) {
+    const rise = comparison.regionChanges.filter((row) => row.difference > 0)
+      .sort((a, b) => b.difference - a.difference)[0];
+    const fall = comparison.regionChanges.filter((row) => row.difference < 0)
+      .sort((a, b) => a.difference - b.difference)[0];
+    if (rise) points.push(`أعلى زيادة مطلقة في ${rise.regionName}: ${rise.difference} شكوى.`);
+    if (fall) points.push(`أعلى انخفاض مطلق في ${fall.regionName}: ${Math.abs(fall.difference)} شكوى.`);
+  }
+  const openDepartment = [...result.distributions.byDepartment].sort((a, b) => b.open - a.open)[0];
+  if (openDepartment?.open) points.push(`${openDepartment.name} الأعلى في الحالات المفتوحة بعدد ${openDepartment.open}.`);
+  return points.slice(0, 4);
+}
+
+function buildNotes(result: ComplaintKpiResult, comparison: ComparisonResult): string[] {
+  const notes: string[] = [];
+  if (result.kpis.unclassifiedComplaints.currentValue > 0) {
+    notes.push(`${result.kpis.unclassifiedComplaints.currentValue} شكوى بلا تصنيف، ما يحد من دقة تحليل الأسباب.`);
+  }
+  if (result.kpis.withoutDueDate.currentValue > 0) {
+    notes.push(`${result.kpis.withoutDueDate.currentValue} شكوى بلا موعد مستهدف ولا تدخل في مقام الالتزام.`);
+  }
+  if (!comparison.previousPeriod) notes.push("لا تتوفر فترة سابقة صالحة للمقارنة الزمنية.");
+  return notes.slice(0, 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +378,41 @@ function buildDailyPointsForPeriod(
   return points;
 }
 
+function resolveTimelineAggregation(periodDays: number): {
+  aggregation: "daily" | "weekly" | "monthly";
+} {
+  if (periodDays <= 31) return { aggregation: "daily" };
+  if (periodDays <= 120) return { aggregation: "weekly" };
+  return { aggregation: "monthly" };
+}
+
+function aggregateTimelinePoints(
+  points: readonly ComparativeTimelinePoint[],
+  aggregation: "daily" | "weekly" | "monthly",
+  periodStart: Date
+): ComparativeTimelinePoint[] {
+  if (aggregation === "daily") return [...points];
+  if (aggregation === "monthly") {
+    const monthly = new Map<string, ComparativeTimelinePoint>();
+    for (const point of points) {
+      const date = new Date(periodStart.getTime() + (point.relativeDay - 1) * DAY_MS);
+      const monthKey = `${date.getUTCFullYear()}-${date.getUTCMonth()}`;
+      const bucket = monthly.get(monthKey);
+      if (bucket) bucket.count += point.count;
+      else monthly.set(monthKey, { relativeDay: point.relativeDay, count: point.count });
+    }
+    return [...monthly.values()];
+  }
+  const aggregated: ComparativeTimelinePoint[] = [];
+  for (let index = 0; index < points.length; index += 7) {
+    aggregated.push({
+      relativeDay: index + 1,
+      count: points.slice(index, index + 7).reduce((sum, point) => sum + point.count, 0),
+    });
+  }
+  return aggregated;
+}
+
 async function buildComparativeTimeline(
   comparison: ComparisonResult,
   filters: ReportFilters,
@@ -327,16 +422,22 @@ async function buildComparativeTimeline(
   const periodDays = Math.round(
     (currentPeriod.toExclusive.getTime() - currentPeriod.from.getTime()) / DAY_MS
   );
+  const { aggregation } = resolveTimelineAggregation(periodDays);
 
   // Current period: sum across all series in the existing trend data.
   const currentDailyTotals = sumDailyCounts(comparison.regionTrend);
-  const currentPoints = buildDailyPointsForPeriod(currentPeriod, currentDailyTotals);
+  const currentPoints = aggregateTimelinePoints(
+    buildDailyPointsForPeriod(currentPeriod, currentDailyTotals),
+    aggregation,
+    currentPeriod.from
+  );
 
   if (!previousPeriod) {
     return {
       current: { label: "الفترة الحالية", points: currentPoints },
       previous: null,
       periodDays,
+      aggregation,
     };
   }
 
@@ -365,7 +466,11 @@ async function buildComparativeTimeline(
     prevDailyTotals.set(date, (prevDailyTotals.get(date) ?? 0) + 1);
   }
 
-  const previousPoints = buildDailyPointsForPeriod(previousPeriod, prevDailyTotals);
+  const previousPoints = aggregateTimelinePoints(
+    buildDailyPointsForPeriod(previousPeriod, prevDailyTotals),
+    aggregation,
+    previousPeriod.from
+  );
 
   const prevFrom = previousPeriod.from.toISOString().slice(0, 10);
   const prevTo = new Date(previousPeriod.toExclusive.getTime() - DAY_MS)
@@ -376,6 +481,7 @@ async function buildComparativeTimeline(
     current: { label: "الفترة الحالية", points: currentPoints },
     previous: { label: `الفترة السابقة (${prevFrom} → ${prevTo})`, points: previousPoints },
     periodDays,
+    aggregation,
   };
 }
 
@@ -540,7 +646,7 @@ export async function buildExecutiveBriefData(
     buildComparativeTimeline(comparison, filters, now),
   ]);
 
-  const briefKpis = buildBriefKpis(result, hasPrevious);
+  const briefKpis = buildBriefKpis(result, previousResult, hasPrevious);
 
   const allRegions = buildAllRegionsTable(
     allTimeRegions,
@@ -566,6 +672,9 @@ export async function buildExecutiveBriefData(
     topClassifications,
     comparativeTimeline,
     concentrationBands,
+    topDepartments: buildEntityRows(result.distributions.byDepartment, result.volume.total),
+    conclusions: buildConclusions(result, comparison),
+    notes: buildNotes(result, comparison),
   };
 }
 

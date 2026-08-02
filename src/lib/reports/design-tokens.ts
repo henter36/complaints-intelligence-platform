@@ -2,18 +2,19 @@ import type { KpiAssessment } from "./report-contract";
 
 /**
  * Shared visual language for every report renderer and preview.
- * `primary` is a temporary corporate fallback until an approved brand colour
- * is supplied by the organisation.
+ * Approved complaints-report palette from the reporting redesign reference.
  */
 export const REPORT_DESIGN_TOKENS = {
   colors: {
-    primary: "#1F2937",
-    success: "#16A34A",
-    danger: "#DC2626",
-    neutral: "#6B7280",
-    background: "#F9FAFB",
-    tableRowAlternate: "#F3F4F6",
-    border: "#E5E7EB",
+    primary: "#004B3A",
+    gold: "#B88919",
+    success: "#004B3A",
+    danger: "#C62828",
+    neutral: "#46534E",
+    text: "#073B31",
+    background: "#FCFAF5",
+    tableRowAlternate: "#F7F2E7",
+    border: "#D8BE7A",
     white: "#FFFFFF",
   },
   card: {
@@ -33,13 +34,17 @@ export const REPORT_DESIGN_TOKENS = {
     sectionTitle: 15,
     kpiValue: 24,
     body: 11,
-    table: 9,
-    footer: 8.5,
+    table: 11,
+    footer: 9,
+  },
+  typography: {
+    /** Keeps shaped Arabic words visually distinct in PDFKit output. */
+    wordSpacing: 1.2,
   },
 } as const;
 
-export const DIGITAL_EXECUTIVE_PAGE_SIZE = [1440, 810] as const;
-export const PRINT_EXECUTIVE_PAGE_SIZE = [841.89, 595.28] as const;
+export const DIGITAL_EXECUTIVE_PAGE_SIZE = [900, 1200] as const;
+export const PRINT_EXECUTIVE_PAGE_SIZE = [900, 1200] as const;
 
 /** Display formats keep Excel cells numeric while matching the report policy. */
 export const REPORT_XLSX_NUMBER_FORMATS = {
@@ -67,7 +72,7 @@ export function directionFromAssessment(
 
 export function directionColor(direction: ExecutiveDirection): string {
   if (direction === "positive") return REPORT_DESIGN_TOKENS.colors.success;
-  if (direction === "negative") return REPORT_DESIGN_TOKENS.colors.danger;
+  if (direction === "negative") return REPORT_DESIGN_TOKENS.colors.gold;
   return REPORT_DESIGN_TOKENS.colors.neutral;
 }
 
@@ -99,5 +104,5 @@ export function formatNullableReportNumber(
   value: number | null,
   options: ReportNumberOptions = {}
 ): string {
-  return value === null ? "—" : formatReportNumber(value, options);
+  return value === null ? "غير متاح" : formatReportNumber(value, options);
 }

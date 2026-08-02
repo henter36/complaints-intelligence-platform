@@ -15,7 +15,6 @@ import {
 import {
   buildComparisonResult,
   comparisonWarningMessage,
-  MAX_TREND_SERIES,
   type ComparisonResult,
   type DeptClassRiseRow,
   type RegionChangeRow,
@@ -32,6 +31,7 @@ import type {
   RegionReferenceRow,
   ClassificationBriefRow,
   ComparativeTimelineData,
+  ExecutiveEntityRow,
   ConcentrationBand,
   NetBacklogFlow,
   PerfVolumeRow,
@@ -67,7 +67,7 @@ export function isReportRowLimitExceededError(error: unknown): error is ReportRo
 export type ReportKpiCard = {
   key: string;
   label: string;
-  value: number;
+  value: number | null;
   format: "number" | "percent" | "days" | "hours";
 };
 
@@ -158,6 +158,9 @@ export type ExecutiveBriefData = {
   topClassifications: ClassificationBriefRow[];
   comparativeTimeline: ComparativeTimelineData;
   concentrationBands: ConcentrationBand[];
+  topDepartments?: ExecutiveEntityRow[];
+  conclusions?: string[];
+  notes?: string[];
 };
 
 /** Extended payload for FULL_ANALYTICAL mode (super-set of ExecutiveBriefData). */
@@ -189,7 +192,7 @@ export type {
 };
 const PREVIEW_TABLE_ROW_CAP = 100;
 
-function kpi(key: string, label: string, value: number, format: ReportKpiCard["format"] = "number"): ReportKpiCard {
+function kpi(key: string, label: string, value: number | null, format: ReportKpiCard["format"] = "number"): ReportKpiCard {
   return { key, label, value, format };
 }
 
@@ -249,16 +252,14 @@ function regionTrendChartSection(trend: RegionTrendData): ReportChartSection {
     id: "region_trend_chart",
     kind: "chart",
     chartType: "line",
-    title: "الاتجاه الزمني للشكاوى حسب المنطقة",
-    description: "عدد الشكاوى المستقبلة يومياً لكل منطقة خلال الفترة الحالية.",
+    title: "الاتجاه الزمني لإجمالي الشكاوى",
+    description: "عدد الشكاوى خلال الفترة الحالية وفق التجميع الزمني المناسب.",
     xAxisLabel: "اليوم",
     yAxisLabel: "عدد الشكاوى",
     unit: "شكوى",
     emptyState: "لا توجد بيانات لعرضها في الرسم البياني.",
     truncated: trend.truncated,
-    truncatedMessage: trend.truncated
-      ? `تم عرض أعلى ${MAX_TREND_SERIES} مناطق فقط، وتم تجميع البقية ضمن "${trend.otherSeriesName ?? "مناطق أخرى"}".`
-      : undefined,
+    truncatedMessage: undefined,
     series: trend.series.map((series) => ({
       name: series.regionName,
       isOther: series.regionName === trend.otherSeriesName,
@@ -460,7 +461,7 @@ async function buildExecutiveSummaryCore(
     sections.push({
       id: "executive_summary_text",
       kind: "text",
-      title: "الملخص التنفيذي",
+      title: "الملخص",
       points: comparison.executiveSummaryPoints,
     });
   }
@@ -574,9 +575,9 @@ async function buildExecutiveSummaryWithMode(
 
   const modeTitle: Record<ReportMode, string> = {
     STANDARD: getReportDefinition(ReportType.EXECUTIVE_SUMMARY).title,
-    DIGITAL_EXECUTIVE_BRIEF: "تقرير تنفيذي مختصر — عرض رقمي",
-    PRINT_EXECUTIVE_BRIEF: "تقرير تنفيذي مختصر — طباعة",
-    FULL_ANALYTICAL: "التقرير التحليلي الكامل",
+    DIGITAL_EXECUTIVE_BRIEF: "تقرير الشكاوى",
+    PRINT_EXECUTIVE_BRIEF: "تقرير الشكاوى",
+    FULL_ANALYTICAL: "تقرير الشكاوى",
   };
 
   const title = request.title ?? modeTitle[reportMode];

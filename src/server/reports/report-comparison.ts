@@ -2,6 +2,8 @@ import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { buildComplaintWhere, parseComplaintQuery } from "@/server/complaints/complaint-query-service";
 import { buildComplaintQueryParams, type ReportFilters } from "./report-definition-service";
+import { normalizeRegionName } from "@/lib/reports/region-normalization";
+import { previousHalfOpenPeriod } from "@/lib/reports/period-range";
 
 // ---------------------------------------------------------------------------
 // Centralized period-comparison module.
@@ -13,11 +15,8 @@ import { buildComplaintQueryParams, type ReportFilters } from "./report-definiti
 // ---------------------------------------------------------------------------
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-export const MAX_TREND_SERIES = 8;
 export const DEPT_CLASS_RISES_LIMIT = 20;
 export const DEFAULT_MINIMUM_INCREASE_COUNT = 1;
-
-const OTHER_REGIONS_LABEL = "مناطق أخرى";
 const UNSPECIFIED_REGION_LABEL = "غير محدد";
 
 export type PeriodRange = { from: Date; toExclusive: Date };
@@ -30,12 +29,7 @@ export type PeriodRange = { from: Date; toExclusive: Date };
  * Returns null when the range is invalid (duration <= 0).
  */
 export function derivePreviousPeriodRange(from: Date, toExclusive: Date): PeriodRange | null {
-  const duration = toExclusive.getTime() - from.getTime();
-  if (duration <= 0) return null;
-  return {
-    from: new Date(from.getTime() - duration),
-    toExclusive: from,
-  };
+  return previousHalfOpenPeriod(from, toExclusive);
 }
 
 export type RegionDayPoint = { date: string; count: number };
@@ -134,9 +128,17 @@ function buildPeriodWhere(filters: ReportFilters, period: PeriodRange, now: Date
   params.delete("to");
   const query = parseComplaintQuery(params);
   const where = buildComplaintWhere(query, now);
-  // Half-open interval [from, toExclusive) on complaintDate.
-  where.complaintDate = { gte: period.from, lt: period.toExclusive };
-  return where;
+  const { complaintDate: _ignoredDate, ...nonDateWhere } = where;
+  return {
+    ...nonDateWhere,
+    OR: [
+      { complaintDate: { gte: period.from, lt: period.toExclusive } },
+      {
+        complaintDate: null,
+        receivedAt: { gte: period.from, lt: period.toExclusive },
+      },
+    ],
+  };
 }
 
 function dayKey(date: Date): string {
@@ -148,7 +150,7 @@ function complaintDay(complaint: ComparisonComplaint): string {
 }
 
 function regionName(complaint: ComparisonComplaint): string {
-  return complaint.region ?? UNSPECIFIED_REGION_LABEL;
+  return normalizeRegionName(complaint.region ?? UNSPECIFIED_REGION_LABEL);
 }
 
 function roundRate(value: number): number {
@@ -184,69 +186,23 @@ function buildRegionTrend(
 ): { data: RegionTrendData; warning: ComparisonWarning | null } {
   const allDates = enumerateDays(period);
 
-  // Totals and per-day counts per region.
-  const totalsByRegion = new Map<string, number>();
-  const perDayByRegion = new Map<string, Map<string, number>>();
+  const totalsByDay = new Map<string, number>();
   for (const complaint of current) {
-    const name = regionName(complaint);
     const day = complaintDay(complaint);
-    totalsByRegion.set(name, (totalsByRegion.get(name) ?? 0) + 1);
-    const dayMap = perDayByRegion.get(name) ?? new Map<string, number>();
-    dayMap.set(day, (dayMap.get(day) ?? 0) + 1);
-    perDayByRegion.set(name, dayMap);
+    totalsByDay.set(day, (totalsByDay.get(day) ?? 0) + 1);
   }
-
-  const sortedRegions = Array.from(totalsByRegion.entries()).sort(
-    (a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "ar")
-  );
-
-  const topRegions = sortedRegions.slice(0, MAX_TREND_SERIES);
-  const otherRegions = sortedRegions.slice(MAX_TREND_SERIES);
-  const truncated = otherRegions.length > 0;
-
-  const series: RegionTrendSeries[] = topRegions.map(([name]) => {
-    const dayMap = perDayByRegion.get(name) ?? new Map<string, number>();
-    return {
-      regionName: name,
-      points: allDates.map((date) => ({ date, count: dayMap.get(date) ?? 0 })),
-    };
-  });
-
-  if (truncated) {
-    // Aggregate every "other" region into a single series. Because each
-    // complaint belongs to exactly one region, and named vs. other regions
-    // are disjoint sets, no complaint is counted twice.
-    const otherDayCounts = new Map<string, number>();
-    for (const [name] of otherRegions) {
-      const dayMap = perDayByRegion.get(name);
-      if (!dayMap) continue;
-      for (const [date, count] of dayMap) {
-        otherDayCounts.set(date, (otherDayCounts.get(date) ?? 0) + count);
-      }
-    }
-    series.push({
-      regionName: OTHER_REGIONS_LABEL,
-      points: allDates.map((date) => ({ date, count: otherDayCounts.get(date) ?? 0 })),
-    });
-  }
-
-  const warning: ComparisonWarning | null = truncated
-    ? {
-        code: "CHART_TRUNCATED",
-        message: `تم عرض أعلى ${MAX_TREND_SERIES} مناطق فقط في الرسم البياني، وتم تجميع البقية ضمن "${OTHER_REGIONS_LABEL}".`,
-        shown: MAX_TREND_SERIES,
-        total: sortedRegions.length,
-      }
-    : null;
 
   return {
     data: {
       allDates,
-      series,
-      truncated,
-      otherSeriesName: truncated ? OTHER_REGIONS_LABEL : null,
+      series: [{
+        regionName: "إجمالي الشكاوى",
+        points: allDates.map((date) => ({ date, count: totalsByDay.get(date) ?? 0 })),
+      }],
+      truncated: false,
+      otherSeriesName: null,
     },
-    warning,
+    warning: null,
   };
 }
 

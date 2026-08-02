@@ -81,7 +81,7 @@ type FiltersData = {
   channels: string[];
 };
 
-type ReportKpiCard = { key: string; label: string; value: number; format: "number" | "percent" | "days" | "hours" };
+type ReportKpiCard = { key: string; label: string; value: number | null; format: "number" | "percent" | "days" | "hours" };
 type ReportTableColumn = { key: string; label: string; format?: "number" | "signed-number" | "percent" | "date" | "text" };
 type ReportTable = {
   id: string; title: string; columns: ReportTableColumn[];
@@ -346,6 +346,7 @@ const KPI_FORMAT_SUFFIX: Record<ReportKpiCard["format"], string> = {
 };
 
 function formatKpiValue(card: ReportKpiCard): string {
+  if (card.value === null) return "غير متاح";
   return `${formatNumber(card.value)}${KPI_FORMAT_SUFFIX[card.format]}`;
 }
 
@@ -1470,9 +1471,10 @@ function isBriefReportMode(mode: ReportMode | undefined): boolean {
 }
 
 function executivePreviewPages(data: ReportData): readonly ReportSection[][] {
-  const pages: Array<Array<{ section: ReportSection; sourceOrder: number }>> = [[], [], []];
+  const pages: Array<Array<{ section: ReportSection; sourceOrder: number }>> =
+    EXECUTIVE_BRIEF_PAGE_PLAN.map(() => []);
   data.sections.forEach((section, sourceOrder) => {
-    const page = section.previewPage ?? 3;
+    const page = section.previewPage ?? 4;
     if (section.previewPage === undefined && process.env.NODE_ENV === "development") {
       console.warn("Executive brief preview section has no page metadata", { sectionId: section.id });
     }
@@ -1491,34 +1493,49 @@ function executivePreviewPages(data: ReportData): readonly ReportSection[][] {
 
 function ExecutiveReportPreview({ data }: Readonly<{ data: ReportData }>) {
   const pages = executivePreviewPages(data);
-  const digital = data.reportMode === "DIGITAL_EXECUTIVE_BRIEF";
   const pageTitles = EXECUTIVE_BRIEF_PAGE_PLAN.map((page) => page.title);
+  const coverSection = data.sections.find((section) => section.kind === "kpi");
+  const coverCards = coverSection?.kind === "kpi" ? coverSection.cards.slice(0, 3) : [];
   return (
     <Card id="report-preview">
       <CardHeader className="border-b bg-muted/30">
         <CardTitle>{data.title}</CardTitle>
         <CardDescription>
-          معاينة {digital ? "رقمية بنسبة 16:9" : "طباعة أفقية"} — ثلاث صفحات
+          معاينة وفق تخطيط التقرير المرجعي — أربع صفحات
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5 p-4 md:p-6">
         {pages.map((sections, pageIndex) => (
           <article
             key={pageTitles[pageIndex]}
-            aria-label={`صفحة ${pageIndex + 1} من 3`}
-            className="mx-auto flex w-full max-w-6xl flex-col overflow-hidden rounded-lg border bg-white p-5 shadow-sm"
+            aria-label={`صفحة ${pageIndex + 1} من 4`}
+            className="mx-auto flex w-full max-w-4xl flex-col overflow-hidden rounded-lg border p-5 shadow-sm"
             style={{
-              aspectRatio: digital ? "16 / 9" : `${841.89} / ${595.28}`,
+              aspectRatio: "3 / 4",
               borderColor: REPORT_DESIGN_TOKENS.colors.border,
               color: REPORT_DESIGN_TOKENS.colors.primary,
+              backgroundColor: REPORT_DESIGN_TOKENS.colors.background,
             }}
           >
             <header className="mb-3 flex items-center justify-between border-b pb-2">
-              <span className="text-xs text-muted-foreground">صفحة {pageIndex + 1} من 3</span>
+              <span className="text-xs text-muted-foreground">صفحة {pageIndex + 1} من 4</span>
               <h3 className="text-base font-semibold">{pageTitles[pageIndex]}</h3>
             </header>
             <div className="min-h-0 flex-1 space-y-3 overflow-auto text-right" dir="rtl">
-              {sections.length === 0 ? (
+              {pageIndex === 0 ? (
+                <div className="flex h-full flex-col items-center justify-center gap-6 text-center">
+                  <h4 className="text-3xl font-bold">تقرير الشكاوى</h4>
+                  <p>الفترة من {data.period.from} إلى {data.period.to}</p>
+                  <div className="grid w-full grid-cols-3 gap-3">
+                    {coverCards.map((card) => (
+                        <div key={card.key} className="rounded-lg border p-3">
+                          <p className="text-xs text-muted-foreground">{card.label}</p>
+                          <p className="text-xl font-bold">{formatKpiValue(card)}</p>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              ) : sections.length === 0 ? (
                 <div className="flex h-full items-center justify-center rounded-lg bg-muted/20 text-sm text-muted-foreground">
                   لا توجد بيانات كافية لهذا القسم.
                 </div>

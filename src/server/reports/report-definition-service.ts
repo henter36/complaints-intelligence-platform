@@ -80,7 +80,7 @@ const OVERDUE_COLUMNS = [
 export const REPORT_DEFINITIONS: Record<ReportType, ReportDefinition> = {
   EXECUTIVE_SUMMARY: {
     type: ReportType.EXECUTIVE_SUMMARY,
-    title: "التقرير التنفيذي الشامل",
+    title: "تقرير الشكاوى",
     description: "نظرة شاملة على أداء الشكاوى خلال الفترة المحددة مع مقارنة بالفترة السابقة.",
     supportedFilters: COMMON_FILTERS,
     sections: [

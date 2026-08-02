@@ -17,7 +17,6 @@ import type {
 import { isFullAnalyticalData } from "./report-data-service";
 import { renderLineChartPng } from "./report-chart-service";
 import { formatRiyadhDateTime } from "./report-time";
-import { MAX_TREND_SERIES, DEPT_CLASS_RISES_LIMIT } from "./report-comparison";
 import { buildMatrixTruncationMessage } from "@/lib/reports/matrix-truncation";
 import {
   formatReportNumber,
@@ -28,7 +27,7 @@ const ASSETS_DIR = path.join(process.cwd(), "src/server/reports/assets");
 const FONT_REGULAR_PATH = path.join(ASSETS_DIR, "fonts/Amiri-Regular.ttf");
 const FONT_BOLD_PATH = path.join(ASSETS_DIR, "fonts/Amiri-Bold.ttf");
 const PAGE_MARGIN = 40;
-const PAGE_SIZE: [number, number] = [595.28, 841.89]; // A4 points
+const PAGE_SIZE: [number, number] = [900, 1200];
 const CONTENT_WIDTH = PAGE_SIZE[0] - PAGE_MARGIN * 2;
 const FOOTER_HEIGHT = 30;
 
@@ -43,6 +42,7 @@ const TABLE_ROW_MAX_LINES = 2;
 let fontRegularBuffer: Buffer | null = null;
 let fontBoldBuffer: Buffer | null = null;
 const COLORS = REPORT_DESIGN_TOKENS.colors;
+const ARABIC_WORD_SPACING = REPORT_DESIGN_TOKENS.typography.wordSpacing;
 
 function loadFonts(): { regular: Buffer; bold: Buffer } {
   if (!fontRegularBuffer) fontRegularBuffer = fs.readFileSync(FONT_REGULAR_PATH);
@@ -58,30 +58,10 @@ const KPI_FORMAT_SUFFIX: Record<ReportKpiCard["format"], string> = {
 };
 
 function formatKpiValue(card: ReportKpiCard): string {
+  if (card.value === null) return "غير متاح";
   const value = formatReportNumber(card.value);
   return `${value}${KPI_FORMAT_SUFFIX[card.format]}`;
 }
-
-const REPORT_TYPE_LABEL: Record<ReportType, string> = {
-  EXECUTIVE_SUMMARY: "التقرير التنفيذي الشامل",
-  DEPARTMENT_PERFORMANCE: "أداء الإدارات",
-  REGION_FACILITY_PERFORMANCE: "أداء المناطق والمواقع",
-  CLASSIFICATION_ANALYSIS: "تحليل التصنيفات",
-  COMPLAINT_DETAIL: "الشكاوى التفصيلي",
-  OVERDUE_COMPLAINTS: "المتأخرات",
-};
-
-const FILTER_LABELS: Record<string, string> = {
-  region: "المنطقة",
-  department: "الإدارة",
-  facility: "الموقع",
-  classificationId: "التصنيف",
-  categoryId: "الفئة",
-  priority: "الأولوية",
-  severity: "الخطورة",
-  channel: "القناة",
-  status: "الحالة",
-};
 
 /** Renders any value to text without relying on the default
  * `[object Object]` stringification of a bare template-literal/String() call. */
@@ -114,10 +94,6 @@ function formatCellValue(value: unknown, format?: ReportTableColumn["format"]): 
   return toDisplayText(value);
 }
 
-function shortRunId(runId?: string): string {
-  return runId ? runId.slice(0, 8) : "";
-}
-
 export type PdfRenderResult = {
   buffer: Buffer;
   warnings: string[];
@@ -142,9 +118,6 @@ export async function renderReportPdf(data: ReportData): Promise<PdfRenderResult
   // structure discoverable to tooling/tests without a PDF-parsing dependency.
   const fullAnalyticalSections = buildFullAnalyticalPdfSections(data);
   const keywordParts = [...data.sections, ...fullAnalyticalSections].map((section) => section.title);
-  if (data.type === ReportType.EXECUTIVE_SUMMARY && data.reportMode !== "FULL_ANALYTICAL") {
-    keywordParts.push("منهجية الاحتساب");
-  }
   const sectionTitles = keywordParts.join(" | ");
 
   const doc = new PDFDocument({
@@ -153,7 +126,7 @@ export async function renderReportPdf(data: ReportData): Promise<PdfRenderResult
     bufferPages: true,
     info: {
       Title: data.title,
-      Author: "نظام ذكاء الشكاوى",
+      Author: "تقارير الشكاوى",
       Subject: definition.description,
       Keywords: sectionTitles,
     },
@@ -175,19 +148,12 @@ export async function renderReportPdf(data: ReportData): Promise<PdfRenderResult
     ...data.sections,
     ...fullAnalyticalSections,
   ].filter(sectionHasRenderableContent);
-  const hasBody = visibleSections.length > 0
-    || (data.type === ReportType.EXECUTIVE_SUMMARY && data.reportMode !== "FULL_ANALYTICAL")
-    || warnings.length > 0;
-  const continueBelowCover = data.reportMode === "FULL_ANALYTICAL";
-  if (hasBody && !continueBelowCover) doc.addPage();
+  const hasBody = visibleSections.length > 0 || warnings.length > 0;
+  if (hasBody) doc.addPage();
 
   for (const section of visibleSections) {
     await renderSection(doc, section, warnings);
     doc.moveDown(0.8);
-  }
-
-  if (data.type === ReportType.EXECUTIVE_SUMMARY && data.reportMode !== "FULL_ANALYTICAL") {
-    renderMethodologyNote(doc);
   }
 
   // Rendered last so it reflects render-time failures collected above.
@@ -195,7 +161,7 @@ export async function renderReportPdf(data: ReportData): Promise<PdfRenderResult
     renderWarnings(doc, warnings);
   }
 
-  drawFooters(doc, data.title, shortRunId(data.reportRunId));
+  drawFooters(doc);
   doc.end();
 
   const buffer = await done;
@@ -325,56 +291,61 @@ function buildFullAnalyticalPdfSections(data: ReportData): ReportSection[] {
 // ---------------------------------------------------------------------------
 
 function renderCoverPage(doc: PDFKit.PDFDocument, data: ReportData): void {
-  const definition = getReportDefinition(data.type);
-  const top = doc.y;
-
-  doc.font("Bold").fontSize(12).fillColor(COLORS.primary);
-  doc.text("نظام ذكاء الشكاوى", PAGE_MARGIN, top + 6, { width: CONTENT_WIDTH, align: "right" });
-
-  doc.moveDown(1.2);
-  doc.font("Bold").fontSize(22).fillColor(COLORS.primary);
-  doc.text(data.title, { width: CONTENT_WIDTH, align: "right" });
-
-  doc.font("Body").fontSize(11).fillColor(COLORS.neutral);
-  doc.text(definition.description, { width: CONTENT_WIDTH, align: "right" });
-  doc.moveDown(0.8);
-
-  doc.fontSize(10).fillColor(COLORS.primary);
-  const metaLines: string[] = [
-    `نوع التقرير: ${REPORT_TYPE_LABEL[data.type]}`,
-    `الفترة الحالية: من ${data.period.from} إلى ${data.period.to}`,
-  ];
+  doc.rect(0, 0, PAGE_SIZE[0], PAGE_SIZE[1]).fill(COLORS.background);
+  doc.rect(PAGE_SIZE[0] - 32, 0, 32, PAGE_SIZE[1]).fill(COLORS.primary);
+  doc.rect(0, 0, 10, PAGE_SIZE[1]).fill(COLORS.gold);
+  const titleY = 315;
+  doc.font("Bold").fontSize(36).fillColor(COLORS.primary)
+    .text("تقرير الشكاوى", PAGE_MARGIN, titleY, {
+      width: CONTENT_WIDTH,
+      align: "center",
+      wordSpacing: ARABIC_WORD_SPACING,
+    });
+  doc.font("Body").fontSize(16).fillColor(COLORS.text)
+    .text(`الفترة من ${data.period.from} إلى ${data.period.to}`, PAGE_MARGIN, titleY + 72, {
+      width: CONTENT_WIDTH,
+      align: "center",
+      wordSpacing: ARABIC_WORD_SPACING,
+    });
   if (data.previousPeriod) {
-    metaLines.push(`الفترة المرجعية للمقارنة: من ${data.previousPeriod.from} إلى ${data.previousPeriod.to}`);
+    doc.text(
+      `مقارنة مع الفترة المماثلة السابقة: ${data.previousPeriod.from} إلى ${data.previousPeriod.to}`,
+      PAGE_MARGIN,
+      titleY + 108,
+      { width: CONTENT_WIDTH, align: "center", wordSpacing: ARABIC_WORD_SPACING }
+    );
   }
-  metaLines.push(`تاريخ الإنشاء: ${formatRiyadhDateTime(new Date(data.generatedAt))}`);
-  const runId = shortRunId(data.reportRunId);
-  if (runId) metaLines.push(`تشغيل: ${runId}`);
-  for (const line of metaLines) {
-    doc.text(line, { width: CONTENT_WIDTH, align: "right" });
-  }
-
-  renderFilterLine(doc, data);
-
-  doc.fillColor(COLORS.primary);
-  doc.moveDown(0.5);
-  separator(doc);
-  doc.moveDown(0.5);
-
-}
-
-function renderFilterLine(doc: PDFKit.PDFDocument, data: ReportData): void {
-  const entries = Object.entries(data.filters).filter(([key, value]) => key !== "from" && key !== "to" && value);
-  if (entries.length === 0) return;
-  const text = entries.map(([key, value]) => `${FILTER_LABELS[key] ?? key}: ${toDisplayText(value)}`).join(" | ");
-  doc.font("Body").fontSize(9).fillColor(COLORS.neutral);
-  doc.text(`الفلاتر المطبقة: ${text}`, { width: CONTENT_WIDTH, align: "right" });
-  doc.fillColor(COLORS.primary);
-}
-
-function separator(doc: PDFKit.PDFDocument): void {
-  doc.moveTo(PAGE_MARGIN, doc.y).lineTo(PAGE_SIZE[0] - PAGE_MARGIN, doc.y).strokeColor(COLORS.border).stroke();
-  doc.strokeColor(COLORS.primary);
+  doc.fontSize(12).fillColor(COLORS.neutral)
+    .text(`تاريخ الإنشاء: ${formatRiyadhDateTime(new Date(data.generatedAt))}`, PAGE_MARGIN, titleY + 150, {
+      width: CONTENT_WIDTH,
+      align: "center",
+      wordSpacing: ARABIC_WORD_SPACING,
+    });
+  const sectionCards = data.sections.find((section) => section.kind === "kpi");
+  const fallbackValue = (key: string): number => {
+    if (sectionCards?.kind !== "kpi") return 0;
+    return sectionCards.cards.find((card) => card.key === key)?.value ?? 0;
+  };
+  const cards = [
+    ["إجمالي الشكاوى", data.kpis.totalComplaints?.currentValue ?? fallbackValue("total")],
+    ["المفتوحة", data.kpis.openComplaints?.currentValue ?? fallbackValue("open")],
+    ["المغلقة", data.kpis.closedComplaints?.currentValue ?? fallbackValue("closed")],
+  ] as const;
+  const gap = 18;
+  const width = (CONTENT_WIDTH - gap * 2) / 3;
+  cards.forEach(([label, value], index) => {
+    const x = PAGE_MARGIN + (2 - index) * (width + gap);
+    doc.roundedRect(x, titleY + 230, width, 104, REPORT_DESIGN_TOKENS.card.radius)
+      .fillAndStroke(COLORS.background, COLORS.border);
+    doc.font("Body").fontSize(12).fillColor(COLORS.neutral)
+      .text(label, x + 10, titleY + 248, {
+        width: width - 20,
+        align: "center",
+        wordSpacing: ARABIC_WORD_SPACING,
+      });
+    doc.font("Bold").fontSize(28).fillColor(COLORS.primary)
+      .text(formatReportNumber(value), x + 10, titleY + 280, { width: width - 20, align: "center" });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -383,39 +354,32 @@ function separator(doc: PDFKit.PDFDocument): void {
 
 function renderWarnings(doc: PDFKit.PDFDocument, warnings: string[]): void {
   ensureSpace(doc, 20 + warnings.length * 14);
-  doc.font("Bold").fontSize(9).fillColor(COLORS.danger);
-  doc.text("تنبيهات:", { width: CONTENT_WIDTH, align: "right" });
-  doc.font("Body").fontSize(9);
+  doc.font("Bold").fontSize(10.5).fillColor(COLORS.danger);
+  doc.text("تنبيهات:", {
+    width: CONTENT_WIDTH,
+    align: "right",
+    wordSpacing: ARABIC_WORD_SPACING,
+  });
+  doc.font("Body").fontSize(10.5);
   for (const warning of warnings) {
-    doc.text(`• ${warning}`, { width: CONTENT_WIDTH, align: "right" });
+    doc.text(`• ${warning}`, {
+      width: CONTENT_WIDTH,
+      align: "right",
+      wordSpacing: ARABIC_WORD_SPACING,
+    });
   }
   doc.fillColor(COLORS.primary);
   doc.moveDown(0.6);
 }
 
-function renderMethodologyNote(doc: PDFKit.PDFDocument): void {
-  const bullets = [
-    "الفترة الحالية هي المدة المحددة في التقرير، والفترة السابقة هي مدة مماثلة لها في الطول وتسبقها مباشرة دون تداخل.",
-    "الفرق = عدد الشكاوى في الفترة الحالية ناقص عددها في الفترة السابقة، ونسبة التغير = الفرق مقسوماً على عدد الفترة السابقة ضرب 100.",
-    'عند غياب أي شكاوى في الفترة السابقة تُصنَّف الحالة كـ "جديد" ولا تُحتسب نسبة تغير تفادياً للقسمة على صفر.',
-    "مساهمة التصنيف تعني نسبة ارتفاع هذا التصنيف من مجموع ارتفاعات تصنيفات الإدارة نفسها (الفروق الموجبة فقط).",
-    "حجم الشكاوى مؤشر كمّي يوضّح الاتجاه، وليس حكماً منفرداً على الأداء.",
-    `يعرض الرسم البياني أعلى ${MAX_TREND_SERIES} مناطق كحد أقصى، ويعرض جدول الارتفاعات ${DEPT_CLASS_RISES_LIMIT} صفاً كحد أقصى.`,
-  ];
-  ensureSpace(doc, 30 + bullets.length * 26);
-  drawSectionTitle(doc, "منهجية الاحتساب");
-  doc.font("Body").fontSize(9).fillColor(COLORS.primary);
-  for (const bullet of bullets) {
-    doc.text(`• ${bullet}`, { width: CONTENT_WIDTH, align: "right" });
-    doc.moveDown(0.2);
-  }
-  doc.fillColor(COLORS.primary);
-}
-
 function drawSectionTitle(doc: PDFKit.PDFDocument, title: string): void {
   ensureSpace(doc, 24);
-  doc.font("Bold").fontSize(13).fillColor(COLORS.primary);
-  doc.text(title, { width: CONTENT_WIDTH, align: "right" });
+  doc.font("Bold").fontSize(REPORT_DESIGN_TOKENS.fontSize.sectionTitle).fillColor(COLORS.primary);
+  doc.text(title, {
+    width: CONTENT_WIDTH,
+    align: "right",
+    wordSpacing: ARABIC_WORD_SPACING,
+  });
   doc.fillColor(COLORS.primary);
   doc.moveDown(0.3);
 }
@@ -426,7 +390,11 @@ function drawTextSection(doc: PDFKit.PDFDocument, section: ReportTextSection): v
   for (const point of section.points) {
     if (!point?.trim()) continue;
     ensureSpace(doc, 18);
-    doc.text(`•  ${point}`, PAGE_MARGIN + 8, doc.y, { width: CONTENT_WIDTH - 8, align: "right" });
+    doc.text(`•  ${point}`, PAGE_MARGIN + 8, doc.y, {
+      width: CONTENT_WIDTH - 8,
+      align: "right",
+      wordSpacing: ARABIC_WORD_SPACING,
+    });
     doc.moveDown(0.2);
   }
   doc.fillColor(COLORS.primary);
@@ -607,6 +575,7 @@ function drawKpiGrid(doc: PDFKit.PDFDocument, cards: ReportKpiCard[], columns = 
         align: "right",
         lineBreak: false,
         ellipsis: true,
+        wordSpacing: ARABIC_WORD_SPACING,
       });
       doc.font("Bold").fontSize(14).fillColor(COLORS.primary);
       doc.text(formatKpiValue(card), x + 6, rowTop + 20, {
@@ -699,7 +668,7 @@ function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
 
   function drawHeaderRow(): void {
     const top = doc.y;
-    doc.font("Bold").fontSize(8.5).fillColor(COLORS.primary);
+    doc.font("Bold").fontSize(10.5).fillColor(COLORS.primary);
     columns.forEach((column, index) => {
       doc.text(column.label, xOffsets[index] + 2, top + 5, {
         width: widths[index] - 4,
@@ -718,12 +687,12 @@ function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
   ensureSpace(doc, headerHeight + 24);
   drawHeaderRow();
 
-  doc.font("Body").fontSize(8.5);
+  doc.font("Body").fontSize(10.5);
   table.rows.forEach((row, rowIndex) => {
     // Compute dynamic row height (up to 2 lines).
     const cellTexts = columns.map((column) => formatCellValue(row[column.key], column.format));
     const maxLines = columns.reduce(
-      (max, column, index) => Math.max(max, estimateLines(doc, cellTexts[index], widths[index], 8.5)),
+      (max, column, index) => Math.max(max, estimateLines(doc, cellTexts[index], widths[index], 10.5)),
       1
     );
     const rowHeight = maxLines * lineHeight + cellPadding * 2;
@@ -732,7 +701,7 @@ function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
     if (doc.y + rowHeight > doc.page.height - doc.page.margins.bottom) {
       doc.addPage();
       drawHeaderRow();
-      doc.font("Body").fontSize(8.5);
+      doc.font("Body").fontSize(10.5);
     }
     const top = doc.y;
     if (rowIndex % 2 === 1) {
@@ -746,26 +715,27 @@ function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
         align: "right",
         lineGap: 0,
         ellipsis: true,
+        wordSpacing: ARABIC_WORD_SPACING,
       });
     });
     doc.y = top + rowHeight;
   });
 }
 
-function drawFooters(doc: PDFKit.PDFDocument, title: string, runId: string): void {
+function drawFooters(doc: PDFKit.PDFDocument): void {
   const range = doc.bufferedPageRange();
-  const runPart = runId ? ` — تشغيل: ${runId}` : "";
   for (let i = range.start; i < range.start + range.count; i++) {
     doc.switchToPage(i);
     const pageNumber = i - range.start + 1;
     const y = doc.page.height - PAGE_MARGIN - 14;
     const originalBottomMargin = doc.page.margins.bottom;
     doc.page.margins.bottom = 0;
-    doc.font("Body").fontSize(8).fillColor(COLORS.neutral);
-    doc.text(`${title}${runPart} — صفحة ${pageNumber} من ${range.count}`, PAGE_MARGIN, y, {
+    doc.font("Body").fontSize(9).fillColor(COLORS.neutral);
+    doc.text(`صفحة ${pageNumber} من ${range.count}`, PAGE_MARGIN, y, {
       width: CONTENT_WIDTH,
       align: "center",
       lineBreak: false,
+      wordSpacing: ARABIC_WORD_SPACING,
     });
     doc.page.margins.bottom = originalBottomMargin;
     doc.fillColor(COLORS.primary);

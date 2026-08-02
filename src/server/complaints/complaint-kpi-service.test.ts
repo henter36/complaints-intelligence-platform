@@ -177,4 +177,66 @@ describe("complaint KPI service", () => {
       expect.objectContaining({ group: "ب", count: 1 }),
     ]);
   });
+
+  it("uses the shared status and due-date rules for open, late, and compliance KPIs", async () => {
+    const now = new Date("2026-07-31T00:00:00Z");
+    dbMocks.findMany.mockResolvedValueOnce([
+      complaint({ id: "open-new", status: ComplaintStatus.NEW }),
+      complaint({ id: "open-progress", status: ComplaintStatus.IN_PROGRESS }),
+      complaint({
+        id: "open-late",
+        status: ComplaintStatus.AWAITING_RESPONSE,
+        dueDate: new Date("2026-07-20T00:00:00Z"),
+      }),
+      complaint({
+        id: "closed-on-time",
+        status: ComplaintStatus.CLOSED,
+        dueDate: new Date("2026-07-20T00:00:00Z"),
+        closedAt: new Date("2026-07-20T00:00:00Z"),
+      }),
+      complaint({
+        id: "closed-late",
+        status: ComplaintStatus.RESOLVED,
+        dueDate: new Date("2026-07-20T00:00:00Z"),
+        closedAt: new Date("2026-07-21T00:00:00Z"),
+      }),
+      complaint({ id: "closed-no-due", status: ComplaintStatus.CLOSED, closedAt: now }),
+    ]);
+
+    const result = await getComplaintKpis(new URLSearchParams(), now);
+
+    expect(result.volume.open).toBe(3);
+    expect(result.volume.closed).toBe(3);
+    expect(result.kpis.currentlyLateComplaints.currentValue).toBe(1);
+    expect(result.kpis.closedLateComplaints.currentValue).toBe(1);
+    expect(result.performance.onTimeEligibleClosed).toBe(2);
+    expect(result.performance.onTimeRate).toBe(50);
+  });
+
+  it("marks compliance unavailable when no closed complaint can be judged", async () => {
+    dbMocks.findMany.mockResolvedValueOnce([
+      complaint({ status: ComplaintStatus.OPEN, dueDate: null }),
+      complaint({ id: "closed-no-due", status: ComplaintStatus.CLOSED, closedAt: new Date("2026-07-20T00:00:00Z") }),
+    ]);
+
+    const result = await getComplaintKpis(new URLSearchParams(), new Date("2026-07-31T00:00:00Z"));
+
+    expect(result.performance.onTimeEligibleClosed).toBe(0);
+    expect(result.performance.onTimeRate).toBeNull();
+    expect(result.kpis.dueDateComplianceRate.available).toBe(false);
+    expect(result.kpis).not.toHaveProperty("dueDateEligibleClosed");
+  });
+
+  it("normalizes equivalent region names into one group", async () => {
+    dbMocks.findMany.mockResolvedValueOnce([
+      complaint({ id: "r1", region: "الرياض" }),
+      complaint({ id: "r2", region: "منطقة الرياض" }),
+    ]);
+
+    const result = await getComplaintKpis(new URLSearchParams(), new Date("2026-07-31T00:00:00Z"));
+
+    expect(result.distributions.byRegion).toEqual([
+      expect.objectContaining({ name: "منطقة الرياض", total: 2 }),
+    ]);
+  });
 });

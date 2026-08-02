@@ -288,8 +288,30 @@ describe("buildExecutiveBriefData — KPI cards", () => {
     expect(keys).toContain("currentlyLate");
     expect(keys).toContain("complianceRate");
     expect(keys).toContain("averageResolutionDays");
-    expect(keys).toContain("highPriorityOpen");
-    expect(keys).toContain("unclassified");
+    expect(keys).toContain("closedLate");
+    expect(keys).toContain("netChange");
+  });
+
+  it("keeps the approved KPI presentation order", async () => {
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
+    expect(data.briefKpis.map((kpi) => kpi.key)).toEqual([
+      "total",
+      "open",
+      "closed",
+      "currentlyLate",
+      "closedLate",
+      "complianceRate",
+      "averageResolutionDays",
+      "netChange",
+    ]);
+  });
+
+  it("keeps compliance unavailable when no closed complaint has a valid due date", async () => {
+    const result = makeKpiResult();
+    result.performance.onTimeRate = null;
+    result.kpis.dueDateComplianceRate.available = false;
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
+    expect(data.briefKpis.find((kpi) => kpi.key === "complianceRate")?.value).toBeNull();
   });
 
   it("closed KPI: fewer closed → negative assessment", async () => {
@@ -372,7 +394,7 @@ describe("buildExecutiveBriefData — allRegions", () => {
   it("keeps a positive difference for a region that increased", async () => {
     dbMocks.complaintGroupBy.mockResolvedValue([{ region: "الرياض" }]);
     const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
-    const riyadh = data.allRegions.find((row) => row.regionName === "الرياض");
+    const riyadh = data.allRegions.find((row) => row.regionName === "منطقة الرياض");
     expect(riyadh).toBeDefined();
     expect(riyadh!.difference).toBeGreaterThan(0);
   });
@@ -465,6 +487,30 @@ describe("buildExecutiveBriefData — comparativeTimeline", () => {
     const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
     expect(data.comparativeTimeline.current.points).toHaveLength(data.comparativeTimeline.periodDays);
   });
+
+  it.each([
+    { days: 31, aggregation: "daily", expectedPoints: 31 },
+    { days: 56, aggregation: "weekly", expectedPoints: 8 },
+    { days: 180, aggregation: "monthly", expectedPoints: 6 },
+  ] as const)(
+    "uses $aggregation buckets for a $days-day reporting period",
+    async ({ days, aggregation, expectedPoints }) => {
+      const comparison = makeComparison(false);
+      comparison.currentPeriod = {
+        from: ISO("2026-01-01"),
+        toExclusive: new Date(ISO("2026-01-01").getTime() + days * 86_400_000),
+      };
+      comparison.regionTrend = {
+        allDates: [],
+        series: [],
+        truncated: false,
+        otherSeriesName: null,
+      };
+      const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
+      expect(data.comparativeTimeline.aggregation).toBe(aggregation);
+      expect(data.comparativeTimeline.current.points).toHaveLength(expectedPoints);
+    }
+  );
 
   it("previous period is null when no comparison", async () => {
     const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(false), undefined, NOW);

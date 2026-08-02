@@ -9,7 +9,7 @@ import type { ReportType } from "@prisma/client";
 import { renderReportXlsx } from "./report-xlsx-service";
 
 const BRIEF_SHEETS = [
-  "المؤشرات التنفيذية",
+  "المؤشرات المختصرة",
   "جميع المناطق",
   "أبرز التصنيفات",
   "الاتجاه الزمني المقارن",
@@ -132,7 +132,7 @@ describe("renderReportXlsx — executive brief mode", () => {
   });
 
   it.each([
-    ["المؤشرات التنفيذية", 3],
+    ["المؤشرات المختصرة", 3],
     ["جميع المناطق", 3],
     ["الاتجاه الزمني المقارن", 3],
   ] as const)("%s has %i rows including its header", (sheetName, rowCount) => {
@@ -146,7 +146,7 @@ describe("renderReportXlsx — executive brief mode", () => {
     const result = await renderReportXlsx(report);
     const wb = await readBack(result.buffer);
     const names = sheetNames(wb);
-    expect(names.some((n) => n.includes("المؤشرات التنفيذية"))).toBe(false);
+    expect(names.some((n) => n.includes("المؤشرات المختصرة"))).toBe(false);
     expect(names.some((n) => n.includes("جميع المناطق"))).toBe(false);
   });
 
@@ -163,7 +163,7 @@ describe("renderReportXlsx — executive brief mode", () => {
   });
 
   it("brief KPIs sheet includes assessment column", async () => {
-    const sheet = briefWorkbook.worksheets.find((ws) => ws.name.includes("المؤشرات التنفيذية"));
+    const sheet = briefWorkbook.worksheets.find((ws) => ws.name.includes("المؤشرات المختصرة"));
     expect(sheet).toBeDefined();
     const headerRow = sheet!.getRow(1);
     const headers = [1, 2, 3, 4, 5, 6].map((col) => headerRow.getCell(col).value as string);
@@ -204,7 +204,7 @@ describe("renderReportXlsx — executive brief mode", () => {
 
     const result = await renderReportXlsx(report);
     const workbook = await readBack(result.buffer);
-    const kpiRow = workbook.getWorksheet("المؤشرات التنفيذية")!.getRow(3);
+    const kpiRow = workbook.getWorksheet("المؤشرات المختصرة")!.getRow(3);
     expect(kpiRow.getCell(2).value).toBeTypeOf("number");
     expect(kpiRow.getCell(3).value).toBeNull();
     expect(kpiRow.getCell(4).value).toBeNull();

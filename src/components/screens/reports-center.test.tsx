@@ -160,7 +160,7 @@ describe("ReportsCenter", () => {
     expect(body.options.reportMode).toBe("STANDARD");
   });
 
-  it("sends the selected mode in preview and presents a three-page 16:9 preview", async () => {
+  it("sends the selected mode in preview and presents the four-page reference preview", async () => {
     const user = userEvent.setup();
     const fetchMock = routedFetch({
       "/api/reports/preview": () => jsonResponse({ report: {
@@ -173,8 +173,8 @@ describe("ReportsCenter", () => {
     render(<ReportsCenter />);
     await user.click(await screen.findByText("التقرير التنفيذي الشامل"));
     await user.click(screen.getByRole("button", { name: /معاينة/ }));
-    expect(await screen.findByText("معاينة رقمية بنسبة 16:9 — ثلاث صفحات")).toBeInTheDocument();
-    expect(screen.getAllByLabelText(/صفحة [123] من 3/)).toHaveLength(3);
+    expect(await screen.findByText("معاينة وفق تخطيط التقرير المرجعي — أربع صفحات")).toBeInTheDocument();
+    expect(screen.getAllByLabelText(/صفحة [1234] من 4/)).toHaveLength(4);
     const previewCall = fetchMock.mock.calls.find(([input]) => String(input).includes("/api/reports/preview"));
     expect(JSON.parse(previewCall?.[1]?.body as string).options.reportMode).toBe("DIGITAL_EXECUTIVE_BRIEF");
   });
@@ -203,14 +203,14 @@ describe("ReportsCenter", () => {
     await user.click(await screen.findByText("التقرير التنفيذي الشامل"));
     await user.click(screen.getByRole("button", { name: /معاينة/ }));
 
-    const secondPage = await screen.findByLabelText("صفحة 2 من 3");
+    const secondPage = await screen.findByLabelText("صفحة 2 من 4");
     const sectionHeadings = within(secondPage).getAllByRole("heading", { level: 4 });
     expect(sectionHeadings.map((heading) => heading.textContent)).toEqual([
       "أول", "ثان", "ثالث", "رابع", "خامس",
     ]);
     expect(within(secondPage).getByText("خامس")).toBeInTheDocument();
-    const thirdPage = screen.getByLabelText("صفحة 3 من 3");
-    expect(within(thirdPage).getByText("قسم غير مصنف")).toBeInTheDocument();
+    const fourthPage = screen.getByLabelText("صفحة 4 من 4");
+    expect(within(fourthPage).getByText("قسم غير مصنف")).toBeInTheDocument();
   });
 
   it("preserves the selected FULL_ANALYTICAL mode when saving a template", async () => {
