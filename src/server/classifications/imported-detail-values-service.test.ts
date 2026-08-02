@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   auditCreate: vi.fn(),
   transaction: vi.fn(),
   loggerInfo: vi.fn(),
+  loggerWarn: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -25,7 +26,7 @@ vi.mock("@/lib/db", () => ({
 }));
 
 vi.mock("@/server/logger", () => ({
-  logger: { info: mocks.loggerInfo, warn: vi.fn(), error: vi.fn() },
+  logger: { info: mocks.loggerInfo, warn: mocks.loggerWarn, error: vi.fn() },
 }));
 
 import {
@@ -75,13 +76,19 @@ describe("imported detail values", () => {
   });
 
   it("reads applied rows from confirmed batches only and groups Arabic variants", async () => {
-    mocks.rowFindMany.mockResolvedValue([
-      { normalizedData: { sourceDetail: "وكالة" }, rawData: {} },
-      { normalizedData: { sourceDetail: " وَكَالَة " }, rawData: {} },
-      { normalizedData: null, rawData: { "تفصيل": "وكالة" } },
-      { normalizedData: { sourceDetail: "   " }, rawData: {} },
-      { normalizedData: null, rawData: {} },
-    ]);
+    mocks.rowFindMany
+      .mockResolvedValueOnce([
+        { id: "row-1", normalizedData: { sourceDetail: "وكالة" } },
+        { id: "row-2", normalizedData: { sourceDetail: " وَكَالَة " } },
+        { id: "row-3", normalizedData: null },
+        { id: "row-4", normalizedData: { sourceDetail: "   " } },
+        { id: "row-5", normalizedData: null },
+      ])
+      .mockResolvedValueOnce([
+        { id: "row-3", rawData: { "تفصيل": "وكالة" } },
+        { id: "row-4", rawData: {} },
+        { id: "row-5", rawData: {} },
+      ]);
     mocks.batchCount.mockResolvedValue(2);
     mocks.classificationFindMany.mockResolvedValue([
       { id: "cls_current", keywords: ["وكالة"] },
@@ -90,17 +97,31 @@ describe("imported detail values", () => {
 
     const result = await listImportedDetailValues({ classificationId: "cls_current" });
 
-    expect(mocks.rowFindMany).toHaveBeenCalledWith(expect.objectContaining({
+    expect(mocks.rowFindMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
       where: {
         importBatch: { status: ImportBatchStatus.CONFIRMED },
         validationStatus: { in: [ImportRowValidationStatus.VALID, ImportRowValidationStatus.WARNING] },
         action: { in: [ImportRowAction.NEW, ImportRowAction.UPDATE, ImportRowAction.NO_CHANGE, ImportRowAction.DUPLICATE] },
       },
-      select: { normalizedData: true, rawData: true },
+      select: { id: true, normalizedData: true },
       orderBy: { id: "asc" },
-      skip: 0,
       take: 500,
     }));
+    expect(mocks.rowFindMany.mock.calls[0][0]).not.toHaveProperty("cursor");
+    expect(mocks.rowFindMany.mock.calls[0][0]).not.toHaveProperty("skip");
+    expect(mocks.rowFindMany).toHaveBeenNthCalledWith(2, {
+      where: {
+        AND: [
+          {
+            importBatch: { status: ImportBatchStatus.CONFIRMED },
+            validationStatus: { in: [ImportRowValidationStatus.VALID, ImportRowValidationStatus.WARNING] },
+            action: { in: [ImportRowAction.NEW, ImportRowAction.UPDATE, ImportRowAction.NO_CHANGE, ImportRowAction.DUPLICATE] },
+          },
+          { id: { in: ["row-3", "row-4", "row-5"] } },
+        ],
+      },
+      select: { id: true, rawData: true },
+    });
     expect(result.items).toEqual([
       expect.objectContaining({
         normalizedValue: normalizeImportedDetailValue("وكالة"),
@@ -120,29 +141,17 @@ describe("imported detail values", () => {
         distinctValues: 1,
       },
     });
-    expect(mocks.loggerInfo).toHaveBeenCalledWith("Imported detail values loaded", {
-      confirmedBatchCount: 2,
-      scannedRowCount: 5,
-      rowsWithDetailCount: 3,
-      distinctValueCount: 1,
-      filters: {
-        hasSearch: false,
-        linkStatus: "ALL",
-        classificationContext: true,
-        page: 1,
-        pageSize: 50,
-      },
-    });
-    expect(JSON.stringify(mocks.loggerInfo.mock.calls)).not.toContain("وكالة");
+    expect(mocks.loggerInfo).not.toHaveBeenCalled();
+    expect(mocks.loggerWarn).not.toHaveBeenCalled();
     expect(result.items[0]).not.toHaveProperty("complaintId");
     expect(result.items[0]).not.toHaveProperty("description");
   });
 
   it("supports normalized search, link filters, and pagination", async () => {
     mocks.rowFindMany.mockResolvedValue([
-      { normalizedData: { sourceDetail: "وكالة" }, rawData: {} },
-      { normalizedData: { sourceDetail: "طلب علاج" }, rawData: {} },
-      { normalizedData: { sourceDetail: "نقل" }, rawData: {} },
+      { id: "row-1", normalizedData: { sourceDetail: "وكالة" } },
+      { id: "row-2", normalizedData: { sourceDetail: "طلب علاج" } },
+      { id: "row-3", normalizedData: { sourceDetail: "نقل" } },
     ]);
     mocks.classificationFindMany.mockResolvedValue([
       { id: "cls_other", keywords: ["طلب علاج"] },
@@ -177,6 +186,58 @@ describe("imported detail values", () => {
     const secondPage = await listImportedDetailValues({ page: 2, pageSize: 2 });
     expect(secondPage).toMatchObject({ page: 2, pageSize: 2, total: 3, availableTotal: 3 });
     expect(secondPage.items).toHaveLength(1);
+  });
+
+  it("uses a stable id cursor without cumulative offset and does not repeat rows", async () => {
+    const firstPage = Array.from({ length: 500 }, (_, index) => ({
+      id: `row-${String(index + 1).padStart(3, "0")}`,
+      normalizedData: { sourceDetail: "وكالة" },
+    }));
+    mocks.rowFindMany
+      .mockResolvedValueOnce(firstPage)
+      .mockResolvedValueOnce([
+        { id: "row-501", normalizedData: { sourceDetail: "وكالة" } },
+      ]);
+
+    const result = await listImportedDetailValues();
+
+    expect(mocks.rowFindMany).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      orderBy: { id: "asc" },
+      take: 500,
+    }));
+    expect(mocks.rowFindMany.mock.calls[0][0]).not.toHaveProperty("cursor");
+    expect(mocks.rowFindMany.mock.calls[0][0]).not.toHaveProperty("skip");
+    expect(mocks.rowFindMany).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      cursor: { id: "row-500" },
+      skip: 1,
+      orderBy: { id: "asc" },
+      take: 500,
+    }));
+    expect(result.items).toEqual([
+      expect.objectContaining({ displayValue: "وكالة", occurrences: 501 }),
+    ]);
+    expect(result.diagnostics).toMatchObject({
+      rowsScanned: 501,
+      rowsWithSourceDetail: 501,
+    });
+  });
+
+  it("warns once without PII when confirmed rows have no extractable details", async () => {
+    mocks.batchCount.mockResolvedValue(1);
+    mocks.rowFindMany
+      .mockResolvedValueOnce([{ id: "row-1", normalizedData: null }])
+      .mockResolvedValueOnce([{ id: "row-1", rawData: {} }]);
+
+    const result = await listImportedDetailValues();
+
+    expect(result.total).toBe(0);
+    expect(mocks.loggerInfo).not.toHaveBeenCalled();
+    expect(mocks.loggerWarn).toHaveBeenCalledOnce();
+    expect(mocks.loggerWarn).toHaveBeenCalledWith(
+      "Confirmed imports contain no extractable detail values",
+      { confirmedBatchCount: 1, rowsScanned: 1 }
+    );
+    expect(JSON.stringify(mocks.loggerWarn.mock.calls)).not.toContain("rawData");
   });
 
   it("adds one or several values, deduplicates them, and writes safe audit metadata", async () => {

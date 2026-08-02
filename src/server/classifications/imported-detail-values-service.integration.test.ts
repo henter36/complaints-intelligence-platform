@@ -22,8 +22,10 @@ import { persistPreviewRows } from "@/server/imports/excel-import-service";
 
 let prisma: PrismaClient;
 let tempDir: string;
+let previousDatabaseUrl: string | undefined;
 
 beforeAll(async () => {
+  previousDatabaseUrl = process.env.DATABASE_URL;
   tempDir = mkdtempSync(join(tmpdir(), "cip-imported-details-"));
   const dbPath = join(tempDir, "test.db");
   process.env.DATABASE_URL = `file:${dbPath}`;
@@ -36,8 +38,16 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(async () => {
-  await prisma.$disconnect();
-  rmSync(tempDir, { recursive: true, force: true });
+  try {
+    await prisma.$disconnect();
+  } finally {
+    if (previousDatabaseUrl === undefined) {
+      delete process.env.DATABASE_URL;
+    } else {
+      process.env.DATABASE_URL = previousDatabaseUrl;
+    }
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 async function createBatch(status: ImportBatchStatus) {

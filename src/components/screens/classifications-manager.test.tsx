@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ImportedDetailPicker } from "./classifications-manager";
@@ -27,6 +27,29 @@ const listPayload = {
   total: 2,
   availableTotal: 2,
 };
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function successfulListResponse(displayValue: string) {
+  return {
+    ok: true,
+    json: async () => ({
+      ...listPayload,
+      items: [{
+        ...listPayload.items[0],
+        normalizedValue: displayValue,
+        displayValue,
+      }],
+      total: 1,
+    }),
+  };
+}
 
 describe("imported detail keyword picker", () => {
   afterEach(() => vi.unstubAllGlobals());
@@ -128,5 +151,56 @@ describe("imported detail keyword picker", () => {
     expect(await screen.findByText("تعذر تحميل القيم المستوردة.")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "إعادة المحاولة" }));
     expect(await screen.findByText("وكالة")).toBeInTheDocument();
+  });
+
+  it("does not let an older search response replace newer results", async () => {
+    const olderRequest = deferred<ReturnType<typeof successfulListResponse>>();
+    const newerRequest = deferred<ReturnType<typeof successfulListResponse>>();
+    const fetchMock = vi.fn()
+      .mockReturnValueOnce(olderRequest.promise)
+      .mockReturnValueOnce(newerRequest.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<ImportedDetailPicker classificationId="cls_1" onImported={vi.fn()} />);
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await user.type(screen.getByRole("textbox", { name: "البحث في قيم تفصيل" }), "ن");
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    await act(async () => newerRequest.resolve(successfulListResponse("نتيجة جديدة")));
+    expect(await screen.findByText("نتيجة جديدة")).toBeInTheDocument();
+
+    await act(async () => olderRequest.resolve(successfulListResponse("نتيجة قديمة")));
+    await waitFor(() => {
+      expect(screen.queryByText("نتيجة قديمة")).not.toBeInTheDocument();
+      expect(screen.getByText("نتيجة جديدة")).toBeInTheDocument();
+    });
+  });
+
+  it("does not let an older retry response replace a later search", async () => {
+    const retryRequest = deferred<ReturnType<typeof successfulListResponse>>();
+    const searchRequest = deferred<ReturnType<typeof successfulListResponse>>();
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: false, json: async () => ({ error: {} }) })
+      .mockReturnValueOnce(retryRequest.promise)
+      .mockReturnValueOnce(searchRequest.promise);
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(<ImportedDetailPicker classificationId="cls_1" onImported={vi.fn()} />);
+
+    expect(await screen.findByText("تعذر تحميل القيم المستوردة.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "إعادة المحاولة" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    await user.type(screen.getByRole("textbox", { name: "البحث في قيم تفصيل" }), "ج");
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+    await act(async () => searchRequest.resolve(successfulListResponse("نتيجة البحث")));
+    expect(await screen.findByText("نتيجة البحث")).toBeInTheDocument();
+
+    await act(async () => retryRequest.resolve(successfulListResponse("نتيجة إعادة قديمة")));
+    await waitFor(() => {
+      expect(screen.queryByText("نتيجة إعادة قديمة")).not.toBeInTheDocument();
+      expect(screen.getByText("نتيجة البحث")).toBeInTheDocument();
+    });
   });
 });

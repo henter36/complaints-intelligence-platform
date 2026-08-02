@@ -55,7 +55,12 @@ type ClassificationKeywordProjection = {
 };
 
 type ImportRowProjection = {
+  id: string;
   normalizedData: unknown;
+};
+
+type RawImportRowProjection = {
+  id: string;
   rawData: unknown;
 };
 
@@ -66,6 +71,20 @@ type ImportedDetailAggregation = {
 };
 
 const DETAIL_ROW_PAGE_SIZE = 500;
+const ELIGIBLE_IMPORTED_DETAIL_ROWS_WHERE: Prisma.ImportBatchRowWhereInput = {
+  importBatch: { status: ImportBatchStatus.CONFIRMED },
+  validationStatus: {
+    in: [ImportRowValidationStatus.VALID, ImportRowValidationStatus.WARNING],
+  },
+  action: {
+    in: [
+      ImportRowAction.NEW,
+      ImportRowAction.UPDATE,
+      ImportRowAction.NO_CHANGE,
+      ImportRowAction.DUPLICATE,
+    ],
+  },
+};
 const NORMALIZED_DETAIL_HEADERS = new Set([
   normalizeColumnHeader("sourceDetail"),
   normalizeColumnHeader("source detail"),
@@ -108,8 +127,7 @@ export function extractSourceDetail(
   normalizedData: unknown,
   rawData: unknown
 ): string | null {
-  const normalizedRecord = asJsonRecord(normalizedData);
-  const normalizedValue = normalizeTextCell(normalizedRecord?.sourceDetail);
+  const normalizedValue = extractNormalizedSourceDetail(normalizedData);
   if (normalizedValue) return normalizedValue;
 
   const rawRecord = asJsonRecord(rawData);
@@ -124,6 +142,11 @@ export function extractSourceDetail(
     if (text) return text;
   }
   return normalizedHeaderDetail(rawRecord);
+}
+
+function extractNormalizedSourceDetail(normalizedData: unknown): string | null {
+  const normalizedRecord = asJsonRecord(normalizedData);
+  return normalizeTextCell(normalizedRecord?.sourceDetail) ?? null;
 }
 
 function bestDisplayValue(variants: Map<string, number>): string {
@@ -159,11 +182,15 @@ function buildLinkedClassificationsByValue(
 
 function appendDetailRows(
   rows: readonly ImportRowProjection[],
+  rawFallbackById: ReadonlyMap<string, unknown>,
   aggregates: Map<string, DetailAggregate>
 ): number {
   let rowsWithSourceDetail = 0;
   for (const row of rows) {
-    const displayValue = extractSourceDetail(row.normalizedData, row.rawData);
+    const displayValue = extractSourceDetail(
+      row.normalizedData,
+      rawFallbackById.get(row.id)
+    );
     if (!displayValue) continue;
     const normalizedValue = normalizeImportedDetailValue(displayValue);
     if (!normalizedValue) continue;
@@ -180,40 +207,74 @@ function appendDetailRows(
   return rowsWithSourceDetail;
 }
 
+function buildImportedDetailPageQuery(
+  cursorId: string | undefined
+): Prisma.ImportBatchRowFindManyArgs {
+  const cursorArgs = cursorId
+    ? { cursor: { id: cursorId }, skip: 1 }
+    : {};
+  return {
+    where: ELIGIBLE_IMPORTED_DETAIL_ROWS_WHERE,
+    select: { id: true, normalizedData: true },
+    orderBy: { id: "asc" },
+    take: DETAIL_ROW_PAGE_SIZE,
+    ...cursorArgs,
+  };
+}
+
+async function loadRawFallbackById(
+  client: ImportedDetailValuesClient,
+  rows: readonly ImportRowProjection[]
+): Promise<Map<string, unknown>> {
+  const missingIds = rows
+    .filter((row) => !extractNormalizedSourceDetail(row.normalizedData))
+    .map((row) => row.id);
+  if (missingIds.length === 0) return new Map();
+
+  const fallbackRows: RawImportRowProjection[] = await client.importBatchRow.findMany({
+    where: {
+      AND: [
+        ELIGIBLE_IMPORTED_DETAIL_ROWS_WHERE,
+        { id: { in: missingIds } },
+      ],
+    },
+    select: { id: true, rawData: true },
+  });
+  return new Map(fallbackRows.map((row) => [row.id, row.rawData]));
+}
+
 async function aggregateImportedDetails(
   client: ImportedDetailValuesClient
 ): Promise<ImportedDetailAggregation> {
   const aggregates = new Map<string, DetailAggregate>();
   let rowsScanned = 0;
   let rowsWithSourceDetail = 0;
-  let skip = 0;
+  let cursorId: string | undefined;
   while (true) {
-    const rows = await client.importBatchRow.findMany({
-      where: {
-        importBatch: { status: ImportBatchStatus.CONFIRMED },
-        validationStatus: {
-          in: [ImportRowValidationStatus.VALID, ImportRowValidationStatus.WARNING],
-        },
-        action: {
-          in: [
-            ImportRowAction.NEW,
-            ImportRowAction.UPDATE,
-            ImportRowAction.NO_CHANGE,
-            ImportRowAction.DUPLICATE,
-          ],
-        },
-      },
-      select: { normalizedData: true, rawData: true },
-      orderBy: { id: "asc" },
-      skip,
-      take: DETAIL_ROW_PAGE_SIZE,
-    });
+    const rows: ImportRowProjection[] = await client.importBatchRow.findMany(
+      buildImportedDetailPageQuery(cursorId)
+    );
+    if (rows.length === 0) break;
+
+    const rawFallbackById = await loadRawFallbackById(client, rows);
     rowsScanned += rows.length;
-    rowsWithSourceDetail += appendDetailRows(rows, aggregates);
+    rowsWithSourceDetail += appendDetailRows(rows, rawFallbackById, aggregates);
+    cursorId = rows.at(-1)?.id;
     if (rows.length < DETAIL_ROW_PAGE_SIZE) break;
-    skip += rows.length;
   }
   return { aggregates, rowsScanned, rowsWithSourceDetail };
+}
+
+function warnWhenConfirmedRowsHaveNoDetails(
+  confirmedBatchCount: number,
+  rowsScanned: number,
+  rowsWithSourceDetail: number
+): void {
+  if (confirmedBatchCount === 0 || rowsScanned === 0 || rowsWithSourceDetail > 0) return;
+  logger.warn("Confirmed imports contain no extractable detail values", {
+    confirmedBatchCount,
+    rowsScanned,
+  });
 }
 
 function buildImportedDetailValues(
@@ -284,19 +345,11 @@ export async function listImportedDetailValues(input: {
     rowsWithSourceDetail,
     distinctValues: aggregates.size,
   };
-  logger.info("Imported detail values loaded", {
+  warnWhenConfirmedRowsHaveNoDetails(
     confirmedBatchCount,
-    scannedRowCount: rowsScanned,
-    rowsWithDetailCount: rowsWithSourceDetail,
-    distinctValueCount: aggregates.size,
-    filters: {
-      hasSearch: Boolean(search),
-      linkStatus,
-      classificationContext: Boolean(input.classificationId),
-      page,
-      pageSize,
-    },
-  });
+    rowsScanned,
+    rowsWithSourceDetail
+  );
 
   const start = (page - 1) * pageSize;
   return {
