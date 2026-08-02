@@ -3,7 +3,7 @@ import {
   formatNullableReportNumber,
   REPORT_DESIGN_TOKENS,
 } from "@/lib/reports/design-tokens";
-import { preparePdfText } from "./arabic-pdf-text";
+import { preparePdfText, preparePdfTextLayout } from "./arabic-pdf-text";
 
 export type ReportCoverMetric = {
   label: string;
@@ -118,10 +118,17 @@ export function drawComplaintsReportCover(options: ReportCoverOptions): void {
     align: "center" as const,
     wordSpacing: WORD_SPACING,
   };
-  const preparedTitle = preparePdfText(title);
   doc.font("Bold").fontSize(80).fillColor(COLORS.primary);
-  const titleHeight = doc.heightOfString(preparedTitle, titleOptions);
-  doc.text(preparedTitle, margin, titleY, titleOptions);
+  // preparePdfTextLayout wraps the logical text first, then reverses each
+  // wrapped line so that PDFKit does not re-wrap the already-reversed visual
+  // text. This is required for long titles that span two or more lines.
+  const titleLayout = preparePdfTextLayout(doc, title, titleOptions);
+  let ty = titleY;
+  for (const line of titleLayout.lines) {
+    doc.text(line.visualText, margin, ty, { ...titleOptions, lineBreak: false });
+    ty += titleLayout.lineHeight;
+  }
+  const titleHeight = titleLayout.height;
 
   // ── Gold separator with diamond ───────────────────────────────────────────
   const sepY = titleY + titleHeight + 18;

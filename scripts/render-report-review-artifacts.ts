@@ -74,6 +74,8 @@ function baseReport(mode: "DIGITAL_EXECUTIVE_BRIEF" | "PRINT_EXECUTIVE_BRIEF"): 
     comparisonData: {
       currentPeriod: { from: new Date("2026-07-01"), toExclusive: new Date("2026-08-01") },
       previousPeriod: { from: new Date("2026-06-01"), toExclusive: new Date("2026-07-01") },
+      currentTotal: briefData.allRegions.reduce((s, r) => s + r.currentCount, 0),
+      previousTotal: briefData.allRegions.reduce((s, r) => s + r.previousCount, 0),
       regionTrend: { allDates: [], series: [], truncated: false, otherSeriesName: null },
       regionChanges: briefData.allRegions.map((row) => ({
         regionName: row.regionName,

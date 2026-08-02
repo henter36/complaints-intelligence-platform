@@ -282,9 +282,11 @@ function buildEntityRows(
 }
 
 function hasMeaningfulPreviousData(comparison: ComparisonResult): boolean {
-  if (!comparison.previousPeriod) return false;
-  const total = comparison.regionChanges.reduce((s, r) => s + r.previousCount, 0);
-  return total > 0;
+  return (
+    comparison.previousPeriod !== null &&
+    comparison.previousTotal !== null &&
+    comparison.previousTotal > 0
+  );
 }
 
 function buildConclusions(

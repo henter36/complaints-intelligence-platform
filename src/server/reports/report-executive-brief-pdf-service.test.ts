@@ -129,6 +129,8 @@ function makeReportData(mode: "DIGITAL_EXECUTIVE_BRIEF" | "PRINT_EXECUTIVE_BRIEF
     comparisonData: {
       currentPeriod: { from: new Date("2026-07-01T00:00:00Z"), toExclusive: new Date("2026-07-08T00:00:00Z") },
       previousPeriod: { from: new Date("2026-06-24T00:00:00Z"), toExclusive: new Date("2026-07-01T00:00:00Z") },
+      currentTotal: 100,
+      previousTotal: 80,
       regionTrend: {
         allDates: ["2026-07-01", "2026-07-02"],
         series: [],

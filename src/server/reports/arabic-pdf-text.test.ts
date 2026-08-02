@@ -1,26 +1,43 @@
 // @vitest-environment node
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import PDFDocument from "pdfkit";
+import fs from "node:fs";
+import path from "node:path";
 import {
   preparePdfText,
   preparePdfTextLines,
+  preparePdfTextLayout,
   containsArabic,
   isNumericDisplayValue,
+  drawPdfText,
 } from "./arabic-pdf-text";
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Test document factory (needed for preparePdfTextLayout and drawPdfText)
+// ---------------------------------------------------------------------------
+
+const ASSETS_DIR = path.join(process.cwd(), "src/server/reports/assets");
+const FONT_REGULAR_PATH = path.join(ASSETS_DIR, "fonts/Amiri-Regular.ttf");
+const FONT_BOLD_PATH = path.join(ASSETS_DIR, "fonts/Amiri-Bold.ttf");
+
+function makeTestDoc(fontSize = 12): InstanceType<typeof PDFDocument> {
+  const doc = new PDFDocument({ bufferPages: true, autoFirstPage: true });
+  doc.registerFont("Body", fs.readFileSync(FONT_REGULAR_PATH));
+  doc.registerFont("Bold", fs.readFileSync(FONT_BOLD_PATH));
+  doc.font("Body").fontSize(fontSize);
+  return doc;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: reconstruct logical sentence from a prepared (visually reversed) string
 // ---------------------------------------------------------------------------
 
 /**
- * For right-to-left sentences, preparePdfText reverses the token order so that
- * PDFKit+fontkit produce the correct visual layout.  A reader scanning the PDF
- * from right-to-left will reconstruct the ORIGINAL logical string.
- *
- * This helper reconstructs the logical sentence from the prepared string by
- * reversing the token order again — it should match the original input.
+ * Reads a prepared RTL string right-to-left by reversing the token order.
+ * Should reconstruct the original logical sentence for single-line RTL text.
  */
 function readRtl(prepared: string): string {
-  return prepared.split(" ").reverse().join(" ");
+  return prepared.split(" ").toReversed().join(" ");
 }
 
 // ---------------------------------------------------------------------------
@@ -76,14 +93,27 @@ describe("isNumericDisplayValue", () => {
 // ---------------------------------------------------------------------------
 
 describe("preparePdfText — pure Arabic", () => {
-  it("reverses token order so RTL reading reproduces original", () => {
+  it("'تقرير الشكاوى': reverses token order so RTL reading reproduces original", () => {
     const input = "تقرير الشكاوى";
     const prepared = preparePdfText(input);
     expect(readRtl(prepared)).toBe(input);
   });
 
+  it("'ملخص المؤشرات': token order reversed for correct RTL visual layout", () => {
+    const input = "ملخص المؤشرات";
+    const prepared = preparePdfText(input);
+    expect(prepared).toBe("المؤشرات ملخص");
+    expect(readRtl(prepared)).toBe(input);
+  });
+
+  it("'مقارنة مع الفترة السابقة': four-word sentence reverses correctly", () => {
+    const input = "مقارنة مع الفترة السابقة";
+    const prepared = preparePdfText(input);
+    expect(prepared).toBe("السابقة الفترة مع مقارنة");
+    expect(readRtl(prepared)).toBe(input);
+  });
+
   it("does not reverse individual character order within a word", () => {
-    // Each token's chars stay in logical order for fontkit shaping
     const input = "تقرير الشكاوى";
     const prepared = preparePdfText(input);
     const tokens = prepared.split(" ");
@@ -101,15 +131,15 @@ describe("preparePdfText — pure Arabic", () => {
 // ---------------------------------------------------------------------------
 
 describe("preparePdfText — pure English / numeric", () => {
-  it("returns pure English text unchanged", () => {
+  it("'SLA report': pure English returned unchanged", () => {
     expect(preparePdfText("SLA report")).toBe("SLA report");
   });
 
-  it("returns pure number unchanged", () => {
+  it("pure number returned unchanged", () => {
     expect(preparePdfText("2026-01-01")).toBe("2026-01-01");
   });
 
-  it("returns empty string unchanged", () => {
+  it("empty string returned unchanged", () => {
     expect(preparePdfText("")).toBe("");
   });
 });
@@ -119,15 +149,14 @@ describe("preparePdfText — pure English / numeric", () => {
 // ---------------------------------------------------------------------------
 
 describe("preparePdfText — Arabic with dates", () => {
-  it("keeps date tokens in their original character order", () => {
+  it("'الفترة من 2026-01-01 إلى 2026-01-31': date tokens stay in original character order", () => {
     const input = "الفترة من 2026-01-01 إلى 2026-01-31";
     const prepared = preparePdfText(input);
-    // Dates must NOT be character-reversed
     expect(prepared).toContain("2026-01-01");
     expect(prepared).toContain("2026-01-31");
   });
 
-  it("RTL reading of prepared string reconstructs the original sentence", () => {
+  it("RTL reading of prepared date sentence reconstructs the original", () => {
     const input = "الفترة من 2026-01-01 إلى 2026-01-31";
     expect(readRtl(preparePdfText(input))).toBe(input);
   });
@@ -135,11 +164,9 @@ describe("preparePdfText — Arabic with dates", () => {
   it("start date appears to the right of end date in prepared string", () => {
     const input = "الفترة من 2026-01-01 إلى 2026-01-31";
     const prepared = preparePdfText(input);
-    // In PDF left-to-right layout, the start date should be to the right (higher index)
-    // so Arabic readers (reading right-to-left) encounter it first
     const idx01 = prepared.indexOf("2026-01-01");
     const idx31 = prepared.indexOf("2026-01-31");
-    expect(idx01).toBeGreaterThan(idx31); // start date is to the RIGHT of end date
+    expect(idx01).toBeGreaterThan(idx31);
   });
 });
 
@@ -148,15 +175,13 @@ describe("preparePdfText — Arabic with dates", () => {
 // ---------------------------------------------------------------------------
 
 describe("preparePdfText — Arabic with percentage", () => {
-  it("keeps percentage token intact", () => {
+  it("'ارتفاع بنسبة 25%': percentage token stays intact", () => {
     const input = "ارتفاع بنسبة 25%";
-    const prepared = preparePdfText(input);
-    expect(prepared).toContain("25%");
+    expect(preparePdfText(input)).toContain("25%");
   });
 
   it("percentage is NOT reversed to %52", () => {
-    const prepared = preparePdfText("ارتفاع بنسبة 25%");
-    expect(prepared).not.toContain("%52");
+    expect(preparePdfText("ارتفاع بنسبة 25%")).not.toContain("%52");
   });
 
   it("RTL reading reconstructs original sentence", () => {
@@ -170,15 +195,12 @@ describe("preparePdfText — Arabic with percentage", () => {
 // ---------------------------------------------------------------------------
 
 describe("preparePdfText — Arabic with positive sign", () => {
-  it("keeps +12 token intact", () => {
-    const input = "الفرق +12 شكوى";
-    const prepared = preparePdfText(input);
-    expect(prepared).toContain("+12");
+  it("'الفرق +12 شكوى': +12 token stays intact", () => {
+    expect(preparePdfText("الفرق +12 شكوى")).toContain("+12");
   });
 
   it("+12 is NOT reversed to 21+", () => {
-    const prepared = preparePdfText("الفرق +12 شكوى");
-    expect(prepared).not.toContain("21+");
+    expect(preparePdfText("الفرق +12 شكوى")).not.toContain("21+");
   });
 
   it("RTL reading reconstructs original", () => {
@@ -188,16 +210,40 @@ describe("preparePdfText — Arabic with positive sign", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 8. preparePdfText — Arabic with parentheses
+// 8. preparePdfText — whitespace preservation
+// ---------------------------------------------------------------------------
+
+describe("preparePdfText — whitespace preservation", () => {
+  it("double space between tokens is preserved after reversal", () => {
+    const input = "كلمة  أخرى";
+    const prepared = preparePdfText(input);
+    expect(prepared).toBe("أخرى  كلمة");
+    expect(prepared).toContain("  ");
+  });
+
+  it("tab between tokens is preserved after reversal", () => {
+    const input = "كلمة\tأخرى";
+    const prepared = preparePdfText(input);
+    expect(prepared).toBe("أخرى\tكلمة");
+    expect(prepared).toContain("\t");
+  });
+
+  it("three words with tabs preserve whitespace positions", () => {
+    const input = "أ\tب\tج";
+    const prepared = preparePdfText(input);
+    expect(prepared).toBe("ج\tب\tأ");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 9. preparePdfText — Arabic with parentheses
 // ---------------------------------------------------------------------------
 
 describe("preparePdfText — Arabic with parentheses", () => {
   it("parentheses remain attached to their content token", () => {
     const input = "منطقة الرياض (12 شكوى)";
     const prepared = preparePdfText(input);
-    // Opening paren appears before its number in Arabic reading direction
-    const parenOpen = prepared.indexOf("(12");
-    expect(parenOpen).toBeGreaterThanOrEqual(0);
+    expect(prepared.indexOf("(12")).toBeGreaterThanOrEqual(0);
   });
 
   it("RTL reading reconstructs original", () => {
@@ -207,27 +253,25 @@ describe("preparePdfText — Arabic with parentheses", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 9. preparePdfText — Arabic with English acronym (LTR paragraph)
+// 10. preparePdfText — LTR paragraph with embedded Arabic
 // ---------------------------------------------------------------------------
 
-describe("preparePdfText — LTR paragraph with embedded Arabic", () => {
-  it("text starting with Latin is returned unchanged (LTR paragraph)", () => {
-    // 'SLA' is the first strong directional character → LTR paragraph
+describe("preparePdfText — LTR paragraph detection", () => {
+  it("'SLA خلال 5 أيام': text starting with Latin returned unchanged (LTR paragraph)", () => {
     const input = "SLA خلال 5 أيام";
     expect(preparePdfText(input)).toBe(input);
   });
 });
 
 // ---------------------------------------------------------------------------
-// 10. preparePdfText — multi-line text
+// 11. preparePdfText — multi-line text
 // ---------------------------------------------------------------------------
 
 describe("preparePdfText — multi-line", () => {
-  it("processes each line independently", () => {
+  it("processes each \\n-delimited line independently", () => {
     const input = "الاستنتاجات\nالملاحظات";
     const prepared = preparePdfText(input);
-    const lines = prepared.split("\n");
-    expect(lines).toHaveLength(2);
+    expect(prepared.split("\n")).toHaveLength(2);
   });
 
   it("LTR lines inside a multi-line string stay unchanged", () => {
@@ -249,7 +293,7 @@ describe("preparePdfText — multi-line", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 11. preparePdfText — empty and edge cases
+// 12. preparePdfText — edge cases
 // ---------------------------------------------------------------------------
 
 describe("preparePdfText — edge cases", () => {
@@ -263,9 +307,7 @@ describe("preparePdfText — edge cases", () => {
 
   it("does not strip diacritics", () => {
     const withDiacritics = "رَبُّكَ";
-    const prepared = preparePdfText(withDiacritics);
-    // Single word: unchanged
-    expect(prepared).toBe(withDiacritics);
+    expect(preparePdfText(withDiacritics)).toBe(withDiacritics);
   });
 
   it("does not strip Arabic punctuation", () => {
@@ -277,13 +319,12 @@ describe("preparePdfText — edge cases", () => {
 
   it("handles Arabic-Indic numerals inside Arabic text", () => {
     const input = "عدد الشكاوى ١٢";
-    const prepared = preparePdfText(input);
-    expect(prepared).toContain("١٢");
+    expect(preparePdfText(input)).toContain("١٢");
   });
 });
 
 // ---------------------------------------------------------------------------
-// 12. preparePdfText — numbers are NOT individually character-reversed
+// 13. preparePdfText — numbers are NOT individually character-reversed
 // ---------------------------------------------------------------------------
 
 describe("preparePdfText — number ordering", () => {
@@ -301,32 +342,28 @@ describe("preparePdfText — number ordering", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 13. preparePdfText — mixed conclusion/note sentences from actual data
+// 14. preparePdfText — mixed conclusion/note sentences from actual data
 // ---------------------------------------------------------------------------
 
 describe("preparePdfText — real report sentences", () => {
   it("RTL reading of conclusion 1 is semantically correct", () => {
     const input = "منطقة الرياض الأعلى حجماً بعدد شكويين وتمثل 66.7% من الإجمالي.";
-    const prepared = preparePdfText(input);
-    const reconstructed = readRtl(prepared);
-    expect(reconstructed).toBe(input);
+    expect(readRtl(preparePdfText(input))).toBe(input);
   });
 
   it("RTL reading of conclusion 2 is semantically correct", () => {
     const input = "أعلى زيادة مطلقة في منطقة الرياض: شكويان.";
-    const prepared = preparePdfText(input);
-    expect(readRtl(prepared)).toBe(input);
+    expect(readRtl(preparePdfText(input))).toBe(input);
   });
 
   it("page footer 'page X of Y' reconstructs correctly", () => {
     const input = "صفحة 1 من 4";
-    const prepared = preparePdfText(input);
-    expect(readRtl(prepared)).toBe(input);
+    expect(readRtl(preparePdfText(input))).toBe(input);
   });
 });
 
 // ---------------------------------------------------------------------------
-// 14. preparePdfTextLines — alias works identically
+// 15. preparePdfTextLines — alias works identically
 // ---------------------------------------------------------------------------
 
 describe("preparePdfTextLines", () => {
@@ -337,18 +374,130 @@ describe("preparePdfTextLines", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 15. Idempotency
+// 16. preparePdfText — idempotency: double processing restores logical order
 // ---------------------------------------------------------------------------
 
-describe("preparePdfText — idempotency", () => {
-  it("applying preparePdfText twice does NOT restore original order", () => {
-    // Double-processing would reverse again = original (wrong) order.
-    // Callers must ensure they only call preparePdfText once per string.
+describe("preparePdfText — double processing", () => {
+  it("applying preparePdfText twice restores the logical token order, so callers must not double-process", () => {
+    // preparePdfText reverses token order for RTL display.
+    // Calling it again reverses back to the original — which is the LOGICAL
+    // (wrong-for-PDF) order.  Callers must call preparePdfText exactly once.
     const input = "الفترة من 2026-01-01 إلى 2026-01-31";
     const once = preparePdfText(input);
     const twice = preparePdfText(once);
-    // Second call re-reverses → back to original (still RTL-correct by fontkit, but
-    // the test documents that callers MUST NOT double-call).
     expect(twice).toBe(input);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 17. drawPdfText — no double processing in the rendering wrapper
+// ---------------------------------------------------------------------------
+
+describe("drawPdfText — no double processing", () => {
+  it("draws preparePdfText(input) exactly once — not preparePdfText(preparePdfText(input))", () => {
+    const doc = makeTestDoc();
+    const textSpy = vi.spyOn(doc, "text");
+
+    const input = "الفترة من 2026-01-01 إلى 2026-01-31";
+    const expectedDrawn = preparePdfText(input);
+    drawPdfText(doc, input, 0, 0, { width: 500 });
+
+    const drawnText = textSpy.mock.calls[0]?.[0] as string;
+    // Must match single-pass preparation.
+    expect(drawnText).toBe(expectedDrawn);
+    // Must NOT match double-pass preparation (which would restore the original).
+    expect(drawnText).not.toBe(preparePdfText(expectedDrawn));
+
+    textSpy.mockRestore();
+    doc.end();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 18. preparePdfTextLayout — wrapping splits long paragraphs correctly
+// ---------------------------------------------------------------------------
+
+describe("preparePdfTextLayout — long paragraph wrapping", () => {
+  it("long RTL paragraph wraps into multiple lines at a narrow width", () => {
+    const doc = makeTestDoc(12);
+    const longText = "التقرير التنفيذي المقارن لتحليل اتجاهات الشكاوى في المناطق والإدارات خلال الفترة المحددة";
+    const layout = preparePdfTextLayout(doc, longText, { width: 100 });
+    expect(layout.lines.length).toBeGreaterThan(1);
+    doc.end();
+  });
+
+  it("each wrapped line's visual text is the token-reversed form of its logical text", () => {
+    const doc = makeTestDoc(12);
+    const longText = "التقرير التنفيذي المقارن لتحليل اتجاهات الشكاوى في المناطق والإدارات خلال الفترة المحددة";
+    const layout = preparePdfTextLayout(doc, longText, { width: 100 });
+    for (const line of layout.lines) {
+      const logTokens = line.logicalText.split(" ").filter(Boolean);
+      const visTokens = line.visualText.split(" ").filter(Boolean);
+      expect(visTokens).toEqual(logTokens.toReversed());
+    }
+    doc.end();
+  });
+
+  it("logical lines cover all words from the original paragraph without duplication", () => {
+    const doc = makeTestDoc(12);
+    const text = "التقرير التنفيذي المقارن لتحليل اتجاهات الشكاوى في المناطق والإدارات خلال الفترة المحددة";
+    const layout = preparePdfTextLayout(doc, text, { width: 100 });
+    const allLogicalWords = layout.lines.flatMap((l) => l.logicalText.split(" ").filter(Boolean));
+    const originalWords = text.split(" ").filter(Boolean);
+    expect(allLogicalWords).toEqual(originalWords);
+    doc.end();
+  });
+
+  it("reading each visual line RTL (reversing its tokens) reconstructs logical order", () => {
+    const doc = makeTestDoc(12);
+    const text = "التقرير التنفيذي المقارن لتحليل اتجاهات الشكاوى في المناطق والإدارات خلال الفترة المحددة";
+    const layout = preparePdfTextLayout(doc, text, { width: 100 });
+
+    const readWords: string[] = [];
+    for (const line of layout.lines) {
+      // An Arabic reader scans the PDF from right to left, encountering tokens in
+      // reverse order of their left-to-right placement.  That equals the reversed
+      // order of visualText tokens = the original logical tokens for this line.
+      const rtlTokens = line.visualText.split(" ").filter(Boolean).toReversed();
+      readWords.push(...rtlTokens);
+    }
+
+    const originalWords = text.split(" ").filter(Boolean);
+    expect(readWords).toEqual(originalWords);
+    doc.end();
+  });
+
+  it("LTR paragraph is passed through as a single line without reversal", () => {
+    const doc = makeTestDoc(12);
+    const ltrText = "SLA performance report 2026";
+    const layout = preparePdfTextLayout(doc, ltrText, { width: 50 });
+    expect(layout.lines).toHaveLength(1);
+    expect(layout.lines[0]!.visualText).toBe(ltrText);
+    doc.end();
+  });
+
+  it("single Arabic word does not wrap and is returned unchanged", () => {
+    const doc = makeTestDoc(12);
+    const layout = preparePdfTextLayout(doc, "تقرير", { width: 500 });
+    expect(layout.lines).toHaveLength(1);
+    expect(layout.lines[0]!.visualText).toBe("تقرير");
+    doc.end();
+  });
+
+  it("height equals lineHeight multiplied by number of lines", () => {
+    const doc = makeTestDoc(12);
+    const layout = preparePdfTextLayout(doc, "التقرير التنفيذي المقارن", { width: 50 });
+    expect(layout.height).toBeCloseTo(layout.lineHeight * layout.lines.length, 5);
+    doc.end();
+  });
+
+  it("\\n separates paragraphs and each is processed independently", () => {
+    const doc = makeTestDoc(12);
+    const text = "التقرير التنفيذي\nالملاحظات والاستنتاجات";
+    const layout = preparePdfTextLayout(doc, text, { width: 500 });
+    expect(layout.lines).toHaveLength(2);
+    expect(layout.lines[0]!.logicalText).toBe("التقرير التنفيذي");
+    expect(layout.lines[1]!.logicalText).toBe("الملاحظات والاستنتاجات");
+    doc.end();
   });
 });
