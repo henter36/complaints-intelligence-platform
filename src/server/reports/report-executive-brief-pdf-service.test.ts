@@ -391,7 +391,8 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
       expect(usedColors).toContain("#004B3A");
       expect(usedColors).toContain("#B88919");
       expect(usedColors).toContain("#46534E");
-      expect(colorImmediatelyBefore("منطقة صاعدة")).toBe("#004B3A");
+      // Region name is now white text inside a dark green header strip
+      expect(colorImmediatelyBefore("منطقة صاعدة")).toBe("#FFFFFF");
     } finally {
       textSpy.mockRestore();
       fillColorSpy.mockRestore();
@@ -514,7 +515,7 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
       const result = await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
       expect(countPageObjects(result.buffer)).toBe(4);
       expect(chartSpy).toHaveBeenCalledTimes(2);
-      expect(chartSpy.mock.calls.map((call) => call[0].chartType)).toEqual(["line", "bar"]);
+      expect(chartSpy.mock.calls.map((call) => call[0].chartType)).toEqual(["bar", "bar"]);
       expect(result.warnings).toEqual([]);
     } finally {
       chartSpy.mockRestore();
@@ -561,7 +562,7 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
     const chartSpy = vi.spyOn(chartService, "renderLineChartPng");
     try {
       await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
-      const regionChart = chartSpy.mock.calls.find((call) => call[0].chartType === "bar");
+      const regionChart = chartSpy.mock.calls.find((call) => call[0].id === "executive-region-comparison");
       expect(regionChart).toBeDefined();
       const points = regionChart![0].series[0].points;
       expect(points.every((point) => !point.x.startsWith("منطقة "))).toBe(true);
@@ -581,7 +582,7 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
     const chartSpy = vi.spyOn(chartService, "renderLineChartPng");
     try {
       await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
-      const regionChart = chartSpy.mock.calls.find((call) => call[0].chartType === "bar");
+      const regionChart = chartSpy.mock.calls.find((call) => call[0].id === "executive-region-comparison");
       expect(regionChart).toBeDefined();
       const points = regionChart![0].series[0].points;
       expect(points.some((point) => point.x === "الشرقية")).toBe(true);
