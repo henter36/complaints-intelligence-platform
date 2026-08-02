@@ -631,8 +631,12 @@ function drawAllRegionCards(
           wordSpacing: ARABIC_WORD_SPACING,
         }
       );
+    let changeDescription = formatNullableReportNumber(region.changeRate, { percent: true });
+    if (region.previousCount === 0 && region.currentCount > 0) {
+      changeDescription = "جديد";
+    }
     const comparison = hasReferencePeriod(context)
-      ? `المتأخرة ${formatReportNumber(region.currentlyLate)} | الفرق ${formatReportNumber(region.difference, { sign: true })} | ${region.previousCount === 0 && region.currentCount > 0 ? "جديد" : formatNullableReportNumber(region.changeRate, { percent: true })}`
+      ? `المتأخرة ${formatReportNumber(region.currentlyLate)} | الفرق ${formatReportNumber(region.difference, { sign: true })} | ${changeDescription}`
       : `المتأخرة ${formatReportNumber(region.currentlyLate)} | لا تتوفر مقارنة`;
     doc.text(comparison, x + 8, y + 48, {
       width: width - 16,

@@ -1491,6 +1491,43 @@ function executivePreviewPages(data: ReportData): readonly ReportSection[][] {
   });
 }
 
+function executivePreviewPageContent(
+  data: ReportData,
+  pageIndex: number,
+  sections: readonly ReportSection[],
+  coverCards: readonly ReportKpiCard[]
+): ReactNode {
+  if (pageIndex === 0) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-6 text-center">
+        <h4 className="text-3xl font-bold">تقرير الشكاوى</h4>
+        <p>الفترة من {data.period.from} إلى {data.period.to}</p>
+        <div className="grid w-full grid-cols-3 gap-3">
+          {coverCards.map((card) => (
+            <div key={card.key} className="rounded-lg border p-3">
+              <p className="text-xs text-muted-foreground">{card.label}</p>
+              <p className="text-xl font-bold">{formatKpiValue(card)}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (sections.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center rounded-lg bg-muted/20 text-sm text-muted-foreground">
+        لا توجد بيانات كافية لهذا القسم.
+      </div>
+    );
+  }
+  return sections.map((section) => (
+    <section key={section.id} className="space-y-1">
+      <h4 className="text-sm font-semibold">{section.title}</h4>
+      <SectionBody section={section} />
+    </section>
+  ));
+}
+
 function ExecutiveReportPreview({ data }: Readonly<{ data: ReportData }>) {
   const pages = executivePreviewPages(data);
   const pageTitles = EXECUTIVE_BRIEF_PAGE_PLAN.map((page) => page.title);
@@ -1522,29 +1559,7 @@ function ExecutiveReportPreview({ data }: Readonly<{ data: ReportData }>) {
               <h3 className="text-base font-semibold">{pageTitles[pageIndex]}</h3>
             </header>
             <div className="min-h-0 flex-1 space-y-3 overflow-auto text-right" dir="rtl">
-              {pageIndex === 0 ? (
-                <div className="flex h-full flex-col items-center justify-center gap-6 text-center">
-                  <h4 className="text-3xl font-bold">تقرير الشكاوى</h4>
-                  <p>الفترة من {data.period.from} إلى {data.period.to}</p>
-                  <div className="grid w-full grid-cols-3 gap-3">
-                    {coverCards.map((card) => (
-                        <div key={card.key} className="rounded-lg border p-3">
-                          <p className="text-xs text-muted-foreground">{card.label}</p>
-                          <p className="text-xl font-bold">{formatKpiValue(card)}</p>
-                        </div>
-                      ))}
-                  </div>
-                </div>
-              ) : sections.length === 0 ? (
-                <div className="flex h-full items-center justify-center rounded-lg bg-muted/20 text-sm text-muted-foreground">
-                  لا توجد بيانات كافية لهذا القسم.
-                </div>
-              ) : sections.map((section) => (
-                <section key={section.id} className="space-y-1">
-                  <h4 className="text-sm font-semibold">{section.title}</h4>
-                  <SectionBody section={section} />
-                </section>
-              ))}
+              {executivePreviewPageContent(data, pageIndex, sections, coverCards)}
             </div>
           </article>
         ))}

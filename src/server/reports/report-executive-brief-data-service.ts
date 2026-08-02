@@ -128,6 +128,11 @@ function buildBriefKpis(
   const previousKpis = previousResult?.kpis;
   const perf = result.performance;
   const vol = result.volume;
+  const previousAverageAvailable = previousResult === undefined
+    || previousResult.volume.closed > 0;
+  const previousAverageResolutionDays = p && previousAverageAvailable
+    ? (previousKpis?.averageResolutionDays.currentValue ?? kpis.averageResolutionDays.previousValue)
+    : null;
 
   const specs: KpiSpec[] = [
     {
@@ -184,9 +189,7 @@ function buildBriefKpis(
       key: "averageResolutionDays",
       label: "متوسط الإغلاق",
       value: vol.closed > 0 ? roundRate(perf.averageResolutionDays) : null,
-      previousValue: p && (previousResult ? previousResult.volume.closed > 0 : true)
-        ? (previousKpis?.averageResolutionDays.currentValue ?? kpis.averageResolutionDays.previousValue)
-        : null,
+      previousValue: previousAverageResolutionDays,
       format: "days",
       higherIsBetter: false,
     },

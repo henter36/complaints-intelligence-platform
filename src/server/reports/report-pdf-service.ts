@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import PDFDocument from "pdfkit";
-import { ReportType } from "@prisma/client";
 import { getReportDefinition } from "./report-definition-service";
 import { renderExecutiveBriefPdf } from "./report-executive-brief-pdf-service";
 import type {

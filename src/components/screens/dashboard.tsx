@@ -606,6 +606,15 @@ function PerfCard({
   };
   const c = colors[color];
   const isGood = value !== null && (inverse ? value <= target : value >= target);
+  let badgeVariant: "outline" | "secondary" | "destructive" = "destructive";
+  let badgeText = "تحت المستهدف";
+  if (value === null) {
+    badgeVariant = "outline";
+    badgeText = "غير متاح";
+  } else if (isGood) {
+    badgeVariant = "secondary";
+    badgeText = "ضمن المستهدف";
+  }
   return (
     <Card className="card-hover">
       <CardContent className="p-4">
@@ -613,8 +622,8 @@ function PerfCard({
           <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${c.bg} ${c.text}`}>
             {icon}
           </div>
-          <Badge variant={value === null ? "outline" : isGood ? "secondary" : "destructive"} className="text-xs">
-            {value === null ? "غير متاح" : isGood ? "ضمن المستهدف" : "تحت المستهدف"}
+          <Badge variant={badgeVariant} className="text-xs">
+            {badgeText}
           </Badge>
         </div>
         <p className="text-2xl font-bold tabular-nums">{value === null ? "غير متاح" : `${value}${suffix}`}</p>
