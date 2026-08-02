@@ -9,6 +9,7 @@ import type {
 import { isFullAnalyticalData } from "./report-data-service";
 import type { ComparisonResult } from "./report-comparison";
 import type { NetBacklogFlow, PerfVolumeRow, ContinuityRow } from "@/lib/reports/report-contract";
+import { getComparisonModeLabelForTable } from "@/lib/reports/comparison-mode-labels";
 import { formatRiyadhDateTime } from "./report-time";
 import { REPORT_XLSX_NUMBER_FORMATS } from "@/lib/reports/design-tokens";
 
@@ -68,10 +69,7 @@ function applyRtlView(worksheet: ExcelJS.Worksheet): void {
 }
 
 function comparisonModeLabel(data: ReportData): string {
-  if (!data.previousPeriod) return "لا توجد فترة مقارنة";
-  return data.comparisonMode === "SAME_PERIOD_LAST_YEAR"
-    ? "الفترة المماثلة من السنة السابقة"
-    : "الفترة السابقة المماثلة في المدة";
+  return getComparisonModeLabelForTable(data.comparisonMode, !!data.previousPeriod);
 }
 
 function buildSummarySheet(workbook: ExcelJS.Workbook, data: ReportData): ExcelJS.Worksheet {

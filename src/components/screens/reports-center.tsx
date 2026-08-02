@@ -47,6 +47,7 @@ import {
   formatReportNumber as formatNumber,
   REPORT_DESIGN_TOKENS,
 } from "@/lib/reports/design-tokens";
+import { getComparisonModeDescription } from "@/lib/reports/comparison-mode-labels";
 import { buildMatrixTruncationMessage } from "@/lib/reports/matrix-truncation";
 
 // =========================================================================
@@ -1540,12 +1541,10 @@ function executivePreviewPageContent(
   if (pageIndex === 0) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-6 text-center">
-        <h4 className="text-3xl font-bold">تقرير الشكاوى</h4>
+        <h4 className="text-3xl font-bold">{data.title}</h4>
         <p>الفترة من {data.period.from} إلى {data.period.to}</p>
         <p className="text-sm text-muted-foreground">
-          {data.previousPeriod
-            ? `${data.comparisonMode === "SAME_PERIOD_LAST_YEAR" ? "مقارنة مع الفترة المماثلة من السنة السابقة" : "مقارنة مع الفترة السابقة المماثلة في المدة"}: ${data.previousPeriod.from} إلى ${data.previousPeriod.to}`
-            : "لا تتوفر فترة زمنية للمقارنة"}
+          {getComparisonModeDescription(data.comparisonMode, data.previousPeriod)}
         </p>
         <p className="text-xs text-muted-foreground">تاريخ الإنشاء: {formatDateTime(data.generatedAt)}</p>
         <div className="grid w-full grid-cols-3 gap-3">

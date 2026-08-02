@@ -21,6 +21,7 @@ import {
   formatReportNumber,
   REPORT_DESIGN_TOKENS,
 } from "@/lib/reports/design-tokens";
+import { getComparisonModeDescription } from "@/lib/reports/comparison-mode-labels";
 import { drawComplaintsReportCover } from "./report-cover";
 
 const ASSETS_DIR = path.join(process.cwd(), "src/server/reports/assets");
@@ -296,13 +297,7 @@ function renderCoverPage(doc: PDFKit.PDFDocument, data: ReportData): void {
     if (sectionCards?.kind !== "kpi") return null;
     return sectionCards.cards.find((card) => card.key === key)?.value ?? null;
   };
-  let comparisonText = "لا تتوفر فترة زمنية للمقارنة";
-  if (data.previousPeriod) {
-    const label = data.comparisonMode === "SAME_PERIOD_LAST_YEAR"
-      ? "مقارنة مع الفترة المماثلة من السنة السابقة"
-      : "مقارنة مع الفترة السابقة المماثلة في المدة";
-    comparisonText = `${label}: ${data.previousPeriod.from} إلى ${data.previousPeriod.to}`;
-  }
+  const comparisonText = getComparisonModeDescription(data.comparisonMode, data.previousPeriod);
   drawComplaintsReportCover({
     doc,
     pageSize: PAGE_SIZE,

@@ -217,19 +217,51 @@ function renderLineSeries(geo: ChartGeometry, section: ReportChartSection, yMax:
   return parts.join("\n");
 }
 
-function renderBarSeries(geo: ChartGeometry, section: ReportChartSection, yMax: number): string {
+/**
+ * Builds a canonical category list by taking the union of all point.x values
+ * across every series, in first-occurrence order. This is the single source of
+ * truth for bar chart axis labels and bar positions so that:
+ *  - missing categories in a series are filled with zero (bar simply absent)
+ *  - no bar appears under the wrong category label
+ *  - order is stable and predictable regardless of which series is "first"
+ *
+ * Exported for unit tests; not part of the public rendering API.
+ */
+export function buildCategoryUnion(section: ReportChartSection): string[] {
+  const seen = new Set<string>();
+  const categories: string[] = [];
+  for (const series of section.series) {
+    for (const point of series.points) {
+      if (!seen.has(point.x)) {
+        seen.add(point.x);
+        categories.push(point.x);
+      }
+    }
+  }
+  return categories;
+}
+
+function renderBarSeries(
+  geo: ChartGeometry,
+  section: ReportChartSection,
+  yMax: number,
+  categories: string[]
+): string {
   const parts: string[] = [];
-  const categoryCount = Math.max(1, geo.xCount);
+  const categoryCount = Math.max(1, categories.length);
   const seriesCount = Math.max(1, section.series.length);
   const categoryWidth = (geo.plotRight - geo.plotLeft) / categoryCount;
   const groupWidth = categoryWidth * 0.72;
   const barWidth = Math.max(2, groupWidth / seriesCount);
+  const categoryIndex = new Map(categories.map((cat, i) => [cat, i]));
   section.series.forEach((series, seriesIndex) => {
     const style = seriesStyle(seriesIndex, series.isOther === true);
-    series.points.forEach((point, pointIndex) => {
+    series.points.forEach((point) => {
+      const catIdx = categoryIndex.get(point.x);
+      if (catIdx === undefined) return;
       const valueY = yForValue(geo, point.y, yMax);
       const x = geo.plotLeft
-        + pointIndex * categoryWidth
+        + catIdx * categoryWidth
         + (categoryWidth - groupWidth) / 2
         + seriesIndex * barWidth;
       parts.push(
@@ -240,9 +272,14 @@ function renderBarSeries(geo: ChartGeometry, section: ReportChartSection, yMax: 
   return parts.join("\n");
 }
 
-function renderSeries(geo: ChartGeometry, section: ReportChartSection, yMax: number): string {
+function renderSeries(
+  geo: ChartGeometry,
+  section: ReportChartSection,
+  yMax: number,
+  categories: string[]
+): string {
   return section.chartType === "bar"
-    ? renderBarSeries(geo, section, yMax)
+    ? renderBarSeries(geo, section, yMax, categories)
     : renderLineSeries(geo, section, yMax);
 }
 
@@ -266,8 +303,15 @@ function renderLegend(section: ReportChartSection, width: number, legendTop: num
   return parts.join("\n");
 }
 
-function buildChartSvg(section: ReportChartSection, width: number, height: number): string {
-  const dates = section.series[0]?.points.map((p) => p.x) ?? [];
+/** Exported for snapshot tests; not part of the public rendering API. */
+export function buildChartSvg(section: ReportChartSection, width: number, height: number): string {
+  // Bar charts build a union of all series categories so every bar aligns
+  // with its correct label even when series have different or missing entries.
+  // Line charts use the first series as the shared time axis (all series are
+  // expected to share the same date points).
+  const categories = section.chartType === "bar"
+    ? buildCategoryUnion(section)
+    : (section.series[0]?.points.map((p) => p.x) ?? []);
   const maxValue = section.series.reduce(
     (max, series) => series.points.reduce((seriesMax, p) => Math.max(seriesMax, p.y), max),
     0
@@ -280,15 +324,15 @@ function buildChartSvg(section: ReportChartSection, width: number, height: numbe
     plotRight: width - 76,
     plotTop: 48,
     plotBottom: height - 46 - legendHeight,
-    xCount: dates.length,
+    xCount: categories.length,
   };
   const title = escapeXml(section.title);
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
     ${fontStyleBlock()}
     <rect width="${width}" height="${height}" fill="${COLORS.white}" stroke="${COLORS.border}"/>
     <text x="${width / 2}" y="28" text-anchor="middle" font-size="16" fill="${COLORS.primary}" direction="rtl" unicode-bidi="plaintext">${title}</text>
-    ${renderAxes(geo, ticks, yMax, dates, section.chartType)}
-    ${renderSeries(geo, section, yMax)}
+    ${renderAxes(geo, ticks, yMax, categories, section.chartType)}
+    ${renderSeries(geo, section, yMax, categories)}
     ${renderLegend(section, width, geo.plotBottom + 28)}
   </svg>`;
 }
