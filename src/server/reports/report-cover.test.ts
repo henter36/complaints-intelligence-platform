@@ -10,11 +10,13 @@ import fs from "node:fs";
 import { drawComplaintsReportCover } from "./report-cover";
 import { REPORT_DESIGN_TOKENS } from "@/lib/reports/design-tokens";
 
+type PdfDocumentInstance = InstanceType<typeof PDFDocument>;
+
 const ASSETS_DIR = path.join(process.cwd(), "src/server/reports/assets");
 const FONT_REGULAR_PATH = path.join(ASSETS_DIR, "fonts/Amiri-Regular.ttf");
 const FONT_BOLD_PATH = path.join(ASSETS_DIR, "fonts/Amiri-Bold.ttf");
 
-function makeDoc(pageSize: [number, number] = [900, 1200]): PDFDocument {
+function makeDoc(pageSize: [number, number] = [900, 1200]): PdfDocumentInstance {
   const doc = new PDFDocument({ size: [...pageSize], bufferPages: true, autoFirstPage: true });
   doc.registerFont("Body", fs.readFileSync(FONT_REGULAR_PATH));
   doc.registerFont("Bold", fs.readFileSync(FONT_BOLD_PATH));
@@ -22,7 +24,7 @@ function makeDoc(pageSize: [number, number] = [900, 1200]): PDFDocument {
   return doc;
 }
 
-function drawCover(doc: PDFDocument, title: string): void {
+function drawCover(doc: PdfDocumentInstance, title: string): void {
   drawComplaintsReportCover({
     doc,
     pageSize: [900, 1200] as const,
@@ -93,14 +95,17 @@ describe("drawComplaintsReportCover — separator position", () => {
     const moveSpy = vi.spyOn(doc, "moveTo");
     drawCover(doc, "تقرير الشكاوى");
 
-    // Collect all text calls and their y positions
-    const titleCall = textSpy.mock.calls.find((c) => String(c[0]) === "تقرير الشكاوى");
+    // Cast to unknown[][] because PDFKit text() has multiple overloads; the (text, x, y, opts)
+    // form is not the primary overload TypeScript infers for the spy, so call[2] would be
+    // flagged as out-of-bounds on the inferred 2-element tuple type without the cast.
+    const allTextCalls = textSpy.mock.calls as unknown[][];
+    const titleCall = allTextCalls.find((c) => String(c[0]) === "تقرير الشكاوى");
     expect(titleCall).toBeDefined();
     const titleY = titleCall![2] as number; // third argument is y
 
     // First moveTo after the title text call is the separator line start
     const titleCallOrder = textSpy.mock.invocationCallOrder[
-      textSpy.mock.calls.indexOf(titleCall!)
+      allTextCalls.indexOf(titleCall!)
     ];
     const moveCallsAfterTitle = moveSpy.mock.calls.filter((_, i) => {
       return moveSpy.mock.invocationCallOrder[i] > titleCallOrder;
@@ -125,12 +130,14 @@ describe("drawComplaintsReportCover — separator position", () => {
     const longTitle = "تقرير الشكاوى الموحد للمنطقة الإدارية";
     drawCover(doc, longTitle);
 
-    const titleCall = textSpy.mock.calls.find((c) => String(c[0]) === longTitle);
+    // Same unknown[][] cast as the short-title test — PDFKit text() overload resolution issue.
+    const allTextCallsLong = textSpy.mock.calls as unknown[][];
+    const titleCall = allTextCallsLong.find((c) => String(c[0]) === longTitle);
     expect(titleCall).toBeDefined();
     const titleY = titleCall![2] as number;
 
     const titleCallOrder = textSpy.mock.invocationCallOrder[
-      textSpy.mock.calls.indexOf(titleCall!)
+      allTextCallsLong.indexOf(titleCall!)
     ];
     const moveCallsAfterTitle = moveSpy.mock.calls.filter((_, i) => {
       return moveSpy.mock.invocationCallOrder[i] > titleCallOrder;
@@ -153,13 +160,15 @@ describe("drawComplaintsReportCover — separator position", () => {
 
     drawCover(doc, "تقرير الشكاوى");
 
-    const titleCall = textSpy.mock.calls.find((c) => String(c[0]) === "تقرير الشكاوى");
-    const periodCall = textSpy.mock.calls.find((c) => String(c[0]).startsWith("الفترة من"));
+    // Same unknown[][] cast — PDFKit text() overload resolution issue.
+    const allTextCallsPeriod = textSpy.mock.calls as unknown[][];
+    const titleCall = allTextCallsPeriod.find((c) => String(c[0]) === "تقرير الشكاوى");
+    const periodCall = allTextCallsPeriod.find((c) => String(c[0]).startsWith("الفترة من"));
     expect(titleCall).toBeDefined();
     expect(periodCall).toBeDefined();
 
-    const titleCallOrder = textSpy.mock.invocationCallOrder[textSpy.mock.calls.indexOf(titleCall!)];
-    const periodCallOrder = textSpy.mock.invocationCallOrder[textSpy.mock.calls.indexOf(periodCall!)];
+    const titleCallOrder = textSpy.mock.invocationCallOrder[allTextCallsPeriod.indexOf(titleCall!)];
+    const periodCallOrder = textSpy.mock.invocationCallOrder[allTextCallsPeriod.indexOf(periodCall!)];
     const periodY = periodCall![2] as number;
 
     // Find moveTo calls between title text and period text — these belong to the separator
