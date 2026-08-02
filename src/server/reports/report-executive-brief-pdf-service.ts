@@ -23,6 +23,7 @@ import type { ExecutiveBriefData, ReportData } from "./report-data-service";
 import { renderLineChartPng } from "./report-chart-service";
 import { formatRiyadhDateTime } from "./report-time";
 import { drawComplaintsReportCover } from "./report-cover";
+import { getComparisonModeDescription } from "@/lib/reports/comparison-mode-labels";
 
 const ASSETS_DIR = path.join(process.cwd(), "src/server/reports/assets");
 const FONT_REGULAR_PATH = path.join(ASSETS_DIR, "fonts/Amiri-Regular.ttf");
@@ -410,13 +411,7 @@ function drawPage2Notes(context: ExecutiveBriefRenderContext, startY: number): v
 
 function renderCoverPage(context: ExecutiveBriefRenderContext): void {
   const { doc, data, brief, layout } = context;
-  let comparison = "لا تتوفر فترة زمنية للمقارنة";
-  if (data.previousPeriod) {
-    const comparisonLabel = data.comparisonMode === "SAME_PERIOD_LAST_YEAR"
-      ? "مقارنة مع الفترة المماثلة من السنة السابقة"
-      : "مقارنة مع الفترة السابقة المماثلة في المدة";
-    comparison = `${comparisonLabel}: ${data.previousPeriod.from} إلى ${data.previousPeriod.to}`;
-  }
+  const comparison = getComparisonModeDescription(data.comparisonMode, data.previousPeriod);
   const valueFor = (key: string): number | null => (
     brief.briefKpis.find((item) => item.key === key)?.value ?? null
   );

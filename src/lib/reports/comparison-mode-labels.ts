@@ -10,18 +10,19 @@ import type { ComparisonMode } from "./report-contract";
 export function getComparisonModeLabelShort(
   comparisonMode: ComparisonMode | null | undefined
 ): string {
-  if (comparisonMode == null) return "وضع المقارنة غير محدد";
-  switch (comparisonMode) {
-    case "SAME_PERIOD_LAST_YEAR":
-      return "الفترة المماثلة من السنة السابقة";
-    case "PREVIOUS_EQUIVALENT_PERIOD":
-      return "الفترة السابقة المماثلة في المدة";
-    default: {
-      const _exhaustive: never = comparisonMode;
-      void _exhaustive;
-      return "وضع المقارنة غير معروف";
-    }
+  if (comparisonMode == null) {
+    return "وضع المقارنة غير محدد";
   }
+
+  if (comparisonMode === "SAME_PERIOD_LAST_YEAR") {
+    return "الفترة المماثلة من السنة السابقة";
+  }
+
+  if (comparisonMode === "PREVIOUS_EQUIVALENT_PERIOD") {
+    return "الفترة السابقة المماثلة في المدة";
+  }
+
+  return "وضع المقارنة غير معروف";
 }
 
 /**

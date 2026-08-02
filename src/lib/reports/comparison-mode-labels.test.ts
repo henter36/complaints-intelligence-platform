@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { ComparisonMode } from "./report-contract";
 import {
   getComparisonModeLabelShort,
   getComparisonModeLabelForTable,
@@ -95,5 +96,32 @@ describe("getComparisonModeDescription", () => {
     expect(description).not.toContain("الفترة السابقة المماثلة في المدة");
     expect(description).not.toContain("الفترة المماثلة من السنة السابقة");
     expect(description).toContain("غير محدد");
+  });
+});
+
+describe("unsupported runtime values", () => {
+  // Cast is intentional and isolated to this test block — it simulates a future
+  // ComparisonMode value or a corrupt DB record reaching the helper at runtime.
+  const unsupportedMode = "UNSUPPORTED_MODE" as ComparisonMode;
+
+  it("getComparisonModeLabelShort returns 'غير معروف' for an unsupported mode", () => {
+    expect(getComparisonModeLabelShort(unsupportedMode)).toBe("وضع المقارنة غير معروف");
+  });
+
+  it("getComparisonModeLabelShort does not classify unsupported as a known mode", () => {
+    const label = getComparisonModeLabelShort(unsupportedMode);
+    expect(label).not.toBe("الفترة المماثلة من السنة السابقة");
+    expect(label).not.toBe("الفترة السابقة المماثلة في المدة");
+  });
+
+  it("getComparisonModeLabelForTable returns 'غير معروف' for unsupported mode with previous period", () => {
+    expect(getComparisonModeLabelForTable(unsupportedMode, true)).toBe("وضع المقارنة غير معروف");
+  });
+
+  it("getComparisonModeDescription does not classify unsupported as a known mode", () => {
+    const description = getComparisonModeDescription(unsupportedMode, PREV);
+    expect(description).not.toContain("الفترة المماثلة من السنة السابقة");
+    expect(description).not.toContain("الفترة السابقة المماثلة في المدة");
+    expect(description).toContain("غير معروف");
   });
 });

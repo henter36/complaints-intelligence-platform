@@ -37,6 +37,7 @@ import {
 } from "lucide-react";
 import { formatDate, formatDateTime } from "@/lib/ar-utils";
 import {
+  COMPARISON_MODES,
   EXECUTIVE_BRIEF_PAGE_PLAN,
   type ComparisonMode,
   type ExecutiveBriefPreviewPage,
@@ -47,7 +48,10 @@ import {
   formatReportNumber as formatNumber,
   REPORT_DESIGN_TOKENS,
 } from "@/lib/reports/design-tokens";
-import { getComparisonModeDescription } from "@/lib/reports/comparison-mode-labels";
+import {
+  getComparisonModeDescription,
+  getComparisonModeLabelShort,
+} from "@/lib/reports/comparison-mode-labels";
 import { buildMatrixTruncationMessage } from "@/lib/reports/matrix-truncation";
 
 // =========================================================================
@@ -211,10 +215,10 @@ const REPORT_MODE_OPTIONS: readonly {
   },
 ];
 
-const COMPARISON_MODE_LABELS: Record<ComparisonMode, string> = {
-  PREVIOUS_EQUIVALENT_PERIOD: "الفترة السابقة المماثلة في المدة",
-  SAME_PERIOD_LAST_YEAR: "الفترة المماثلة من السنة السابقة",
-};
+// Derived from the shared helper so labels stay in sync automatically.
+const COMPARISON_MODE_LABELS: Record<ComparisonMode, string> = Object.fromEntries(
+  COMPARISON_MODES.map((mode) => [mode, getComparisonModeLabelShort(mode)])
+) as Record<ComparisonMode, string>;
 
 const REPORT_MODE_LEGEND_ID = "report-mode-legend";
 
