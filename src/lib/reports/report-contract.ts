@@ -34,6 +34,57 @@ export function isReportMode(value: unknown): value is ReportMode {
 }
 
 // ---------------------------------------------------------------------------
+// Executive brief page plan
+// ---------------------------------------------------------------------------
+
+export type ExecutiveBriefPreviewPage = 1 | 2 | 3;
+
+export type ExecutiveBriefPagePlanEntry = {
+  page: ExecutiveBriefPreviewPage;
+  title: string;
+  sectionIds: readonly string[];
+};
+
+/**
+ * Shared page ownership for the three-page executive brief. Renderers own the
+ * visual layout, while data builders and previews share this stable metadata.
+ */
+export const EXECUTIVE_BRIEF_PAGE_PLAN = [
+  {
+    page: 1,
+    title: "النظرة التنفيذية",
+    sectionIds: ["kpi_overview", "executive_summary_text", "region_trend_chart"],
+  },
+  {
+    page: 2,
+    title: "المقارنة والأداء",
+    sectionIds: ["comparison", "region_changes", "top_regions", "top_departments"],
+  },
+  {
+    page: 3,
+    title: "التصنيفات والاستنتاجات",
+    sectionIds: ["top_classifications", "dept_class_rises", "overdue_table"],
+  },
+] as const satisfies readonly ExecutiveBriefPagePlanEntry[];
+
+export type ExecutiveBriefSectionPlacement = {
+  previewPage: ExecutiveBriefPreviewPage;
+  previewOrder: number;
+};
+
+export function getExecutiveBriefSectionPlacement(
+  sectionId: string
+): ExecutiveBriefSectionPlacement | null {
+  for (const pagePlan of EXECUTIVE_BRIEF_PAGE_PLAN) {
+    const previewOrder = (pagePlan.sectionIds as readonly string[]).indexOf(sectionId);
+    if (previewOrder >= 0) {
+      return { previewPage: pagePlan.page, previewOrder };
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Executive brief KPI card (with comparison + assessment)
 // ---------------------------------------------------------------------------
 
@@ -189,6 +240,8 @@ export type ReportMatrixSection = {
   truncated: boolean;       // = truncatedRows || truncatedColumns (back-compat)
   maxRows: number;
   maxColumns: number;
+  previewPage?: ExecutiveBriefPreviewPage;
+  previewOrder?: number;
 };
 
 // ---------------------------------------------------------------------------

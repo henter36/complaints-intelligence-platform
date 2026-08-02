@@ -251,7 +251,7 @@ function sectionHasRenderableContent(section: ReportSection): boolean {
   if (section.kind === "kpi") return section.cards.length > 0;
   if (section.kind === "text") return section.points.some((point) => point.trim().length > 0);
   if (section.kind === "chart") {
-    return section.series.some((series) => series.points.some((point) => point.y !== 0));
+    return section.series.some((series) => series.points.length > 0);
   }
   if (section.kind === "matrix") {
     return section.rowHeaders.length > 0 && section.columnHeaders.length > 0;

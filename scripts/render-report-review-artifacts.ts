@@ -133,15 +133,82 @@ function fullReport(): ReportData {
   };
 }
 
+function reportWithCompliance(value: number): ReportData {
+  const report = baseReport("DIGITAL_EXECUTIVE_BRIEF");
+  report.briefData = {
+    ...briefData,
+    briefKpis: briefData.briefKpis.map((card) => (
+      card.key === "complianceRate" ? { ...card, value } : card
+    )),
+  };
+  return report;
+}
+
+function reportWithoutReference(): ReportData {
+  const report = baseReport("DIGITAL_EXECUTIVE_BRIEF");
+  report.previousPeriod = null;
+  report.comparisonData = undefined;
+  report.briefData = {
+    ...briefData,
+    allRegions: briefData.allRegions.map((row, index) => ({
+      ...row,
+      currentCount: 10 + index,
+      previousCount: 0,
+      difference: 0,
+      changeRate: null,
+    })),
+    comparativeTimeline: {
+      current: briefData.comparativeTimeline.current,
+      previous: null,
+      periodDays: briefData.comparativeTimeline.periodDays,
+    },
+  };
+  return report;
+}
+
+function zeroTrendReport(): ReportData {
+  const report = fullReport();
+  return {
+    ...report,
+    title: "تقرير اتجاه صفري صالح",
+    reportMode: "STANDARD",
+    briefData: undefined,
+    comparisonData: undefined,
+    sections: [{
+      id: "zero_trend",
+      kind: "chart",
+      chartType: "line",
+      title: "الاتجاه الزمني — جميع القيم صفر",
+      series: [{
+        name: "الفترة الحالية",
+        points: Array.from({ length: 7 }, (_, index) => ({
+          x: `2026-07-${String(index + 1).padStart(2, "0")}`,
+          y: 0,
+        })),
+      }],
+    }],
+  };
+}
+
 async function main(): Promise<void> {
   await fs.mkdir(outputDir, { recursive: true });
   const digital = await renderExecutiveBriefPdf(baseReport("DIGITAL_EXECUTIVE_BRIEF"), "DIGITAL_EXECUTIVE_BRIEF");
   const print = await renderExecutiveBriefPdf(baseReport("PRINT_EXECUTIVE_BRIEF"), "PRINT_EXECUTIVE_BRIEF");
   const full = await renderReportPdf(fullReport());
+  const gauge25 = await renderExecutiveBriefPdf(reportWithCompliance(25), "DIGITAL_EXECUTIVE_BRIEF");
+  const gauge75 = await renderExecutiveBriefPdf(reportWithCompliance(75), "DIGITAL_EXECUTIVE_BRIEF");
+  const gauge100 = await renderExecutiveBriefPdf(reportWithCompliance(100), "DIGITAL_EXECUTIVE_BRIEF");
+  const noReference = await renderExecutiveBriefPdf(reportWithoutReference(), "DIGITAL_EXECUTIVE_BRIEF");
+  const zeroTrend = await renderReportPdf(zeroTrendReport());
   await Promise.all([
     fs.writeFile(path.join(outputDir, "digital-executive-brief.pdf"), digital.buffer),
     fs.writeFile(path.join(outputDir, "print-executive-brief.pdf"), print.buffer),
     fs.writeFile(path.join(outputDir, "full-analytical-report.pdf"), full.buffer),
+    fs.writeFile(path.join(outputDir, "digital-gauge-25.pdf"), gauge25.buffer),
+    fs.writeFile(path.join(outputDir, "digital-gauge-75.pdf"), gauge75.buffer),
+    fs.writeFile(path.join(outputDir, "digital-gauge-100.pdf"), gauge100.buffer),
+    fs.writeFile(path.join(outputDir, "digital-no-reference.pdf"), noReference.buffer),
+    fs.writeFile(path.join(outputDir, "zero-trend-report.pdf"), zeroTrend.buffer),
   ]);
   process.stdout.write(`${outputDir}\n`);
 }

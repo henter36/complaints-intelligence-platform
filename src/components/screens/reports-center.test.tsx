@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -108,6 +108,38 @@ describe("ReportsCenter", () => {
     expect(screen.getByText(/ثلاث صفحات أفقية احترافية/)).toBeInTheDocument();
   });
 
+  it("implements an accessible radiogroup with roving keyboard focus", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("fetch", routedFetch());
+    render(<ReportsCenter />);
+    await user.click(await screen.findByText("التقرير التنفيذي الشامل"));
+
+    const group = screen.getByRole("radiogroup");
+    const legend = screen.getByText("نمط التقرير");
+    expect(group).toHaveAttribute("aria-labelledby", legend.id);
+    const radios = within(group).getAllByRole("radio");
+    expect(radios.filter((radio) => radio.tabIndex === 0)).toHaveLength(1);
+    expect(radios[0]).not.toHaveAccessibleName(/مقترح/);
+
+    radios[0].focus();
+    await user.keyboard("{ArrowRight}");
+    expect(radios[1]).toHaveFocus();
+    expect(radios[1]).toHaveAttribute("aria-checked", "true");
+    expect(radios.filter((radio) => radio.tabIndex === 0)).toEqual([radios[1]]);
+
+    await user.keyboard("{End}");
+    expect(radios[3]).toHaveFocus();
+    expect(radios[3]).toHaveAttribute("aria-checked", "true");
+    await user.keyboard("{Home}");
+    expect(radios[0]).toHaveFocus();
+    await user.keyboard("{ArrowLeft}");
+    expect(radios[3]).toHaveFocus();
+    await user.keyboard("{ArrowUp}");
+    expect(radios[2]).toHaveFocus();
+    await user.keyboard("{ArrowDown}");
+    expect(radios[3]).toHaveFocus();
+  });
+
   it("hides report modes and resets the hidden value after changing report type", async () => {
     const user = userEvent.setup();
     const fetchMock = routedFetch({
@@ -145,6 +177,40 @@ describe("ReportsCenter", () => {
     expect(screen.getAllByLabelText(/صفحة [123] من 3/)).toHaveLength(3);
     const previewCall = fetchMock.mock.calls.find(([input]) => String(input).includes("/api/reports/preview"));
     expect(JSON.parse(previewCall?.[1]?.body as string).options.reportMode).toBe("DIGITAL_EXECUTIVE_BRIEF");
+  });
+
+  it("uses explicit page metadata, preserves every section, and respects preview order", async () => {
+    const user = userEvent.setup();
+    const sections = [
+      { id: "renamed-five", kind: "text", title: "خامس", points: ["5"], previewPage: 2, previewOrder: 4 },
+      { id: "renamed-one", kind: "text", title: "أول", points: ["1"], previewPage: 2, previewOrder: 0 },
+      { id: "renamed-four", kind: "text", title: "رابع", points: ["4"], previewPage: 2, previewOrder: 3 },
+      { id: "renamed-two", kind: "text", title: "ثان", points: ["2"], previewPage: 2, previewOrder: 1 },
+      { id: "renamed-three", kind: "text", title: "ثالث", points: ["3"], previewPage: 2, previewOrder: 2 },
+      { id: "unclassified", kind: "text", title: "قسم غير مصنف", points: ["fallback"] },
+    ];
+    vi.stubGlobal("fetch", routedFetch({
+      "/api/reports/preview": () => jsonResponse({ report: {
+        type: "EXECUTIVE_SUMMARY",
+        reportMode: "DIGITAL_EXECUTIVE_BRIEF",
+        title: "المختصر الرقمي",
+        generatedAt: new Date().toISOString(),
+        period: { from: "2026-07-01", to: "2026-07-31" },
+        filters: {}, sections, warnings: [], rowCount: 0,
+      } }),
+    }));
+    render(<ReportsCenter />);
+    await user.click(await screen.findByText("التقرير التنفيذي الشامل"));
+    await user.click(screen.getByRole("button", { name: /معاينة/ }));
+
+    const secondPage = await screen.findByLabelText("صفحة 2 من 3");
+    const sectionHeadings = within(secondPage).getAllByRole("heading", { level: 4 });
+    expect(sectionHeadings.map((heading) => heading.textContent)).toEqual([
+      "أول", "ثان", "ثالث", "رابع", "خامس",
+    ]);
+    expect(within(secondPage).getByText("خامس")).toBeInTheDocument();
+    const thirdPage = screen.getByLabelText("صفحة 3 من 3");
+    expect(within(thirdPage).getByText("قسم غير مصنف")).toBeInTheDocument();
   });
 
   it("preserves the selected FULL_ANALYTICAL mode when saving a template", async () => {

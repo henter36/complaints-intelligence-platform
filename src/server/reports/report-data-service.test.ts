@@ -1,5 +1,6 @@
 import { ComplaintPriority, ComplaintStatus, ReportType } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReportMode } from "@/lib/reports/report-contract";
 
 const dbMocks = vi.hoisted(() => ({
   findMany: vi.fn(),
@@ -52,6 +53,28 @@ function complaint(overrides: Record<string, unknown> = {}) {
 
 const VALID_FILTERS = { from: "2026-07-01", to: "2026-07-31" };
 
+function comparisonResultWithReference(hasReference: boolean) {
+  return {
+    currentPeriod: {
+      from: new Date("2026-07-01T00:00:00Z"),
+      toExclusive: new Date("2026-08-01T00:00:00Z"),
+    },
+    previousPeriod: hasReference
+      ? {
+          from: new Date("2026-05-31T00:00:00Z"),
+          toExclusive: new Date("2026-07-01T00:00:00Z"),
+        }
+      : null,
+    regionTrend: { allDates: [], series: [], truncated: false, otherSeriesName: null },
+    regionChanges: [],
+    deptClassRises: [],
+    deptClassRisesTotal: 0,
+    deptClassAllPairs: [],
+    executiveSummaryPoints: [],
+    warnings: [],
+  };
+}
+
 describe("report data service — parity with the central KPI service", () => {
   beforeEach(async () => {
     vi.resetModules();
@@ -99,6 +122,87 @@ describe("report data service — parity with the central KPI service", () => {
     expect(ids).toContain("dept_class_rises");
     // Comparison data is threaded through for the XLSX/PDF renderers.
     expect(report.comparisonData).toBeDefined();
+    expect(report.sections.find((section) => section.id === "kpi_overview"))
+      .toMatchObject({ previewPage: 1, previewOrder: 0 });
+    expect(report.sections.find((section) => section.id === "region_changes"))
+      .toMatchObject({ previewPage: 2, previewOrder: 1 });
+    expect(report.sections.find((section) => section.id === "top_classifications"))
+      .toMatchObject({ previewPage: 3, previewOrder: 0 });
+  });
+
+  it("STANDARD skips the unused reference-period KPI query", async () => {
+    dbMocks.findMany.mockResolvedValue([complaint()]);
+    dbMocks.count.mockResolvedValue(1);
+    const kpiService = await import("@/server/complaints/complaint-kpi-service");
+    const comparisonService = await import("./report-comparison");
+    const briefService = await import("./report-executive-brief-data-service");
+    const kpiSpy = vi.spyOn(kpiService, "getComplaintKpis");
+    vi.spyOn(comparisonService, "buildComparisonResult")
+      .mockResolvedValue(comparisonResultWithReference(true));
+    vi.spyOn(briefService, "buildExecutiveBriefData").mockResolvedValue({} as never);
+    vi.spyOn(briefService, "buildFullAnalyticalData").mockResolvedValue({} as never);
+    const { buildReportData } = await import("./report-data-service");
+    const { parseReportRequest } = await import("./report-definition-service");
+    const request = parseReportRequest({
+      type: "EXECUTIVE_SUMMARY",
+      filters: VALID_FILTERS,
+      options: { reportMode: "STANDARD" },
+    });
+
+    await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+
+    expect(kpiSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it.each<ReportMode>([
+    "DIGITAL_EXECUTIVE_BRIEF",
+    "PRINT_EXECUTIVE_BRIEF",
+    "FULL_ANALYTICAL",
+  ])("%s loads reference-period KPI data when a reference exists", async (reportMode) => {
+    dbMocks.findMany.mockResolvedValue([complaint()]);
+    dbMocks.count.mockResolvedValue(1);
+    const kpiService = await import("@/server/complaints/complaint-kpi-service");
+    const comparisonService = await import("./report-comparison");
+    const briefService = await import("./report-executive-brief-data-service");
+    const kpiSpy = vi.spyOn(kpiService, "getComplaintKpis");
+    vi.spyOn(comparisonService, "buildComparisonResult")
+      .mockResolvedValue(comparisonResultWithReference(true));
+    vi.spyOn(briefService, "buildExecutiveBriefData").mockResolvedValue({} as never);
+    vi.spyOn(briefService, "buildFullAnalyticalData").mockResolvedValue({} as never);
+    const { buildReportData } = await import("./report-data-service");
+    const { parseReportRequest } = await import("./report-definition-service");
+    const request = parseReportRequest({
+      type: "EXECUTIVE_SUMMARY",
+      filters: VALID_FILTERS,
+      options: { reportMode },
+    });
+
+    await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+
+    expect(kpiSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not query reference-period KPI data when no reference exists", async () => {
+    dbMocks.findMany.mockResolvedValue([complaint()]);
+    dbMocks.count.mockResolvedValue(1);
+    const kpiService = await import("@/server/complaints/complaint-kpi-service");
+    const comparisonService = await import("./report-comparison");
+    const briefService = await import("./report-executive-brief-data-service");
+    const kpiSpy = vi.spyOn(kpiService, "getComplaintKpis");
+    vi.spyOn(comparisonService, "buildComparisonResult")
+      .mockResolvedValue(comparisonResultWithReference(false));
+    vi.spyOn(briefService, "buildExecutiveBriefData").mockResolvedValue({} as never);
+    const { buildReportData } = await import("./report-data-service");
+    const { parseReportRequest } = await import("./report-definition-service");
+    const request = parseReportRequest({
+      type: "EXECUTIVE_SUMMARY",
+      filters: VALID_FILTERS,
+      options: { reportMode: "DIGITAL_EXECUTIVE_BRIEF" },
+    });
+
+    await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+
+    expect(kpiSpy).toHaveBeenCalledTimes(1);
   });
 
   it("DEPARTMENT_PERFORMANCE group breakdown matches getComplaintKpis distributions.byDepartment", async () => {

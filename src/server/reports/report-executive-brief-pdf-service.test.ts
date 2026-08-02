@@ -354,6 +354,70 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
     }
   });
 
+  it.each([0, 50, 75, 100])(
+    "keeps the %s%% compliance gauge within one semicircle",
+    async (value) => {
+      const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+      data.briefData = makeBriefData({
+        briefKpis: makeBriefData().briefKpis.map((card) => (
+          card.key === "complianceRate" ? { ...card, value } : card
+        )),
+      });
+      const pathSpy = vi.spyOn(PDFDocument.prototype, "path");
+      try {
+        await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+        const gaugeArcs = pathSpy.mock.calls
+          .map((call) => String(call[0]))
+          .filter((path) => path.includes("A 34 34"));
+        expect(gaugeArcs).toHaveLength(2);
+        expect(gaugeArcs.every((path) => path.includes("A 34 34 0 0 1"))).toBe(true);
+        expect(gaugeArcs.some((path) => path.includes("A 34 34 0 1 1"))).toBe(false);
+      } finally {
+        pathSpy.mockRestore();
+      }
+    }
+  );
+
+  it("does not infer a reference period from missing comparisonData", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.previousPeriod = null;
+    data.comparisonData = undefined;
+    const chartSpy = vi.spyOn(chartService, "renderLineChartPng");
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+      expect(chartSpy).not.toHaveBeenCalled();
+      expect(textSpy.mock.calls.some((call) => String(call[0]).includes("لا تتوفر فترة مرجعية"))).toBe(true);
+    } finally {
+      chartSpy.mockRestore();
+      textSpy.mockRestore();
+    }
+  });
+
+  it("does not render a comparison visual when previousPeriod is null", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.previousPeriod = null;
+    const chartSpy = vi.spyOn(chartService, "renderLineChartPng");
+    try {
+      await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+      expect(chartSpy).not.toHaveBeenCalled();
+    } finally {
+      chartSpy.mockRestore();
+    }
+  });
+
+  it("renders a useful comparison when the authoritative previousPeriod exists", async () => {
+    const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
+    data.comparisonData = undefined;
+    const chartSpy = vi.spyOn(chartService, "renderLineChartPng");
+    try {
+      await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
+      expect(chartSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      chartSpy.mockRestore();
+    }
+  });
+
   it("acceptance fixture stays three pages and replaces a low-value large chart", async () => {
     const data = makeReportData("DIGITAL_EXECUTIVE_BRIEF");
     data.briefData = makeBriefData({

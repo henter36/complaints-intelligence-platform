@@ -1,11 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import PDFDocument from "pdfkit";
-import type {
-  ClassificationBriefRow,
-  ExecutiveBriefKpiCard,
-  KpiAssessment,
-  RegionReferenceRow,
+import {
+  EXECUTIVE_BRIEF_PAGE_PLAN,
+  type ClassificationBriefRow,
+  type ExecutiveBriefKpiCard,
+  type ExecutiveBriefPreviewPage,
+  type KpiAssessment,
+  type RegionReferenceRow,
 } from "@/lib/reports/report-contract";
 import {
   DIGITAL_EXECUTIVE_PAGE_SIZE,
@@ -223,7 +225,6 @@ function drawCommitmentGauge(
   card: ExecutiveBriefKpiCard,
   x: number,
   y: number,
-  width: number,
   compact: boolean
 ): void {
   const gaugeWidth = compact ? 52 : 76;
@@ -234,12 +235,11 @@ function drawCommitmentGauge(
   const clamped = Math.max(0, Math.min(100, card.value));
   const endX = centerX - radius * Math.cos(Math.PI * clamped / 100);
   const endY = baseline - radius * Math.sin(Math.PI * clamped / 100);
-  const largeArc = clamped > 50 ? 1 : 0;
   doc.lineWidth(thickness).lineCap("round");
   doc.path(`M ${centerX - radius} ${baseline} A ${radius} ${radius} 0 0 1 ${centerX + radius} ${baseline}`)
     .strokeColor(COLORS.border)
     .stroke();
-  doc.path(`M ${centerX - radius} ${baseline} A ${radius} ${radius} 0 ${largeArc} 1 ${endX} ${endY}`)
+  doc.path(`M ${centerX - radius} ${baseline} A ${radius} ${radius} 0 0 1 ${endX} ${endY}`)
     .strokeColor(directionColor(directionFromAssessment(card.assessment)))
     .stroke();
   doc.lineWidth(1).lineCap("butt");
@@ -284,7 +284,7 @@ function drawKpiCard(
     height: fontSize(layout, 32, 22),
     lineBreak: false,
   });
-  if (hasGauge) drawCommitmentGauge(doc, card, x + padding, y + 5, width, layout.compact);
+  if (hasGauge) drawCommitmentGauge(doc, card, x + padding, y + 5, layout.compact);
   if (card.difference !== null) {
     const direction = directionFromAssessment(card.assessment);
     const deltaY = y + height - fontSize(layout, 25, 18);
@@ -362,11 +362,19 @@ function drawExecutiveSummary(
   return y + Math.ceil(points.length / columns) * rowHeight + gap;
 }
 
+function hasReferencePeriod(context: ExecutiveBriefRenderContext): boolean {
+  return context.data.previousPeriod != null;
+}
+
 function hasUsefulComparison(context: ExecutiveBriefRenderContext): boolean {
+  if (!hasReferencePeriod(context)) return false;
   const totalCurrent = context.brief.allRegions.reduce((sum, row) => sum + row.currentCount, 0);
-  return context.data.comparisonData?.previousPeriod !== null
-    && context.brief.allRegions.length >= 3
+  return context.brief.allRegions.length >= 3
     && totalCurrent >= 10;
+}
+
+function briefPageTitle(page: ExecutiveBriefPreviewPage): string {
+  return EXECUTIVE_BRIEF_PAGE_PLAN[page - 1].title;
 }
 
 function selectPage1Visual(context: ExecutiveBriefRenderContext): ExecutiveVisual {
@@ -427,7 +435,7 @@ async function drawPage1Visual(
 }
 
 async function renderPage1(context: ExecutiveBriefRenderContext): Promise<void> {
-  let y = drawPageHeader(context, "التقرير التنفيذي المختصر — النظرة التنفيذية");
+  let y = drawPageHeader(context, `التقرير التنفيذي المختصر — ${briefPageTitle(1)}`);
   y = drawSectionTitle(context.doc, "المؤشرات التنفيذية", context.layout.margin, y, context.layout.contentWidth, context.layout);
   y = drawKpiGrid(context.doc, context.brief.briefKpis, context.layout, y);
   y = drawExecutiveSummary(context, y);
@@ -530,7 +538,7 @@ function drawComparisonCards(
   context: ExecutiveBriefRenderContext,
   startY: number
 ): void {
-  const { doc, brief, layout, data } = context;
+  const { doc, brief, layout } = context;
   const regions = brief.allRegions;
   const candidates = [
     { label: "أعلى ارتفاع", row: [...regions].sort((a, b) => b.difference - a.difference)[0] },
@@ -558,7 +566,7 @@ function drawComparisonCards(
       height: fontSize(layout, 22, 16),
       ellipsis: true,
     });
-    if (candidate.row && data.previousPeriod) {
+    if (candidate.row && hasReferencePeriod(context)) {
       drawDirectionIcon(doc, regionDirection(candidate.row), x + 8, cardY + 25, fontSize(layout, 13, 10));
       doc.font("Body").fontSize(fontSize(layout, 9.5, 8)).fillColor(COLORS.neutral);
       doc.text(
@@ -578,9 +586,9 @@ function resolveRegionRowHeight(layout: BriefPageLayout, regionCount: number): n
 }
 
 function renderPage2(context: ExecutiveBriefRenderContext): void {
-  const { doc, data, brief, layout } = context;
-  let y = drawPageHeader(context, "المقارنة والأداء");
-  if (!data.previousPeriod) {
+  const { doc, brief, layout } = context;
+  let y = drawPageHeader(context, briefPageTitle(2));
+  if (!hasReferencePeriod(context)) {
     doc.roundedRect(layout.margin, y, layout.contentWidth, fontSize(layout, 54, 38), REPORT_DESIGN_TOKENS.card.radius)
       .fillAndStroke(COLORS.background, COLORS.border);
     doc.font("Body").fontSize(fontSize(layout, 12, 9)).fillColor(COLORS.neutral);
@@ -595,13 +603,13 @@ function renderPage2(context: ExecutiveBriefRenderContext): void {
   const regionCount = brief.allRegions.length;
   const rowHeight = resolveRegionRowHeight(layout, regionCount);
   const tableRows = brief.allRegions;
-  const rowsForDisplay = data.previousPeriod
+  const rowsForDisplay = hasReferencePeriod(context)
     ? tableRows
     : tableRows.map((row) => ({ ...row, previousCount: 0, difference: 0, changeRate: null }));
   y = drawRtlTable({
     doc,
     rows: rowsForDisplay,
-    columns: data.previousPeriod
+    columns: hasReferencePeriod(context)
       ? REGION_COLUMNS
       : REGION_COLUMNS.filter((column) => !["previousCount", "difference", "changeRate", "direction"].includes(String(column.key))),
     x: layout.margin,
@@ -611,8 +619,8 @@ function renderPage2(context: ExecutiveBriefRenderContext): void {
     fontSize: fontSize(layout, 9, 8.5),
     maxRows,
     formatCell: formatRegionCell,
-    directionForRow: data.previousPeriod ? regionDirection : undefined,
-    directionKey: data.previousPeriod ? "direction" : undefined,
+    directionForRow: hasReferencePeriod(context) ? regionDirection : undefined,
+    directionKey: hasReferencePeriod(context) ? "direction" : undefined,
   });
   if (tableRows.length > maxRows) {
     doc.font("Body").fontSize(fontSize(layout, 9, 8)).fillColor(COLORS.neutral);
@@ -736,7 +744,7 @@ function buildAttentionItems(context: ExecutiveBriefRenderContext): AttentionIte
     items.push({ text: `${formatReportNumber(priority.value)} شكوى عالية الأولوية ما زالت مفتوحة.`, assessment: priority.assessment });
   }
   const topRise = data.comparisonData?.deptClassRises[0];
-  if (topRise && data.previousPeriod) {
+  if (topRise && hasReferencePeriod(context)) {
     items.push({
       text: `ارتفاع مؤثر في ${topRise.departmentName} / ${topRise.classificationName} بمقدار ${formatReportNumber(topRise.difference, { sign: true })}.`,
       assessment: "warning",
@@ -755,7 +763,7 @@ function drawAttentionCards(
   y: number,
   width: number
 ): number {
-  const { doc, layout } = context;
+  const { doc, data, layout } = context;
   const height = layout.compact ? 34 : 45;
   const gap = layout.compact ? 6 : 8;
   items.forEach((item, index) => {
@@ -787,7 +795,7 @@ function drawRisingPairs(
   width: number
 ): void {
   const { doc, data, layout } = context;
-  if (!data.previousPeriod) {
+  if (!hasReferencePeriod(context)) {
     doc.roundedRect(x, y, width, fontSize(layout, 100, 70), REPORT_DESIGN_TOKENS.card.radius)
       .fillAndStroke(COLORS.background, COLORS.border);
     doc.font("Body").fontSize(fontSize(layout, 10, 8.5)).fillColor(COLORS.neutral);
@@ -824,7 +832,7 @@ function drawRisingPairs(
 }
 
 function drawMethodology(context: ExecutiveBriefRenderContext): void {
-  const { doc, data, layout } = context;
+  const { doc, layout } = context;
   const y = layout.pageSize[1] - layout.margin - fontSize(layout, 64, 48);
   doc.moveTo(layout.margin, y)
     .lineTo(layout.margin + layout.contentWidth, y)
@@ -833,10 +841,10 @@ function drawMethodology(context: ExecutiveBriefRenderContext): void {
   doc.font("Bold").fontSize(fontSize(layout, 9.5, 8)).fillColor(COLORS.primary);
   doc.text("المنهجية", layout.margin, y + 7, { width: layout.contentWidth, align: "right" });
   doc.font("Body").fontSize(fontSize(layout, 8.5, 7.5)).fillColor(COLORS.neutral);
-  const reference = data.previousPeriod
+  const reference = hasReferencePeriod(context)
     ? "الفترة السابقة مماثلة زمنيًا وتسبق الحالية مباشرة."
     : "لا توجد فترة سابقة متاحة.";
-  const continuity = data.previousPeriod
+  const continuity = hasReferencePeriod(context)
     ? "يستخدم وصف «جديد» فقط عند توفر مرجع وكانت القيمة السابقة صفرًا."
     : "لا تُنشأ تصنيفات استمرارية عند غياب المرجع.";
   const text = `${reference} الفرق = الحالي − السابق؛ نسبة التغير = الفرق ÷ السابق. ${continuity} تعرض الجداول أعلى الصفوف عند تجاوز المساحة.`;
@@ -850,15 +858,15 @@ function drawMethodology(context: ExecutiveBriefRenderContext): void {
 
 function renderPage3(context: ExecutiveBriefRenderContext): void {
   const { doc, brief, data, layout } = context;
-  let y = drawPageHeader(context, "التصنيفات والاستنتاجات");
+  let y = drawPageHeader(context, briefPageTitle(3));
   const gap = layout.compact ? 10 : 16;
   const donutWidth = layout.contentWidth * 0.28;
   const tableWidth = layout.contentWidth - donutWidth - gap;
   y = drawSectionTitle(doc, "أبرز التصنيفات", layout.margin, y, tableWidth, layout);
-  const classRows = data.previousPeriod
+  const classRows = hasReferencePeriod(context)
     ? brief.topClassifications
     : brief.topClassifications.map((row) => ({ ...row, previousCount: 0, difference: 0, changeRate: null }));
-  const columns = data.previousPeriod
+  const columns = hasReferencePeriod(context)
     ? CLASSIFICATION_COLUMNS
     : CLASSIFICATION_COLUMNS.filter((column) => !["previousCount", "difference", "changeRate"].includes(String(column.key)));
   const tableBottom = drawRtlTable({
@@ -872,8 +880,8 @@ function renderPage3(context: ExecutiveBriefRenderContext): void {
     fontSize: fontSize(layout, 9, 8.5),
     maxRows: 8,
     formatCell: formatClassificationCell,
-    directionForRow: data.previousPeriod ? classificationDirection : undefined,
-    directionKey: data.previousPeriod ? "changeRate" : undefined,
+    directionForRow: hasReferencePeriod(context) ? classificationDirection : undefined,
+    directionKey: hasReferencePeriod(context) ? "changeRate" : undefined,
   });
   drawCategoryDonut(
     doc,

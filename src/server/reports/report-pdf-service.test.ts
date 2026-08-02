@@ -8,6 +8,7 @@ import fs from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type { ReportData, ReportSection } from "./report-data-service";
 import { renderReportPdf } from "./report-pdf-service";
+import * as chartService from "./report-chart-service";
 
 /** PDFKit stores Info strings (Title/Keywords) as UTF-16BE literals, so a
  * title is discoverable in the raw buffer via its UTF-16BE byte sequence.
@@ -321,5 +322,53 @@ describe("PDF report — comparative executive sections", () => {
     const { buffer } = await renderReportPdf(report);
     // Empty series still renders (empty-state PNG), producing a valid PDF.
     expect(buffer.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+  });
+
+  it("keeps a chart whose valid points all have zero values", async () => {
+    const chartSpy = vi.spyOn(chartService, "renderLineChartPng");
+    try {
+      const report = baseReport({
+        sections: [{
+          id: "zero_trend",
+          kind: "chart",
+          chartType: "line",
+          title: "اتجاه صفري صالح",
+          series: [{
+            name: "الفترة الحالية",
+            points: Array.from({ length: 7 }, (_, index) => ({
+              x: `2026-07-${String(index + 1).padStart(2, "0")}`,
+              y: 0,
+            })),
+          }],
+        }],
+      });
+
+      await renderReportPdf(report);
+
+      expect(chartSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      chartSpy.mockRestore();
+    }
+  });
+
+  it("omits a chart when every series has no points", async () => {
+    const chartSpy = vi.spyOn(chartService, "renderLineChartPng");
+    try {
+      const report = baseReport({
+        sections: [{
+          id: "empty_trend",
+          kind: "chart",
+          chartType: "line",
+          title: "اتجاه بلا نقاط",
+          series: [{ name: "الفترة الحالية", points: [] }],
+        }],
+      });
+
+      await renderReportPdf(report);
+
+      expect(chartSpy).not.toHaveBeenCalled();
+    } finally {
+      chartSpy.mockRestore();
+    }
   });
 });

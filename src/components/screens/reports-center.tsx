@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import { PageHeader } from "@/components/shared/page-header";
 import {
   Card, CardContent, CardHeader, CardTitle, CardDescription,
@@ -29,7 +36,12 @@ import {
   AlertTriangle, Loader2, CalendarClock, PlayCircle,
 } from "lucide-react";
 import { formatDate, formatDateTime } from "@/lib/ar-utils";
-import type { ReportMatrixSection, ReportMode } from "@/lib/reports/report-contract";
+import {
+  EXECUTIVE_BRIEF_PAGE_PLAN,
+  type ExecutiveBriefPreviewPage,
+  type ReportMatrixSection,
+  type ReportMode,
+} from "@/lib/reports/report-contract";
 import {
   formatReportNumber as formatNumber,
   REPORT_DESIGN_TOKENS,
@@ -76,11 +88,16 @@ type ReportTable = {
   rows: Record<string, unknown>[]; truncated: boolean; totalMatched: number;
 };
 type ChartSeries = { name: string; points: { x: string; y: number }[]; isOther?: boolean };
+type ReportSectionPreviewMetadata = {
+  previewPage?: ExecutiveBriefPreviewPage;
+  previewOrder?: number;
+};
+
 type ReportSection =
-  | { id: string; kind: "kpi"; title: string; cards: ReportKpiCard[] }
-  | { id: string; kind: "table"; title: string; table: ReportTable }
-  | { id: string; kind: "text"; title: string; points: string[] }
-  | { id: string; kind: "chart"; chartType: "line"; title: string; series: ChartSeries[]; description?: string; emptyState?: string; unit?: string; truncated?: boolean; truncatedMessage?: string }
+  | (ReportSectionPreviewMetadata & { id: string; kind: "kpi"; title: string; cards: ReportKpiCard[] })
+  | (ReportSectionPreviewMetadata & { id: string; kind: "table"; title: string; table: ReportTable })
+  | (ReportSectionPreviewMetadata & { id: string; kind: "text"; title: string; points: string[] })
+  | (ReportSectionPreviewMetadata & { id: string; kind: "chart"; chartType: "line"; title: string; series: ChartSeries[]; description?: string; emptyState?: string; unit?: string; truncated?: boolean; truncatedMessage?: string })
   | ReportMatrixSection;
 
 type ReportData = {
@@ -188,6 +205,87 @@ const REPORT_MODE_OPTIONS: readonly {
     description: "التقرير التقليدي بكامل الأقسام المعتادة.",
   },
 ];
+
+const REPORT_MODE_LEGEND_ID = "report-mode-legend";
+
+function ReportModeRadioGroup({
+  value,
+  onChange,
+}: Readonly<{
+  value: ReportMode;
+  onChange: (value: ReportMode) => void;
+}>) {
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+
+  function selectAndFocus(index: number): void {
+    const option = REPORT_MODE_OPTIONS[index];
+    if (!option) return;
+    onChange(option.value);
+    optionRefs.current[index]?.focus();
+  }
+
+  function handleKeyDown(event: KeyboardEvent<HTMLButtonElement>, currentIndex: number): void {
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      nextIndex = (currentIndex + 1) % REPORT_MODE_OPTIONS.length;
+    } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      nextIndex = (currentIndex - 1 + REPORT_MODE_OPTIONS.length) % REPORT_MODE_OPTIONS.length;
+    } else if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = REPORT_MODE_OPTIONS.length - 1;
+    }
+    if (nextIndex === null) return;
+    event.preventDefault();
+    selectAndFocus(nextIndex);
+  }
+
+  return (
+    <fieldset className="space-y-3">
+      <legend id={REPORT_MODE_LEGEND_ID} className="text-sm font-semibold">
+        نمط التقرير
+      </legend>
+      <div
+        role="radiogroup"
+        aria-labelledby={REPORT_MODE_LEGEND_ID}
+        className="grid gap-3 md:grid-cols-2"
+      >
+        {REPORT_MODE_OPTIONS.map((modeOption, index) => {
+          const selected = value === modeOption.value;
+          return (
+            <button
+              key={modeOption.value}
+              ref={(element) => { optionRefs.current[index] = element; }}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              tabIndex={selected ? 0 : -1}
+              onClick={() => onChange(modeOption.value)}
+              onKeyDown={(event) => handleKeyDown(event, index)}
+              className="rounded-lg border p-4 text-right transition-colors"
+              style={{
+                borderColor: selected
+                  ? REPORT_DESIGN_TOKENS.colors.primary
+                  : REPORT_DESIGN_TOKENS.colors.border,
+                backgroundColor: selected
+                  ? REPORT_DESIGN_TOKENS.colors.background
+                  : REPORT_DESIGN_TOKENS.colors.white,
+              }}
+            >
+              <span className="flex items-center justify-between gap-2">
+                <span className="font-medium">{modeOption.label}</span>
+                {modeOption.recommended && <Badge aria-hidden="true">مقترح</Badge>}
+              </span>
+              <span className="mt-1 block text-xs text-muted-foreground">
+                {modeOption.description}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </fieldset>
+  );
+}
 
 const REPORT_MODE_LABELS = Object.fromEntries(
   REPORT_MODE_OPTIONS.map((option) => [option.value, option.label])
@@ -897,43 +995,13 @@ export function ReportsCenter() {
                 <Separator />
 
                 {selectedType === "EXECUTIVE_SUMMARY" && (
-                  <fieldset className="space-y-3">
-                    <legend className="text-sm font-semibold">نمط التقرير</legend>
-                    <div className="grid gap-3 md:grid-cols-2">
-                      {REPORT_MODE_OPTIONS.map((modeOption) => {
-                        const selected = options.reportMode === modeOption.value;
-                        return (
-                          <button
-                            key={modeOption.value}
-                            type="button"
-                            role="radio"
-                            aria-checked={selected}
-                            onClick={() => setOptions((previous) => ({
-                              ...previous,
-                              reportMode: modeOption.value,
-                            }))}
-                            className="rounded-lg border p-4 text-right transition-colors"
-                            style={{
-                              borderColor: selected
-                                ? REPORT_DESIGN_TOKENS.colors.primary
-                                : REPORT_DESIGN_TOKENS.colors.border,
-                              backgroundColor: selected
-                                ? REPORT_DESIGN_TOKENS.colors.background
-                                : REPORT_DESIGN_TOKENS.colors.white,
-                            }}
-                          >
-                            <span className="flex items-center justify-between gap-2">
-                              <span className="font-medium">{modeOption.label}</span>
-                              {modeOption.recommended && <Badge>مقترح</Badge>}
-                            </span>
-                            <span className="mt-1 block text-xs text-muted-foreground">
-                              {modeOption.description}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </fieldset>
+                  <ReportModeRadioGroup
+                    value={options.reportMode}
+                    onChange={(reportMode) => setOptions((previous) => ({
+                      ...previous,
+                      reportMode,
+                    }))}
+                  />
                 )}
 
                 {selectedType === "EXECUTIVE_SUMMARY" && <Separator />}
@@ -1402,21 +1470,27 @@ function isBriefReportMode(mode: ReportMode | undefined): boolean {
 }
 
 function executivePreviewPages(data: ReportData): readonly ReportSection[][] {
-  const first = data.sections.filter((section) => section.kind === "kpi" || section.kind === "text");
-  const second = data.sections.filter((section) => {
-    const searchable = `${section.id} ${section.title}`;
-    return section.kind !== "kpi" && section.kind !== "text"
-      && /(region|department|comparison|منطق|إدار|مقارن)/i.test(searchable);
+  const pages: Array<Array<{ section: ReportSection; sourceOrder: number }>> = [[], [], []];
+  data.sections.forEach((section, sourceOrder) => {
+    const page = section.previewPage ?? 3;
+    if (section.previewPage === undefined && process.env.NODE_ENV === "development") {
+      console.warn("Executive brief preview section has no page metadata", { sectionId: section.id });
+    }
+    pages[page - 1].push({ section, sourceOrder });
   });
-  const assigned = new Set([...first, ...second].map((section) => section.id));
-  const third = data.sections.filter((section) => !assigned.has(section.id));
-  return [first, second, third];
+  return pages.map((entries) => entries
+    .sort((left, right) => {
+      const orderDifference = (left.section.previewOrder ?? Number.MAX_SAFE_INTEGER)
+        - (right.section.previewOrder ?? Number.MAX_SAFE_INTEGER);
+      return orderDifference || left.sourceOrder - right.sourceOrder;
+    })
+    .map(({ section }) => section));
 }
 
 function ExecutiveReportPreview({ data }: Readonly<{ data: ReportData }>) {
   const pages = executivePreviewPages(data);
   const digital = data.reportMode === "DIGITAL_EXECUTIVE_BRIEF";
-  const pageTitles = ["النظرة التنفيذية", "المقارنة والأداء", "التصنيفات والاستنتاجات"];
+  const pageTitles = EXECUTIVE_BRIEF_PAGE_PLAN.map((page) => page.title);
   return (
     <Card id="report-preview">
       <CardHeader className="border-b bg-muted/30">
@@ -1441,12 +1515,12 @@ function ExecutiveReportPreview({ data }: Readonly<{ data: ReportData }>) {
               <span className="text-xs text-muted-foreground">صفحة {pageIndex + 1} من 3</span>
               <h3 className="text-base font-semibold">{pageTitles[pageIndex]}</h3>
             </header>
-            <div className="min-h-0 flex-1 space-y-3 overflow-hidden text-right" dir="rtl">
+            <div className="min-h-0 flex-1 space-y-3 overflow-auto text-right" dir="rtl">
               {sections.length === 0 ? (
                 <div className="flex h-full items-center justify-center rounded-lg bg-muted/20 text-sm text-muted-foreground">
                   لا توجد بيانات كافية لهذا القسم.
                 </div>
-              ) : sections.slice(0, 3).map((section) => (
+              ) : sections.map((section) => (
                 <section key={section.id} className="space-y-1">
                   <h4 className="text-sm font-semibold">{section.title}</h4>
                   <SectionBody section={section} />
