@@ -49,6 +49,22 @@ type DetailAggregate = {
   variants: Map<string, number>;
 };
 
+type ClassificationKeywordProjection = {
+  id: string;
+  keywords: Prisma.JsonValue | null;
+};
+
+type ImportRowProjection = {
+  normalizedData: unknown;
+  rawData: unknown;
+};
+
+type ImportedDetailAggregation = {
+  aggregates: Map<string, DetailAggregate>;
+  rowsScanned: number;
+  rowsWithSourceDetail: number;
+};
+
 const DETAIL_ROW_PAGE_SIZE = 500;
 const NORMALIZED_DETAIL_HEADERS = new Set([
   normalizeColumnHeader("sourceDetail"),
@@ -125,26 +141,9 @@ function matchesLinkStatus(
   return true;
 }
 
-export async function listImportedDetailValues(input: {
-  search?: string;
-  classificationId?: string;
-  linkStatus?: ImportedDetailLinkStatus;
-  page?: number;
-  pageSize?: number;
-} = {}, client: ImportedDetailValuesClient = db): Promise<ImportedDetailValuesResult> {
-  const page = positiveInteger(input.page, 1);
-  const pageSize = Math.min(100, positiveInteger(input.pageSize, 50));
-  const search = normalizeImportedDetailValue(input.search ?? "");
-  const linkStatus = input.linkStatus ?? "ALL";
-
-  const [confirmedBatchCount, classifications] = await Promise.all([
-    client.importBatch.count({ where: { status: ImportBatchStatus.CONFIRMED } }),
-    client.classification.findMany({
-      where: { isActive: true, isDeleted: false },
-      select: { id: true, keywords: true },
-    }),
-  ]);
-
+function buildLinkedClassificationsByValue(
+  classifications: readonly ClassificationKeywordProjection[]
+): Map<string, Set<string>> {
   const linkedByValue = new Map<string, Set<string>>();
   for (const classification of classifications) {
     for (const keyword of parseKeywords(classification.keywords)) {
@@ -155,7 +154,35 @@ export async function listImportedDetailValues(input: {
       linkedByValue.set(normalized, linkedIds);
     }
   }
+  return linkedByValue;
+}
 
+function appendDetailRows(
+  rows: readonly ImportRowProjection[],
+  aggregates: Map<string, DetailAggregate>
+): number {
+  let rowsWithSourceDetail = 0;
+  for (const row of rows) {
+    const displayValue = extractSourceDetail(row.normalizedData, row.rawData);
+    if (!displayValue) continue;
+    const normalizedValue = normalizeImportedDetailValue(displayValue);
+    if (!normalizedValue) continue;
+    rowsWithSourceDetail += 1;
+
+    const aggregate = aggregates.get(normalizedValue) ?? {
+      occurrences: 0,
+      variants: new Map<string, number>(),
+    };
+    aggregate.occurrences += 1;
+    aggregate.variants.set(displayValue, (aggregate.variants.get(displayValue) ?? 0) + 1);
+    aggregates.set(normalizedValue, aggregate);
+  }
+  return rowsWithSourceDetail;
+}
+
+async function aggregateImportedDetails(
+  client: ImportedDetailValuesClient
+): Promise<ImportedDetailAggregation> {
   const aggregates = new Map<string, DetailAggregate>();
   let rowsScanned = 0;
   let rowsWithSourceDetail = 0;
@@ -182,44 +209,74 @@ export async function listImportedDetailValues(input: {
       take: DETAIL_ROW_PAGE_SIZE,
     });
     rowsScanned += rows.length;
-    for (const row of rows) {
-      const displayValue = extractSourceDetail(row.normalizedData, row.rawData);
-      if (!displayValue) continue;
-      const normalizedValue = normalizeImportedDetailValue(displayValue);
-      if (!normalizedValue) continue;
-      rowsWithSourceDetail += 1;
-
-      const aggregate = aggregates.get(normalizedValue) ?? {
-        occurrences: 0,
-        variants: new Map<string, number>(),
-      };
-      aggregate.occurrences += 1;
-      aggregate.variants.set(displayValue, (aggregate.variants.get(displayValue) ?? 0) + 1);
-      aggregates.set(normalizedValue, aggregate);
-    }
+    rowsWithSourceDetail += appendDetailRows(rows, aggregates);
     if (rows.length < DETAIL_ROW_PAGE_SIZE) break;
     skip += rows.length;
   }
+  return { aggregates, rowsScanned, rowsWithSourceDetail };
+}
 
-  const availableItems = [...aggregates.entries()]
-    .map(([normalizedValue, aggregate]): ImportedDetailValue => {
-      const linkedIds = linkedByValue.get(normalizedValue) ?? new Set<string>();
-      const linkedToCurrent = Boolean(input.classificationId && linkedIds.has(input.classificationId));
-      return {
-        normalizedValue,
-        displayValue: bestDisplayValue(aggregate.variants),
-        occurrences: aggregate.occurrences,
-        linkedKeywordsCount: linkedIds.size,
-        alreadyLinkedToCurrentClassification: linkedToCurrent,
-        linkedToOtherClassification: [...linkedIds].some((id) => id !== input.classificationId),
-      };
-    });
-  const allItems = availableItems
+function buildImportedDetailValues(
+  aggregates: ReadonlyMap<string, DetailAggregate>,
+  linkedByValue: ReadonlyMap<string, Set<string>>,
+  classificationId: string | undefined
+): ImportedDetailValue[] {
+  return [...aggregates.entries()].map(([normalizedValue, aggregate]) => {
+    const linkedIds = linkedByValue.get(normalizedValue) ?? new Set<string>();
+    const linkedToCurrent = Boolean(classificationId && linkedIds.has(classificationId));
+    return {
+      normalizedValue,
+      displayValue: bestDisplayValue(aggregate.variants),
+      occurrences: aggregate.occurrences,
+      linkedKeywordsCount: linkedIds.size,
+      alreadyLinkedToCurrentClassification: linkedToCurrent,
+      linkedToOtherClassification: [...linkedIds].some((id) => id !== classificationId),
+    };
+  });
+}
+
+function filterAndSortImportedDetailValues(
+  items: readonly ImportedDetailValue[],
+  search: string,
+  linkStatus: ImportedDetailLinkStatus
+): ImportedDetailValue[] {
+  return items
     .filter((item) => !search || item.normalizedValue.includes(search))
     .filter((item) => matchesLinkStatus(item, linkStatus))
     .sort((left, right) =>
       right.occurrences - left.occurrences || left.displayValue.localeCompare(right.displayValue, "ar")
     );
+}
+
+export async function listImportedDetailValues(input: {
+  search?: string;
+  classificationId?: string;
+  linkStatus?: ImportedDetailLinkStatus;
+  page?: number;
+  pageSize?: number;
+} = {}, client: ImportedDetailValuesClient = db): Promise<ImportedDetailValuesResult> {
+  const page = positiveInteger(input.page, 1);
+  const pageSize = Math.min(100, positiveInteger(input.pageSize, 50));
+  const search = normalizeImportedDetailValue(input.search ?? "");
+  const linkStatus = input.linkStatus ?? "ALL";
+
+  const [confirmedBatchCount, classifications] = await Promise.all([
+    client.importBatch.count({ where: { status: ImportBatchStatus.CONFIRMED } }),
+    client.classification.findMany({
+      where: { isActive: true, isDeleted: false },
+      select: { id: true, keywords: true },
+    }),
+  ]);
+
+  const linkedByValue = buildLinkedClassificationsByValue(classifications);
+  const { aggregates, rowsScanned, rowsWithSourceDetail } =
+    await aggregateImportedDetails(client);
+  const availableItems = buildImportedDetailValues(
+    aggregates,
+    linkedByValue,
+    input.classificationId
+  );
+  const allItems = filterAndSortImportedDetailValues(availableItems, search, linkStatus);
 
   const diagnostics: ImportedDetailDiagnostics = {
     confirmedBatches: confirmedBatchCount,
