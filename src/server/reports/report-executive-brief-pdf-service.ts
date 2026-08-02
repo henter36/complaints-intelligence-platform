@@ -23,6 +23,7 @@ import type { ExecutiveBriefData, ReportData } from "./report-data-service";
 import { renderLineChartPng } from "./report-chart-service";
 import { drawComplaintsReportCover } from "./report-cover";
 import { getComparisonModeDescription } from "@/lib/reports/comparison-mode-labels";
+import { preparePdfText } from "./arabic-pdf-text";
 
 const ASSETS_DIR = path.join(process.cwd(), "src/server/reports/assets");
 const FONT_REGULAR_PATH = path.join(ASSETS_DIR, "fonts/Amiri-Regular.ttf");
@@ -257,13 +258,14 @@ function drawPageHeader(
     align: "right" as const,
     wordSpacing: ARABIC_WORD_SPACING,
   };
+  const preparedPageTitle = preparePdfText(pageTitle);
   doc.font("Bold").fontSize(titleSize).fillColor(COLORS.primary).text(
-    pageTitle,
+    preparedPageTitle,
     margin,
     titleY,
     pageTitleOptions
   );
-  const titleH = doc.heightOfString(pageTitle, pageTitleOptions);
+  const titleH = doc.heightOfString(preparedPageTitle, pageTitleOptions);
 
   // Gold separator with diamond below title
   const sepY = titleY + titleH + 14;
@@ -285,7 +287,7 @@ function drawSectionTitle(
 ): number {
   const sz = fontSize(layout, REPORT_DESIGN_TOKENS.fontSize.sectionTitle, 13);
   doc.font("Bold").fontSize(sz).fillColor(COLORS.primary);
-  doc.text(title, x, y, { width, align: "right", wordSpacing: ARABIC_WORD_SPACING });
+  doc.text(preparePdfText(title), x, y, { width, align: "right", wordSpacing: ARABIC_WORD_SPACING });
   return y + sz + 10;
 }
 
@@ -345,7 +347,7 @@ function drawKpiCard(
     gaugeWidth = layout.compact ? 60 : 86;
   }
   doc.font("Body").fontSize(fontSize(layout, 13, 10)).fillColor(COLORS.neutral);
-  doc.text(card.label, x + padding + gaugeWidth, y + padding, {
+  doc.text(preparePdfText(card.label), x + padding + gaugeWidth, y + padding, {
     width: width - padding * 2 - gaugeWidth,
     align: "right",
     wordSpacing: ARABIC_WORD_SPACING,
@@ -353,7 +355,7 @@ function drawKpiCard(
     ellipsis: true,
   });
   doc.font("Bold").fontSize(fontSize(layout, REPORT_DESIGN_TOKENS.fontSize.kpiValue, 18)).fillColor(COLORS.primary);
-  doc.text(formatKpiValue(card), x + padding + gaugeWidth, y + fontSize(layout, 38, 27), {
+  doc.text(preparePdfText(formatKpiValue(card)), x + padding + gaugeWidth, y + fontSize(layout, 38, 27), {
     width: width - padding * 2 - gaugeWidth,
     align: "right",
     height: fontSize(layout, 32, 22),
@@ -369,7 +371,7 @@ function drawKpiCard(
     const previous = card.previousValue === null
       ? ""
       : ` | السابق ${formatReportNumber(card.previousValue)}`;
-    doc.text(`${formatKpiDelta(card.difference, card.changeRate)}${previous}`, x + padding + 20, deltaY, {
+    doc.text(preparePdfText(`${formatKpiDelta(card.difference, card.changeRate)}${previous}`), x + padding + 20, deltaY, {
       width: width - padding * 2 - 20,
       align: "right",
       lineBreak: false,
@@ -487,7 +489,7 @@ function drawPage2Notes(context: ExecutiveBriefRenderContext, startY: number): v
     .fillAndStroke(COLORS.background, COLORS.border);
   doc.font("Body").fontSize(REPORT_DESIGN_TOKENS.fontSize.body).fillColor(COLORS.text);
   notes.forEach((note, index) => {
-    doc.text(`• ${note}`, layout.margin + 12, titleY + 9 + index * noteLineH, {
+    doc.text(preparePdfText(`• ${note}`), layout.margin + 12, titleY + 9 + index * noteLineH, {
       width: layout.contentWidth - 24,
       height: noteLineH,
       align: "right",
@@ -587,7 +589,7 @@ function drawRtlTable<Row>(options: DrawTableOptions<Row>): number {
   }
 
   columns.forEach((column, index) => {
-    doc.text(column.label, offsets[index] + 4, y + 5, {
+    doc.text(preparePdfText(column.label), offsets[index] + 4, y + 5, {
       width: widths[index] - 8,
       height: headerHeight - 7,
       align: "right",
@@ -615,7 +617,7 @@ function drawRtlTable<Row>(options: DrawTableOptions<Row>): number {
         );
         return;
       }
-      doc.text(formatCell(row, column.key), offsets[columnIndex] + 4, rowY + 5, {
+      doc.text(preparePdfText(formatCell(row, column.key)), offsets[columnIndex] + 4, rowY + 5, {
         width: widths[columnIndex] - 8,
         height: rowHeight - 6,
         align: "right",
@@ -686,7 +688,7 @@ function drawAllRegionCards(
 
     // Region name in header (white text) — use short name (strip prefix)
     doc.font("Bold").fontSize(12).fillColor(COLORS.white).text(
-      stripRegionPrefix(region.regionName),
+      preparePdfText(stripRegionPrefix(region.regionName)),
       x + 8,
       y + (headerH - 13) / 2,
       {
@@ -716,7 +718,7 @@ function drawAllRegionCards(
         doc.lineWidth(1);
       }
       doc.font("Body").fontSize(11).fillColor(COLORS.neutral).text(
-        metric.label,
+        preparePdfText(metric.label),
         mx + 2,
         bodyY + 8,
         { width: metricW - 4, align: "center", wordSpacing: ARABIC_WORD_SPACING }
@@ -782,7 +784,7 @@ async function renderPage3(context: ExecutiveBriefRenderContext): Promise<void> 
     doc.roundedRect(layout.margin, y, layout.contentWidth, fontSize(layout, 54, 38), REPORT_DESIGN_TOKENS.card.radius)
       .fillAndStroke(COLORS.background, COLORS.border);
     doc.font("Body").fontSize(fontSize(layout, 12, 9)).fillColor(COLORS.neutral);
-    doc.text("لا تتوفر فترة مرجعية للمقارنة. يعرض الجدول أداء الفترة الحالية فقط.", layout.margin + 12, y + 16, {
+    doc.text(preparePdfText("لا تتوفر فترة مرجعية للمقارنة. يعرض الجدول أداء الفترة الحالية فقط."), layout.margin + 12, y + 16, {
       width: layout.contentWidth - 24,
       align: "center",
     });
@@ -817,7 +819,7 @@ async function renderPage3(context: ExecutiveBriefRenderContext): Promise<void> 
   y += 14;
   if (tableRows.length === 0) {
     doc.font("Body").fontSize(fontSize(layout, 11, 9)).fillColor(COLORS.neutral);
-    doc.text("لا توجد بيانات مناطق ضمن الفترة المحددة.", layout.margin, y, {
+    doc.text(preparePdfText("لا توجد بيانات مناطق ضمن الفترة المحددة."), layout.margin, y, {
       width: layout.contentWidth,
       align: "center",
     });
@@ -917,7 +919,7 @@ function drawBulletBox(doc: PDFKit.PDFDocument, options: DrawBulletBoxOptions): 
 
   // Header title (white)
   doc.font("Bold").fontSize(fontSize(layout, 12, 9)).fillColor(COLORS.white).text(
-    title,
+    preparePdfText(title),
     x + 8,
     y + (headerH - fontSize(layout, 12, 9)) / 2,
     { width: width - 16, align: "right", wordSpacing: ARABIC_WORD_SPACING, lineBreak: false }
@@ -932,7 +934,7 @@ function drawBulletBox(doc: PDFKit.PDFDocument, options: DrawBulletBoxOptions): 
   const maxLines = Math.max(1, Math.floor(bodyH / lineH));
   const displayPoints = points.slice(0, maxLines);
   displayPoints.forEach((point, idx) => {
-    doc.text(`• ${point}`, x + 10, bodyY + idx * lineH, {
+    doc.text(preparePdfText(`• ${point}`), x + 10, bodyY + idx * lineH, {
       width: width - 20,
       height: lineH - 2,
       align: "right",
@@ -944,7 +946,7 @@ function drawBulletBox(doc: PDFKit.PDFDocument, options: DrawBulletBoxOptions): 
 
   if (displayPoints.length === 0) {
     doc.font("Body").fontSize(bodyFontSize).fillColor(COLORS.neutral).text(
-      "لا توجد بيانات.",
+      preparePdfText("لا توجد بيانات."),
       x + 10,
       bodyY,
       { width: width - 20, align: "center" }
@@ -1023,7 +1025,7 @@ function renderPage4(context: ExecutiveBriefRenderContext): void {
     doc.roundedRect(layout.margin, y, layout.contentWidth, 48, REPORT_DESIGN_TOKENS.card.radius)
       .fillAndStroke(COLORS.background, COLORS.border);
     doc.font("Body").fontSize(11).fillColor(COLORS.neutral).text(
-      "لا توجد ارتفاعات إدارية وتصنيفية مؤثرة في هذه الفترة.",
+      preparePdfText("لا توجد ارتفاعات إدارية وتصنيفية مؤثرة في هذه الفترة."),
       layout.margin + 12, y + 16,
       { width: layout.contentWidth - 24, align: "center" }
     );
@@ -1121,7 +1123,7 @@ function drawBriefFooters(
     doc.page.margins.bottom = 0;
     doc.font("Body").fontSize(REPORT_DESIGN_TOKENS.fontSize.footer).fillColor(COLORS.neutral);
     doc.text(
-      `صفحة ${formatReportNumber(pageNumber)} من ${formatReportNumber(range.count)}`,
+      preparePdfText(`صفحة ${formatReportNumber(pageNumber)} من ${formatReportNumber(range.count)}`),
       layout.margin,
       layout.pageSize[1] - layout.margin - 12,
       { width: layout.contentWidth, align: "center", lineBreak: false }

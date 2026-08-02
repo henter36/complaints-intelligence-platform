@@ -9,6 +9,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { drawComplaintsReportCover } from "./report-cover";
 import { REPORT_DESIGN_TOKENS } from "@/lib/reports/design-tokens";
+import { preparePdfText } from "./arabic-pdf-text";
 
 type PdfDocumentInstance = InstanceType<typeof PDFDocument>;
 
@@ -99,7 +100,7 @@ describe("drawComplaintsReportCover — separator position", () => {
     // form is not the primary overload TypeScript infers for the spy, so call[2] would be
     // flagged as out-of-bounds on the inferred 2-element tuple type without the cast.
     const allTextCalls = textSpy.mock.calls as unknown[][];
-    const titleCall = allTextCalls.find((c) => String(c[0]) === "تقرير الشكاوى");
+    const titleCall = allTextCalls.find((c) => String(c[0]) === preparePdfText("تقرير الشكاوى"));
     expect(titleCall).toBeDefined();
     const titleY = titleCall![2] as number; // third argument is y
 
@@ -132,7 +133,7 @@ describe("drawComplaintsReportCover — separator position", () => {
 
     // Same unknown[][] cast as the short-title test — PDFKit text() overload resolution issue.
     const allTextCallsLong = textSpy.mock.calls as unknown[][];
-    const titleCall = allTextCallsLong.find((c) => String(c[0]) === longTitle);
+    const titleCall = allTextCallsLong.find((c) => String(c[0]) === preparePdfText(longTitle));
     expect(titleCall).toBeDefined();
     const titleY = titleCall![2] as number;
 
@@ -162,8 +163,8 @@ describe("drawComplaintsReportCover — separator position", () => {
 
     // Same unknown[][] cast — PDFKit text() overload resolution issue.
     const allTextCallsPeriod = textSpy.mock.calls as unknown[][];
-    const titleCall = allTextCallsPeriod.find((c) => String(c[0]) === "تقرير الشكاوى");
-    const periodCall = allTextCallsPeriod.find((c) => String(c[0]).startsWith("الفترة من"));
+    const titleCall = allTextCallsPeriod.find((c) => String(c[0]) === preparePdfText("تقرير الشكاوى"));
+    const periodCall = allTextCallsPeriod.find((c) => String(c[0]).includes("الفترة") && String(c[0]).includes("2025-08-01"));
     expect(titleCall).toBeDefined();
     expect(periodCall).toBeDefined();
 
@@ -194,12 +195,12 @@ describe("drawComplaintsReportCover — separator position", () => {
 
     drawCover(doc, "تقرير الشكاوى");
 
-    const titleCall = textSpy.mock.calls.find((c) => String(c[0]) === "تقرير الشكاوى");
+    const titleCall = textSpy.mock.calls.find((c) => String(c[0]) === preparePdfText("تقرير الشكاوى"));
     expect(titleCall).toBeDefined();
 
-    // heightOfString must have been called for the title text
+    // heightOfString must have been called for the (prepared) title text
     const heightCallsForTitle = heightSpy.mock.calls.filter(
-      (c) => String(c[0]) === "تقرير الشكاوى"
+      (c) => String(c[0]) === preparePdfText("تقرير الشكاوى")
     );
     expect(heightCallsForTitle.length).toBeGreaterThanOrEqual(1);
 
