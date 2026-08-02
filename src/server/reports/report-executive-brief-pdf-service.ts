@@ -763,7 +763,7 @@ function drawAttentionCards(
   y: number,
   width: number
 ): number {
-  const { doc, data, layout } = context;
+  const { doc, layout } = context;
   const height = layout.compact ? 34 : 45;
   const gap = layout.compact ? 6 : 8;
   items.forEach((item, index) => {
@@ -857,7 +857,7 @@ function drawMethodology(context: ExecutiveBriefRenderContext): void {
 }
 
 function renderPage3(context: ExecutiveBriefRenderContext): void {
-  const { doc, brief, data, layout } = context;
+  const { doc, brief, layout } = context;
   let y = drawPageHeader(context, briefPageTitle(3));
   const gap = layout.compact ? 10 : 16;
   const donutWidth = layout.contentWidth * 0.28;

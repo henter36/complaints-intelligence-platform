@@ -1478,13 +1478,15 @@ function executivePreviewPages(data: ReportData): readonly ReportSection[][] {
     }
     pages[page - 1].push({ section, sourceOrder });
   });
-  return pages.map((entries) => entries
-    .sort((left, right) => {
+  return pages.map((entries) => {
+    const sortedEntries = [...entries];
+    sortedEntries.sort((left, right) => {
       const orderDifference = (left.section.previewOrder ?? Number.MAX_SAFE_INTEGER)
         - (right.section.previewOrder ?? Number.MAX_SAFE_INTEGER);
       return orderDifference || left.sourceOrder - right.sourceOrder;
-    })
-    .map(({ section }) => section));
+    });
+    return sortedEntries.map(({ section }) => section);
+  });
 }
 
 function ExecutiveReportPreview({ data }: Readonly<{ data: ReportData }>) {
