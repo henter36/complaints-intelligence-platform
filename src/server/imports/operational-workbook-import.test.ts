@@ -320,6 +320,36 @@ describe("privacy helpers", () => {
 });
 
 describe("operational workbook parsing and normalization", () => {
+  it("keeps the operational detail fixture through mapping, normalization, and validation", () => {
+    const rawRow = {
+      rowNumber: 2,
+      values: {
+        "رقم الشكوى": "1001",
+        "تفصيل": "طلب نقل",
+        "الحالة": "الإرسال إلى السجن",
+        "حالة الاجراء": "جديد",
+      },
+    };
+    const { mapping } = matchComplaintColumns(Object.keys(rawRow.values));
+    const normalized = normalizeImportRow(rawRow, mapping);
+    const validation = validateNormalizedComplaintRow(normalized.normalized, {
+      categories: [],
+      classifications: [],
+    });
+
+    expect(mapping["تفصيل"]).toBe("sourceDetail");
+    expect(rawRow.values["تفصيل"]).toBe("طلب نقل");
+    expect(normalized.normalized).toMatchObject({
+      externalId: "1001",
+      sourceDetail: "طلب نقل",
+      sourceStatus: "الإرسال إلى السجن",
+      sourceActionStatus: "جديد",
+      status: ComplaintStatus.IN_PROGRESS,
+    });
+    expect(validation.errors.some((message) => message.field === "sourceDetail")).toBe(false);
+    expect(normalized.normalized.sourceDetail).toBe("طلب نقل");
+  });
+
   it("parses operational headers and Excel serial dates through the production parser", async () => {
     const parsed = await parseXlsxWorkbook(await operationalWorkbookBuffer({}));
     expect(parsed.headers).toEqual([...OPERATIONAL_HEADERS]);

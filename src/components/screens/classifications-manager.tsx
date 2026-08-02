@@ -134,6 +134,8 @@ type ImportedDetailItem = {
   linkedToOtherClassification: boolean;
 };
 
+const IMPORTED_VALUES_LOAD_ERROR_MESSAGE = "تعذر تحميل القيم المستوردة.";
+
 export function ImportedDetailPicker({
   classificationId,
   onImported,
@@ -148,12 +150,22 @@ export function ImportedDetailPicker({
   const [linkStatus, setLinkStatus] = useState("ALL");
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(false);
+  const [availableTotal, setAvailableTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [hasLoaded, setHasLoaded] = useState(false);
   const [adding, setAdding] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const valuesRequestIdRef = useRef(0);
+  const valuesAbortControllerRef = useRef<AbortController | null>(null);
   const pageSize = 20;
 
-  const loadValues = useCallback(async (signal?: AbortSignal) => {
+  const loadValues = useCallback(async () => {
+    valuesAbortControllerRef.current?.abort();
+    const controller = new AbortController();
+    valuesAbortControllerRef.current = controller;
+    const requestId = ++valuesRequestIdRef.current;
+    const isLatestRequest = () => valuesRequestIdRef.current === requestId;
+
     setLoading(true);
     setLoadError(null);
     try {
@@ -164,23 +176,34 @@ export function ImportedDetailPicker({
         pageSize: String(pageSize),
       });
       if (search.trim()) params.set("search", search.trim());
-      const response = await fetch(`/api/classifications/imported-detail-values?${params}`, { signal });
+      const response = await fetch(`/api/classifications/imported-detail-values?${params}`, {
+        signal: controller.signal,
+      });
       const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error?.message || "تعذر تحميل القيم المستوردة");
+      if (!response.ok) throw new Error(IMPORTED_VALUES_LOAD_ERROR_MESSAGE);
+      if (!isLatestRequest()) return;
       setItems(payload.items);
       setTotal(payload.total);
+      setAvailableTotal(payload.availableTotal ?? payload.total);
+      setHasLoaded(true);
     } catch (error) {
-      if (isAbortError(error)) return;
-      setLoadError(error instanceof Error ? error.message : "تعذر تحميل القيم المستوردة");
+      if (isAbortError(error) || !isLatestRequest()) return;
+      setLoadError(IMPORTED_VALUES_LOAD_ERROR_MESSAGE);
+      setHasLoaded(true);
     } finally {
-      if (!signal?.aborted) setLoading(false);
+      if (isLatestRequest()) {
+        setLoading(false);
+        valuesAbortControllerRef.current = null;
+      }
     }
   }, [classificationId, linkStatus, page, search]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    void Promise.resolve().then(() => loadValues(controller.signal));
-    return () => controller.abort();
+    void Promise.resolve().then(() => loadValues());
+    return () => {
+      valuesAbortControllerRef.current?.abort();
+      valuesRequestIdRef.current += 1;
+    };
   }, [loadValues]);
 
   const selectableItems = items.filter((item) => !item.alreadyLinkedToCurrentClassification);
@@ -266,10 +289,20 @@ export function ImportedDetailPicker({
         </label>
       </div>
       {loading && <div className="space-y-2"><Skeleton className="h-10" /><Skeleton className="h-10" /></div>}
-      {loadError && <p className="text-sm text-destructive">{loadError}</p>}
-      {!loading && !loadError && items.length === 0 && (
+      {!loading && loadError && (
+        <div className="space-y-3 rounded-md border border-destructive/30 p-4" role="alert">
+          <p className="text-sm text-destructive">{loadError}</p>
+          <Button type="button" variant="outline" size="sm" onClick={() => void loadValues()}>
+            <RefreshCw className="h-4 w-4" />
+            إعادة المحاولة
+          </Button>
+        </div>
+      )}
+      {hasLoaded && !loading && !loadError && items.length === 0 && (
         <p className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
-          لا توجد قيم مستوردة مطابقة.
+          {availableTotal === 0 && !search.trim() && linkStatus === "ALL"
+            ? "لا توجد بيانات مستوردة من حقل «تفصيل»."
+            : "لا توجد قيم مطابقة للبحث أو التصفية الحالية."}
         </p>
       )}
       {!loading && items.length > 0 && (
