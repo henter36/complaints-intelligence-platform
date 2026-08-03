@@ -4,7 +4,7 @@ import PDFDocument from "pdfkit";
 import type { ReportType } from "@prisma/client";
 import type { ExecutiveBriefV2Data, ReportData } from "./report-data-service";
 import { isExecutiveBriefV2Data } from "./report-data-service";
-import { renderExecutiveBriefV2Pdf } from "./report-executive-brief-v2-pdf-service";
+import { renderExecutiveBriefV2Pdf, formatTableValue } from "./report-executive-brief-v2-pdf-service";
 import { REPORT_DESIGN_TOKENS } from "@/lib/reports/design-tokens";
 
 const DANGER = REPORT_DESIGN_TOKENS.colors.danger;
@@ -284,5 +284,47 @@ describe("renderExecutiveBriefV2Pdf", () => {
     } finally {
       textSpy.mockRestore();
     }
+  });
+
+  it("renders table headers, regions, classifications, departments, and box titles", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      const result = await renderExecutiveBriefV2Pdf(makeV2Report());
+      expect(countPageObjects(result.buffer)).toBe(4);
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      // preparePdfText reorders RTL tokens; assert stable Arabic substrings that still appear.
+      for (const token of [
+        "المنطقة",
+        "الحالية",
+        "السابقة",
+        "الفرق",
+        "تغير",
+        "موضوع",
+        "التصنيف",
+        "الإدارة",
+        "الاستنتاجات",
+        "ملاحظات",
+        "استنتاج",
+        "المتابعة",
+        "نقل",
+      ]) {
+        expect(joined).toContain(token);
+      }
+      expect(joined).not.toContain("[object Object]");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+});
+
+describe("formatTableValue", () => {
+  it("formats numbers and strings while blocking object leak", () => {
+    expect(formatTableValue(12)).toBe("12");
+    expect(formatTableValue("نقل")).toBe("نقل");
+    expect(formatTableValue(null)).toBe("—");
+    expect(formatTableValue(undefined)).toBe("—");
+    expect(formatTableValue({ nested: true })).toBe("—");
+    expect(formatTableValue([1, 2])).toBe("—");
+    expect(formatTableValue({ nested: true })).not.toContain("object Object");
   });
 });

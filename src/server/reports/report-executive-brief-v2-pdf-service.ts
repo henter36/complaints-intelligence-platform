@@ -25,6 +25,7 @@ import {
 import type {
   ExecutiveBriefKpiCard,
   RegionReferenceRow,
+  ClassificationBriefRow,
   ExecutiveEntityRow,
 } from "@/lib/reports/report-contract";
 import type { ExecutiveBriefV2Data, ReportData } from "./report-data-service";
@@ -299,28 +300,53 @@ function drawPageHeader(ctx: V2Context, title: string): number {
 
 type ColDef = { key: string; label: string; weight: number };
 
-function drawTable<Row extends object>(
-  doc: PDFKit.PDFDocument,
-  rows: readonly Row[],
-  cols: readonly ColDef[],
-  x: number,
-  y: number,
-  width: number,
-  rowH: number,
-  formatCell: (row: Row, key: string) => string,
-  maxRows = rows.length
-): number {
-  const totalWeight = cols.reduce((s, c) => s + c.weight, 0);
-  const widths = cols.map((c) => width * c.weight / totalWeight);
+/** Safe cell formatter: never emit [object Object] for unsupported types. */
+export function formatTableValue(value: unknown): string {
+  if (typeof value === "number") {
+    return formatReportNumber(value);
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  return "—";
+}
+
+type DrawTableOptions<Row extends object> = {
+  doc: PDFKit.PDFDocument;
+  rows: readonly Row[];
+  columns: readonly ColDef[];
+  x: number;
+  y: number;
+  width: number;
+  rowHeight: number;
+  formatCell: (row: Row, key: string) => string;
+  maxRows?: number;
+};
+
+function drawTable<Row extends object>(options: DrawTableOptions<Row>): number {
+  const {
+    doc,
+    rows,
+    columns,
+    x,
+    y,
+    width,
+    rowHeight,
+    formatCell,
+    maxRows = rows.length,
+  } = options;
+
+  const totalWeight = columns.reduce((s, c) => s + c.weight, 0);
+  const widths = columns.map((c) => width * c.weight / totalWeight);
   const offsets: number[] = [];
   let cur = x + width;
   widths.forEach((w) => { cur -= w; offsets.push(cur); });
 
-  const hdrH = rowH + 2;
+  const hdrH = rowHeight + 2;
   const r = REPORT_DESIGN_TOKENS.card.radius;
   doc.roundedRect(x, y, width, hdrH, r).fill(COLORS.primary);
   doc.font("Bold").fontSize(REPORT_DESIGN_TOKENS.fontSize.tableHeader).fillColor(COLORS.white);
-  cols.forEach((col, i) => {
+  columns.forEach((col, i) => {
     doc.text(preparePdfText(col.label), offsets[i] + 4, y + 5, {
       width: widths[i] - 8, height: hdrH - 7, align: "right", ellipsis: true, wordSpacing: WORD_SPACING,
     });
@@ -328,10 +354,10 @@ function drawTable<Row extends object>(
 
   let rowY = y + hdrH;
   rows.slice(0, maxRows).forEach((row, ri) => {
-    if (ri % 2 === 1) doc.rect(x, rowY, width, rowH).fill(COLORS.tableRowAlternate);
-    doc.moveTo(x, rowY + rowH).lineTo(x + width, rowY + rowH).strokeColor(COLORS.border).stroke();
+    if (ri % 2 === 1) doc.rect(x, rowY, width, rowHeight).fill(COLORS.tableRowAlternate);
+    doc.moveTo(x, rowY + rowHeight).lineTo(x + width, rowY + rowHeight).strokeColor(COLORS.border).stroke();
     doc.font("Body").fontSize(REPORT_DESIGN_TOKENS.fontSize.table).fillColor(COLORS.primary);
-    cols.forEach((col, i) => {
+    columns.forEach((col, i) => {
       const cellText = formatCell(row, col.key);
       // Show negative differences and change rates in red (U+2212 or ASCII -)
       const isDeltaColumn = col.key === "difference" || col.key === "changeRate";
@@ -342,13 +368,13 @@ function drawTable<Row extends object>(
         doc.fillColor(COLORS.danger);
       }
       doc.text(preparePdfText(cellText), offsets[i] + 4, rowY + 5, {
-        width: widths[i] - 8, height: rowH - 6, align: "right", ellipsis: true, wordSpacing: WORD_SPACING,
+        width: widths[i] - 8, height: rowHeight - 6, align: "right", ellipsis: true, wordSpacing: WORD_SPACING,
       });
       if (isNegative) {
         doc.fillColor(COLORS.primary);
       }
     });
-    rowY += rowH;
+    rowY += rowHeight;
   });
   resetInk(doc);
   return rowY;
@@ -356,16 +382,19 @@ function drawTable<Row extends object>(
 
 // ── Bullet box (conclusions / notes) ─────────────────────────────────────────
 
-function drawBulletBox(
-  doc: PDFKit.PDFDocument,
-  title: string,
-  icon: IconType,
-  points: readonly string[],
-  x: number,
-  y: number,
-  width: number,
-  height: number
-): void {
+type DrawBulletBoxOptions = {
+  doc: PDFKit.PDFDocument;
+  title: string;
+  icon: IconType;
+  points: readonly string[];
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
+function drawBulletBox(options: DrawBulletBoxOptions): void {
+  const { doc, title, icon, points, x, y, width, height } = options;
   const r = REPORT_DESIGN_TOKENS.card.radius;
   const hdrH = 30;
   doc.roundedRect(x, y, width, height, r).fillAndStroke(COLORS.background, COLORS.border);
@@ -648,11 +677,7 @@ async function renderPage2(ctx: V2Context): Promise<void> {
   let y = drawPageHeader(ctx, "ملخص المؤشرات والاتجاه الزمني");
 
   // Sub-heading: brief comparison description (without date range)
-  const subHeader = data.previousPeriod
-    ? data.comparisonMode === "SAME_PERIOD_LAST_YEAR"
-      ? "الفترة الحالية مقارنة بالفترة المماثلة من السنة السابقة"
-      : "الفترة الحالية مقارنة بالفترة السابقة المماثلة"
-    : "لا توجد فترة مقارنة";
+  const subHeader = resolveComparisonSubHeader(data);
   doc.font("Bold").fontSize(12).fillColor(COLORS.primary).text(
     preparePdfText(subHeader), margin, y,
     { width: contentWidth, align: "right", wordSpacing: WORD_SPACING }
@@ -729,7 +754,16 @@ async function renderPage2(ctx: V2Context): Promise<void> {
   // Notes
   const noteLines = (brief.notes ?? []).slice(0, 5);
   const notesBoxH = Math.max(notesH, 28 + noteLines.length * 22);
-  drawBulletBox(doc, "ملاحظات", "clipboard", noteLines, margin, y, contentWidth, notesBoxH);
+  drawBulletBox({
+    doc,
+    title: "ملاحظات",
+    icon: "clipboard",
+    points: noteLines,
+    x: margin,
+    y,
+    width: contentWidth,
+    height: notesBoxH,
+  });
 }
 
 // ── Page 3: Regions ───────────────────────────────────────────────────────────
@@ -747,6 +781,21 @@ type RegionComparisonTableRow = RegionReferenceRow & {
   subjectChange: string;
 };
 
+type EnrichedClassificationRow = ClassificationBriefRow & {
+  openAtEnd: number;
+  lateAtEnd: number;
+};
+
+function resolveComparisonSubHeader(data: ReportData): string {
+  if (!data.previousPeriod) {
+    return "لا توجد فترة مقارنة";
+  }
+  if (data.comparisonMode === "SAME_PERIOD_LAST_YEAR") {
+    return "الفترة الحالية مقارنة بالفترة المماثلة من السنة السابقة";
+  }
+  return "الفترة الحالية مقارنة بالفترة السابقة المماثلة";
+}
+
 function formatRegionalSubjectChange(input: {
   currentCount: number;
   previousCount: number;
@@ -760,6 +809,45 @@ function formatRegionalSubjectChange(input: {
   }
   if (input.changeRate === null) return difference;
   return `${difference} (${formatReportNumber(input.changeRate, { sign: true, percent: true })})`;
+}
+
+function formatRegionTableCell(
+  row: RegionComparisonTableRow,
+  key: string,
+  hasComparisonPeriod: boolean
+): string {
+  if (key === "difference") {
+    if (!hasComparisonPeriod) return "—";
+    return formatReportNumber(row.difference, { sign: true });
+  }
+  if (key === "changeRate") {
+    if (!hasComparisonPeriod) return "—";
+    if (row.previousCount === 0 && row.currentCount > 0) {
+      return "جديد";
+    }
+    if (row.previousCount === 0 && row.currentCount === 0) {
+      return formatReportNumber(0, { percent: true });
+    }
+    return formatNullableReportNumber(row.changeRate, { percent: true });
+  }
+  return formatTableValue((row as Record<string, unknown>)[key]);
+}
+
+function formatClassificationTableCell(
+  row: EnrichedClassificationRow,
+  key: string
+): string {
+  if (key === "difference") {
+    return formatReportNumber(row.difference, { sign: true });
+  }
+  if (key === "changeRate") {
+    return formatNullableReportNumber(row.changeRate, { percent: true });
+  }
+  return formatTableValue((row as Record<string, unknown>)[key]);
+}
+
+function formatDepartmentTableCell(row: ExecutiveEntityRow, key: string): string {
+  return formatTableValue((row as Record<string, unknown>)[key]);
 }
 
 async function renderPage3(ctx: V2Context): Promise<void> {
@@ -877,28 +965,16 @@ async function renderPage3(ctx: V2Context): Promise<void> {
   ];
 
   const rowH = regions.length > 8 ? 27 : 31;
-  y = drawTable(
-    doc, regionRows, regionCols, margin, y, contentWidth, rowH,
-    (row: RegionComparisonTableRow, key) => {
-      if (key === "difference") {
-        return hasComparisonPeriod
-          ? formatReportNumber(row.difference, { sign: true })
-          : "—";
-      }
-      if (key === "changeRate") {
-        if (!hasComparisonPeriod) return "—";
-        if (row.previousCount === 0 && row.currentCount > 0) return "جديد";
-        if (row.previousCount === 0 && row.currentCount === 0) return formatReportNumber(0, { percent: true });
-        return formatNullableReportNumber(row.changeRate, { percent: true });
-      }
-      const value = (row as Record<string, unknown>)[key];
-      return value === null || value === undefined
-        ? "—"
-        : typeof value === "number"
-          ? formatReportNumber(value)
-          : String(value);
-    }
-  );
+  y = drawTable({
+    doc,
+    rows: regionRows,
+    columns: regionCols,
+    x: margin,
+    y,
+    width: contentWidth,
+    rowHeight: rowH,
+    formatCell: (row, key) => formatRegionTableCell(row, key, hasComparisonPeriod),
+  });
   y += 14;
 
   drawInfoBox(
@@ -963,20 +1039,21 @@ function renderPage4(ctx: V2Context): void {
       ];
 
   // Enrich classification rows with open/late from V2 data
-  const enrichedClass = classRows.map((row) => {
+  const enrichedClass: EnrichedClassificationRow[] = classRows.map((row) => {
     const ol = brief.classificationOpenLate[row.classificationId] ?? { openAtEnd: 0, lateAtEnd: 0 };
     return { ...row, openAtEnd: ol.openAtEnd, lateAtEnd: ol.lateAtEnd };
   });
 
-  y = drawTable(
-    doc, enrichedClass, classCols, margin, y, contentWidth, rowH,
-    (row, key) => {
-      if (key === "difference") return formatReportNumber(row.difference, { sign: true });
-      if (key === "changeRate") return formatNullableReportNumber(row.changeRate, { percent: true });
-      const v = (row as Record<string, unknown>)[key];
-      return v === null || v === undefined ? "—" : typeof v === "number" ? formatReportNumber(v) : String(v);
-    }
-  );
+  y = drawTable({
+    doc,
+    rows: enrichedClass,
+    columns: classCols,
+    x: margin,
+    y,
+    width: contentWidth,
+    rowHeight: rowH,
+    formatCell: formatClassificationTableCell,
+  });
   y += gap;
 
   // ── Departments table ──────────────────────────────────────────────────────
@@ -988,13 +1065,16 @@ function renderPage4(ctx: V2Context): void {
     { key: "open", label: "مفتوحة نهاية الفترة", weight: 0.95 },
     { key: "currentlyLate", label: "متأخرة نهاية الفترة", weight: 0.95 },
   ];
-  y = drawTable(
-    doc, deptRows, deptCols, margin, y, contentWidth, rowH,
-    (row: ExecutiveEntityRow, key) => {
-      const v = (row as Record<string, unknown>)[key];
-      return v === null || v === undefined ? "—" : typeof v === "number" ? formatReportNumber(v) : String(v);
-    }
-  );
+  y = drawTable({
+    doc,
+    rows: deptRows,
+    columns: deptCols,
+    x: margin,
+    y,
+    width: contentWidth,
+    rowHeight: rowH,
+    formatCell: formatDepartmentTableCell,
+  });
   y += gap;
 
   // ── Conclusions (full-width) ──────────────────────────────────────────────
@@ -1008,14 +1088,32 @@ function renderPage4(ctx: V2Context): void {
     Math.floor(availableH * 0.48)
   ));
 
-  drawBulletBox(doc, "الاستنتاجات", "report", conclusions, margin, y, contentWidth, eachBoxH);
+  drawBulletBox({
+    doc,
+    title: "الاستنتاجات",
+    icon: "report",
+    points: conclusions,
+    x: margin,
+    y,
+    width: contentWidth,
+    height: eachBoxH,
+  });
   y += eachBoxH + gap;
 
   const notesBoxH = Math.max(boxHdrH + lineH + 12, Math.min(
     boxHdrH + 12 + Math.max(notes.length, 1) * lineH,
     layout.pageSize[1] - layout.margin * 2 - 26 - y
   ));
-  drawBulletBox(doc, "ملاحظات جودة البيانات وتأثيرها على المؤشرات", "database", notes, margin, y, contentWidth, notesBoxH);
+  drawBulletBox({
+    doc,
+    title: "ملاحظات جودة البيانات وتأثيرها على المؤشرات",
+    icon: "database",
+    points: notes,
+    x: margin,
+    y,
+    width: contentWidth,
+    height: notesBoxH,
+  });
 }
 
 // ── Footers ───────────────────────────────────────────────────────────────────
@@ -1059,6 +1157,16 @@ const EMPTY_V2: ExecutiveBriefV2Data = {
   classificationOpenLate: {},
 };
 
+function buildFallbackBrief(rawBrief: ReportData["briefData"]): ExecutiveBriefV2Data {
+  if (!rawBrief) {
+    return { ...EMPTY_V2 };
+  }
+  return {
+    ...EMPTY_V2,
+    ...rawBrief,
+  };
+}
+
 export async function renderExecutiveBriefV2Pdf(data: ReportData): Promise<ExecutiveBriefV2PdfResult> {
   const warnings = [...data.warnings];
   const { regular, bold } = loadFonts();
@@ -1066,7 +1174,7 @@ export async function renderExecutiveBriefV2Pdf(data: ReportData): Promise<Execu
   const rawBrief = data.briefData;
   const brief: ExecutiveBriefV2Data = rawBrief && isExecutiveBriefV2Data(rawBrief)
     ? rawBrief
-    : { ...EMPTY_V2, ...(rawBrief ?? {}) };
+    : buildFallbackBrief(rawBrief);
 
   const layout = createV2Layout(brief.allRegions.length);
   const [PW, PH] = layout.pageSize;

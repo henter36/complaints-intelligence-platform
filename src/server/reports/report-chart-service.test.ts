@@ -274,8 +274,8 @@ describe("buildChartSvg — dual-axis and legend", () => {
       ],
     };
     const svg = buildChartSvg(section, 600, 400);
-    expect((svg.match(/<rect x=/g) ?? []).length).toBe(4);
-    expect((svg.match(/<polyline /g) ?? []).length).toBe(2);
+    expect(svg.match(/<rect x=/g) ?? []).toHaveLength(4);
+    expect(svg.match(/<polyline /g) ?? []).toHaveLength(2);
     // Secondary axis dashed line is on plotLeft (x="76")
     expect(svg).toMatch(/stroke-dasharray="3,3"/);
     expect(svg).toMatch(/x1="76" y1="48" x2="76"/);
@@ -318,7 +318,7 @@ describe("buildChartSvg — dual-axis and legend", () => {
     expect(svg).not.toMatch(/stroke-dasharray="3,3"/);
     expect(svg).toMatch(/x1="54"/);
     // Two polylines only (one per series), not four
-    expect((svg.match(/<polyline /g) ?? []).length).toBe(2);
+    expect(svg.match(/<polyline /g) ?? []).toHaveLength(2);
   });
 
   it("legend swatches match right-axis plot colors", () => {
@@ -356,8 +356,9 @@ describe("buildChartSvg — dual-axis and legend", () => {
       ],
     };
     const svg = buildChartSvg(section, 600, 400);
-    // Peak bar label should be white (clamped inside); low bar keeps series color
-    expect(svg).toContain('fill="#FFFFFF"');
-    expect(svg).toMatch(/fill="#004B3A">1<\/text>/);
+    // Peak bar label "100" is clamped inside the bar in white; short bar "1" keeps series color.
+    // Attribute order is x/y/text-anchor/font-size/fill before the text content.
+    expect(svg).toMatch(/<text[^>]*fill="#FFFFFF"[^>]*>100<\/text>/);
+    expect(svg).toMatch(/<text[^>]*fill="#004B3A"[^>]*>1<\/text>/);
   });
 });
