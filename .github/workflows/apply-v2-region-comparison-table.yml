@@ -40,6 +40,14 @@ jobs:
           python3 <<'PY'
           from pathlib import Path
 
+          comparison_path = Path("src/server/reports/report-comparison.ts")
+          comparison = comparison_path.read_text(encoding="utf-8")
+          old_subject = "  return complaint.subject.trim() || UNSPECIFIED_SUBJECT;"
+          new_subject = "  return complaint.subject?.trim() || UNSPECIFIED_SUBJECT;"
+          if comparison.count(old_subject) != 1:
+              raise SystemExit(f"subject fallback marker count: {comparison.count(old_subject)}")
+          comparison_path.write_text(comparison.replace(old_subject, new_subject, 1), encoding="utf-8")
+
           renderer_path = Path("src/server/reports/report-executive-brief-v2-pdf-service.ts")
           renderer = renderer_path.read_text(encoding="utf-8")
 
@@ -210,6 +218,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add \
+            src/server/reports/report-comparison.ts \
             src/server/reports/report-executive-brief-v2-pdf-service.ts \
             scripts/render-report-review-artifacts.ts \
             .github/workflows/apply-v2-region-comparison-table.yml
