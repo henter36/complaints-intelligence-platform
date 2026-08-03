@@ -184,7 +184,7 @@ function regionName(complaint: ComparisonComplaint): string {
 }
 
 function subjectName(complaint: ComparisonComplaint): string {
-  return complaint.subject.trim() || UNSPECIFIED_SUBJECT;
+  return complaint.subject?.trim() || UNSPECIFIED_SUBJECT;
 }
 
 function roundRate(value: number): number {

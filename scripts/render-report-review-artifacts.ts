@@ -86,7 +86,12 @@ function baseReport(mode: "DIGITAL_EXECUTIVE_BRIEF" | "PRINT_EXECUTIVE_BRIEF" | 
         changeRate: row.changeRate,
         direction: row.difference > 0 ? "ارتفاع" : "انخفاض",
       })),
-      deptClassRises: [{
+      regionSubjectChanges: [
+      { regionName: "منطقة الرياض", subject: "عرضه على الطبيب", currentCount: 18, previousCount: 7, difference: 11, changeRate: 157.1, direction: "ارتفاع" },
+      { regionName: "منطقة مكة المكرمة", subject: "انقطاع العلاج", currentCount: 9, previousCount: 3, difference: 6, changeRate: 200, direction: "ارتفاع" },
+      { regionName: "المنطقة الشرقية", subject: "استفسار عن معاملة", currentCount: 1, previousCount: 8, difference: -7, changeRate: -87.5, direction: "انخفاض" },
+    ],
+    deptClassRises: [{
         departmentId: "d1", departmentName: "إدارة المتابعة", classificationId: "c1",
         classificationName: "طلب نقل", currentCount: 2, previousCount: 0,
         difference: 2, changeRate: null, classificationContribution: 100,

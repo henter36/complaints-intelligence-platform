@@ -4,7 +4,7 @@
  * Page layout (all pages are A4-portrait at 900×1200 pt):
  *   1. Cover   — large title + 3 summary cards + all-time total
  *   2. KPIs    — 8 icon-KPI cards + monthly inflow/closed chart + notes
- *   3. Regions — comparison chart + region cards + full region table
+ *   3. Regions — comparison chart + volume cards + delta/topic table
  *   4. Dept/Class — notable rises + classification table + department table + conclusions + data notes
  */
 
@@ -742,8 +742,28 @@ function visibleRegions(brief: ExecutiveBriefV2Data): readonly RegionReferenceRo
   return brief.allRegions.slice(0, MAX_REGION_ROWS);
 }
 
+type RegionComparisonTableRow = RegionReferenceRow & {
+  topSubject: string;
+  subjectChange: string;
+};
+
+function formatRegionalSubjectChange(input: {
+  currentCount: number;
+  previousCount: number;
+  difference: number;
+  changeRate: number | null;
+} | undefined): string {
+  if (!input) return "دون تغير ملحوظ";
+  const difference = formatReportNumber(input.difference, { sign: true });
+  if (input.previousCount === 0 && input.currentCount > 0) {
+    return `${difference} (جديد)`;
+  }
+  if (input.changeRate === null) return difference;
+  return `${difference} (${formatReportNumber(input.changeRate, { sign: true, percent: true })})`;
+}
+
 async function renderPage3(ctx: V2Context): Promise<void> {
-  const { doc, brief, layout, warnings } = ctx;
+  const { doc, data, brief, layout, warnings } = ctx;
   const { margin, contentWidth } = layout;
   const regions = visibleRegions(brief);
   const hasPrev = regions.some((r) => r.previousCount > 0);
@@ -826,43 +846,68 @@ async function renderPage3(ctx: V2Context): Promise<void> {
   resetInk(doc);
   y += Math.ceil(regions.length / cols) * (cardH + cardGap) + 14;
 
-  // ── Full region table ─────────────────────────────────────────────────────
-  y = drawSectionTitle(doc, "جميع المناطق", margin, y, contentWidth);
+  // ── Regional delta and leading-subject table ───────────────────────────────
+  y = drawSectionTitle(doc, "التغير وأبرز موضوع حسب المنطقة", margin, y, contentWidth);
 
-  const regionCols: ColDef[] = hasPrev
-    ? [
-        { key: "regionName", label: "المنطقة", weight: 2.2 },
-        { key: "currentCount", label: "شكاوى الفترة", weight: 0.9 },
-        { key: "previousCount", label: "السابق", weight: 0.85 },
-        { key: "difference", label: "الفرق", weight: 0.8 },
-        { key: "changeRate", label: "نسبة التغير", weight: 0.9 },
-        { key: "openCount", label: "المفتوحة نهاية الفترة", weight: 0.95 },
-        { key: "currentlyLate", label: "المتأخرة نهاية الفترة", weight: 0.95 },
-      ]
-    : [
-        { key: "regionName", label: "المنطقة", weight: 2.5 },
-        { key: "currentCount", label: "شكاوى الفترة", weight: 1 },
-        { key: "openCount", label: "المفتوحة نهاية الفترة", weight: 1 },
-        { key: "currentlyLate", label: "المتأخرة نهاية الفترة", weight: 1 },
-      ];
+  const hasComparisonPeriod = Boolean(data.previousPeriod);
+  const subjectChanges = new Map(
+    (data.comparisonData?.regionSubjectChanges ?? []).map((row) => [row.regionName, row])
+  );
+  const regionRows: RegionComparisonTableRow[] = regions.map((region) => {
+    const subjectChange = subjectChanges.get(region.regionName);
+    return {
+      ...region,
+      topSubject: hasComparisonPeriod
+        ? subjectChange?.subject ?? "دون تغير ملحوظ"
+        : "لا توجد فترة مقارنة",
+      subjectChange: hasComparisonPeriod
+        ? formatRegionalSubjectChange(subjectChange)
+        : "—",
+    };
+  });
 
-  const rowH = regions.length > 8 ? 24 : 30;
+  const regionCols: ColDef[] = [
+    { key: "regionName", label: "المنطقة", weight: 1.7 },
+    { key: "currentCount", label: "الحالية", weight: 0.72 },
+    { key: "previousCount", label: "السابقة", weight: 0.72 },
+    { key: "difference", label: "الفرق", weight: 0.72 },
+    { key: "changeRate", label: "نسبة التغير", weight: 0.82 },
+    { key: "topSubject", label: "أبرز موضوع متغير", weight: 2.25 },
+    { key: "subjectChange", label: "تغير الموضوع", weight: 1.12 },
+  ];
+
+  const rowH = regions.length > 8 ? 27 : 31;
   y = drawTable(
-    doc, regions, regionCols, margin, y, contentWidth, rowH,
-    (row: RegionReferenceRow, key) => {
+    doc, regionRows, regionCols, margin, y, contentWidth, rowH,
+    (row: RegionComparisonTableRow, key) => {
+      if (key === "difference") {
+        return hasComparisonPeriod
+          ? formatReportNumber(row.difference, { sign: true })
+          : "—";
+      }
       if (key === "changeRate") {
-        if (row.changeRate === null && row.previousCount === 0 && row.currentCount > 0) return "جديد";
+        if (!hasComparisonPeriod) return "—";
+        if (row.previousCount === 0 && row.currentCount > 0) return "جديد";
+        if (row.previousCount === 0 && row.currentCount === 0) return formatReportNumber(0, { percent: true });
         return formatNullableReportNumber(row.changeRate, { percent: true });
       }
-      if (key === "difference") return formatReportNumber(row.difference, { sign: true });
-      const v = (row as Record<string, unknown>)[key];
-      return v === null || v === undefined ? "—" : typeof v === "number" ? formatReportNumber(v) : String(v);
+      const value = (row as Record<string, unknown>)[key];
+      return value === null || value === undefined
+        ? "—"
+        : typeof value === "number"
+          ? formatReportNumber(value)
+          : String(value);
     }
   );
   y += 14;
 
-  // Info methodology box
-  drawInfoBox(doc, "تشمل مؤشرات المفتوحة والمتأخرة جميع الحالات غير المغلقة حتى نهاية الفترة، حتى لو أُنشئت قبل بداية الفترة.", margin, y, contentWidth);
+  drawInfoBox(
+    doc,
+    "يعرض الجدول الفرق العددي ونسبة التغير بين الفترتين، مع الموضوع صاحب أكبر تغير مطلق داخل كل منطقة. عندما تكون قيمة الفترة السابقة صفراً تظهر الحالة «جديد» بدلاً من نسبة غير معرفة.",
+    margin,
+    y,
+    contentWidth
+  );
 }
 
 // ── Page 4: Classifications + Departments + Conclusions ───────────────────────
