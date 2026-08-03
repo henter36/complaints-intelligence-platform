@@ -27,6 +27,14 @@ function mapSeverity(severity: string): AnalyticalSeverity {
   return "LOW";
 }
 
+function getCertaintyLabel(certainty: string): string {
+  if (certainty === "CONFIRMED_IN_TEXT") return "مؤكد في النص";
+  if (certainty === "SUSPECTED") return "اشتباه";
+  if (certainty === "ALLEGED") return "ادعاء";
+  if (certainty === "HISTORICAL_RESOLVED") return "حدث سابق";
+  return "غير محدد";
+}
+
 function mapConfidence(score: number): AnalyticalFinding["confidence"] {
   if (score >= 0.8) return "HIGH";
   if (score >= 0.5) return "MEDIUM";
@@ -73,7 +81,7 @@ export function mapTextRiskSignalToAnalyticalFinding(signal: SignalForMapping): 
     priorityScore: Math.round(signal.confidenceScore * 100),
     confidence: mapConfidence(signal.confidenceScore),
     detectionSource: "RULE",
-    explanation: `${signal.title}: إشارة مكتشفة بواسطة محرك القواعد في نص الشكوى. (${signal.certainty === "CONFIRMED_IN_TEXT" ? "مؤكد في النص" : signal.certainty === "SUSPECTED" ? "اشتباه" : signal.certainty === "ALLEGED" ? "ادعاء" : signal.certainty === "HISTORICAL_RESOLVED" ? "حدث سابق" : "غير محدد"})`,
+    explanation: `${signal.title}: إشارة مكتشفة بواسطة محرك القواعد في نص الشكوى. (${getCertaintyLabel(signal.certainty)})`,
     supportingMetrics: {
       confidenceScore: signal.confidenceScore,
       certainty: signal.certainty,

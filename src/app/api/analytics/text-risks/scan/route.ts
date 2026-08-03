@@ -6,11 +6,32 @@ import {
   resumeTextRiskScan,
 } from "@/server/analytics/text-risk/text-risk-analysis-service";
 
-const ScanRequestSchema = z.object({
-  importBatchId: z.string().optional(),
-  fullScan: z.boolean().optional(),
-  resumeRunId: z.string().optional(),
-});
+const ScanRequestSchema = z
+  .object({
+    importBatchId: z.string().optional(),
+    fullScan: z.boolean().optional(),
+    resumeRunId: z.string().optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.resumeRunId && data.importBatchId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "resumeRunId cannot be combined with importBatchId",
+      });
+    }
+    if (data.resumeRunId && data.fullScan) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "resumeRunId cannot be combined with fullScan",
+      });
+    }
+    if (data.fullScan && data.importBatchId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "fullScan cannot be combined with importBatchId",
+      });
+    }
+  });
 
 export async function POST(req: NextRequest) {
   try {
@@ -35,9 +56,10 @@ export async function POST(req: NextRequest) {
 
     if (resumeRunId) {
       const summary = await resumeTextRiskScan(resumeRunId);
-      return NextResponse.json(summary);
+      return NextResponse.json(summary, { status: 202 });
     }
 
+    // importBatchId scan, fullScan=true, or default (no args = full scan)
     const summary = await startTextRiskScan({ importBatchId });
     return NextResponse.json(summary, { status: 202 });
   } catch (error) {

@@ -109,7 +109,23 @@ export function getSeverityClassName(severity: string): string {
 
 function parseEvidenceSpans(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
-  return raw.filter((s): s is string => typeof s === "string");
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const s of raw) {
+    if (typeof s === "string" && !seen.has(s)) {
+      seen.add(s);
+      result.push(s);
+    }
+  }
+  return result;
+}
+
+export function getReviewStatusVariant(
+  status: string
+): "default" | "secondary" | "outline" {
+  if (status === "CONFIRMED") return "default";
+  if (status === "DISMISSED") return "secondary";
+  return "outline";
 }
 
 function formatPercent(score: number): string {
@@ -219,8 +235,8 @@ function ReviewDialog({ signal, onClose, onSubmit }: ReviewDialogProps) {
           {spans.length > 0 && (
             <div>
               <p className="text-sm font-medium mb-1.5">الأدلة المستخرجة (مُنقَّحة):</p>
-              {spans.map((span, i) => (
-                <div key={i} className="bg-muted rounded-md p-2 text-sm font-mono leading-relaxed">
+              {spans.map((span) => (
+                <div key={`${signal.id}:${span}`} className="bg-muted rounded-md p-2 text-sm font-mono leading-relaxed">
                   {span}
                 </div>
               ))}
@@ -315,15 +331,20 @@ export function TextRisks() {
     setError(null);
     try {
       const response = await fetch(`/api/analytics/text-risks?${buildQuery()}`, { signal });
+      if (signal.aborted) return;
       if (!response.ok) throw new Error("fetch-failed");
       const data = await response.json() as ListResult;
+      if (signal.aborted) return;
       setItems(data.items);
       setTotal(data.total);
     } catch (err) {
       if (isAbortError(err)) return;
+      if (signal.aborted) return;
       setError("تعذر جلب إشارات الخطر. يرجى المحاولة لاحقًا.");
     } finally {
-      setLoading(false);
+      if (!signal.aborted) {
+        setLoading(false);
+      }
     }
   }, [buildQuery]);
 
@@ -576,7 +597,7 @@ export function TextRisks() {
                         </td>
                         <td className="py-2 px-3 text-center">
                           <Badge
-                            variant={signal.reviewStatus === "CONFIRMED" ? "default" : signal.reviewStatus === "DISMISSED" ? "secondary" : "outline"}
+                            variant={getReviewStatusVariant(signal.reviewStatus)}
                             className="text-xs"
                           >
                             {REVIEW_STATUS_LABELS[signal.reviewStatus] ?? signal.reviewStatus}

@@ -6,7 +6,7 @@ const MAX_INPUT_LENGTH = 5000;
 
 // Punctuation characters to collapse to a space for matching purposes.
 // Using a character class without quantifier nesting — linear O(n) performance.
-const PUNCTUATION_RE = /[،,؛;:.!?،؟]/g;
+const PUNCTUATION_RE = /[،,؛;:.!?؟]/g;
 
 // Multiple spaces → single space.
 const MULTI_SPACE_RE = /\s\s+/g;

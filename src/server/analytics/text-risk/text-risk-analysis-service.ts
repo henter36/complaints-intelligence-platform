@@ -1,7 +1,10 @@
 import {
+  ComplaintPriority,
   ImportBatchStatus,
+  TextRiskCertainty,
   TextRiskReviewStatus,
   TextRiskScanStatus,
+  TextRiskSignalType,
   type Prisma,
 } from "@prisma/client";
 import { db } from "@/lib/db";
@@ -278,7 +281,6 @@ async function applyRulesAndPersist(
   actor: string
 ): Promise<AnalyzeComplaintResult> {
   const sourceTextHash = computeSourceTextHash(complaint.subject, complaint.description);
-  const ruleVersion = RULE_CATALOG_VERSION;
 
   const matches = matchTextRisks({
     subject: complaint.subject,
@@ -374,10 +376,10 @@ async function applyRulesAndPersist(
 export type ListSignalsOptions = Readonly<{
   page?: number;
   pageSize?: number;
-  signalType?: string;
-  severity?: string;
-  reviewStatus?: string;
-  certainty?: string;
+  signalType?: TextRiskSignalType;
+  severity?: ComplaintPriority;
+  reviewStatus?: TextRiskReviewStatus;
+  certainty?: TextRiskCertainty;
   region?: string;
   facility?: string;
   department?: string;
@@ -429,10 +431,10 @@ export async function listTextRiskSignals(options: ListSignalsOptions = {}) {
 function buildSignalWhere(options: ListSignalsOptions): Prisma.TextRiskSignalWhereInput {
   const where: Prisma.TextRiskSignalWhereInput = {};
 
-  if (options.signalType) where.signalType = options.signalType as never;
-  if (options.severity) where.severity = options.severity as never;
-  if (options.reviewStatus) where.reviewStatus = options.reviewStatus as never;
-  if (options.certainty) where.certainty = options.certainty as never;
+  if (options.signalType) where.signalType = options.signalType;
+  if (options.severity) where.severity = options.severity;
+  if (options.reviewStatus) where.reviewStatus = options.reviewStatus;
+  if (options.certainty) where.certainty = options.certainty;
   if (options.region) where.region = options.region;
   if (options.facility) where.facility = options.facility;
   if (options.department) where.department = options.department;

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { matchTextRisks, computeSourceTextHash } from "./text-risk-matcher";
+import { normalizeForMatching } from "./text-risk-normalize";
+import { TEXT_RISK_RULES } from "./text-risk-rule-catalog";
 
 // ---------- Helpers ----------
 
@@ -233,25 +235,19 @@ describe("negation proximity window", () => {
     expect(results.some((r) => r.ruleId === "POISON_001")).toBe(false);
   });
 
-  it("negation token beyond window does not cancel (different sentence)", () => {
-    // Build a sentence with enough separation so negation is >60 chars from match
-    const farPrefix = "تم التحقق من جميع المرافق وثبت عدم وجود أي خلل في المطابخ الرئيسية. ";
-    const matchSuffix = " وردت شكوى بوجود تسمم غذائي حاد.";
-    const text = farPrefix + matchSuffix;
-    // The "ثبت عدم" might be a negation token... but "تسمم" in suffix is far from "ثبت عدم"
-    // Let's use a simpler test: negation in second sentence that doesn't relate
-    const twoSentences = "يعاني عدد من النزلاء من تسمم غذائي حاد. لا يوجد مشكلة في المطبخ الرئيسي بعيداً جداً.";
-    const results = match(twoSentences);
-    // "تسمم" is near start; "لا يوجد" is >60 chars away in second sentence
-    const pos = twoSentences.indexOf("تسمم");
-    const negPos = twoSentences.indexOf("لا يوجد");
-    const distance = Math.abs(negPos - pos);
-    if (distance > 60) {
-      expect(results.some((r) => r.ruleId === "POISON_001")).toBe(true);
-    } else {
-      // If by chance they're within 60 chars, this test is vacuous — skip
-      expect(distance).toBeGreaterThan(0);
-    }
+  it("negation token beyond window does not cancel", () => {
+    // "تسمم" appears early in the sentence; "لا يوجد" appears >60 normalized chars later.
+    // This test is deterministic: we verify the distance in the assertion before asserting the match.
+    const text = "وردت شكوى بوجود تسمم غذائي في المطبخ وقد تم فتح تحقيق في هذا الشأن من قبل الجهات المختصة ولا يوجد ما يثير القلق";
+    const normalized = normalizeForMatching(text);
+    const tsammPos = normalized.indexOf("تسمم");
+    const negPos = normalized.indexOf("لا يوجد");
+    expect(tsammPos).toBeGreaterThan(-1);
+    expect(negPos).toBeGreaterThan(-1);
+    expect(negPos - tsammPos).toBeGreaterThan(60);
+    // Negation is beyond the window, so the match still fires
+    const results = match(text);
+    expect(results.some((r) => r.ruleId === "POISON_001")).toBe(true);
   });
 });
 
@@ -377,5 +373,137 @@ describe("edge cases", () => {
   it("ruleVersion matches RULE_CATALOG_VERSION in all results", () => {
     const results = match("تسمم غذائي في المطبخ");
     results.forEach((r) => expect(r.ruleVersion).toBe("rule-v1"));
+  });
+});
+
+// ---------- Evidence extraction from normalized coordinates ----------
+
+describe("evidence spans from normalized text", () => {
+  it("returns non-empty evidence span when subject contains tashkeel", () => {
+    // Tashkeel is stripped during normalization; matchPos is from normalizedText.
+    // Evidence must be extracted from normalizedText (not originalText) to avoid coord mismatch.
+    const results = match("يُعَانِي المحتجز من تَسْمُم حاد");
+    const p = results.find((r) => r.ruleId === "POISON_001");
+    expect(p).toBeDefined();
+    const spans = (p?.evidenceSpans ?? []) as string[];
+    expect(spans.length).toBeGreaterThan(0);
+    spans.forEach((span) => expect(span.trim().length).toBeGreaterThan(0));
+  });
+
+  it("evidence span contains the matched keyword (normalized form)", () => {
+    const results = match("تَسْمُم غذائي حاد في المطبخ");
+    const p = results.find((r) => r.ruleId === "POISON_001");
+    const spans = (p?.evidenceSpans ?? []) as string[];
+    expect(spans.join(" ")).toContain("تسمم");
+  });
+
+  it("returns evidence span when input has tatweel characters", () => {
+    // Tatweel (U+0640) is stripped by normalizer; coord must be from normalizedText.
+    const results = match("تـسـمـم غذائي في الجناح");
+    const p = results.find((r) => r.ruleId === "POISON_001");
+    expect(p).toBeDefined();
+    const spans = (p?.evidenceSpans ?? []) as string[];
+    expect(spans.length).toBeGreaterThan(0);
+    expect(spans.join(" ")).toContain("تسمم");
+  });
+
+  it("returns evidence span when input has repeated spaces", () => {
+    const results = match("وجود   تسمم   غذائي   حاد");
+    const p = results.find((r) => r.ruleId === "POISON_001");
+    expect(p).toBeDefined();
+    const spans = (p?.evidenceSpans ?? []) as string[];
+    expect(spans.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------- False-positive guard: removed SEC_002 ["فر"] token ----------
+
+describe("SEC_002 false-positive guard (removed 2-char [فر] token)", () => {
+  it("does NOT fire for الإفراج عن محتجز (افراج contains فر but rule removed that token)", () => {
+    // Old rule had ["فر"] which matched position 4 in "الافراج". Now removed.
+    expect(matchIds("تم الإفراج عن المحتجز بعد انتهاء إجراءات التحقيق")).not.toContain("SEC_002");
+  });
+
+  it("does NOT fire for فريق (فريق contains فر but rule removed that token)", () => {
+    expect(matchIds("وصل فريق الطوارئ إلى الموقع")).not.toContain("SEC_002");
+  });
+
+  it("does NOT fire for مصروف (unrelated to escape attempts)", () => {
+    expect(matchIds("مصروف الاعاشه لم يصل")).not.toContain("SEC_002");
+  });
+});
+
+// ---------- False-positive guard: removed HEALTH_002 standalone ["انتهي"] ----------
+
+describe("HEALTH_002 false-positive guard (removed standalone [انتهي] group)", () => {
+  it("does NOT fire for انتهى الإجراء (procedural completion)", () => {
+    // Old standalone ["انتهي"] matched any procedural sentence with "انتهي".
+    expect(matchIds("انتهى الإجراء القانوني وأُغلق الملف")).not.toContain("HEALTH_002");
+  });
+
+  it("does NOT fire for انتهى الموعد (appointment end)", () => {
+    expect(matchIds("انتهى الموعد المحدد للمراجعة")).not.toContain("HEALTH_002");
+  });
+
+  it("does NOT fire for انتهت المعالجة (treatment end)", () => {
+    expect(matchIds("انتهت المعالجه وخرج من المستشفي")).not.toContain("HEALTH_002");
+  });
+});
+
+// ---------- HEALTH_002 positive cases: new specific groups ----------
+
+describe("HEALTH_002 — positive cases with new specific groups", () => {
+  it("detects انتهت حياته (death phrase)", () => {
+    const results = match("انتهت حياته داخل مرفق الاحتجاز");
+    expect(results.some((r) => r.ruleId === "HEALTH_002")).toBe(true);
+  });
+
+  it("detects انتهي أجله (death phrase with dialectal spelling)", () => {
+    const results = match("يُدّعى أن انتهي أجله قبل وصول الإسعاف");
+    expect(results.some((r) => r.ruleId === "HEALTH_002")).toBe(true);
+  });
+
+  it("detects وفاة (death)", () => {
+    expect(matchIds("الشكوى تتعلق بوفاه أحد المحتجزين")).toContain("HEALTH_002");
+  });
+
+  it("detects فقدان وعي (loss of consciousness)", () => {
+    expect(matchIds("أفاد بوجود فقدان وعي لدى المحتجز")).toContain("HEALTH_002");
+  });
+
+  it("detects تأخر الإسعاف (ambulance delay)", () => {
+    expect(matchIds("تم تقديم شكوى بسبب تأخر الإسعاف عن الوصول")).toContain("HEALTH_002");
+  });
+});
+
+// ---------- Catalog token normalization invariant ----------
+
+describe("catalog token normalization invariant", () => {
+  it("every primaryGroup token is already in normalized form", () => {
+    const dead: string[] = [];
+    for (const rule of TEXT_RISK_RULES) {
+      for (const group of rule.primaryGroups) {
+        for (const token of group) {
+          const normalized = normalizeForMatching(token);
+          if (normalized !== token) {
+            dead.push(`[${rule.ruleId}] "${token}" → "${normalized}"`);
+          }
+        }
+      }
+    }
+    expect(dead, `Dead tokens found:\n${dead.join("\n")}`).toHaveLength(0);
+  });
+
+  it("every negationToken is already in normalized form", () => {
+    const dead: string[] = [];
+    for (const rule of TEXT_RISK_RULES) {
+      for (const token of rule.negationTokens) {
+        const normalized = normalizeForMatching(token);
+        if (normalized !== token) {
+          dead.push(`[${rule.ruleId} negation] "${token}" → "${normalized}"`);
+        }
+      }
+    }
+    expect(dead, `Dead negation tokens:\n${dead.join("\n")}`).toHaveLength(0);
   });
 });

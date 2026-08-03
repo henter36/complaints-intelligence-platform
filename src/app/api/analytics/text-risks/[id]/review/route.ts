@@ -58,44 +58,59 @@ export async function PATCH(
       );
     }
 
-    const existing = await db.textRiskSignal.findUnique({
-      where: { id },
-      select: { id: true, reviewStatus: true },
+    const trimmedReason = reviewReason?.trim() ?? null;
+    const reviewedAt = new Date();
+
+    // Atomic: read + update + audit log in a single transaction
+    const result = await db.$transaction(async (tx) => {
+      const existing = await tx.textRiskSignal.findUnique({
+        where: { id },
+        select: { id: true, reviewStatus: true },
+      });
+
+      if (!existing) return null;
+
+      const previousStatus = existing.reviewStatus;
+
+      const updated = await tx.textRiskSignal.update({
+        where: { id },
+        data: {
+          reviewStatus,
+          reviewedBy: AUDIT_ACTOR_SINGLE_ADMIN,
+          reviewedAt,
+          reviewReason: trimmedReason,
+        },
+        select: {
+          id: true,
+          reviewStatus: true,
+          reviewedAt: true,
+          reviewReason: true,
+        },
+      });
+
+      await writeAuditLog(tx, {
+        action: resolveAuditAction(reviewStatus),
+        entityType: "TextRiskSignal",
+        entityId: id,
+        actor: AUDIT_ACTOR_SINGLE_ADMIN,
+        metadata: {
+          previousStatus,
+          reviewStatus,
+          hasReason: Boolean(trimmedReason),
+        },
+      });
+
+      return updated;
     });
 
-    if (!existing) {
+    if (result === null) {
       return NextResponse.json(
         { error: { code: "NOT_FOUND", message: "الإشارة غير موجودة" } },
         { status: 404 }
       );
     }
 
-    const updated = await db.textRiskSignal.update({
-      where: { id },
-      data: {
-        reviewStatus,
-        reviewedBy: AUDIT_ACTOR_SINGLE_ADMIN,
-        reviewedAt: new Date(),
-        reviewReason: reviewReason?.trim() ?? null,
-      },
-      select: {
-        id: true,
-        reviewStatus: true,
-        reviewedAt: true,
-        reviewReason: true,
-      },
-    });
-
-    const auditAction = resolveAuditAction(reviewStatus);
-    await writeAuditLog(db, {
-      action: auditAction,
-      entityType: "TextRiskSignal",
-      entityId: id,
-      actor: AUDIT_ACTOR_SINGLE_ADMIN,
-      metadata: { reviewStatus, hasReason: Boolean(reviewReason?.trim()) },
-    });
-
-    return NextResponse.json(updated);
+    return NextResponse.json(result);
   } catch (error) {
     const authResponse = mapAuthError(error);
     if (authResponse) return authResponse;

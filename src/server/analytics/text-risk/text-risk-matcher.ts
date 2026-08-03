@@ -1,5 +1,5 @@
 import { type ComplaintPriority, type TextRiskSignalType, type TextRiskCertainty } from "@prisma/client";
-import { createHash } from "crypto";
+import { createHash } from "node:crypto";
 import {
   TEXT_RISK_RULES,
   RULE_CATALOG_VERSION,
@@ -93,17 +93,16 @@ function hasTokenNear(
 }
 
 /**
- * Extracts a sanitized evidence span around matchPos from the original text.
- * Uses a wider window to compensate for normalization length differences.
+ * Extracts a sanitized evidence span from normalizedText around matchPos.
+ * Coordinates in normalizedText are valid because matchPos was found in it.
  */
 function extractSanitizedEvidenceSpan(
-  originalText: string,
+  normalizedText: string,
   matchPos: number
 ): string {
-  const halfWindow = Math.round(EVIDENCE_WINDOW_CHARS * 1.4);
-  const start = Math.max(0, matchPos - halfWindow);
-  const end = Math.min(originalText.length, matchPos + halfWindow);
-  const raw = originalText.slice(start, end).trim();
+  const start = Math.max(0, matchPos - EVIDENCE_WINDOW_CHARS);
+  const end = Math.min(normalizedText.length, matchPos + EVIDENCE_WINDOW_CHARS);
+  const raw = normalizedText.slice(start, end).trim();
   try {
     return sanitizeText(raw);
   } catch {
@@ -137,7 +136,6 @@ function adjustConfidence(
 function evaluateRule(
   rule: TextRiskRule,
   normalizedText: string,
-  originalText: string,
   hasDescription: boolean
 ): TextRiskMatch | null {
   const groupMatch = findFirstGroupMatch(
@@ -181,7 +179,7 @@ function evaluateRule(
     confidenceScore: confidence,
     certainty,
     isOngoing,
-    evidenceSpans: [extractSanitizedEvidenceSpan(originalText, matchPos)],
+    evidenceSpans: [extractSanitizedEvidenceSpan(normalizedText, matchPos)],
     normalizedEvidenceHash: hashGroup(matchedGroup),
   };
 }
@@ -194,14 +192,13 @@ function evaluateRule(
  */
 export function matchTextRisks(input: TextRiskMatchInput): TextRiskMatch[] {
   const { text: normalizedText } = buildMatchableText(input.subject, input.description);
-  const originalText = `${input.subject} ${input.description ?? ""}`.trim();
   const hasDescription = Boolean(input.description && input.description.trim().length > 0);
 
   const results: TextRiskMatch[] = [];
   const seenDedupeKeys = new Set<string>();
 
   for (const rule of TEXT_RISK_RULES) {
-    const match = evaluateRule(rule, normalizedText, originalText, hasDescription);
+    const match = evaluateRule(rule, normalizedText, hasDescription);
     if (match === null) continue;
 
     // Prevent duplicate signals for identical (ruleId, normalizedEvidenceHash) pairs.

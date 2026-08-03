@@ -104,7 +104,6 @@ const COMMON_HISTORICAL: ReadonlyArray<string> = [
   "تم حل",
   "حل المشكله",
   "انتهت المشكله",
-  "تم الاصلاح",
 ];
 
 const COMMON_ONGOING: ReadonlyArray<string> = [
@@ -236,7 +235,7 @@ export const TEXT_RISK_RULES: ReadonlyArray<TextRiskRule> = [
       ["انقطاع", "وجبات"],
       ["توقف", "نقل"],
       ["انقطاع", "نقل"],
-      ["توقف", "إعاشه"],
+      ["توقف", "اعاشه"],
       ["توقف خدمه", "اعاشه"],
     ],
     groupWindowChars: WIDE_WINDOW,
@@ -302,7 +301,6 @@ export const TEXT_RISK_RULES: ReadonlyArray<TextRiskRule> = [
     severity: ComplaintPriority.CRITICAL,
     primaryGroups: [
       ["تسمم"],
-      ["تسمّم"],
       ["حالات تسمم"],
       ["اعراض تسمم"],
       ["غثيان", "اقياء", "نزله"],
@@ -350,13 +348,13 @@ export const TEXT_RISK_RULES: ReadonlyArray<TextRiskRule> = [
     severity: ComplaintPriority.CRITICAL,
     primaryGroups: [
       ["وفاه"],
-      ["وفاة"],
       ["فقد", "وعي"],
       ["فقدان", "وعي"],
       ["تاخر", "اسعاف"],
       ["تاخر", "الاسعاف"],
       ["لم يصل", "اسعاف"],
-      ["انتهي"],
+      ["انتهت", "حياته"],
+      ["انتهي", "اجله"],
     ],
     groupWindowChars: WIDE_WINDOW,
     negationTokens: [...COMMON_NEGATION, "طبيعي", "سليم", "بخير"],
@@ -549,7 +547,6 @@ export const TEXT_RISK_RULES: ReadonlyArray<TextRiskRule> = [
       ["محاوله هروب"],
       ["هروب"],
       ["حاول الهروب"],
-      ["فر"],
     ],
     groupWindowChars: WIDE_WINDOW,
     negationTokens: COMMON_NEGATION,
