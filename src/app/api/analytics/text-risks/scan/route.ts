@@ -85,6 +85,12 @@ export async function POST(req: NextRequest) {
         { status: 409 }
       );
     }
+    if (message === "TEXT_RISK_SCAN_ALREADY_RUNNING") {
+      return NextResponse.json(
+        { error: { code: "TEXT_RISK_SCAN_ALREADY_RUNNING", message: "توجد عملية تحليل مخاطر نصية قيد التشغيل" } },
+        { status: 409 }
+      );
+    }
 
     return NextResponse.json(
       { error: { code: "SCAN_FAILED", message: "تعذر بدء الفحص" } },

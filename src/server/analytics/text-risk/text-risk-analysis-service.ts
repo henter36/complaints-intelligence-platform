@@ -17,6 +17,24 @@ import { matchTextRisks, computeSourceTextHash } from "./text-risk-matcher";
 const BATCH_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
 
+// ---------- Internal helpers ----------
+
+function getTextRiskSeverityRank(severity: ComplaintPriority): number {
+  if (severity === ComplaintPriority.CRITICAL) return 4;
+  if (severity === ComplaintPriority.HIGH) return 3;
+  if (severity === ComplaintPriority.MEDIUM) return 2;
+  return 1;
+}
+
+function isPrismaConflict(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code: string }).code === "P2002"
+  );
+}
+
 // ---------- Exported types ----------
 
 export type StartScanOptions = Readonly<{
@@ -69,26 +87,9 @@ export async function analyzeComplaintTextRisks(
 export async function startTextRiskScan(options: StartScanOptions = {}): Promise<ScanSummary> {
   const ruleVersion = options.ruleVersion ?? RULE_CATALOG_VERSION;
   const actor = options.actor ?? AUDIT_ACTOR_SYSTEM;
+  const activeLockKey = `TEXT_RISK_ACTIVE:${ruleVersion}`;
 
-  // Prevent overlapping scans for the same importBatchId + ruleVersion
   if (options.importBatchId) {
-    const running = await db.textRiskScanRun.findFirst({
-      where: {
-        importBatchId: options.importBatchId,
-        ruleVersion,
-        status: { in: [TextRiskScanStatus.PENDING, TextRiskScanStatus.RUNNING] },
-      },
-    });
-    if (running) {
-      return {
-        runId: running.id,
-        status: running.status,
-        processedComplaints: running.processedComplaints,
-        matchedSignals: running.matchedSignals,
-      };
-    }
-
-    // Only allow scanning CONFIRMED batches
     const batch = await db.importBatch.findUnique({
       where: { id: options.importBatchId },
       select: { status: true },
@@ -98,19 +99,39 @@ export async function startTextRiskScan(options: StartScanOptions = {}): Promise
     }
   }
 
-  // Count complaints for this scan scope
   const where = buildComplaintWhere(options.importBatchId);
   const totalComplaints = await db.complaint.count({ where });
 
-  const run = await db.textRiskScanRun.create({
-    data: {
-      status: TextRiskScanStatus.RUNNING,
-      ruleVersion,
-      importBatchId: options.importBatchId ?? null,
-      totalComplaints,
-      startedAt: new Date(),
-    },
-  });
+  let run: { id: string };
+  try {
+    run = await db.textRiskScanRun.create({
+      data: {
+        status: TextRiskScanStatus.RUNNING,
+        ruleVersion,
+        importBatchId: options.importBatchId ?? null,
+        totalComplaints,
+        startedAt: new Date(),
+        activeLockKey,
+      },
+      select: { id: true },
+    });
+  } catch (err) {
+    if (isPrismaConflict(err)) {
+      const active = await db.textRiskScanRun.findFirst({ where: { activeLockKey } });
+      if (!active) throw new Error("TEXT_RISK_SCAN_ALREADY_RUNNING");
+      const sameScope = active.importBatchId === (options.importBatchId ?? null);
+      if (sameScope) {
+        return {
+          runId: active.id,
+          status: active.status,
+          processedComplaints: active.processedComplaints,
+          matchedSignals: active.matchedSignals,
+        };
+      }
+      throw new Error("TEXT_RISK_SCAN_ALREADY_RUNNING");
+    }
+    throw err;
+  }
 
   await writeAuditLog(db, {
     action: "TEXT_RISK_SCAN_STARTED",
@@ -120,11 +141,7 @@ export async function startTextRiskScan(options: StartScanOptions = {}): Promise
     metadata: { ruleVersion, importBatchId: options.importBatchId ?? null, totalComplaints },
   });
 
-  // Run the scan asynchronously; if running in a web context this will
-  // complete in the background. Errors are captured in the run record.
-  processScanRun(run.id, ruleVersion, options.importBatchId, actor).catch(() => {
-    // Errors are already recorded inside processScanRun
-  });
+  processScanRun(run.id, ruleVersion, options.importBatchId, actor).catch(() => {});
 
   return {
     runId: run.id,
@@ -142,16 +159,23 @@ export async function resumeTextRiskScan(
   if (!run) throw new Error("SCAN_RUN_NOT_FOUND");
   if (run.status !== TextRiskScanStatus.FAILED) throw new Error("SCAN_RUN_NOT_RESUMABLE");
 
-  await db.textRiskScanRun.update({
-    where: { id: runId },
-    data: {
-      status: TextRiskScanStatus.RUNNING,
-      failedAt: null,
-      errorCode: null,
-      errorMessage: null,
-      startedAt: run.startedAt ?? new Date(),
-    },
-  });
+  const activeLockKey = `TEXT_RISK_ACTIVE:${run.ruleVersion}`;
+  try {
+    await db.textRiskScanRun.update({
+      where: { id: runId },
+      data: {
+        status: TextRiskScanStatus.RUNNING,
+        activeLockKey,
+        failedAt: null,
+        errorCode: null,
+        errorMessage: null,
+        startedAt: run.startedAt ?? new Date(),
+      },
+    });
+  } catch (err) {
+    if (isPrismaConflict(err)) throw new Error("TEXT_RISK_SCAN_ALREADY_RUNNING");
+    throw err;
+  }
 
   const actor = options.actor ?? AUDIT_ACTOR_SYSTEM;
   processScanRun(runId, run.ruleVersion, run.importBatchId ?? undefined, actor).catch(() => {});
@@ -234,6 +258,7 @@ async function processScanRun(
         completedAt: new Date(),
         processedComplaints: processedCount,
         matchedSignals: matchedCount,
+        activeLockKey: null,
       },
     });
 
@@ -253,6 +278,7 @@ async function processScanRun(
         failedAt: new Date(),
         errorCode: "SCAN_PROCESSING_ERROR",
         errorMessage: errorMessage.slice(0, 500),
+        activeLockKey: null,
       },
     });
     await writeAuditLog(db, {
@@ -291,81 +317,73 @@ async function applyRulesAndPersist(
   let updated = 0;
 
   for (const match of matches) {
-    // Check if we already have this exact signal (idempotency)
-    const existing = await db.textRiskSignal.findUnique({
-      where: {
-        complaintId_ruleId_ruleVersion_normalizedEvidenceHash: {
+    const rank = getTextRiskSeverityRank(match.severity);
+    let wasCreated = false;
+
+    try {
+      await db.textRiskSignal.create({
+        data: {
+          complaintId: complaint.id,
+          signalType: match.signalType,
+          ruleId: match.ruleId,
+          ruleVersion: match.ruleVersion,
+          title: match.title,
+          description: `إشارة آلية مستخرجة من نص الشكوى: ${match.title}`,
+          severity: match.severity,
+          severityRank: rank,
+          confidenceScore: match.confidenceScore,
+          certainty: match.certainty,
+          isOngoing: match.isOngoing,
+          evidenceSpans: match.evidenceSpans as unknown as Prisma.InputJsonValue,
+          normalizedEvidenceHash: match.normalizedEvidenceHash,
+          sourceTextHash,
+          region: complaint.region,
+          facility: complaint.facility,
+          department: complaint.department,
+        },
+      });
+      wasCreated = true;
+    } catch (err) {
+      if (!isPrismaConflict(err)) throw err;
+    }
+
+    if (wasCreated) {
+      created++;
+      await writeAuditLog(db, {
+        action: "TEXT_RISK_SIGNAL_DETECTED",
+        entityType: "TextRiskSignal",
+        entityId: complaint.id,
+        actor,
+        metadata: {
+          ruleId: match.ruleId,
+          ruleVersion: match.ruleVersion,
+          signalType: match.signalType,
+          severity: match.severity,
+        },
+      });
+    } else {
+      // Signal already exists — update it if source text changed and not yet reviewed
+      const updateResult = await db.textRiskSignal.updateMany({
+        where: {
           complaintId: complaint.id,
           ruleId: match.ruleId,
           ruleVersion: match.ruleVersion,
           normalizedEvidenceHash: match.normalizedEvidenceHash,
+          sourceTextHash: { not: sourceTextHash },
+          reviewStatus: { notIn: [TextRiskReviewStatus.CONFIRMED, TextRiskReviewStatus.DISMISSED] },
         },
-      },
-      select: { id: true, sourceTextHash: true, reviewStatus: true },
-    });
-
-    if (existing) {
-      // If source text hasn't changed, skip (fully idempotent).
-      if (existing.sourceTextHash === sourceTextHash) continue;
-
-      // Source text changed — update non-reviewed signals.
-      const isReviewed =
-        existing.reviewStatus === TextRiskReviewStatus.CONFIRMED ||
-        existing.reviewStatus === TextRiskReviewStatus.DISMISSED;
-
-      if (!isReviewed) {
-        await db.textRiskSignal.update({
-          where: { id: existing.id },
-          data: {
-            confidenceScore: match.confidenceScore,
-            certainty: match.certainty,
-            isOngoing: match.isOngoing,
-            evidenceSpans: match.evidenceSpans as unknown as Prisma.InputJsonValue,
-            sourceTextHash,
-            severity: match.severity,
-          },
-        });
-        updated += 1;
-      }
-      continue;
+        data: {
+          confidenceScore: match.confidenceScore,
+          certainty: match.certainty,
+          isOngoing: match.isOngoing,
+          evidenceSpans: match.evidenceSpans as unknown as Prisma.InputJsonValue,
+          sourceTextHash,
+          severity: match.severity,
+          severityRank: rank,
+        },
+      });
+      if (updateResult.count > 0) updated++;
     }
-
-    // Create new signal
-    await db.textRiskSignal.create({
-      data: {
-        complaintId: complaint.id,
-        signalType: match.signalType,
-        ruleId: match.ruleId,
-        ruleVersion: match.ruleVersion,
-        title: match.title,
-        description: `إشارة آلية مستخرجة من نص الشكوى: ${match.title}`,
-        severity: match.severity,
-        confidenceScore: match.confidenceScore,
-        certainty: match.certainty,
-        isOngoing: match.isOngoing,
-        evidenceSpans: match.evidenceSpans as unknown as Prisma.InputJsonValue,
-        normalizedEvidenceHash: match.normalizedEvidenceHash,
-        sourceTextHash,
-        region: complaint.region,
-        facility: complaint.facility,
-        department: complaint.department,
-      },
-    });
-
-    await writeAuditLog(db, {
-      action: "TEXT_RISK_SIGNAL_DETECTED",
-      entityType: "TextRiskSignal",
-      entityId: complaint.id,
-      actor,
-      metadata: {
-        ruleId: match.ruleId,
-        ruleVersion: match.ruleVersion,
-        signalType: match.signalType,
-        severity: match.severity,
-      },
-    });
-
-    created += 1;
   }
 
   return { complaintId: complaint.id, signalsCreated: created, signalsUpdated: updated };
@@ -398,7 +416,7 @@ export async function listTextRiskSignals(options: ListSignalsOptions = {}) {
   const [items, total] = await Promise.all([
     db.textRiskSignal.findMany({
       where,
-      orderBy: [{ severity: "desc" }, { createdAt: "desc" }],
+      orderBy: [{ severityRank: "desc" }, { createdAt: "desc" }, { id: "asc" }],
       skip,
       take: pageSize,
       select: {

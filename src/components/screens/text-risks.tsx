@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PageHeader } from "@/components/shared/page-header";
 import {
   Card, CardContent, CardHeader, CardTitle, CardDescription,
@@ -315,6 +315,7 @@ export function TextRisks() {
   const [filterType, setFilterType] = useState("all");
 
   const pageSize = 20;
+  const requestGenerationRef = useRef(0);
 
   const buildQuery = useCallback(() => {
     const params = new URLSearchParams();
@@ -327,22 +328,22 @@ export function TextRisks() {
   }, [page, filterSeverity, filterStatus, filterType]);
 
   const fetchData = useCallback(async (signal: AbortSignal) => {
+    const requestId = ++requestGenerationRef.current;
     setLoading(true);
     setError(null);
     try {
       const response = await fetch(`/api/analytics/text-risks?${buildQuery()}`, { signal });
-      if (signal.aborted) return;
+      if (signal.aborted || requestId !== requestGenerationRef.current) return;
       if (!response.ok) throw new Error("fetch-failed");
       const data = await response.json() as ListResult;
-      if (signal.aborted) return;
+      if (signal.aborted || requestId !== requestGenerationRef.current) return;
       setItems(data.items);
       setTotal(data.total);
     } catch (err) {
-      if (isAbortError(err)) return;
-      if (signal.aborted) return;
+      if (isAbortError(err) || signal.aborted || requestId !== requestGenerationRef.current) return;
       setError("تعذر جلب إشارات الخطر. يرجى المحاولة لاحقًا.");
     } finally {
-      if (!signal.aborted) {
+      if (!signal.aborted && requestId === requestGenerationRef.current) {
         setLoading(false);
       }
     }
@@ -430,7 +431,7 @@ export function TextRisks() {
               <ShieldCheck className="h-8 w-8 text-amber-600" aria-hidden="true" />
               <div>
                 <p className="text-2xl font-bold text-amber-600">{pendingCount}</p>
-                <p className="text-sm text-muted-foreground">قيد المراجعة</p>
+                <p className="text-sm text-muted-foreground">قيد المراجعة في الصفحة الحالية</p>
               </div>
             </div>
           </CardContent>

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ImportBatchStatus, TextRiskScanStatus } from "@prisma/client";
 
-// ---------- DB mock (vi.hoisted so the factory can reference it) ----------
+// ---------- DB mock ----------
 
 const mockDb = vi.hoisted(() => ({
   complaint: {
@@ -10,9 +10,9 @@ const mockDb = vi.hoisted(() => ({
     count: vi.fn(),
   },
   textRiskSignal: {
-    findUnique: vi.fn(),
     create: vi.fn(),
     update: vi.fn(),
+    updateMany: vi.fn(),
     findMany: vi.fn(),
     count: vi.fn(),
   },
@@ -39,9 +39,9 @@ vi.mock("@/server/audit/audit-log-service", () => ({
 import {
   analyzeComplaintTextRisks,
   startTextRiskScan,
+  resumeTextRiskScan,
   listTextRiskSignals,
 } from "./text-risk-analysis-service";
-import { computeSourceTextHash } from "./text-risk-matcher";
 
 // ---------- Fixtures ----------
 
@@ -72,6 +72,7 @@ function makeScanRun(overrides: Partial<{
   matchedSignals: number;
   lastComplaintId: string | null;
   startedAt: Date | null;
+  activeLockKey: string | null;
 }> = {}) {
   return {
     id: overrides.id ?? "run-1",
@@ -82,7 +83,14 @@ function makeScanRun(overrides: Partial<{
     matchedSignals: overrides.matchedSignals ?? 0,
     lastComplaintId: overrides.lastComplaintId ?? null,
     startedAt: overrides.startedAt ?? new Date(),
+    activeLockKey: overrides.activeLockKey ?? null,
   };
+}
+
+function makePrismaConflict(): Error & { code: string } {
+  const err = new Error("Unique constraint failed") as Error & { code: string };
+  err.code = "P2002";
+  return err;
 }
 
 // ---------- analyzeComplaintTextRisks ----------
@@ -90,9 +98,8 @@ function makeScanRun(overrides: Partial<{
 describe("analyzeComplaintTextRisks", () => {
   beforeEach(() => {
     vi.resetAllMocks();
-    mockDb.textRiskSignal.findUnique.mockResolvedValue(null);
     mockDb.textRiskSignal.create.mockResolvedValue({ id: "sig-1" });
-    mockDb.textRiskSignal.update.mockResolvedValue({ id: "sig-1" });
+    mockDb.textRiskSignal.updateMany.mockResolvedValue({ count: 0 });
     mockDb.auditLog.create.mockResolvedValue(undefined);
   });
 
@@ -110,85 +117,77 @@ describe("analyzeComplaintTextRisks", () => {
     expect(result.signalsUpdated).toBe(0);
   });
 
-  it("creates signal when rule matches", async () => {
+  it("creates signal when rule matches and sets severityRank", async () => {
     mockDb.complaint.findUnique.mockResolvedValue(
       makeComplaint({ subject: "تسمم غذائي", description: "يعاني المحتجز من تسمم حاد" })
     );
     const result = await analyzeComplaintTextRisks("complaint-1");
     expect(result.signalsCreated).toBeGreaterThan(0);
     expect(mockDb.textRiskSignal.create).toHaveBeenCalled();
+    const createData = mockDb.textRiskSignal.create.mock.calls[0][0].data;
+    expect(typeof createData.severityRank).toBe("number");
+    expect(createData.severityRank).toBeGreaterThanOrEqual(1);
   });
 
-  it("is idempotent: same complaint twice does not create duplicate (same sourceTextHash)", async () => {
+  it("is idempotent: P2002 on create + updateMany finds no stale → signalsUpdated=0", async () => {
     const complaint = makeComplaint({ subject: "تسمم غذائي", description: "تسمم حاد" });
     mockDb.complaint.findUnique.mockResolvedValue(complaint);
 
-    // First call: no existing signal
-    mockDb.textRiskSignal.findUnique.mockResolvedValueOnce(null);
-    mockDb.textRiskSignal.create.mockResolvedValueOnce({ id: "sig-1" });
-    const first = await analyzeComplaintTextRisks("complaint-1");
-    expect(first.signalsCreated).toBeGreaterThan(0);
+    // Simulate duplicate: create throws P2002, updateMany finds 0 rows (same hash)
+    mockDb.textRiskSignal.create.mockRejectedValue(makePrismaConflict());
+    mockDb.textRiskSignal.updateMany.mockResolvedValue({ count: 0 });
 
-    // Second call: existing signal with SAME sourceTextHash → skip
-    const existingSignal = {
-      id: "sig-1",
-      sourceTextHash: computeSourceTextHash(complaint.subject, complaint.description),
-      reviewStatus: "PENDING_REVIEW",
-    };
-    mockDb.complaint.findUnique.mockResolvedValue(complaint);
-    mockDb.textRiskSignal.findUnique.mockResolvedValue(existingSignal);
-
-    const second = await analyzeComplaintTextRisks("complaint-1");
-    expect(second.signalsCreated).toBe(0);
-    expect(second.signalsUpdated).toBe(0);
+    const result = await analyzeComplaintTextRisks("complaint-1");
+    expect(result.signalsCreated).toBe(0);
+    expect(result.signalsUpdated).toBe(0);
   });
 
-  it("updates non-reviewed signal when sourceTextHash changes", async () => {
+  it("updates non-reviewed signal when P2002 on create and updateMany returns count>0", async () => {
     const complaint = makeComplaint({ subject: "تسمم غذائي", description: "تسمم حاد" });
     mockDb.complaint.findUnique.mockResolvedValue(complaint);
 
-    const existingSignal = {
-      id: "sig-1",
-      sourceTextHash: "OLD_HASH_THAT_DOES_NOT_MATCH",
-      reviewStatus: "PENDING_REVIEW",
-    };
-    mockDb.textRiskSignal.findUnique.mockResolvedValue(existingSignal);
-    mockDb.textRiskSignal.update.mockResolvedValue({ id: "sig-1" });
+    mockDb.textRiskSignal.create.mockRejectedValue(makePrismaConflict());
+    mockDb.textRiskSignal.updateMany.mockResolvedValue({ count: 1 });
 
     const result = await analyzeComplaintTextRisks("complaint-1");
     expect(result.signalsUpdated).toBeGreaterThan(0);
-    expect(mockDb.textRiskSignal.update).toHaveBeenCalled();
+    expect(mockDb.textRiskSignal.updateMany).toHaveBeenCalled();
   });
 
-  it("does NOT update reviewed (CONFIRMED) signal even when text changes", async () => {
+  it("updateMany call excludes CONFIRMED and DISMISSED signals", async () => {
     const complaint = makeComplaint({ subject: "تسمم غذائي", description: "تسمم حاد" });
     mockDb.complaint.findUnique.mockResolvedValue(complaint);
 
-    const reviewedSignal = {
-      id: "sig-1",
-      sourceTextHash: "OLD_HASH",
-      reviewStatus: "CONFIRMED",
-    };
-    mockDb.textRiskSignal.findUnique.mockResolvedValue(reviewedSignal);
+    mockDb.textRiskSignal.create.mockRejectedValue(makePrismaConflict());
+    mockDb.textRiskSignal.updateMany.mockResolvedValue({ count: 0 });
 
-    const result = await analyzeComplaintTextRisks("complaint-1");
-    expect(result.signalsUpdated).toBe(0);
-    expect(mockDb.textRiskSignal.update).not.toHaveBeenCalled();
+    await analyzeComplaintTextRisks("complaint-1");
+
+    const updateManyCall = mockDb.textRiskSignal.updateMany.mock.calls[0][0];
+    expect(updateManyCall.where.reviewStatus.notIn).toContain("CONFIRMED");
+    expect(updateManyCall.where.reviewStatus.notIn).toContain("DISMISSED");
   });
 
-  it("does NOT update reviewed (DISMISSED) signal even when text changes", async () => {
+  it("updateMany includes severityRank in data", async () => {
     const complaint = makeComplaint({ subject: "تسمم غذائي", description: "تسمم حاد" });
     mockDb.complaint.findUnique.mockResolvedValue(complaint);
 
-    const dismissedSignal = {
-      id: "sig-1",
-      sourceTextHash: "OLD_HASH",
-      reviewStatus: "DISMISSED",
-    };
-    mockDb.textRiskSignal.findUnique.mockResolvedValue(dismissedSignal);
+    mockDb.textRiskSignal.create.mockRejectedValue(makePrismaConflict());
+    mockDb.textRiskSignal.updateMany.mockResolvedValue({ count: 1 });
 
-    const result = await analyzeComplaintTextRisks("complaint-1");
-    expect(result.signalsUpdated).toBe(0);
+    await analyzeComplaintTextRisks("complaint-1");
+
+    const updateManyCall = mockDb.textRiskSignal.updateMany.mock.calls[0][0];
+    expect(typeof updateManyCall.data.severityRank).toBe("number");
+  });
+
+  it("propagates non-P2002 errors from signal create", async () => {
+    const complaint = makeComplaint({ subject: "تسمم غذائي", description: "تسمم حاد" });
+    mockDb.complaint.findUnique.mockResolvedValue(complaint);
+
+    mockDb.textRiskSignal.create.mockRejectedValue(new Error("DB_TIMEOUT"));
+
+    await expect(analyzeComplaintTextRisks("complaint-1")).rejects.toThrow("DB_TIMEOUT");
   });
 });
 
@@ -197,14 +196,13 @@ describe("analyzeComplaintTextRisks", () => {
 describe("startTextRiskScan", () => {
   beforeEach(() => {
     vi.resetAllMocks();
-    mockDb.textRiskScanRun.findFirst.mockResolvedValue(null);
     mockDb.importBatch.findUnique.mockResolvedValue({ status: ImportBatchStatus.CONFIRMED });
     mockDb.complaint.count.mockResolvedValue(0);
     mockDb.complaint.findMany.mockResolvedValue([]);
     mockDb.textRiskScanRun.create.mockResolvedValue(makeScanRun());
     mockDb.textRiskScanRun.update.mockResolvedValue(makeScanRun());
-    mockDb.textRiskSignal.findUnique.mockResolvedValue(null);
     mockDb.textRiskSignal.create.mockResolvedValue({ id: "sig-1" });
+    mockDb.textRiskSignal.updateMany.mockResolvedValue({ count: 0 });
     mockDb.auditLog.create.mockResolvedValue(undefined);
   });
 
@@ -222,14 +220,41 @@ describe("startTextRiskScan", () => {
     ).rejects.toThrow("TEXT_RISK_SCAN_BATCH_NOT_CONFIRMED");
   });
 
-  it("returns existing running scan instead of starting duplicate", async () => {
-    const existingRun = makeScanRun({ id: "existing-run", status: TextRiskScanStatus.RUNNING });
+  it("returns existing running scan (same scope) when P2002 on create", async () => {
+    const existingRun = makeScanRun({
+      id: "existing-run",
+      status: TextRiskScanStatus.RUNNING,
+      importBatchId: "batch-1",
+      activeLockKey: "TEXT_RISK_ACTIVE:rule-v1",
+    });
+    mockDb.textRiskScanRun.create.mockRejectedValue(makePrismaConflict());
     mockDb.textRiskScanRun.findFirst.mockResolvedValue(existingRun);
 
     const result = await startTextRiskScan({ importBatchId: "batch-1" });
     expect(result.runId).toBe("existing-run");
-    // Should not create a new run
-    expect(mockDb.textRiskScanRun.create).not.toHaveBeenCalled();
+    expect(mockDb.textRiskScanRun.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws TEXT_RISK_SCAN_ALREADY_RUNNING when P2002 on create and scope differs", async () => {
+    // Global scan is active (importBatchId=null), but we're trying a batch scan
+    const existingRun = makeScanRun({
+      id: "global-run",
+      importBatchId: null,
+      activeLockKey: "TEXT_RISK_ACTIVE:rule-v1",
+    });
+    mockDb.textRiskScanRun.create.mockRejectedValue(makePrismaConflict());
+    mockDb.textRiskScanRun.findFirst.mockResolvedValue(existingRun);
+
+    await expect(
+      startTextRiskScan({ importBatchId: "batch-1" })
+    ).rejects.toThrow("TEXT_RISK_SCAN_ALREADY_RUNNING");
+  });
+
+  it("throws TEXT_RISK_SCAN_ALREADY_RUNNING when P2002 and findFirst returns nothing", async () => {
+    mockDb.textRiskScanRun.create.mockRejectedValue(makePrismaConflict());
+    mockDb.textRiskScanRun.findFirst.mockResolvedValue(null);
+
+    await expect(startTextRiskScan({})).rejects.toThrow("TEXT_RISK_SCAN_ALREADY_RUNNING");
   });
 
   it("returns RUNNING status after starting scan", async () => {
@@ -243,15 +268,67 @@ describe("startTextRiskScan", () => {
     expect(mockDb.importBatch.findUnique).not.toHaveBeenCalled();
   });
 
+  it("passes activeLockKey to textRiskScanRun.create", async () => {
+    await startTextRiskScan({ ruleVersion: "test-v99" });
+    const createData = mockDb.textRiskScanRun.create.mock.calls[0][0].data;
+    expect(createData.activeLockKey).toBe("TEXT_RISK_ACTIVE:test-v99");
+  });
+
   it("scan failure does not propagate to caller (fire-and-forget)", async () => {
-    // processScanRun will fail when count throws, but startTextRiskScan should still resolve
     mockDb.complaint.count.mockResolvedValueOnce(1);
-    mockDb.textRiskScanRun.create.mockResolvedValueOnce(makeScanRun());
     mockDb.complaint.findMany.mockRejectedValueOnce(new Error("DB failure"));
     mockDb.textRiskScanRun.update.mockResolvedValue(makeScanRun({ status: TextRiskScanStatus.FAILED }));
 
-    // Should resolve without throwing
     await expect(startTextRiskScan({})).resolves.toBeDefined();
+  });
+});
+
+// ---------- resumeTextRiskScan ----------
+
+describe("resumeTextRiskScan", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    mockDb.complaint.findMany.mockResolvedValue([]);
+    mockDb.textRiskScanRun.update.mockResolvedValue(makeScanRun());
+    mockDb.auditLog.create.mockResolvedValue(undefined);
+  });
+
+  it("throws SCAN_RUN_NOT_FOUND when run does not exist", async () => {
+    mockDb.textRiskScanRun.findUnique.mockResolvedValue(null);
+    await expect(resumeTextRiskScan("missing-run")).rejects.toThrow("SCAN_RUN_NOT_FOUND");
+  });
+
+  it("throws SCAN_RUN_NOT_RESUMABLE when run is not FAILED", async () => {
+    mockDb.textRiskScanRun.findUnique.mockResolvedValue(
+      makeScanRun({ status: TextRiskScanStatus.COMPLETED })
+    );
+    await expect(resumeTextRiskScan("run-1")).rejects.toThrow("SCAN_RUN_NOT_RESUMABLE");
+  });
+
+  it("resumes a FAILED scan and returns RUNNING", async () => {
+    mockDb.textRiskScanRun.findUnique.mockResolvedValue(
+      makeScanRun({ status: TextRiskScanStatus.FAILED })
+    );
+    const result = await resumeTextRiskScan("run-1");
+    expect(result.status).toBe(TextRiskScanStatus.RUNNING);
+  });
+
+  it("passes activeLockKey to update on resume", async () => {
+    mockDb.textRiskScanRun.findUnique.mockResolvedValue(
+      makeScanRun({ status: TextRiskScanStatus.FAILED, ruleVersion: "v42" })
+    );
+    await resumeTextRiskScan("run-1");
+    const updateData = mockDb.textRiskScanRun.update.mock.calls[0][0].data;
+    expect(updateData.activeLockKey).toBe("TEXT_RISK_ACTIVE:v42");
+  });
+
+  it("throws TEXT_RISK_SCAN_ALREADY_RUNNING when P2002 on update during resume", async () => {
+    mockDb.textRiskScanRun.findUnique.mockResolvedValue(
+      makeScanRun({ status: TextRiskScanStatus.FAILED })
+    );
+    mockDb.textRiskScanRun.update.mockRejectedValue(makePrismaConflict());
+
+    await expect(resumeTextRiskScan("run-1")).rejects.toThrow("TEXT_RISK_SCAN_ALREADY_RUNNING");
   });
 });
 
@@ -275,6 +352,16 @@ describe("listTextRiskSignals", () => {
     const findManyCall = mockDb.textRiskSignal.findMany.mock.calls[0][0];
     expect(findManyCall.skip).toBe(0);
     expect(findManyCall.take).toBe(20);
+  });
+
+  it("orders by severityRank desc, then createdAt desc, then id asc", async () => {
+    await listTextRiskSignals();
+    const findManyCall = mockDb.textRiskSignal.findMany.mock.calls[0][0];
+    expect(findManyCall.orderBy).toEqual([
+      { severityRank: "desc" },
+      { createdAt: "desc" },
+      { id: "asc" },
+    ]);
   });
 
   it("applies severity filter", async () => {
@@ -301,17 +388,13 @@ describe("listTextRiskSignals", () => {
     expect(call.take).toBe(100);
   });
 
-  it("does not expose complaintId field (excluded from select)", async () => {
-    // listTextRiskSignals selects specific fields; verify complaintId is included
-    // (it's needed for the review screen) but PII-sensitive ones are not selected
+  it("select includes id, complaintId, signalType but not sourceTextHash", async () => {
     await listTextRiskSignals();
     const call = mockDb.textRiskSignal.findMany.mock.calls[0][0];
     expect(call.select).toBeDefined();
-    // These fields must be explicitly selected (complaintId is needed for review screen)
     expect(call.select.id).toBe(true);
     expect(call.select.complaintId).toBe(true);
     expect(call.select.signalType).toBe(true);
-    // sourceTextHash is internal — should NOT be exposed
     expect(call.select.sourceTextHash).toBeUndefined();
   });
 

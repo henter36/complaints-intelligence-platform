@@ -24,54 +24,28 @@ describe("GET /api/analytics/text-risks", () => {
     listSignalsMock.mockResolvedValue(EMPTY_RESULT);
   });
 
-  it("returns 200 for a request with no filters", async () => {
-    const res = await get("");
+  it.each([
+    ["طلب دون فلاتر", ""],
+    ["signalType صالح", "?signalType=POISONING"],
+    ["from يساوي to", "?from=2026-07-01&to=2026-07-01"],
+  ])("valid: %s → 200", async (_name, search) => {
+    const res = await get(search);
     expect(res.status).toBe(200);
   });
 
-  it("returns 200 for valid signalType enum value", async () => {
-    const res = await get("?signalType=POISONING");
-    expect(res.status).toBe(200);
-  });
-
-  it("returns 200 when from equals to", async () => {
-    const res = await get("?from=2026-07-01&to=2026-07-01");
-    expect(res.status).toBe(200);
-  });
-
-  it("returns 400 for invalid signalType enum", async () => {
-    const res = await get("?signalType=NOT_A_VALID_TYPE");
+  it.each([
+    ["signalType غير صالح", "?signalType=NOT_A_VALID_TYPE"],
+    ["severity غير صالح", "?severity=BAD_SEVERITY"],
+    ["reviewStatus غير صالح", "?reviewStatus=NOT_VALID"],
+    ["certainty غير صالح", "?certainty=MADE_UP"],
+    ["from غير صالح", "?from=not-a-date"],
+    ["to غير صالح", "?to=definitely-not-a-date"],
+    ["from بعد to", "?from=2026-07-31&to=2026-07-01"],
+  ])("%s يعيد INVALID_QUERY", async (_name, search) => {
+    const res = await get(search);
+    const body = await res.json() as { error: { code: string } };
     expect(res.status).toBe(400);
-  });
-
-  it("returns 400 for invalid severity enum", async () => {
-    const res = await get("?severity=BAD_SEVERITY");
-    expect(res.status).toBe(400);
-  });
-
-  it("returns 400 for invalid reviewStatus enum", async () => {
-    const res = await get("?reviewStatus=NOT_VALID");
-    expect(res.status).toBe(400);
-  });
-
-  it("returns 400 for invalid certainty enum", async () => {
-    const res = await get("?certainty=MADE_UP");
-    expect(res.status).toBe(400);
-  });
-
-  it("returns 400 for invalid date format in from", async () => {
-    const res = await get("?from=not-a-date");
-    expect(res.status).toBe(400);
-  });
-
-  it("returns 400 for invalid date format in to", async () => {
-    const res = await get("?to=definitely-not-a-date");
-    expect(res.status).toBe(400);
-  });
-
-  it("returns 400 when from is after to", async () => {
-    const res = await get("?from=2026-07-31&to=2026-07-01");
-    expect(res.status).toBe(400);
+    expect(body.error.code).toBe("INVALID_QUERY");
   });
 
   it("passes parsed filters to listTextRiskSignals", async () => {

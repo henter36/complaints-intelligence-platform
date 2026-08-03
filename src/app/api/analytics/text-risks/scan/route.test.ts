@@ -85,6 +85,14 @@ describe("POST /api/analytics/text-risks/scan", () => {
     expect(res.status).toBe(409);
   });
 
+  it("returns 409 with TEXT_RISK_SCAN_ALREADY_RUNNING code when a scan is active", async () => {
+    startScanMock.mockRejectedValueOnce(new Error("TEXT_RISK_SCAN_ALREADY_RUNNING"));
+    const res = await post({});
+    const body = await res.json() as { error: { code: string } };
+    expect(res.status).toBe(409);
+    expect(body.error.code).toBe("TEXT_RISK_SCAN_ALREADY_RUNNING");
+  });
+
   it("returns 500 for unexpected errors", async () => {
     startScanMock.mockRejectedValueOnce(new Error("unexpected db failure"));
     const res = await post({});

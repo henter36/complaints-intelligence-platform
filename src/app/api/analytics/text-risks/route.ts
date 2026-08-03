@@ -10,7 +10,7 @@ import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 import { listTextRiskSignals } from "@/server/analytics/text-risk/text-risk-analysis-service";
 
 function isValidIsoDate(s: string): boolean {
-  return !isNaN(Date.parse(s));
+  return !Number.isNaN(Date.parse(s));
 }
 
 const ListQuerySchema = z

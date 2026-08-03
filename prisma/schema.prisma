@@ -500,6 +500,7 @@ model TextRiskSignal {
   title                  String
   description            String
   severity               ComplaintPriority
+  severityRank           Int                     @default(0)
   confidenceScore        Float
   certainty              TextRiskCertainty
   isOngoing              Boolean?
@@ -527,6 +528,7 @@ model TextRiskSignal {
   @@index([region])
   @@index([facility])
   @@index([department])
+  @@index([severityRank, createdAt])
 }
 
 model TextRiskScanRun {
@@ -543,6 +545,7 @@ model TextRiskScanRun {
   failedAt            DateTime?
   errorCode           String?
   errorMessage        String?
+  activeLockKey       String?            @unique
   createdAt           DateTime           @default(now())
   updatedAt           DateTime           @updatedAt
 
