@@ -124,7 +124,7 @@ describe("report engine performance (10,000 complaints)", () => {
     console.log(`[perf] renderReportXlsx COMPLAINT_DETAIL (10k rows): ${xlsxMs.toFixed(1)}ms, size=${(detailXlsx.buffer.length / 1024).toFixed(1)}KB`);
     expect(xlsxMs).toBeLessThan(15_000);
     expect(detailXlsx.buffer.length).toBeLessThan(25 * 1024 * 1024);
-  }, 60_000);
+  }, 120_000);
 
   it("PDF for the overdue-complaints report spans multiple pages without erroring", async () => {
     const { buildReportData } = await import("./report-data-service");

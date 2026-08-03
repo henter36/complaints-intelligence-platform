@@ -1,9 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { ReportType } from "@prisma/client";
-import type { ExecutiveBriefData, FullAnalyticalData, ReportData } from "@/server/reports/report-data-service";
+import type { ExecutiveBriefData, ExecutiveBriefV2Data, FullAnalyticalData, ReportData } from "@/server/reports/report-data-service";
 import { renderExecutiveBriefPdf } from "@/server/reports/report-executive-brief-pdf-service";
 import { renderReportPdf } from "@/server/reports/report-pdf-service";
+import { renderExecutiveBriefV2Pdf } from "@/server/reports/report-executive-brief-v2-pdf-service";
 
 const outputDir = path.join(process.cwd(), "output/pdf");
 
@@ -47,7 +48,7 @@ const briefData: ExecutiveBriefData = {
   notes: ["شكوى واحدة بلا موعد مستهدف ولا تدخل في مقام الالتزام."],
 };
 
-function baseReport(mode: "DIGITAL_EXECUTIVE_BRIEF" | "PRINT_EXECUTIVE_BRIEF"): ReportData {
+function baseReport(mode: "DIGITAL_EXECUTIVE_BRIEF" | "PRINT_EXECUTIVE_BRIEF" | "PRINT_EXECUTIVE_BRIEF_V2"): ReportData {
   return {
     type: ReportType.EXECUTIVE_SUMMARY,
     title: "تقرير الشكاوى",
@@ -85,7 +86,12 @@ function baseReport(mode: "DIGITAL_EXECUTIVE_BRIEF" | "PRINT_EXECUTIVE_BRIEF"): 
         changeRate: row.changeRate,
         direction: row.difference > 0 ? "ارتفاع" : "انخفاض",
       })),
-      deptClassRises: [{
+      regionSubjectChanges: [
+      { regionName: "منطقة الرياض", subject: "عرضه على الطبيب", currentCount: 18, previousCount: 7, difference: 11, changeRate: 157.1, direction: "ارتفاع" },
+      { regionName: "منطقة مكة المكرمة", subject: "انقطاع العلاج", currentCount: 9, previousCount: 3, difference: 6, changeRate: 200, direction: "ارتفاع" },
+      { regionName: "المنطقة الشرقية", subject: "استفسار عن معاملة", currentCount: 1, previousCount: 8, difference: -7, changeRate: -87.5, direction: "انخفاض" },
+    ],
+    deptClassRises: [{
         departmentId: "d1", departmentName: "إدارة المتابعة", classificationId: "c1",
         classificationName: "طلب نقل", currentCount: 2, previousCount: 0,
         difference: 2, changeRate: null, classificationContribution: 100,
@@ -199,8 +205,160 @@ function zeroTrendReport(): ReportData {
   };
 }
 
+// ── V2 test data helpers ──────────────────────────────────────────────────────
+
+/** V2-specific extension with realistic 5-month stock/flow data matching the design reference. */
+const v2BriefData: ExecutiveBriefV2Data = {
+  ...briefData,
+  allTimeTotal: 18560,
+  classificationOpenLate: {
+    c1: { openAtEnd: 41, lateAtEnd: 11 },
+    c2: { openAtEnd: 26, lateAtEnd: 4 },
+    c3: { openAtEnd: 18, lateAtEnd: 5 },
+  },
+  monthlyStockFlow: [
+    { monthLabel: "أغسطس 2025",   inflow: 1552, closed: 1412, openAtEnd: 158, lateAtEnd: 34 },
+    { monthLabel: "سبتمبر 2025",  inflow: 1468, closed: 1300, openAtEnd: 150, lateAtEnd: 32 },
+    { monthLabel: "أكتوبر 2025",  inflow: 1314, closed: 1170, openAtEnd: 140, lateAtEnd: 29 },
+    { monthLabel: "نوفمبر 2025",  inflow: 1231, closed: 1085, openAtEnd: 134, lateAtEnd: 27 },
+    { monthLabel: "ديسمبر 2025",  inflow: 1207, closed: 1145, openAtEnd: 128, lateAtEnd: 26 },
+  ],
+};
+
+const ALL_SAUDI_REGIONS = [
+  "منطقة الرياض",
+  "منطقة مكة المكرمة",
+  "منطقة المدينة المنورة",
+  "منطقة القصيم",
+  "المنطقة الشرقية",
+  "منطقة عسير",
+  "منطقة تبوك",
+  "منطقة حائل",
+  "منطقة الحدود الشمالية",
+  "منطقة جازان",
+  "منطقة نجران",
+  "منطقة الباحة",
+  "منطقة الجوف",
+];
+
+function v2BaseReport(): ReportData {
+  const base = baseReport("PRINT_EXECUTIVE_BRIEF_V2");
+  base.briefData = v2BriefData;
+  base.period = { from: "2025-11-25", to: "2025-12-25" };
+  base.previousPeriod = { from: "2025-10-25", to: "2025-11-24" };
+  base.comparisonMode = "PREVIOUS_EQUIVALENT_PERIOD";
+  return base;
+}
+
+function v2NoReferenceReport(): ReportData {
+  const base = v2BaseReport();
+  base.previousPeriod = null;
+  base.comparisonData = undefined;
+  base.briefData = {
+    ...v2BriefData,
+    allRegions: v2BriefData.allRegions.map((row) => ({
+      ...row,
+      previousCount: 0,
+      difference: 0,
+      changeRate: null,
+    })),
+    comparativeTimeline: {
+      current: v2BriefData.comparativeTimeline.current,
+      previous: null,
+      periodDays: v2BriefData.comparativeTimeline.periodDays,
+    },
+  };
+  return base;
+}
+
+function v2ComplianceReport(value: number): ReportData {
+  const base = v2BaseReport();
+  base.briefData = {
+    ...v2BriefData,
+    briefKpis: v2BriefData.briefKpis.map((card) =>
+      card.key === "complianceRate" ? { ...card, value } : card
+    ),
+  };
+  return base;
+}
+
+function v2AllSaudiRegionsReport(): ReportData {
+  const base = v2BaseReport();
+  base.briefData = {
+    ...v2BriefData,
+    allRegions: ALL_SAUDI_REGIONS.map((regionName, index) => ({
+      regionName,
+      currentCount: 10 + index * 3,
+      previousCount: index * 2 + 1,
+      difference: 10 + index,
+      changeRate: Math.round((10 + index) / (index * 2 + 1) * 100),
+      complianceRate: 80 + index,
+      averageResolutionDays: 5 + index,
+      openCount: 4 + index,
+      closedCount: 6 + index,
+      currentlyLate: index % 3,
+      direction: "ارتفاع",
+    })),
+  };
+  return base;
+}
+
+// Tests "جديد" display: current > 0, previous = 0.
+function v2NewEntitiesReport(): ReportData {
+  const base = v2BaseReport();
+  base.briefData = {
+    ...v2BriefData,
+    briefKpis: v2BriefData.briefKpis.map((card) => ({
+      ...card,
+      previousValue: card.key === "total" ? 0 : (card.previousValue ?? 0),
+      changeRate: card.key === "total" ? null : card.changeRate,
+    })),
+    topClassifications: v2BriefData.topClassifications.map((row) => ({
+      ...row,
+      previousCount: 0,
+      difference: row.currentCount,
+      changeRate: null,
+    })),
+  };
+  return base;
+}
+
+// Numeric accuracy: 484 total / 1207 previous → changeRate ≈ −59.9%.
+function v2HighVolumeReport(): ReportData {
+  const base = v2BaseReport();
+  base.title = "تقرير الشكاوى — حجم مرتفع";
+  base.briefData = {
+    ...v2BriefData,
+    allTimeTotal: 18560,
+    briefKpis: [
+      { key: "total", label: "شكاوى الفترة", value: 1207, previousValue: 1870, difference: -663, changeRate: -35.5, format: "number", assessment: "negative" },
+      { key: "closed", label: "المغلقة خلال الفترة", value: 1145, previousValue: 1320, difference: -175, changeRate: -13.3, format: "number", assessment: "negative" },
+      { key: "open", label: "المفتوحة نهاية الفترة", value: 128, previousValue: 92, difference: 36, changeRate: 39.1, format: "number", assessment: "negative" },
+      { key: "currentlyLate", label: "المتأخرة نهاية الفترة", value: 26, previousValue: 14, difference: 12, changeRate: 85.7, format: "number", assessment: "negative" },
+      { key: "netChange", label: "إجمالي الشكاوى في النظام", value: 18560, previousValue: null, difference: null, changeRate: null, format: "number", assessment: "neutral" },
+      { key: "closedLate", label: "المغلقة بعد المهلة", value: 31, previousValue: 18, difference: 13, changeRate: 72.2, format: "number", assessment: "negative" },
+      { key: "complianceRate", label: "الالتزام ضمن المهلة", value: 97.3, previousValue: 90, difference: 7.3, changeRate: 8.1, format: "percent", assessment: "positive" },
+      { key: "averageResolutionDays", label: "متوسط الإغلاق", value: 3.2, previousValue: 22.6, difference: -19.4, changeRate: -85.8, format: "days", assessment: "positive" },
+    ],
+  };
+  return base;
+}
+
+// V2 without conclusions or notes to verify the empty-state fallback rendering.
+function v2NoNotesReport(): ReportData {
+  const base = v2BaseReport();
+  base.briefData = {
+    ...v2BriefData,
+    conclusions: [],
+    notes: [],
+  };
+  return base;
+}
+
 async function main(): Promise<void> {
   await fs.mkdir(outputDir, { recursive: true });
+
+  // ── Existing modes ────────────────────────────────────────────────────────
   const digital = await renderExecutiveBriefPdf(baseReport("DIGITAL_EXECUTIVE_BRIEF"), "DIGITAL_EXECUTIVE_BRIEF");
   const print = await renderExecutiveBriefPdf(baseReport("PRINT_EXECUTIVE_BRIEF"), "PRINT_EXECUTIVE_BRIEF");
   const full = await renderReportPdf(fullReport());
@@ -209,6 +367,17 @@ async function main(): Promise<void> {
   const gauge100 = await renderExecutiveBriefPdf(reportWithCompliance(100), "DIGITAL_EXECUTIVE_BRIEF");
   const noReference = await renderExecutiveBriefPdf(reportWithoutReference(), "DIGITAL_EXECUTIVE_BRIEF");
   const zeroTrend = await renderReportPdf(zeroTrendReport());
+
+  // ── V2 test cases (8 scenarios) ───────────────────────────────────────────
+  const v2Base = await renderExecutiveBriefV2Pdf(v2BaseReport());
+  const v2NoRef = await renderExecutiveBriefV2Pdf(v2NoReferenceReport());
+  const v2Compliance25 = await renderExecutiveBriefV2Pdf(v2ComplianceReport(25));
+  const v2Compliance100 = await renderExecutiveBriefV2Pdf(v2ComplianceReport(100));
+  const v2AllRegions = await renderExecutiveBriefV2Pdf(v2AllSaudiRegionsReport());
+  const v2NewEntities = await renderExecutiveBriefV2Pdf(v2NewEntitiesReport());
+  const v2HighVolume = await renderExecutiveBriefV2Pdf(v2HighVolumeReport());
+  const v2NoNotes = await renderExecutiveBriefV2Pdf(v2NoNotesReport());
+
   await Promise.all([
     fs.writeFile(path.join(outputDir, "digital-executive-brief.pdf"), digital.buffer),
     fs.writeFile(path.join(outputDir, "print-executive-brief.pdf"), print.buffer),
@@ -218,6 +387,15 @@ async function main(): Promise<void> {
     fs.writeFile(path.join(outputDir, "digital-gauge-100.pdf"), gauge100.buffer),
     fs.writeFile(path.join(outputDir, "digital-no-reference.pdf"), noReference.buffer),
     fs.writeFile(path.join(outputDir, "zero-trend-report.pdf"), zeroTrend.buffer),
+    // V2 scenarios
+    fs.writeFile(path.join(outputDir, "v2-executive-brief.pdf"), v2Base.buffer),
+    fs.writeFile(path.join(outputDir, "v2-no-reference.pdf"), v2NoRef.buffer),
+    fs.writeFile(path.join(outputDir, "v2-compliance-25.pdf"), v2Compliance25.buffer),
+    fs.writeFile(path.join(outputDir, "v2-compliance-100.pdf"), v2Compliance100.buffer),
+    fs.writeFile(path.join(outputDir, "v2-all-saudi-regions.pdf"), v2AllRegions.buffer),
+    fs.writeFile(path.join(outputDir, "v2-new-entities.pdf"), v2NewEntities.buffer),
+    fs.writeFile(path.join(outputDir, "v2-high-volume.pdf"), v2HighVolume.buffer),
+    fs.writeFile(path.join(outputDir, "v2-no-notes.pdf"), v2NoNotes.buffer),
   ]);
   process.stdout.write(`${outputDir}\n`);
 }

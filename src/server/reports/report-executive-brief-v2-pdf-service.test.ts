@@ -1,0 +1,330 @@
+// @vitest-environment node
+import { describe, expect, it, vi } from "vitest";
+import PDFDocument from "pdfkit";
+import type { ReportType } from "@prisma/client";
+import type { ExecutiveBriefV2Data, ReportData } from "./report-data-service";
+import { isExecutiveBriefV2Data } from "./report-data-service";
+import { renderExecutiveBriefV2Pdf, formatTableValue } from "./report-executive-brief-v2-pdf-service";
+import { REPORT_DESIGN_TOKENS } from "@/lib/reports/design-tokens";
+
+const DANGER = REPORT_DESIGN_TOKENS.colors.danger;
+
+function countPageObjects(buffer: Buffer): number {
+  return (buffer.toString("binary").match(/\/Type\s*\/Page\s*\/Parent/g) ?? []).length;
+}
+
+function makeV2Brief(overrides: Partial<ExecutiveBriefV2Data> = {}): ExecutiveBriefV2Data {
+  return {
+    briefKpis: [
+      { key: "total", label: "إجمالي الشكاوى", value: 100, previousValue: 80, difference: 20, changeRate: 25, format: "number", assessment: "neutral" },
+      { key: "open", label: "المفتوحة", value: 30, previousValue: 25, difference: 5, changeRate: 20, format: "number", assessment: "negative" },
+      { key: "closed", label: "المغلقة", value: 65, previousValue: 50, difference: 15, changeRate: 30, format: "number", assessment: "positive" },
+      { key: "currentlyLate", label: "المتأخرة", value: 8, previousValue: 10, difference: -2, changeRate: -20, format: "number", assessment: "positive" },
+      { key: "complianceRate", label: "نسبة الالتزام", value: 95, previousValue: 90, difference: 5, changeRate: 5.6, format: "percent", assessment: "positive" },
+      { key: "averageResolutionDays", label: "متوسط زمن الإغلاق", value: 3.5, previousValue: 4, difference: -0.5, changeRate: -12.5, format: "days", assessment: "positive" },
+      { key: "closedLate", label: "المغلقة بعد المهلة", value: 2, previousValue: 3, difference: -1, changeRate: -33.3, format: "number", assessment: "positive" },
+      { key: "netChange", label: "صافي التغير", value: 20, previousValue: null, difference: null, changeRate: null, format: "number", assessment: "neutral" },
+    ],
+    allRegions: [
+      { regionName: "منطقة الرياض", currentCount: 40, previousCount: 30, difference: 10, changeRate: 33.3, complianceRate: 96, averageResolutionDays: 3.2, openCount: 10, closedCount: 30, currentlyLate: 3, direction: "ارتفاع" },
+      { regionName: "منطقة جدة", currentCount: 30, previousCount: 35, difference: -5, changeRate: -14.3, complianceRate: 95, averageResolutionDays: 3.5, openCount: 8, closedCount: 22, currentlyLate: 2, direction: "انخفاض" },
+      { regionName: "منطقة مكة", currentCount: 15, previousCount: 0, difference: 15, changeRate: null, complianceRate: 90, averageResolutionDays: 4, openCount: 5, closedCount: 10, currentlyLate: 1, direction: "ارتفاع" },
+    ],
+    topClassifications: [
+      { classificationId: "c1", classificationName: "نقل", currentCount: 30, previousCount: 25, difference: 5, changeRate: 20, shareOfTotal: 30 },
+      { classificationId: "c2", classificationName: "علاج", currentCount: 20, previousCount: 0, difference: 20, changeRate: null, shareOfTotal: 20 },
+    ],
+    comparativeTimeline: {
+      current: { label: "الحالية", points: [{ relativeDay: 1, count: 10 }] },
+      previous: { label: "السابقة", points: [{ relativeDay: 1, count: 8 }] },
+      periodDays: 30,
+    },
+    concentrationBands: [],
+    topDepartments: [
+      { name: "المتابعة", total: 40, open: 10, closed: 30, currentlyLate: 3, shareOfTotal: 40 },
+    ],
+    conclusions: ["استنتاج تجريبي."],
+    notes: ["ملاحظة جودة بيانات تجريبية."],
+    allTimeTotal: 18560,
+    monthlyStockFlow: [
+      { monthLabel: "نوفمبر 2025", inflow: 100, closed: 90, openAtEnd: 40, lateAtEnd: 5 },
+      { monthLabel: "ديسمبر 2025", inflow: 120, closed: 110, openAtEnd: 45, lateAtEnd: 6 },
+    ],
+    classificationOpenLate: {
+      c1: { openAtEnd: 12, lateAtEnd: 3 },
+      c2: { openAtEnd: 4, lateAtEnd: 1 },
+    },
+    ...overrides,
+  };
+}
+
+function makeV2Report(overrides: Partial<ReportData> = {}): ReportData {
+  return {
+    type: "EXECUTIVE_SUMMARY" as ReportType,
+    title: "تقرير الشكاوى",
+    generatedAt: new Date("2026-07-31T04:00:00Z").toISOString(),
+    period: { from: "2025-11-25", to: "2025-12-25" },
+    previousPeriod: { from: "2025-10-25", to: "2025-11-24" },
+    filters: { from: "2025-11-25", to: "2025-12-25" },
+    kpis: {} as ReportData["kpis"],
+    sections: [],
+    warnings: [],
+    rowCount: 0,
+    reportMode: "PRINT_EXECUTIVE_BRIEF_V2",
+    comparisonMode: "PREVIOUS_EQUIVALENT_PERIOD",
+    briefData: makeV2Brief(),
+    comparisonData: {
+      currentPeriod: { from: new Date("2025-11-25"), toExclusive: new Date("2025-12-26") },
+      previousPeriod: { from: new Date("2025-10-25"), toExclusive: new Date("2025-11-25") },
+      currentTotal: 100,
+      previousTotal: 80,
+      regionTrend: { allDates: [], series: [], truncated: false, otherSeriesName: null },
+      regionChanges: [],
+      regionSubjectChanges: [
+        { regionName: "منطقة الرياض", subject: "عرضه على الطبيب", currentCount: 18, previousCount: 7, difference: 11, changeRate: 157.1, direction: "ارتفاع" },
+        { regionName: "منطقة جدة", subject: "استفسار", currentCount: 1, previousCount: 8, difference: -7, changeRate: -87.5, direction: "انخفاض" },
+        { regionName: "منطقة مكة", subject: "طلب نقل", currentCount: 4, previousCount: 0, difference: 4, changeRate: null, direction: "ارتفاع" },
+      ],
+      deptClassRises: [
+        {
+          departmentId: "d1",
+          departmentName: "المتابعة",
+          classificationId: "c1",
+          classificationName: "نقل",
+          currentCount: 10,
+          previousCount: 2,
+          difference: 8,
+          changeRate: 400,
+          classificationContribution: 80,
+        },
+      ],
+      deptClassRisesTotal: 1,
+      deptClassAllPairs: [],
+      executiveSummaryPoints: [],
+      warnings: [],
+    },
+    ...overrides,
+  };
+}
+
+describe("isExecutiveBriefV2Data", () => {
+  it("rejects payloads missing classificationOpenLate so EMPTY_V2 fallback is used", async () => {
+    const incomplete = {
+      briefKpis: makeV2Brief().briefKpis,
+      allRegions: makeV2Brief().allRegions,
+      topClassifications: makeV2Brief().topClassifications,
+      comparativeTimeline: makeV2Brief().comparativeTimeline,
+      concentrationBands: [],
+      topDepartments: makeV2Brief().topDepartments,
+      conclusions: makeV2Brief().conclusions,
+      notes: makeV2Brief().notes,
+      allTimeTotal: 18560,
+      monthlyStockFlow: makeV2Brief().monthlyStockFlow,
+      // intentionally omit classificationOpenLate
+    };
+    expect(isExecutiveBriefV2Data(incomplete as unknown as ExecutiveBriefV2Data)).toBe(false);
+
+    const result = await renderExecutiveBriefV2Pdf(
+      makeV2Report({
+        briefData: incomplete as unknown as ExecutiveBriefV2Data,
+      })
+    );
+    expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
+  });
+});
+
+describe("renderExecutiveBriefV2Pdf", () => {
+  it("produces a valid 4-page reference PDF", async () => {
+    const result = await renderExecutiveBriefV2Pdf(makeV2Report());
+    expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
+    expect(countPageObjects(result.buffer)).toBe(4);
+    expect(result.warnings.every((w) => !w.includes("بدلًا من"))).toBe(true);
+  });
+
+  it("colors negative difference and changeRate with danger", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    const fillSpy = vi.spyOn(PDFDocument.prototype, "fillColor");
+    try {
+      await renderExecutiveBriefV2Pdf(makeV2Report());
+      const colorBefore = (needle: string): string | undefined => {
+        const textIndex = textSpy.mock.calls.findIndex((call) => String(call[0]).includes(needle));
+        if (textIndex < 0) return undefined;
+        const textOrder = textSpy.mock.invocationCallOrder[textIndex];
+        let colorIndex = -1;
+        fillSpy.mock.invocationCallOrder.forEach((order, index) => {
+          if (order < textOrder && (colorIndex === -1 || order > fillSpy.mock.invocationCallOrder[colorIndex])) {
+            colorIndex = index;
+          }
+        });
+        return colorIndex === -1 ? undefined : String(fillSpy.mock.calls[colorIndex][0]);
+      };
+      // −5 difference for Jeddah and −14.3% change rate
+      expect(colorBefore("−5")).toBe(DANGER);
+      expect(colorBefore("−14.3%")).toBe(DANGER);
+    } finally {
+      textSpy.mockRestore();
+      fillSpy.mockRestore();
+    }
+  });
+
+  it("uses drawInfoBox height so long methodology notes do not ignore returned y", async () => {
+    const yValues: number[] = [];
+    const originalRoundedRect = PDFDocument.prototype.roundedRect;
+    const rectSpy = vi.spyOn(PDFDocument.prototype, "roundedRect").mockImplementation(function (
+      this: PDFKit.PDFDocument,
+      ...args: unknown[]
+    ) {
+      const y = args[1] as number;
+      yValues.push(y);
+      return originalRoundedRect.apply(this, args as [number, number, number, number, number?]);
+    });
+    try {
+      await renderExecutiveBriefV2Pdf(makeV2Report());
+      expect(yValues.length).toBeGreaterThan(5);
+      // Later boxes are placed at higher y positions on page content flow
+      expect(Math.max(...yValues)).toBeGreaterThan(Math.min(...yValues));
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
+
+  it("classification comparison columns do not depend on region previous data", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      const data = makeV2Report();
+      data.briefData = makeV2Brief({
+        allRegions: makeV2Brief().allRegions.map((r) => ({
+          ...r,
+          previousCount: 0,
+          difference: r.currentCount,
+          changeRate: null,
+        })),
+        topClassifications: [
+          { classificationId: "c1", classificationName: "نقل", currentCount: 30, previousCount: 25, difference: 5, changeRate: 20, shareOfTotal: 30 },
+        ],
+      });
+      await renderExecutiveBriefV2Pdf(data);
+      const texts = textSpy.mock.calls.map((c) => String(c[0]));
+      // "السابق" header must appear for classifications even when regions have previous=0
+      expect(texts.some((t) => t.includes("السابق"))).toBe(true);
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("does not fail when page count exceeds target; footers use actual count", async () => {
+    const many = Array.from({ length: 13 }, (_, i) => ({
+      regionName: `منطقة ${i + 1}`,
+      currentCount: 50 + i,
+      previousCount: 40 + i,
+      difference: 10,
+      changeRate: 25,
+      complianceRate: 90,
+      averageResolutionDays: 4,
+      openCount: 10,
+      closedCount: 40,
+      currentlyLate: 2,
+      direction: "ارتفاع",
+    }));
+    const data = makeV2Report({
+      briefData: makeV2Brief({
+        allRegions: many,
+        notes: Array.from({ length: 5 }, (_, i) => `ملاحظة ${i + 1}`),
+        conclusions: Array.from({ length: 5 }, (_, i) => `استنتاج ${i + 1}`),
+      }),
+    });
+    const result = await renderExecutiveBriefV2Pdf(data);
+    expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
+    expect(countPageObjects(result.buffer)).toBeGreaterThanOrEqual(4);
+    // Must never throw V2_PAGE_COUNT_MISMATCH
+    expect(result.warnings.some((w) => w.includes("V2_PAGE_COUNT"))).toBe(false);
+  });
+
+  it("calls doc.end once on success and once on render failure", async () => {
+    const originalEnd = PDFDocument.prototype.end;
+    let endCount = 0;
+    PDFDocument.prototype.end = function (this: PDFKit.PDFDocument, ...args: unknown[]) {
+      endCount += 1;
+      return originalEnd.apply(this, args as []);
+    };
+    try {
+      const ok = await renderExecutiveBriefV2Pdf(makeV2Report());
+      expect(ok.buffer.length).toBeGreaterThan(100);
+      expect(endCount).toBe(1);
+
+      endCount = 0;
+      const originalAddPage = PDFDocument.prototype.addPage;
+      let addPageCalls = 0;
+      PDFDocument.prototype.addPage = function (this: PDFKit.PDFDocument, ...args: unknown[]) {
+        addPageCalls += 1;
+        // Allow autoFirstPage construction; fail when adding page 2.
+        if (addPageCalls >= 2) {
+          throw new Error("forced-render-failure");
+        }
+        return originalAddPage.apply(this, args as []);
+      };
+      try {
+        await expect(renderExecutiveBriefV2Pdf(makeV2Report())).rejects.toThrow("forced-render-failure");
+        expect(endCount).toBe(1);
+      } finally {
+        PDFDocument.prototype.addPage = originalAddPage;
+      }
+    } finally {
+      PDFDocument.prototype.end = originalEnd;
+    }
+  });
+
+  it("shows جديد when previousCount is 0 and uses signed subject declines", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(makeV2Report());
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(joined).toContain("جديد");
+      expect(joined).toMatch(/−7/);
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("renders table headers, regions, classifications, departments, and box titles", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      const result = await renderExecutiveBriefV2Pdf(makeV2Report());
+      expect(countPageObjects(result.buffer)).toBe(4);
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      // preparePdfText reorders RTL tokens; assert stable Arabic substrings that still appear.
+      for (const token of [
+        "المنطقة",
+        "الحالية",
+        "السابقة",
+        "الفرق",
+        "تغير",
+        "موضوع",
+        "التصنيف",
+        "الإدارة",
+        "الاستنتاجات",
+        "ملاحظات",
+        "استنتاج",
+        "المتابعة",
+        "نقل",
+      ]) {
+        expect(joined).toContain(token);
+      }
+      expect(joined).not.toContain("[object Object]");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+});
+
+describe("formatTableValue", () => {
+  it("formats numbers and strings while blocking object leak", () => {
+    expect(formatTableValue(12)).toBe("12");
+    expect(formatTableValue("نقل")).toBe("نقل");
+    expect(formatTableValue(null)).toBe("—");
+    expect(formatTableValue(undefined)).toBe("—");
+    expect(formatTableValue({ nested: true })).toBe("—");
+    expect(formatTableValue([1, 2])).toBe("—");
+    expect(formatTableValue({ nested: true })).not.toContain("object Object");
+  });
+});

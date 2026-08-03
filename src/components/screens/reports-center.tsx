@@ -204,6 +204,11 @@ const REPORT_MODE_OPTIONS: readonly {
     description: "أربع صفحات محسنة للطباعة بخطوط وجداول واضحة.",
   },
   {
+    value: "PRINT_EXECUTIVE_BRIEF_V2",
+    label: "التقرير التنفيذي — النسخة الثانية (4 صفحات)",
+    description: "نسخة محسّنة من التقرير التنفيذي المطبوع بتصميم معاد هيكلته.",
+  },
+  {
     value: "FULL_ANALYTICAL",
     label: "التقرير التحليلي الكامل",
     description: "تقرير موسع يتضمن الجداول والتحليلات التفصيلية.",
@@ -1512,7 +1517,11 @@ function ReportChartPreview({ section }: Readonly<{ section: Extract<ReportSecti
 }
 
 function isBriefReportMode(mode: ReportMode | undefined): boolean {
-  return mode === "DIGITAL_EXECUTIVE_BRIEF" || mode === "PRINT_EXECUTIVE_BRIEF";
+  return (
+    mode === "DIGITAL_EXECUTIVE_BRIEF" ||
+    mode === "PRINT_EXECUTIVE_BRIEF" ||
+    mode === "PRINT_EXECUTIVE_BRIEF_V2"
+  );
 }
 
 function executivePreviewPages(data: ReportData): readonly ReportSection[][] {

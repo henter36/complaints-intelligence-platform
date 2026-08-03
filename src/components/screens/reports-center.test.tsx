@@ -127,17 +127,19 @@ describe("ReportsCenter", () => {
     expect(radios[1]).toHaveAttribute("aria-checked", "true");
     expect(radios.filter((radio) => radio.tabIndex === 0)).toEqual([radios[1]]);
 
+    const last = radios[radios.length - 1];
+    const secondLast = radios[radios.length - 2];
     await user.keyboard("{End}");
-    expect(radios[3]).toHaveFocus();
-    expect(radios[3]).toHaveAttribute("aria-checked", "true");
+    expect(last).toHaveFocus();
+    expect(last).toHaveAttribute("aria-checked", "true");
     await user.keyboard("{Home}");
     expect(radios[0]).toHaveFocus();
     await user.keyboard("{ArrowLeft}");
-    expect(radios[3]).toHaveFocus();
+    expect(last).toHaveFocus();
     await user.keyboard("{ArrowUp}");
-    expect(radios[2]).toHaveFocus();
+    expect(secondLast).toHaveFocus();
     await user.keyboard("{ArrowDown}");
-    expect(radios[3]).toHaveFocus();
+    expect(last).toHaveFocus();
   });
 
   it("hides report modes and resets the hidden value after changing report type", async () => {

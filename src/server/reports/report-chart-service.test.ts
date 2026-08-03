@@ -255,3 +255,110 @@ describe("buildChartSvg — bar chart category alignment", () => {
     expect(labelXByCategory["الرياض"]).toBeLessThan(labelXByCategory["جدة"]);
   });
 });
+
+describe("buildChartSvg — dual-axis and legend", () => {
+  const DANGER = "#C62828";
+  const PRIMARY = "#004B3A";
+
+  it("dual-axis bar: left bars + right overlay lines use category centers", () => {
+    const section: ReportChartSection = {
+      id: "dual-bar",
+      kind: "chart",
+      chartType: "bar",
+      title: "اختبار",
+      series: [
+        { name: "واردة", points: [{ x: "أ", y: 10 }, { x: "ب", y: 20 }] },
+        { name: "مغلقة", points: [{ x: "أ", y: 5 }, { x: "ب", y: 8 }] },
+        { name: "مفتوحة", axis: "right", points: [{ x: "أ", y: 30 }, { x: "ب", y: 40 }] },
+        { name: "متأخرة", axis: "right", points: [{ x: "أ", y: 2 }, { x: "ب", y: 4 }] },
+      ],
+    };
+    const svg = buildChartSvg(section, 600, 400);
+    expect(svg.match(/<rect x=/g) ?? []).toHaveLength(4);
+    expect(svg.match(/<polyline /g) ?? []).toHaveLength(2);
+    // Secondary axis dashed line is on plotLeft (x="76")
+    expect(svg).toMatch(/stroke-dasharray="3,3"/);
+    expect(svg).toMatch(/x1="76" y1="48" x2="76"/);
+    // Right-axis first series uses primary, second uses danger
+    expect(svg).toContain(`stroke="${PRIMARY}"`);
+    expect(svg).toContain(`stroke="${DANGER}"`);
+  });
+
+  it("dual-axis line: right-axis points use xForIndex spacing", () => {
+    const section: ReportChartSection = {
+      id: "dual-line",
+      kind: "chart",
+      chartType: "line",
+      title: "خط",
+      series: [
+        { name: "يسار", points: [{ x: "2026-01-01", y: 1 }, { x: "2026-01-02", y: 2 }, { x: "2026-01-03", y: 3 }] },
+        { name: "يمين", axis: "right", points: [{ x: "2026-01-01", y: 10 }, { x: "2026-01-02", y: 20 }, { x: "2026-01-03", y: 30 }] },
+      ],
+    };
+    const svg = buildChartSvg(section, 600, 400);
+    // plotLeft dual=76, plotRight=600-76=524 → first x=76, mid=300, last=524
+    expect(svg).toContain("76.0,");
+    expect(svg).toContain("300.0,");
+    expect(svg).toContain("524.0,");
+  });
+
+  it("right-axis-only is treated as single-axis without double drawing", () => {
+    const section: ReportChartSection = {
+      id: "right-only",
+      kind: "chart",
+      chartType: "line",
+      title: "يمين فقط",
+      series: [
+        { name: "مفتوحة", axis: "right", points: [{ x: "أ", y: 5 }, { x: "ب", y: 6 }] },
+        { name: "متأخرة", axis: "right", points: [{ x: "أ", y: 1 }, { x: "ب", y: 2 }] },
+      ],
+    };
+    const svg = buildChartSvg(section, 600, 400);
+    // Single-axis (plotLeft 54) — no secondary dash/thick plotLeft dual margin
+    expect(svg).not.toMatch(/stroke-dasharray="3,3"/);
+    expect(svg).toMatch(/x1="54"/);
+    // Two polylines only (one per series), not four
+    expect(svg.match(/<polyline /g) ?? []).toHaveLength(2);
+  });
+
+  it("legend swatches match right-axis plot colors", () => {
+    const section: ReportChartSection = {
+      id: "legend",
+      kind: "chart",
+      chartType: "bar",
+      title: "وسيلة إيضاح",
+      series: [
+        { name: "واردة", points: [{ x: "أ", y: 10 }] },
+        { name: "مفتوحة", axis: "right", points: [{ x: "أ", y: 40 }] },
+        { name: "متأخرة", axis: "right", points: [{ x: "أ", y: 5 }] },
+      ],
+    };
+    const svg = buildChartSvg(section, 600, 400);
+    // Right series 0 → primary, series 1 → danger (same as rightAxisStyle)
+    const polylines = [...svg.matchAll(/<polyline[^>]*stroke="([^"]+)"/g)].map((m) => m[1]);
+    expect(polylines).toEqual([PRIMARY, DANGER]);
+    // Legend lines: left series uses seriesStyle[0]=primary; right uses same as plot
+    const legendLines = [...svg.matchAll(/<line x1="[^"]+" y1="[^"]+" x2="[^"]+" y2="[^"]+" stroke="([^"]+)"/g)]
+      .map((m) => m[1])
+      .filter((c) => c === PRIMARY || c === DANGER || c === "#B88919");
+    expect(legendLines).toContain(PRIMARY);
+    expect(legendLines).toContain(DANGER);
+  });
+
+  it("clamps tall bar labels inside the bar with white fill", () => {
+    const section: ReportChartSection = {
+      id: "tall",
+      kind: "chart",
+      chartType: "bar",
+      title: "عمود طويل",
+      series: [
+        { name: "ذروة", points: [{ x: "أ", y: 100 }, { x: "ب", y: 1 }] },
+      ],
+    };
+    const svg = buildChartSvg(section, 600, 400);
+    // Peak bar label "100" is clamped inside the bar in white; short bar "1" keeps series color.
+    // Attribute order is x/y/text-anchor/font-size/fill before the text content.
+    expect(svg).toMatch(/<text[^>]*fill="#FFFFFF"[^>]*>100<\/text>/);
+    expect(svg).toMatch(/<text[^>]*fill="#004B3A"[^>]*>1<\/text>/);
+  });
+});

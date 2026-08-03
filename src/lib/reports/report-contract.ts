@@ -17,16 +17,18 @@
  * and ReportRun — no schema migration required.
  */
 export type ReportMode =
-  | "STANDARD"                 // Existing full-section report
-  | "DIGITAL_EXECUTIVE_BRIEF"  // 3-page 16:9 digital slides (1440×810 pt)
-  | "FULL_ANALYTICAL"          // Unlimited-page portrait deep-dive on the readable report canvas
-  | "PRINT_EXECUTIVE_BRIEF";   // 4-page print-oriented complaints report
+  | "STANDARD"                  // Existing full-section report
+  | "DIGITAL_EXECUTIVE_BRIEF"   // 4-page 16:9 digital slides
+  | "FULL_ANALYTICAL"           // Unlimited-page portrait deep-dive on the readable report canvas
+  | "PRINT_EXECUTIVE_BRIEF"     // 4-page print-oriented complaints report
+  | "PRINT_EXECUTIVE_BRIEF_V2"; // 4-page print report — redesigned V2 layout
 
 export const REPORT_MODES = [
   "STANDARD",
   "DIGITAL_EXECUTIVE_BRIEF",
   "FULL_ANALYTICAL",
   "PRINT_EXECUTIVE_BRIEF",
+  "PRINT_EXECUTIVE_BRIEF_V2",
 ] as const satisfies readonly ReportMode[];
 
 export function isReportMode(value: unknown): value is ReportMode {
@@ -198,6 +200,21 @@ export type ComparativeTimelineData = {
   previous: ComparativeTimelineSeries | null;
   periodDays: number;
   aggregation?: "daily" | "weekly" | "monthly";
+};
+
+// ---------------------------------------------------------------------------
+// V2 monthly stock-and-flow timeline
+// ---------------------------------------------------------------------------
+
+/** One calendar-month bucket for the V2 executive brief timeline chart.
+ *  Inflow and closed are flow metrics (events during the month).
+ *  openAtEnd and lateAtEnd are stock metrics (snapshot at end of month). */
+export type MonthlyStockFlowPoint = {
+  monthLabel: string;
+  inflow: number;
+  closed: number;
+  openAtEnd: number;
+  lateAtEnd: number;
 };
 
 // ---------------------------------------------------------------------------

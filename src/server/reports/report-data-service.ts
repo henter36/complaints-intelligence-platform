@@ -38,11 +38,13 @@ import type {
   PerfVolumeRow,
   ContinuityRow,
   ExecutiveBriefPreviewPage,
+  MonthlyStockFlowPoint,
 } from "@/lib/reports/report-contract";
 // Types that are only re-exported (not used locally) — direct re-export avoids a redundant import.
 export type { KpiAssessment, ComparativeTimelinePoint, ComparativeTimelineSeries } from "@/lib/reports/report-contract";
 import {
   buildExecutiveBriefData,
+  buildExecutiveBriefV2Data,
   buildFullAnalyticalData,
 } from "./report-executive-brief-data-service";
 
@@ -91,6 +93,8 @@ export type ChartSeries = {
   name: string;
   points: { x: string; y: number }[];
   isOther?: boolean;
+  /** When "right", render against a secondary Y-axis (dual-axis bar+line charts). */
+  axis?: "left" | "right";
 };
 
 type ReportSectionPreviewMetadata = {
@@ -150,7 +154,7 @@ export type ReportData = {
   // Mode-specific extended data (only present for the new report modes).
   reportMode?: ReportMode;
   comparisonMode?: ComparisonMode;
-  briefData?: ExecutiveBriefData | FullAnalyticalData;
+  briefData?: ExecutiveBriefData | ExecutiveBriefV2Data | FullAnalyticalData;
 };
 
 /** Extended payload for DIGITAL_EXECUTIVE_BRIEF and PRINT_EXECUTIVE_BRIEF modes. */
@@ -165,12 +169,31 @@ export type ExecutiveBriefData = {
   notes?: string[];
 };
 
+/** Extended payload for PRINT_EXECUTIVE_BRIEF_V2 (super-set of ExecutiveBriefData). */
+export type ExecutiveBriefV2Data = ExecutiveBriefData & {
+  allTimeTotal: number;
+  monthlyStockFlow: MonthlyStockFlowPoint[];
+  /** Per-classificationId open and late counts at current period end. */
+  classificationOpenLate: Record<string, { openAtEnd: number; lateAtEnd: number }>;
+};
+
 /** Extended payload for FULL_ANALYTICAL mode (super-set of ExecutiveBriefData). */
 export type FullAnalyticalData = ExecutiveBriefData & {
   netBacklogFlow: NetBacklogFlow;
   perfVolumeRows: PerfVolumeRow[];
   continuityRows: ContinuityRow[];
 };
+
+/** Returns true when the brief data includes V2-specific fields. */
+export function isExecutiveBriefV2Data(
+  data: ExecutiveBriefData | ExecutiveBriefV2Data | FullAnalyticalData
+): data is ExecutiveBriefV2Data {
+  return (
+    "allTimeTotal" in data &&
+    "monthlyStockFlow" in data &&
+    "classificationOpenLate" in data
+  );
+}
 
 /** Returns true when all FULL_ANALYTICAL-only payload fields are present. */
 export function isFullAnalyticalData(
@@ -587,6 +610,7 @@ async function buildExecutiveSummaryWithMode(
     STANDARD: getReportDefinition(ReportType.EXECUTIVE_SUMMARY).title,
     DIGITAL_EXECUTIVE_BRIEF: "تقرير الشكاوى",
     PRINT_EXECUTIVE_BRIEF: "تقرير الشكاوى",
+    PRINT_EXECUTIVE_BRIEF_V2: "تقرير الشكاوى",
     FULL_ANALYTICAL: "تقرير الشكاوى",
   };
 
@@ -617,6 +641,18 @@ async function buildExecutiveSummaryWithMode(
       now
     );
     return { ...base, title, reportMode, briefData: fullData };
+  }
+
+  // PRINT_EXECUTIVE_BRIEF_V2
+  if (reportMode === "PRINT_EXECUTIVE_BRIEF_V2") {
+    const briefData = await buildExecutiveBriefV2Data(
+      request.filters,
+      result,
+      comparison,
+      previousResult,
+      now
+    );
+    return { ...base, title, reportMode, briefData };
   }
 
   // DIGITAL_EXECUTIVE_BRIEF / PRINT_EXECUTIVE_BRIEF
