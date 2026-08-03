@@ -47,12 +47,15 @@ const SNAPSHOT_FIELDS = [
   "resolution",
   "actionTaken",
   "actionDescription",
-  "closedBy",
+  "sourceOrigin",
+  "sourceClosedBy",
   "wingCode",
-  "lastUpdatedAt",
-  "lastModifiedAt",
-  "lastUpdatedBy",
-  "complaintCount",
+  "sourceUpdatedAt",
+  "sourceModifiedAt",
+  "sourceUpdatedBy",
+  "sourceStatus",
+  "sourceDetail",
+  "sourceActionStatus",
 ] as const;
 
 type SnapshotField = (typeof SNAPSHOT_FIELDS)[number];
@@ -72,6 +75,8 @@ type NormalizedConfirmationRow = {
   subject?: string | null;
   description?: string | null;
   sourceDetail?: string | null;
+  sourceActionStatus?: string | null;
+  sourceStatus?: string | null;
   complainantName?: string | null;
   complainantIdentifier?: string | null;
   complainantPhone?: string | null;
@@ -85,12 +90,12 @@ type NormalizedConfirmationRow = {
   resolution?: string | null;
   actionTaken?: string | null;
   actionDescription?: string | null;
-  closedBy?: string | null;
+  sourceOrigin?: string | null;
+  sourceClosedBy?: string | null;
   wingCode?: string | null;
-  lastUpdatedAt?: Date | null;
-  lastModifiedAt?: Date | null;
-  lastUpdatedBy?: string | null;
-  complaintCount?: number | null;
+  sourceUpdatedAt?: Date | null;
+  sourceModifiedAt?: Date | null;
+  sourceUpdatedBy?: string | null;
 };
 
 export type ImportConfirmationResult = {
@@ -187,13 +192,6 @@ function parseText(value: unknown): string | null | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-function parseNumber(value: unknown): number | null | undefined {
-  if (value === undefined) return undefined;
-  if (value === null) return null;
-  if (typeof value === "number") return Number.isFinite(value) ? Math.trunc(value) : undefined;
-  return undefined;
-}
-
 function hasOwn(value: Record<string, unknown>, key: string): boolean {
   return Object.hasOwn(value, key);
 }
@@ -254,6 +252,8 @@ function parseNormalizedRow(row: ConfirmationRow): NormalizedConfirmationRow {
     subject: parseText(data.subject),
     description: parseText(data.description),
     sourceDetail: parseText(data.sourceDetail),
+    sourceActionStatus: parseText(data.sourceActionStatus),
+    sourceStatus: parseText(data.sourceStatus),
     complainantName: parseText(data.complainantName),
     complainantIdentifier: parseText(data.complainantIdentifier),
     complainantPhone: parseText(data.complainantPhone),
@@ -267,12 +267,12 @@ function parseNormalizedRow(row: ConfirmationRow): NormalizedConfirmationRow {
     resolution: parseText(data.resolution),
     actionTaken: parseText(data.actionTaken),
     actionDescription: parseText(data.actionDescription),
-    closedBy: parseText(data.closedBy),
+    sourceOrigin: parseText(data.sourceOrigin),
+    sourceClosedBy: parseText(data.sourceClosedBy),
     wingCode: parseText(data.wingCode),
-    lastUpdatedAt: parseDate(data.sourceUpdatedAt),
-    lastModifiedAt: parseDate(data.lastModifiedAt),
-    lastUpdatedBy: parseText(data.lastUpdatedBy),
-    complaintCount: parseNumber(data.complaintCount),
+    sourceUpdatedAt: parseDate(data.sourceUpdatedAt),
+    sourceModifiedAt: parseDate(data.sourceModifiedAt),
+    sourceUpdatedBy: parseText(data.sourceUpdatedBy),
   };
 }
 
@@ -407,12 +407,15 @@ async function applyNewRow(
       resolution: normalized.resolution ?? null,
       actionTaken: normalized.actionTaken ?? null,
       actionDescription: normalized.actionDescription ?? null,
-      closedBy: normalized.closedBy ?? null,
+      sourceOrigin: normalized.sourceOrigin ?? null,
+      sourceClosedBy: normalized.sourceClosedBy ?? null,
       wingCode: normalized.wingCode ?? null,
-      lastUpdatedAt: normalized.lastUpdatedAt ?? null,
-      lastModifiedAt: normalized.lastModifiedAt ?? null,
-      lastUpdatedBy: normalized.lastUpdatedBy ?? null,
-      complaintCount: normalized.complaintCount ?? null,
+      sourceUpdatedAt: normalized.sourceUpdatedAt ?? null,
+      sourceModifiedAt: normalized.sourceModifiedAt ?? null,
+      sourceUpdatedBy: normalized.sourceUpdatedBy ?? null,
+      sourceStatus: normalized.sourceStatus ?? null,
+      sourceDetail: normalized.sourceDetail ?? null,
+      sourceActionStatus: normalized.sourceActionStatus ?? null,
       importBatchId: batchId,
     },
   });
@@ -504,12 +507,15 @@ function assignImportUpdateFields(
   assignIfDefined(data, "resolution", normalized.resolution);
   assignIfDefined(data, "actionTaken", normalized.actionTaken);
   assignIfDefined(data, "actionDescription", normalized.actionDescription);
-  assignIfDefined(data, "closedBy", normalized.closedBy);
+  assignIfDefined(data, "sourceOrigin", normalized.sourceOrigin);
+  assignIfDefined(data, "sourceClosedBy", normalized.sourceClosedBy);
   assignIfDefined(data, "wingCode", normalized.wingCode);
-  assignIfDefined(data, "lastUpdatedAt", normalized.lastUpdatedAt);
-  assignIfDefined(data, "lastModifiedAt", normalized.lastModifiedAt);
-  assignIfDefined(data, "lastUpdatedBy", normalized.lastUpdatedBy);
-  assignIfDefined(data, "complaintCount", normalized.complaintCount);
+  assignIfDefined(data, "sourceUpdatedAt", normalized.sourceUpdatedAt);
+  assignIfDefined(data, "sourceModifiedAt", normalized.sourceModifiedAt);
+  assignIfDefined(data, "sourceUpdatedBy", normalized.sourceUpdatedBy);
+  assignIfDefined(data, "sourceStatus", normalized.sourceStatus);
+  assignIfDefined(data, "sourceDetail", normalized.sourceDetail);
+  assignIfDefined(data, "sourceActionStatus", normalized.sourceActionStatus);
 }
 
 function buildUpdateData(

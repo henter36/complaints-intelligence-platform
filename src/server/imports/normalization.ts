@@ -44,11 +44,11 @@ export type NormalizedComplaintRow = {
   resolution?: string;
   actionTaken?: string;
   actionDescription?: string;
-  closedBy?: string;
+  sourceOrigin?: string;
+  sourceClosedBy?: string;
   wingCode?: string;
-  lastModifiedAt?: Date;
-  lastUpdatedBy?: string;
-  complaintCount?: number;
+  sourceModifiedAt?: Date;
+  sourceUpdatedBy?: string;
 };
 
 export type RowMessage = {
@@ -97,7 +97,7 @@ const DATE_FIELD_LABELS: Partial<Record<ComplaintImportField, string>> = {
   dueDate: "تاريخ الاستحقاق",
   closedAt: "تاريخ الإغلاق",
   sourceUpdatedAt: "آخر تحديث في المصدر",
-  lastModifiedAt: "آخر تعديل في",
+  sourceModifiedAt: "آخر تعديل في",
 };
 
 function normalizeArabicToken(value: string): string {
@@ -239,10 +239,9 @@ function normalizePriority(value: unknown): ComplaintPriority | undefined {
 }
 
 const DATE_FIELDS = new Set<ComplaintImportField>([
-  "complaintDate", "receivedAt", "dueDate", "closedAt", "sourceUpdatedAt", "lastModifiedAt",
+  "complaintDate", "receivedAt", "dueDate", "closedAt", "sourceUpdatedAt", "sourceModifiedAt",
 ]);
 const ENUM_FIELDS = new Set<ComplaintImportField>(["status", "priority"]);
-const NUMERIC_FIELDS = new Set<ComplaintImportField>(["complaintCount"]);
 const TEXT_FIELDS = [
   "externalId",
   "sourceReference",
@@ -262,9 +261,10 @@ const TEXT_FIELDS = [
   "resolution",
   "actionTaken",
   "actionDescription",
-  "closedBy",
+  "sourceOrigin",
+  "sourceClosedBy",
   "wingCode",
-  "lastUpdatedBy",
+  "sourceUpdatedBy",
 ] as const satisfies readonly ComplaintImportField[];
 
 type TextImportField = (typeof TEXT_FIELDS)[number];
@@ -275,7 +275,7 @@ function assignDateField(target: NormalizedComplaintRow, field: ComplaintImportF
   if (field === "dueDate") target.dueDate = date;
   if (field === "closedAt") target.closedAt = date;
   if (field === "sourceUpdatedAt") target.sourceUpdatedAt = date;
-  if (field === "lastModifiedAt") target.lastModifiedAt = date;
+  if (field === "sourceModifiedAt") target.sourceModifiedAt = date;
 }
 
 function assignTextField(target: NormalizedComplaintRow, field: TextImportField, value: string): void {
@@ -339,37 +339,6 @@ function normalizeEnumField(
   }
 }
 
-function normalizeIntCell(value: unknown): number | undefined {
-  if (value === null || value === undefined || value === "") return undefined;
-  if (typeof value === "number") {
-    return Number.isFinite(value) ? Math.trunc(value) : undefined;
-  }
-  const text = normalizeTextCell(value);
-  if (!text) return undefined;
-  const num = Number(text.replace(/[,،]/g, ""));
-  return Number.isFinite(num) ? Math.trunc(num) : undefined;
-}
-
-function normalizeNumericField(
-  target: NormalizedComplaintRow,
-  field: ComplaintImportField,
-  value: unknown,
-  errors: RowMessage[],
-  rowNumber: number
-): void {
-  if (field !== "complaintCount") return;
-  const num = normalizeIntCell(value);
-  if (value !== undefined && value !== null && value !== "" && num === undefined) {
-    errors.push({
-      field,
-      code: "INVALID_COMPLAINT_COUNT",
-      message: `الصف ${rowNumber}: قيمة عدد الشكاوي غير صالحة.`,
-    });
-    return;
-  }
-  if (num !== undefined) target.complaintCount = num;
-}
-
 function normalizeMappedField(
   target: NormalizedComplaintRow,
   field: ComplaintImportField,
@@ -385,11 +354,6 @@ function normalizeMappedField(
 
   if (ENUM_FIELDS.has(field)) {
     normalizeEnumField(target, field, value, errors, warnings);
-    return;
-  }
-
-  if (NUMERIC_FIELDS.has(field)) {
-    normalizeNumericField(target, field, value, errors, rowNumber);
     return;
   }
 

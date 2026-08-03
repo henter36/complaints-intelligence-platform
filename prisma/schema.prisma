@@ -160,12 +160,15 @@ model Complaint {
   resolution            String?
   actionTaken           String?
   actionDescription     String?
-  closedBy              String?
+  sourceClosedBy        String?
   wingCode              String?
-  lastUpdatedAt         DateTime?
-  lastModifiedAt        DateTime?
-  lastUpdatedBy         String?
-  complaintCount        Int?
+  sourceUpdatedAt       DateTime?
+  sourceModifiedAt      DateTime?
+  sourceUpdatedBy       String?
+  sourceOrigin          String?
+  sourceStatus          String?
+  sourceDetail          String?
+  sourceActionStatus    String?
   firstActionAt         DateTime?
   processingStartedAt   DateTime?
   delayReason           String?

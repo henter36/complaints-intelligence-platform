@@ -27,11 +27,11 @@ export const COMPLAINT_IMPORT_FIELDS = [
   "resolution",
   "actionTaken",
   "actionDescription",
-  "closedBy",
+  "sourceOrigin",
+  "sourceClosedBy",
   "wingCode",
-  "lastModifiedAt",
-  "lastUpdatedBy",
-  "complaintCount",
+  "sourceModifiedAt",
+  "sourceUpdatedBy",
 ] as const;
 
 export type ComplaintImportField = (typeof COMPLAINT_IMPORT_FIELDS)[number];
@@ -68,6 +68,8 @@ export type ColumnMappingAnalysis = {
 const COMPLAINT_IMPORT_FIELD_SET = new Set<ComplaintImportField>(COMPLAINT_IMPORT_FIELDS);
 const DANGEROUS_MAPPING_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
+export const IGNORED_BY_POLICY_LABEL = "متجاهل وفق قاعدة العمل — يعتمد النظام عدد السجلات الفعلية";
+
 const FIELD_LABELS: Record<ComplaintImportField, string> = {
   externalId: "رقم الشكوى",
   sourceReference: "الرقم المرجعي",
@@ -94,11 +96,11 @@ const FIELD_LABELS: Record<ComplaintImportField, string> = {
   resolution: "الإجراء أو الحل",
   actionTaken: "الإجراء المتخذ",
   actionDescription: "وصف الإجراء",
-  closedBy: "مُغلق من",
+  sourceOrigin: "مصدر الشكوى (الجهة)",
+  sourceClosedBy: "أُغلق بواسطة",
   wingCode: "رمز الجناح",
-  lastModifiedAt: "آخر تعديل في",
-  lastUpdatedBy: "آخر من حدّث",
-  complaintCount: "عدد الشكاوي",
+  sourceModifiedAt: "آخر تعديل في",
+  sourceUpdatedBy: "آخر من حدّث",
 };
 
 const RESOLUTION_HEADER_PRIORITY = [
@@ -106,6 +108,16 @@ const RESOLUTION_HEADER_PRIORITY = [
   "الحل",
   "resolution",
 ];
+
+const INTENTIONALLY_IGNORED_NORMALIZED = new Set<string>();
+
+function addIgnoredHeaders(headers: string[]): void {
+  for (const header of headers) {
+    INTENTIONALLY_IGNORED_NORMALIZED.add(normalizeColumnHeader(header));
+  }
+}
+
+addIgnoredHeaders(["عدد الشكاوي", "عدد الشكاوى", "complaint count"]);
 
 const SYNONYMS: Record<ComplaintImportField, string[]> = {
   externalId: [
@@ -155,7 +167,14 @@ const SYNONYMS: Record<ComplaintImportField, string[]> = {
     "محتوى الشكوى",
     "description",
   ],
-  complainantName: ["اسم مقدم الشكوى", "اسم المشتكي", "complainant name"],
+  complainantName: [
+    "اسم مقدم الشكوى",
+    "اسم المشتكي",
+    "اسم السجين",
+    "اسم النزيل",
+    "اسم المعتقل",
+    "complainant name",
+  ],
   complainantIdentifier: [
     "هوية السجين",
     "هوية النزيل",
@@ -172,7 +191,7 @@ const SYNONYMS: Record<ComplaintImportField, string[]> = {
   category: ["الفئة", "category"],
   classification: ["تصنيف", "التصنيف", "نوع الشكوى", "classification"],
   priority: ["الأولوية", "priority"],
-  channel: ["المصدر", "مصدر الشكوى", "القناة", "channel", "source"],
+  channel: ["القناة", "channel", "قناة التواصل"],
   resolution: [
     "الإجراء أو الحل",
     "الحل",
@@ -181,6 +200,8 @@ const SYNONYMS: Record<ComplaintImportField, string[]> = {
   actionTaken: [
     "الإجراء المتخذ",
     "الاجراء المتخذ",
+    "الإجراء المتخد",
+    "الاجراء المتخد",
     "action taken",
   ],
   actionDescription: [
@@ -188,7 +209,13 @@ const SYNONYMS: Record<ComplaintImportField, string[]> = {
     "وصف الاجراء",
     "action description",
   ],
-  closedBy: [
+  sourceOrigin: [
+    "المصدر",
+    "مصدر الشكوى",
+    "الجهة المصدر",
+    "source origin",
+  ],
+  sourceClosedBy: [
     "مُغلق من",
     "مغلق من",
     "أُغلق من قبل",
@@ -203,23 +230,18 @@ const SYNONYMS: Record<ComplaintImportField, string[]> = {
     "كود الجناح",
     "wing code",
   ],
-  lastModifiedAt: [
+  sourceModifiedAt: [
     "آخر تعديل في",
     "اخر تعديل في",
     "تاريخ آخر تعديل",
     "last modified at",
     "modified at",
   ],
-  lastUpdatedBy: [
+  sourceUpdatedBy: [
     "آخر من حدّث",
     "اخر من حدث",
     "آخر تحديث بواسطة",
     "last updated by",
-  ],
-  complaintCount: [
-    "عدد الشكاوي",
-    "عدد الشكاوى",
-    "complaint count",
   ],
 };
 
@@ -325,6 +347,15 @@ function classifyHeaderMappingEntry(input: {
     };
   }
 
+  if (INTENTIONALLY_IGNORED_NORMALIZED.has(normalizedHeader)) {
+    return {
+      header: input.trimmed,
+      normalizedHeader,
+      field: null,
+      status: "INTENTIONALLY_IGNORED",
+    };
+  }
+
   if (field) {
     return {
       header: input.trimmed,
@@ -420,7 +451,9 @@ export function analyzeColumnMapping(
     unmappedColumns: headers
       .map((header) => header.trim())
       .filter(Boolean)
-      .filter((header) => !mappedHeaders.has(header)),
+      .filter((header) => !mappedHeaders.has(header))
+      .filter((header) => !conflictHeaders.has(header))
+      .filter((header) => !INTENTIONALLY_IGNORED_NORMALIZED.has(normalizeColumnHeader(header))),
     conflicts,
   };
 }

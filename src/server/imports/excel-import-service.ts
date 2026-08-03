@@ -222,10 +222,13 @@ export function hasMeaningfulChange(row: NormalizedComplaintRow, complaint: Comp
     [row.resolution, complaint.resolution],
     [row.actionTaken, complaint.actionTaken],
     [row.actionDescription, complaint.actionDescription],
-    [row.closedBy, complaint.closedBy],
+    [row.sourceOrigin, complaint.sourceOrigin],
+    [row.sourceClosedBy, complaint.sourceClosedBy],
     [row.wingCode, complaint.wingCode],
-    [row.lastUpdatedBy, complaint.lastUpdatedBy],
-    [row.complaintCount, complaint.complaintCount],
+    [row.sourceUpdatedBy, complaint.sourceUpdatedBy],
+    [row.sourceStatus, complaint.sourceStatus],
+    [row.sourceDetail, complaint.sourceDetail],
+    [row.sourceActionStatus, complaint.sourceActionStatus],
     [row.complainantIdentifier, complaint.complainantIdentifier],
     [row.complainantName, complaint.complainantName],
     [row.complainantPhone, complaint.complainantPhone],
@@ -233,8 +236,8 @@ export function hasMeaningfulChange(row: NormalizedComplaintRow, complaint: Comp
     [toOptionalDateKey(row.receivedAt), toOptionalDateKey(complaint.receivedAt)],
     [toOptionalDateKey(row.dueDate), toOptionalDateKey(complaint.dueDate)],
     [toOptionalDateKey(row.closedAt), toOptionalDateKey(complaint.closedAt)],
-    [toOptionalDateKey(row.sourceUpdatedAt), toOptionalDateKey(complaint.lastUpdatedAt)],
-    [toOptionalDateKey(row.lastModifiedAt), toOptionalDateKey(complaint.lastModifiedAt)],
+    [toOptionalDateKey(row.sourceUpdatedAt), toOptionalDateKey(complaint.sourceUpdatedAt)],
+    [toOptionalDateKey(row.sourceModifiedAt), toOptionalDateKey(complaint.sourceModifiedAt)],
   ];
 
   return comparisons.some(([left, right]) => left !== undefined && left !== right);
@@ -558,7 +561,7 @@ export function resolveEffectiveColumnMapping(input: {
 
 function buildImportBatchWarnings(
   columnMapping: ColumnMapping,
-  normalizedRows?: Array<{ row: { complaintCount?: number | null } }>
+  unmappedColumns: string[]
 ): RowMessage[] {
   const warnings: RowMessage[] = [];
   if (!Object.values(columnMapping).includes("description")) {
@@ -569,11 +572,11 @@ function buildImportBatchWarnings(
       level: "warning",
     });
   }
-  if (normalizedRows?.some((r) => (r.row.complaintCount ?? 1) > 1)) {
+  if (unmappedColumns.length > 0) {
     warnings.push({
-      field: "complaintCount",
-      code: "AGGREGATED_COMPLAINT_COUNT",
-      message: "يبدو أن الملف يحتوي على سجلات مجمعة (عدد الشكاوي أكبر من 1)؛ قد لا تعكس السجلات شكاوى منفردة.",
+      field: "unmappedColumns",
+      code: "UNMAPPED_COLUMNS",
+      message: `الأعمدة التالية لم تُربط بأي حقل وستُحفظ في البيانات الأصلية فقط: ${unmappedColumns.join("، ")}.`,
       level: "warning",
     });
   }
@@ -669,7 +672,7 @@ async function processWorkbookPreview(
     columnCount: workbook.headers.filter(Boolean).length,
     processedRows,
     counters: calculateRowCounters(processedRows),
-    batchWarnings: buildImportBatchWarnings(columnMapping, normalizedRows),
+    batchWarnings: buildImportBatchWarnings(columnMapping, mappingAnalysis.unmappedColumns),
   };
 }
 
@@ -898,12 +901,7 @@ export async function loadImportBatchForResume(batchId: string): Promise<ImportU
     columnCount: headers.length,
     processedRows,
     counters: calculateRowCounters(processedRows),
-    batchWarnings: buildImportBatchWarnings(
-      columnMapping,
-      processedRows
-        .filter((r) => r.normalizedData)
-        .map((r) => ({ row: r.normalizedData as { complaintCount?: number | null } }))
-    ),
+    batchWarnings: buildImportBatchWarnings(columnMapping, mappingAnalysis.unmappedColumns),
   }, batch.status);
   return {
     ...result,
