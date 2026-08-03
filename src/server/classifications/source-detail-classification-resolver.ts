@@ -1,4 +1,5 @@
 import { normalizeArabic } from "@/server/imports/arabic-normalize";
+import { parseClassificationKeywords } from "./classification-keywords";
 
 export type SourceDetailClassificationCandidate = {
   id: string;
@@ -35,19 +36,28 @@ export type SourceDetailClassificationResolution =
       status: "AMBIGUOUS";
       normalizedValue: string;
       matches: SourceDetailClassificationMatch[];
+    }
+  | {
+      status: "CATEGORY_CONFLICT";
+      normalizedValue: string;
+      explicitCategory: string;
+      matchedCategory: string;
+      match: SourceDetailClassificationMatch;
     };
+
+export class ClassificationKeywordsError extends Error {
+  readonly classificationId: string;
+  constructor(classificationId: string) {
+    super(`CLASSIFICATION_KEYWORDS_INVALID: ${classificationId}`);
+    this.name = "ClassificationKeywordsError";
+    this.classificationId = classificationId;
+  }
+}
 
 export function normalizeSourceDetailClassificationValue(value: string): string {
   return normalizeArabic(value)
     .replaceAll(/\s+/g, " ")
     .toLocaleLowerCase("ar-SA");
-}
-
-function parseKeywords(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter(
-    (item): item is string => typeof item === "string" && Boolean(item.trim())
-  );
 }
 
 function isCandidateActive(candidate: SourceDetailClassificationCandidate): boolean {
@@ -63,7 +73,14 @@ function findCandidateMatch(
   candidate: SourceDetailClassificationCandidate,
   normalizedValue: string
 ): SourceDetailClassificationMatch | null {
-  for (const keyword of parseKeywords(candidate.keywords)) {
+  let keywords: string[];
+  try {
+    keywords = parseClassificationKeywords(candidate.keywords);
+  } catch {
+    throw new ClassificationKeywordsError(candidate.id);
+  }
+
+  for (const keyword of keywords) {
     if (normalizeSourceDetailClassificationValue(keyword) !== normalizedValue) continue;
 
     return {
@@ -81,6 +98,7 @@ function findCandidateMatch(
 export function resolveSourceDetailClassification(input: {
   sourceDetail?: string | null;
   explicitClassification?: string | null;
+  explicitCategory?: string | null;
   classifications: readonly SourceDetailClassificationCandidate[];
 }): SourceDetailClassificationResolution {
   if (input.explicitClassification?.trim()) {
@@ -103,7 +121,24 @@ export function resolveSourceDetailClassification(input: {
   }
 
   if (matches.length === 1) {
-    return { status: "MATCHED", normalizedValue, match: matches[0] };
+    const match = matches[0];
+
+    if (input.explicitCategory?.trim()) {
+      const normalizedExplicit = normalizeSourceDetailClassificationValue(input.explicitCategory.trim());
+      const normalizedMatched = normalizeSourceDetailClassificationValue(match.categoryName);
+
+      if (normalizedExplicit !== normalizedMatched) {
+        return {
+          status: "CATEGORY_CONFLICT",
+          normalizedValue,
+          explicitCategory: input.explicitCategory.trim(),
+          matchedCategory: match.categoryName,
+          match,
+        };
+      }
+    }
+
+    return { status: "MATCHED", normalizedValue, match };
   }
 
   return { status: "AMBIGUOUS", normalizedValue, matches };

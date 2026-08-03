@@ -590,6 +590,152 @@ describe("transactional import confirmation", () => {
   });
 });
 
+describe("isRepeated recalculation — scoped to touched identifiers", () => {
+  it("sets isRepeated=true for both complaints when a second one with the same identifier is confirmed", async () => {
+    const existing = await prisma.complaint.create({
+      data: {
+        externalId: `EXT-RPT-A-${crypto.randomUUID()}`,
+        complaintDate: new Date("2026-07-01T00:00:00Z"),
+        receivedAt: new Date("2026-07-01T00:00:00Z"),
+        subject: "الأولى",
+        status: ComplaintStatus.OPEN,
+        priority: ComplaintPriority.MEDIUM,
+        complainantIdentifier: "1234567890",
+        isRepeated: false,
+      },
+    });
+    const batch = await createReadyBatch();
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 1,
+      action: ImportRowAction.NEW,
+      normalizedData: {
+        externalId: `EXT-RPT-B-${crypto.randomUUID()}`,
+        receivedAt: "2026-07-02T00:00:00.000Z",
+        subject: "الثانية",
+        complainantIdentifier: "1234567890",
+        status: ComplaintStatus.OPEN,
+        priority: ComplaintPriority.MEDIUM,
+      },
+    });
+
+    await confirmReadyImportBatch(batch.id, { client: prisma });
+
+    const first = await prisma.complaint.findUniqueOrThrow({ where: { id: existing.id } });
+    expect(first.isRepeated).toBe(true);
+    const second = await prisma.complaint.findFirst({
+      where: { importBatchId: batch.id, isDeleted: false },
+    });
+    expect(second?.isRepeated).toBe(true);
+  });
+
+  it("reverts isRepeated to false when the second complaint is rolled back", async () => {
+    const existing = await prisma.complaint.create({
+      data: {
+        externalId: `EXT-RPT-ROLLBACK-${crypto.randomUUID()}`,
+        complaintDate: new Date("2026-07-01T00:00:00Z"),
+        receivedAt: new Date("2026-07-01T00:00:00Z"),
+        subject: "مراجعة",
+        status: ComplaintStatus.OPEN,
+        priority: ComplaintPriority.MEDIUM,
+        complainantIdentifier: "9876543210",
+        isRepeated: false,
+      },
+    });
+    const batch = await createReadyBatch();
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 1,
+      action: ImportRowAction.NEW,
+      normalizedData: {
+        externalId: `EXT-RPT-ROLLBACK-B-${crypto.randomUUID()}`,
+        receivedAt: "2026-07-02T00:00:00.000Z",
+        subject: "مكررة",
+        complainantIdentifier: "9876543210",
+        status: ComplaintStatus.OPEN,
+        priority: ComplaintPriority.MEDIUM,
+      },
+    });
+
+    await confirmReadyImportBatch(batch.id, { client: prisma });
+    await rollbackConfirmedImportBatch(batch.id, { reason: "تراجع التكرار", client: prisma });
+
+    const first = await prisma.complaint.findUniqueOrThrow({ where: { id: existing.id } });
+    expect(first.isRepeated).toBe(false);
+  });
+
+  it("preserves leading zeros in complainant identifier", async () => {
+    const batch = await createReadyBatch();
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 1,
+      action: ImportRowAction.NEW,
+      normalizedData: {
+        externalId: `EXT-LEADING-ZERO-${crypto.randomUUID()}`,
+        receivedAt: "2026-07-01T00:00:00.000Z",
+        subject: "أصفار بادئة",
+        complainantIdentifier: "0012345678",
+        status: ComplaintStatus.OPEN,
+        priority: ComplaintPriority.MEDIUM,
+      },
+    });
+
+    await confirmReadyImportBatch(batch.id, { client: prisma });
+
+    const complaint = await prisma.complaint.findFirst({
+      where: { importBatchId: batch.id, isDeleted: false },
+    });
+    expect(complaint?.complainantIdentifier).toBe("0012345678");
+  });
+
+  it("normalizes Arabic-Indic digits in complainant identifier on save", async () => {
+    const batch = await createReadyBatch();
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 1,
+      action: ImportRowAction.NEW,
+      normalizedData: {
+        externalId: `EXT-ARABIC-DIGITS-${crypto.randomUUID()}`,
+        receivedAt: "2026-07-01T00:00:00.000Z",
+        subject: "أرقام عربية",
+        complainantIdentifier: "١٢٣٤٥٦٧٨٩٠",
+        status: ComplaintStatus.OPEN,
+        priority: ComplaintPriority.MEDIUM,
+      },
+    });
+
+    await confirmReadyImportBatch(batch.id, { client: prisma });
+
+    const complaint = await prisma.complaint.findFirst({
+      where: { importBatchId: batch.id, isDeleted: false },
+    });
+    expect(complaint?.complainantIdentifier).toBe("1234567890");
+  });
+
+  it("empty complainant identifier does not affect isRepeated calculation", async () => {
+    const batch = await createReadyBatch();
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 1,
+      action: ImportRowAction.NEW,
+      normalizedData: {
+        externalId: `EXT-NO-ID-${crypto.randomUUID()}`,
+        receivedAt: "2026-07-01T00:00:00.000Z",
+        subject: "بلا هوية",
+        status: ComplaintStatus.OPEN,
+        priority: ComplaintPriority.MEDIUM,
+      },
+    });
+
+    await confirmReadyImportBatch(batch.id, { client: prisma });
+
+    const complaint = await prisma.complaint.findFirst({
+      where: { importBatchId: batch.id, isDeleted: false },
+    });
+    expect(complaint?.isRepeated).toBe(false);
+  });
+});
+
 describe("scan trigger on import confirmation", () => {
   it("confirmation resolves correctly even when startTextRiskScan rejects", async () => {
     // The scan is fire-and-forget: its rejection must not propagate to the caller.

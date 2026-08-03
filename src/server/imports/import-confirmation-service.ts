@@ -14,10 +14,7 @@ import { assertClosedAtMatchesStatus } from "@/server/complaints/status";
 import { calculateRowCounters } from "./import-batch-service";
 import { deriveSubject } from "./subject-derive";
 import { startTextRiskScan } from "@/server/analytics/text-risk/text-risk-analysis-service";
-import {
-  countComplaintsByIdentifier,
-  isRepeatedComplainantIdentifier,
-} from "@/server/complaints/repeated-complaint-identifier";
+import { normalizeComplainantIdentifier } from "@/server/complaints/repeated-complaint-identifier";
 
 const CONFIRMABLE_ACTIONS = new Set<ImportRowAction>([
   ImportRowAction.NEW,
@@ -342,12 +339,14 @@ async function applyNewRow(
   row: ConfirmationRow,
   actor: string,
   appliedAt: Date
-): Promise<void> {
+): Promise<string | null> {
   const normalized = parseNormalizedRow(row);
   const taxonomy = await resolveTaxonomy(tx, normalized);
   const status = normalized.status ?? ComplaintStatus.NEW;
   const closedAt = normalized.closedAt ?? null;
   assertClosedAtMatchesStatus(status, closedAt, { requireClosedAtForClosedStatuses: false });
+
+  const complainantIdentifier = normalizeComplainantIdentifier(normalized.complainantIdentifier) ?? null;
 
   const complaint = await tx.complaint.create({
     data: {
@@ -364,7 +363,7 @@ async function applyNewRow(
         (normalized.description ? deriveSubject(normalized.description) : "بدون موضوع"),
       description: normalized.description ?? null,
       complainantName: normalized.complainantName ?? null,
-      complainantIdentifier: normalized.complainantIdentifier ?? null,
+      complainantIdentifier,
       complainantPhone: normalized.complainantPhone ?? null,
       region: normalized.region ?? null,
       facility: normalized.facility ?? null,
@@ -413,6 +412,7 @@ async function applyNewRow(
     actor,
     metadata: { batchId, rowId: row.id, action: row.action },
   });
+  return complainantIdentifier;
 }
 
 function assignIfDefined<T extends keyof Prisma.ComplaintUncheckedUpdateManyInput>(
@@ -446,7 +446,13 @@ function assignImportUpdateFields(
   );
   assignIfDefined(data, "description", normalized.description);
   assignIfDefined(data, "complainantName", normalized.complainantName);
-  assignIfDefined(data, "complainantIdentifier", normalized.complainantIdentifier);
+  assignIfDefined(
+    data,
+    "complainantIdentifier",
+    normalized.complainantIdentifier !== undefined
+      ? (normalizeComplainantIdentifier(normalized.complainantIdentifier) ?? null)
+      : undefined
+  );
   assignIfDefined(data, "complainantPhone", normalized.complainantPhone);
   assignIfDefined(data, "region", normalized.region);
   assignIfDefined(data, "facility", normalized.facility);
@@ -484,7 +490,7 @@ async function applyUpdateRow(
   row: ConfirmationRow,
   actor: string,
   appliedAt: Date
-): Promise<void> {
+): Promise<{ beforeIdentifier: string | null; afterIdentifier: string | null }> {
   if (!row.matchedComplaintId || row.matchedComplaintVersion == null) {
     throw new ImportConfirmationError("IMPORT_PREVIEW_STALE", "معاينة الدفعة قديمة ويجب إعادة المعالجة قبل التأكيد", 409);
   }
@@ -495,6 +501,9 @@ async function applyUpdateRow(
   }
 
   const normalized = parseNormalizedRow(row);
+  const afterIdentifier = normalized.complainantIdentifier !== undefined
+    ? (normalizeComplainantIdentifier(normalized.complainantIdentifier) ?? null)
+    : current.complainantIdentifier;
   const taxonomy = await resolveTaxonomy(tx, normalized);
   const beforeData = snapshotComplaint(current);
   const updateData = buildUpdateData(current, normalized, taxonomy);
@@ -541,27 +550,33 @@ async function applyUpdateRow(
     actor,
     metadata: { batchId, rowId: row.id, action: row.action },
   });
+  return { beforeIdentifier: current.complainantIdentifier, afterIdentifier };
 }
 
-async function recalculateIsRepeated(tx: Prisma.TransactionClient): Promise<void> {
-  const complaints = await tx.complaint.findMany({
-    where: { isDeleted: false },
-    select: { id: true, complainantIdentifier: true },
-  });
-  const counts = countComplaintsByIdentifier(complaints.map((c) => c.complainantIdentifier));
-  const repeatedIds = complaints
-    .filter((c) => isRepeatedComplainantIdentifier(c.complainantIdentifier, counts))
-    .map((c) => c.id);
+async function recalculateIsRepeatedForIdentifiers(
+  tx: Prisma.TransactionClient,
+  identifiers: Iterable<string | null | undefined>
+): Promise<void> {
+  const normalized = new Set<string>();
+  for (const id of identifiers) {
+    const n = normalizeComplainantIdentifier(id);
+    if (n) normalized.add(n);
+  }
+  if (normalized.size === 0) return;
 
-  await tx.complaint.updateMany({ where: { isDeleted: false }, data: { isRepeated: false } });
-  if (repeatedIds.length > 0) {
-    const CHUNK = 900;
-    for (let i = 0; i < repeatedIds.length; i += CHUNK) {
-      await tx.complaint.updateMany({
-        where: { id: { in: repeatedIds.slice(i, i + CHUNK) } },
-        data: { isRepeated: true },
-      });
-    }
+  for (const identifier of normalized) {
+    const count = await tx.complaint.count({
+      where: { isDeleted: false, complainantIdentifier: identifier },
+    });
+    const shouldBeRepeated = count > 1;
+    await tx.complaint.updateMany({
+      where: {
+        isDeleted: false,
+        complainantIdentifier: identifier,
+        isRepeated: { not: shouldBeRepeated },
+      },
+      data: { isRepeated: shouldBeRepeated },
+    });
   }
 }
 
@@ -598,16 +613,20 @@ export async function confirmReadyImportBatch(
     }) as ConfirmationRow[];
     assertBatchRowsAreConfirmable(rows);
 
+    const touchedIdentifiers = new Set<string | null>();
     for (const row of rows) {
       if (row.action === ImportRowAction.NEW) {
-        await applyNewRow(tx, batchId, row, actor, confirmedAt);
+        const id = await applyNewRow(tx, batchId, row, actor, confirmedAt);
+        touchedIdentifiers.add(id);
       }
       if (row.action === ImportRowAction.UPDATE) {
-        await applyUpdateRow(tx, batchId, row, actor, confirmedAt);
+        const { beforeIdentifier, afterIdentifier } = await applyUpdateRow(tx, batchId, row, actor, confirmedAt);
+        touchedIdentifiers.add(beforeIdentifier);
+        touchedIdentifiers.add(afterIdentifier);
       }
     }
 
-    await recalculateIsRepeated(tx);
+    await recalculateIsRepeatedForIdentifiers(tx, touchedIdentifiers);
 
     const counters = calculateRowCounters(rows);
     await tx.importBatch.update({
@@ -802,7 +821,7 @@ async function reverseCreatedComplaint(
     rolledBackAt: Date;
     actor: string;
   }
-): Promise<void> {
+): Promise<string | null> {
   const { snapshot, current, batchId, rolledBackAt, actor } = input;
   const result = await tx.complaint.updateMany({
     where: { id: current.id, version: snapshot.versionAfter, importBatchId: batchId, isDeleted: false },
@@ -829,6 +848,7 @@ async function reverseCreatedComplaint(
     actor,
     metadata: { batchId, rowId: snapshot.importBatchRowId },
   });
+  return current.complainantIdentifier;
 }
 
 async function writeReverseStatusHistory(
@@ -868,7 +888,7 @@ async function reverseUpdatedComplaint(
     actor: string;
     reason: string;
   }
-): Promise<void> {
+): Promise<(string | null)[]> {
   const { snapshot, current, batchId, rolledBackAt, actor, reason } = input;
   const restoreData = restoreSnapshotData(snapshot.beforeData);
   const result = await tx.complaint.updateMany({
@@ -889,6 +909,8 @@ async function reverseUpdatedComplaint(
     actor,
     metadata: { batchId, rowId: snapshot.importBatchRowId },
   });
+  const restoredIdentifier = (restoreData.complainantIdentifier as string | null | undefined) ?? current.complainantIdentifier;
+  return [current.complainantIdentifier, restoredIdentifier];
 }
 
 async function reverseRollbackSnapshot(
@@ -900,17 +922,17 @@ async function reverseRollbackSnapshot(
     actor: string;
     reason: string;
   }
-): Promise<ImportChangeType> {
+): Promise<{ changeType: ImportChangeType; touchedIdentifiers: (string | null)[] }> {
   const { snapshot, batchId, rolledBackAt, actor, reason } = input;
   const current = await loadCurrentRollbackComplaint(tx, snapshot);
 
   if (snapshot.changeType === ImportChangeType.CREATE) {
-    await reverseCreatedComplaint(tx, { snapshot, current, batchId, rolledBackAt, actor });
-    return ImportChangeType.CREATE;
+    const identifier = await reverseCreatedComplaint(tx, { snapshot, current, batchId, rolledBackAt, actor });
+    return { changeType: ImportChangeType.CREATE, touchedIdentifiers: [identifier] };
   }
 
-  await reverseUpdatedComplaint(tx, { snapshot, current, batchId, rolledBackAt, actor, reason });
-  return ImportChangeType.UPDATE;
+  const identifiers = await reverseUpdatedComplaint(tx, { snapshot, current, batchId, rolledBackAt, actor, reason });
+  return { changeType: ImportChangeType.UPDATE, touchedIdentifiers: identifiers };
 }
 
 function addRollbackCounter(counters: RollbackCounters, changeType: ImportChangeType): void {
@@ -969,12 +991,14 @@ export async function rollbackConfirmedImportBatch(
 
     const snapshots = await loadRollbackSnapshots(tx, batchId);
     const counters: RollbackCounters = { revertedCreates: 0, revertedUpdates: 0 };
+    const touchedIdentifiers = new Set<string | null>();
     for (const snapshot of snapshots) {
-      const changeType = await reverseRollbackSnapshot(tx, { snapshot, batchId, rolledBackAt, actor, reason });
+      const { changeType, touchedIdentifiers: ids } = await reverseRollbackSnapshot(tx, { snapshot, batchId, rolledBackAt, actor, reason });
+      for (const id of ids) touchedIdentifiers.add(id);
       addRollbackCounter(counters, changeType);
     }
 
-    await recalculateIsRepeated(tx);
+    await recalculateIsRepeatedForIdentifiers(tx, touchedIdentifiers);
     await finalizeRollbackBatch(tx, { batchId, rolledBackAt, reason, actor, counters });
 
     return {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   normalizeSourceDetailClassificationValue,
   resolveSourceDetailClassification,
+  ClassificationKeywordsError,
   type SourceDetailClassificationCandidate,
 } from "./source-detail-classification-resolver";
 
@@ -116,5 +117,74 @@ describe("resolveSourceDetailClassification", () => {
         classifications: candidates,
       })
     ).toEqual({ status: "NO_SOURCE_DETAIL" });
+  });
+
+  it("throws ClassificationKeywordsError when an active classification has malformed keywords", () => {
+    expect(() =>
+      resolveSourceDetailClassification({
+        sourceDetail: "طلب دواء",
+        classifications: [
+          {
+            id: "bad-keywords-id",
+            nameAr: "تصنيف فاسد",
+            keywords: { invalid: true },
+            category: { id: "cat-1", nameAr: "فئة" },
+          },
+        ],
+      })
+    ).toThrow(ClassificationKeywordsError);
+  });
+
+  it("does not set classification when explicit category conflicts with the matched category", () => {
+    const result = resolveSourceDetailClassification({
+      sourceDetail: "طلب دواء",
+      explicitCategory: "فئة مختلفة",
+      classifications: candidates,
+    });
+    expect(result.status).toBe("CATEGORY_CONFLICT");
+    if (result.status === "CATEGORY_CONFLICT") {
+      expect(result.explicitCategory).toBe("فئة مختلفة");
+      expect(result.matchedCategory).toBe("خدمات النزلاء");
+    }
+  });
+
+  it("returns MATCHED when explicit category matches the matched category (Arabic normalization)", () => {
+    const result = resolveSourceDetailClassification({
+      sourceDetail: "طلب دواء",
+      explicitCategory: "خدمات  النزلاء",
+      classifications: candidates,
+    });
+    expect(result.status).toBe("MATCHED");
+  });
+
+  it("returns MATCHED and sets category when no explicit category is provided", () => {
+    const result = resolveSourceDetailClassification({
+      sourceDetail: "طلب نقل",
+      classifications: candidates,
+    });
+    expect(result.status).toBe("MATCHED");
+    if (result.status === "MATCHED") {
+      expect(result.match.categoryName).toBe("حقوق النزلاء");
+    }
+  });
+
+  it("explicit classification skips category conflict check", () => {
+    expect(
+      resolveSourceDetailClassification({
+        sourceDetail: "طلب دواء",
+        explicitClassification: "تصنيف صريح",
+        explicitCategory: "فئة أخرى",
+        classifications: candidates,
+      })
+    ).toEqual({ status: "SKIPPED_EXPLICIT_CLASSIFICATION" });
+  });
+
+  it("Arabic diacritics and extra spaces do not cause a false category conflict", () => {
+    const result = resolveSourceDetailClassification({
+      sourceDetail: "طلب دواء",
+      explicitCategory: "خدمات النزلاء ",
+      classifications: candidates,
+    });
+    expect(result.status).toBe("MATCHED");
   });
 });

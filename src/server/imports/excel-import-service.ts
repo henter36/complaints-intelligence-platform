@@ -548,6 +548,19 @@ export function resolveEffectiveColumnMapping(input: {
   return { columnMapping, mappingAnalysis, manuallyMapped };
 }
 
+function buildImportBatchWarnings(columnMapping: ColumnMapping): RowMessage[] {
+  const warnings: RowMessage[] = [];
+  if (!Object.values(columnMapping).includes("description")) {
+    warnings.push({
+      field: "description",
+      code: "DESCRIPTION_COLUMN_MISSING",
+      message: DESCRIPTION_COLUMN_MISSING_BATCH_MESSAGE,
+      level: "warning",
+    });
+  }
+  return warnings;
+}
+
 async function processWorkbookPreview(
   buffer: Buffer,
   callerMapping?: unknown,
@@ -569,16 +582,7 @@ async function processWorkbookPreview(
   ]);
   const taxonomy = { categories: categoryList, classifications: classificationList };
 
-  const hasDescriptionColumn = Object.values(columnMapping).includes("description");
-  const batchWarnings: RowMessage[] = [];
-  if (!hasDescriptionColumn) {
-    batchWarnings.push({
-      field: "description",
-      code: "DESCRIPTION_COLUMN_MISSING",
-      message: DESCRIPTION_COLUMN_MISSING_BATCH_MESSAGE,
-      level: "warning",
-    });
-  }
+  const batchWarnings = buildImportBatchWarnings(columnMapping);
 
   const normalizedRows = workbook.rows.map((row) => {
     const normResult = normalizeImportRow(row, columnMapping);
@@ -587,11 +591,14 @@ async function processWorkbookPreview(
     const classificationResolution = resolveSourceDetailClassification({
       sourceDetail: normalized.sourceDetail,
       explicitClassification: normalized.classification,
+      explicitCategory: normalized.category,
       classifications: classificationList,
     });
     if (classificationResolution.status === "MATCHED") {
       normalized.classification = classificationResolution.match.classificationName;
-      normalized.category = classificationResolution.match.categoryName;
+      if (!normalized.category?.trim()) {
+        normalized.category = classificationResolution.match.categoryName;
+      }
       normResult.derived.push({
         field: "classification",
         code: "CLASSIFICATION_RESOLVED_FROM_SOURCE_DETAIL",
@@ -600,6 +607,13 @@ async function processWorkbookPreview(
         originalValue: normalized.sourceDetail ?? "",
         usedValue: classificationResolution.match.classificationName,
         source: "sourceDetail",
+      });
+    } else if (classificationResolution.status === "CATEGORY_CONFLICT") {
+      normResult.warnings.push({
+        field: "classification",
+        code: "SOURCE_DETAIL_CATEGORY_CONFLICT",
+        message: `قيمة «تفصيل» مرتبطة بتصنيف يتبع فئة مختلفة عن الفئة الواردة في الملف؛ لم يُعتمد التصنيف تلقائيًا.`,
+        level: "warning",
       });
     } else if (classificationResolution.status === "AMBIGUOUS") {
       normResult.warnings.push({
@@ -751,7 +765,7 @@ function toImportUploadResult(
   status: ImportBatchStatus = ImportBatchStatus.READY_FOR_CONFIRMATION
 ): ImportUploadResult {
   const qualityIssueRows = processed.processedRows.filter(
-    (row) => row.validationErrors || row.validationWarnings
+    (row) => row.validationStatus !== ImportRowValidationStatus.VALID
   );
   const PREVIEW_LIMIT = 50;
   const QUALITY_LIMIT = 100;
@@ -867,7 +881,7 @@ export async function loadImportBatchForResume(batchId: string): Promise<ImportU
     columnCount: headers.length,
     processedRows,
     counters: calculateRowCounters(processedRows),
-    batchWarnings: [],
+    batchWarnings: buildImportBatchWarnings(columnMapping),
   }, batch.status);
   return {
     ...result,

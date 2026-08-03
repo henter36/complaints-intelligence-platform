@@ -534,6 +534,33 @@ describe("operational workbook parsing and normalization", () => {
     ]));
   });
 
+  it("VALID row with only derived messages is not a quality issue row", () => {
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "الموضوع"]);
+    const result = normalizeImportRow(
+      {
+        rowNumber: 2,
+        values: {
+          "رقم الشكوى": "COMP/001",
+          "تاريخ التسجيل": "2026-07-01",
+          "الموضوع": "موضوع اختبار",
+        },
+      },
+      mapping
+    );
+    // Only derived messages should be present (no real warnings)
+    expect(result.errors).toHaveLength(0);
+    const realWarnings = result.warnings.filter((w) => w.level !== "derived");
+    expect(realWarnings).toHaveLength(0);
+    // validationStatus should be VALID
+    const status =
+      result.errors.length > 0
+        ? ImportRowValidationStatus.INVALID
+        : realWarnings.length > 0
+          ? ImportRowValidationStatus.WARNING
+          : ImportRowValidationStatus.VALID;
+    expect(status).toBe(ImportRowValidationStatus.VALID);
+  });
+
   it("counts only non-empty data rows toward IMPORT_MAX_ROWS", async () => {
     const limits = getImportLimits();
     const emptyPadding = Array.from({ length: limits.maxRows + 50 }, () => "");

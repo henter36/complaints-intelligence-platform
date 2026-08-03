@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
+import { parseClassificationKeywords } from "@/server/classifications/classification-keywords";
 
 export async function GET(req: NextRequest) {
   try {
@@ -55,6 +56,17 @@ export async function POST(req: NextRequest) {
         { error: "INVALID_PARENT_CATEGORY", message: "parentId must reference an active category." },
         { status: 400 }
       );
+    }
+
+    if (keywords !== undefined && keywords !== null) {
+      try {
+        parseClassificationKeywords(keywords);
+      } catch {
+        return NextResponse.json(
+          { error: "INVALID_CLASSIFICATION_KEYWORDS", message: "يجب أن تكون الكلمات المفتاحية قائمة من النصوص." },
+          { status: 400 }
+        );
+      }
     }
 
     if (normalizedParentId) {
