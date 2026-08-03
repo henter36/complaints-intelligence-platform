@@ -44,7 +44,11 @@ export function getComparisonStateClassName(state: ComparisonState): string {
   return "text-muted-foreground";
 }
 
-function ComparisonDirectionIcon({ state }: { state: ComparisonState }) {
+type ComparisonDirectionIconProps = Readonly<{
+  state: ComparisonState;
+}>;
+
+function ComparisonDirectionIcon({ state }: ComparisonDirectionIconProps) {
   if (state === "INCREASE") return <TrendingUp className="h-3 w-3" />;
   if (state === "DECREASE") return <TrendingDown className="h-3 w-3" />;
   return null;
