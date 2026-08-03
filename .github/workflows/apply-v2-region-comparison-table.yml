@@ -1,0 +1,215 @@
+name: Apply V2 regional comparison table refinement
+
+on:
+  push:
+    branches:
+      - feat/arabic-complaints-report-redesign
+    paths:
+      - .github/workflows/apply-v2-region-comparison-table.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: "file:./ci-region-table.db"
+      NEXTAUTH_URL: "http://localhost:3000"
+      NEXT_TELEMETRY_DISABLED: "1"
+      AI_ENABLED: "false"
+      OPENAI_API_KEY: ""
+    steps:
+      - name: Checkout branch
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          ref: feat/arabic-complaints-report-redesign
+
+      - name: Setup Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Patch V2 region table and review fixtures
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          renderer_path = Path("src/server/reports/report-executive-brief-v2-pdf-service.ts")
+          renderer = renderer_path.read_text(encoding="utf-8")
+
+          old_comment = " *   3. Regions — comparison chart + region cards + full region table\n"
+          new_comment = " *   3. Regions — comparison chart + volume cards + delta/topic table\n"
+          if renderer.count(old_comment) != 1:
+              raise SystemExit(f"renderer page comment marker count: {renderer.count(old_comment)}")
+          renderer = renderer.replace(old_comment, new_comment, 1)
+
+          old_context = "  const { doc, brief, layout, warnings } = ctx;\n"
+          new_context = "  const { doc, data, brief, layout, warnings } = ctx;\n"
+          if renderer.count(old_context) != 1:
+              raise SystemExit(f"renderPage3 context marker count: {renderer.count(old_context)}")
+          renderer = renderer.replace(old_context, new_context, 1)
+
+          visible_marker = '''function visibleRegions(brief: ExecutiveBriefV2Data): readonly RegionReferenceRow[] {
+            return brief.allRegions.slice(0, MAX_REGION_ROWS);
+          }
+          '''
+          helper_block = '''
+          type RegionComparisonTableRow = RegionReferenceRow & {
+            topSubject: string;
+            subjectChange: string;
+          };
+
+          function formatRegionalSubjectChange(input: {
+            currentCount: number;
+            previousCount: number;
+            difference: number;
+            changeRate: number | null;
+          } | undefined): string {
+            if (!input) return "دون تغير ملحوظ";
+            const difference = formatReportNumber(input.difference, { sign: true });
+            if (input.previousCount === 0 && input.currentCount > 0) {
+              return `${difference} (جديد)`;
+            }
+            if (input.changeRate === null) return difference;
+            return `${difference} (${formatReportNumber(input.changeRate, { sign: true, percent: true })})`;
+          }
+          '''
+          if renderer.count(visible_marker) != 1:
+              raise SystemExit(f"visibleRegions marker count: {renderer.count(visible_marker)}")
+          renderer = renderer.replace(visible_marker, visible_marker + helper_block, 1)
+
+          start_marker = "  // ── Full region table ─────────────────────────────────────────────────────\n"
+          end_marker = '  drawInfoBox(doc, "تشمل مؤشرات المفتوحة والمتأخرة جميع الحالات غير المغلقة حتى نهاية الفترة، حتى لو أُنشئت قبل بداية الفترة.", margin, y, contentWidth);'
+          start = renderer.find(start_marker)
+          end_start = renderer.find(end_marker, start)
+          if start < 0 or end_start < 0:
+              raise SystemExit(f"page 3 table markers not found: start={start}, end={end_start}")
+          end = end_start + len(end_marker)
+
+          replacement = '''  // ── Regional delta and leading-subject table ───────────────────────────────
+            y = drawSectionTitle(doc, "التغير وأبرز موضوع حسب المنطقة", margin, y, contentWidth);
+
+            const hasComparisonPeriod = Boolean(data.previousPeriod);
+            const subjectChanges = new Map(
+              (data.comparisonData?.regionSubjectChanges ?? []).map((row) => [row.regionName, row])
+            );
+            const regionRows: RegionComparisonTableRow[] = regions.map((region) => {
+              const subjectChange = subjectChanges.get(region.regionName);
+              return {
+                ...region,
+                topSubject: hasComparisonPeriod
+                  ? subjectChange?.subject ?? "دون تغير ملحوظ"
+                  : "لا توجد فترة مقارنة",
+                subjectChange: hasComparisonPeriod
+                  ? formatRegionalSubjectChange(subjectChange)
+                  : "—",
+              };
+            });
+
+            const regionCols: ColDef[] = [
+              { key: "regionName", label: "المنطقة", weight: 1.7 },
+              { key: "currentCount", label: "الحالية", weight: 0.72 },
+              { key: "previousCount", label: "السابقة", weight: 0.72 },
+              { key: "difference", label: "الفرق", weight: 0.72 },
+              { key: "changeRate", label: "نسبة التغير", weight: 0.82 },
+              { key: "topSubject", label: "أبرز موضوع متغير", weight: 2.25 },
+              { key: "subjectChange", label: "تغير الموضوع", weight: 1.12 },
+            ];
+
+            const rowH = regions.length > 8 ? 27 : 31;
+            y = drawTable(
+              doc, regionRows, regionCols, margin, y, contentWidth, rowH,
+              (row: RegionComparisonTableRow, key) => {
+                if (key === "difference") {
+                  return hasComparisonPeriod
+                    ? formatReportNumber(row.difference, { sign: true })
+                    : "—";
+                }
+                if (key === "changeRate") {
+                  if (!hasComparisonPeriod) return "—";
+                  if (row.previousCount === 0 && row.currentCount > 0) return "جديد";
+                  if (row.previousCount === 0 && row.currentCount === 0) return formatReportNumber(0, { percent: true });
+                  return formatNullableReportNumber(row.changeRate, { percent: true });
+                }
+                const value = (row as Record<string, unknown>)[key];
+                return value === null || value === undefined
+                  ? "—"
+                  : typeof value === "number"
+                    ? formatReportNumber(value)
+                    : String(value);
+              }
+            );
+            y += 14;
+
+            drawInfoBox(
+              doc,
+              "يعرض الجدول الفرق العددي ونسبة التغير بين الفترتين، مع الموضوع صاحب أكبر تغير مطلق داخل كل منطقة. عندما تكون قيمة الفترة السابقة صفراً تظهر الحالة «جديد» بدلاً من نسبة غير معرفة.",
+              margin,
+              y,
+              contentWidth
+            );'''
+
+          renderer = renderer[:start] + replacement + renderer[end:]
+          renderer_path.write_text(renderer, encoding="utf-8")
+
+          fixture_path = Path("scripts/render-report-review-artifacts.ts")
+          fixture = fixture_path.read_text(encoding="utf-8")
+          fixture_marker = '''      deptClassRises: [{
+          '''
+          fixture_insert = '''      regionSubjectChanges: [
+                { regionName: "منطقة الرياض", subject: "عرضه على الطبيب", currentCount: 18, previousCount: 7, difference: 11, changeRate: 157.1, direction: "ارتفاع" },
+                { regionName: "منطقة مكة المكرمة", subject: "انقطاع العلاج", currentCount: 9, previousCount: 3, difference: 6, changeRate: 200, direction: "ارتفاع" },
+                { regionName: "المنطقة الشرقية", subject: "استفسار عن معاملة", currentCount: 1, previousCount: 8, difference: -7, changeRate: -87.5, direction: "انخفاض" },
+              ],
+              deptClassRises: [{
+          '''
+          if fixture.count(fixture_marker) != 1:
+              raise SystemExit(f"fixture marker count: {fixture.count(fixture_marker)}")
+          fixture = fixture.replace(fixture_marker, fixture_insert, 1)
+          fixture_path.write_text(fixture, encoding="utf-8")
+          PY
+
+          rm -f .github/workflows/apply-v2-region-comparison-table.yml
+
+      - name: Generate CI secrets
+        shell: bash
+        run: |
+          echo "AUTH_SECRET=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+          echo "INTERNAL_SCHEDULER_SECRET=$(openssl rand -hex 32)" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Generate Prisma client
+        run: npm run db:generate
+
+      - name: TypeScript
+        run: npm run typecheck
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Targeted report tests
+        run: npm test -- src/server/reports/report-comparison.test.ts src/server/reports/report-executive-brief-data-service.test.ts
+
+      - name: Render V2 review PDFs
+        run: npm run reports:render-review
+
+      - name: Production build
+        run: npm run build
+
+      - name: Commit and push verified change
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add \
+            src/server/reports/report-executive-brief-v2-pdf-service.ts \
+            scripts/render-report-review-artifacts.ts \
+            .github/workflows/apply-v2-region-comparison-table.yml
+          git commit -m "feat(reports): enrich regional comparison table"
+          git push origin HEAD:feat/arabic-complaints-report-redesign
