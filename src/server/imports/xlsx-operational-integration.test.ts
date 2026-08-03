@@ -475,6 +475,12 @@ async function buildSharedStringWorkbook(config: {
   siXmlEntries: string[];                          // one <si> body per shared string
   dataRow: Array<string | number | { ss: number }>; // ss = shared string index
 }): Promise<Buffer> {
+  if (config.headers.length > 26 || config.dataRow.length > 26) {
+    throw new Error(
+      "buildSharedStringWorkbook supports at most 26 columns (A-Z)"
+    );
+  }
+
   const zip = new JSZip();
 
   const sharedStringsXml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -494,7 +500,7 @@ ${config.siXmlEntries.map((body) => `  <si>${body}</si>`).join("\n")}
     .map((v, col) => {
       const letter = String.fromCharCode(65 + col);
       const ref = `${letter}2`;
-      if (typeof v === "object" && "ss" in v) {
+      if (v !== null && typeof v === "object" && "ss" in v) {
         return `<c r="${ref}" t="s"><v>${v.ss}</v></c>`;
       }
       if (typeof v === "number") {
@@ -672,6 +678,7 @@ describe("normalizeImportRow — preserve-space values trimmed by normalizeTextC
     );
 
     expect(result.normalized.sourceDetail).toBe("طلب نقل");
+    expect(result.normalized.subject).toBe("طلب نقل");
     expect(result.normalized.description).toBe("وصف عربي مفصل");
   });
 });
