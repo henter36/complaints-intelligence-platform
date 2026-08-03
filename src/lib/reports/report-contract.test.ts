@@ -11,8 +11,8 @@ import {
 } from "./report-contract";
 
 describe("REPORT_MODES", () => {
-  it("contains exactly 4 modes", () => {
-    expect(REPORT_MODES).toHaveLength(4);
+  it("contains exactly 5 modes", () => {
+    expect(REPORT_MODES).toHaveLength(5);
   });
 
   it("contains STANDARD", () => {
@@ -29,6 +29,10 @@ describe("REPORT_MODES", () => {
 
   it("contains PRINT_EXECUTIVE_BRIEF", () => {
     expect(REPORT_MODES).toContain("PRINT_EXECUTIVE_BRIEF");
+  });
+
+  it("contains PRINT_EXECUTIVE_BRIEF_V2", () => {
+    expect(REPORT_MODES).toContain("PRINT_EXECUTIVE_BRIEF_V2");
   });
 
   it("modes are unique", () => {
@@ -50,6 +54,10 @@ describe("isReportMode", () => {
 
   it("returns true for PRINT_EXECUTIVE_BRIEF", () => {
     expect(isReportMode("PRINT_EXECUTIVE_BRIEF")).toBe(true);
+  });
+
+  it("returns true for PRINT_EXECUTIVE_BRIEF_V2", () => {
+    expect(isReportMode("PRINT_EXECUTIVE_BRIEF_V2")).toBe(true);
   });
 
   it("returns false for an empty string", () => {

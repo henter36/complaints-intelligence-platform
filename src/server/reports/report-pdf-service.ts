@@ -3,6 +3,7 @@ import path from "node:path";
 import PDFDocument from "pdfkit";
 import { getReportDefinition } from "./report-definition-service";
 import { renderExecutiveBriefPdf } from "./report-executive-brief-pdf-service";
+import { renderExecutiveBriefV2Pdf } from "./report-executive-brief-v2-pdf-service";
 import type {
   ReportChartSection,
   ReportData,
@@ -107,6 +108,9 @@ export async function renderReportPdf(data: ReportData): Promise<PdfRenderResult
     data.reportMode === "PRINT_EXECUTIVE_BRIEF"
   ) {
     return renderExecutiveBriefPdf(data, data.reportMode);
+  }
+  if (data.reportMode === "PRINT_EXECUTIVE_BRIEF_V2") {
+    return renderExecutiveBriefV2Pdf(data);
   }
 
   const { regular, bold } = loadFonts();

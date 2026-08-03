@@ -20,6 +20,7 @@ import type { DeptClassPeriodCount, ComparisonResult, PeriodRange } from "./repo
 import { buildComplaintQueryParams, type ReportFilters } from "./report-definition-service";
 import type {
   ExecutiveBriefData,
+  ExecutiveBriefV2Data,
   FullAnalyticalData,
 } from "./report-data-service";
 import type {
@@ -30,6 +31,7 @@ import type {
   ComparativeTimelineData,
   ComparativeTimelinePoint,
   ConcentrationBand,
+  MonthlyStockFlowPoint,
   NetBacklogFlow,
   PerfVolumeRow,
   ContinuityRow,
@@ -744,4 +746,141 @@ export async function buildFullAnalyticalData(
     perfVolumeRows,
     continuityRows,
   };
+}
+
+// ---------------------------------------------------------------------------
+// V2: monthly stock-and-flow timeline
+// ---------------------------------------------------------------------------
+
+async function buildMonthlyStockFlow(
+  filters: ReportFilters,
+  comparison: ComparisonResult,
+  now: Date
+): Promise<MonthlyStockFlowPoint[]> {
+  const params = buildComplaintQueryParams(filters);
+  params.delete("from");
+  params.delete("to");
+  const query = parseComplaintQuery(params);
+  const baseWhere = buildComplaintWhere(query, now);
+
+  const buckets = computeThirteenMonthWindow(comparison.currentPeriod);
+
+  // One query covers all needed dates; JS bucketing avoids N separate round-trips.
+  const complaints = await db.complaint.findMany({
+    where: { ...baseWhere, isDeleted: false },
+    select: { complaintDate: true, receivedAt: true, closedAt: true, dueDate: true },
+  });
+
+  return buckets.map((bucket) => {
+    const startMs = bucket.from.getTime();
+    const endMs = bucket.toExclusive.getTime();
+    let inflow = 0;
+    let closed = 0;
+    let openAtEnd = 0;
+    let lateAtEnd = 0;
+
+    for (const c of complaints) {
+      const effectiveMs = (c.complaintDate ?? c.receivedAt).getTime();
+
+      if (effectiveMs >= startMs && effectiveMs < endMs) inflow++;
+
+      if (c.closedAt) {
+        const closedMs = c.closedAt.getTime();
+        if (closedMs >= startMs && closedMs < endMs) closed++;
+      }
+
+      if (effectiveMs < endMs) {
+        const closedBeforeEnd = c.closedAt && c.closedAt.getTime() < endMs;
+        if (!closedBeforeEnd) {
+          openAtEnd++;
+          if (c.dueDate && c.dueDate.getTime() < endMs) lateAtEnd++;
+        }
+      }
+    }
+
+    return { monthLabel: bucket.label, inflow, closed, openAtEnd, lateAtEnd };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// V2: all-time complaint count (no date filter)
+// ---------------------------------------------------------------------------
+
+async function fetchAllTimeTotal(
+  filters: ReportFilters,
+  now: Date
+): Promise<number> {
+  const params = buildComplaintQueryParams(filters);
+  params.delete("from");
+  params.delete("to");
+  const query = parseComplaintQuery(params);
+  const baseWhere = buildComplaintWhere(query, now);
+  return db.complaint.count({ where: { ...baseWhere, isDeleted: false } });
+}
+
+// ---------------------------------------------------------------------------
+// V2: open/late counts per classification at current period end
+// ---------------------------------------------------------------------------
+
+async function fetchClassificationOpenLate(
+  filters: ReportFilters,
+  comparison: ComparisonResult,
+  now: Date
+): Promise<Record<string, { openAtEnd: number; lateAtEnd: number }>> {
+  const params = buildComplaintQueryParams(filters);
+  params.delete("from");
+  params.delete("to");
+  const query = parseComplaintQuery(params);
+  const baseWhere = buildComplaintWhere(query, now);
+
+  const periodEndMs = comparison.currentPeriod.toExclusive.getTime();
+
+  const complaints = await db.complaint.findMany({
+    where: { ...baseWhere, isDeleted: false },
+    select: {
+      classificationId: true,
+      complaintDate: true,
+      receivedAt: true,
+      closedAt: true,
+      dueDate: true,
+    },
+  });
+
+  const result: Record<string, { openAtEnd: number; lateAtEnd: number }> = {};
+
+  for (const c of complaints) {
+    const effectiveMs = (c.complaintDate ?? c.receivedAt).getTime();
+    if (effectiveMs >= periodEndMs) continue;
+
+    const closedBeforeEnd = c.closedAt && c.closedAt.getTime() < periodEndMs;
+    if (closedBeforeEnd) continue;
+
+    const key = c.classificationId ?? "__unclassified__";
+    if (!result[key]) result[key] = { openAtEnd: 0, lateAtEnd: 0 };
+    result[key].openAtEnd++;
+    if (c.dueDate && c.dueDate.getTime() < periodEndMs) result[key].lateAtEnd++;
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// V2 public API
+// ---------------------------------------------------------------------------
+
+export async function buildExecutiveBriefV2Data(
+  filters: ReportFilters,
+  result: ComplaintKpiResult,
+  comparison: ComparisonResult,
+  previousResult?: ComplaintKpiResult,
+  now: Date = new Date()
+): Promise<ExecutiveBriefV2Data> {
+  const [briefData, allTimeTotal, monthlyStockFlow, classificationOpenLate] = await Promise.all([
+    buildExecutiveBriefData(filters, result, comparison, previousResult, now),
+    fetchAllTimeTotal(filters, now),
+    buildMonthlyStockFlow(filters, comparison, now),
+    fetchClassificationOpenLate(filters, comparison, now),
+  ]);
+
+  return { ...briefData, allTimeTotal, monthlyStockFlow, classificationOpenLate };
 }
