@@ -388,6 +388,12 @@ export function normalizeImportRow(
   for (const [header, field] of Object.entries(mapping)) {
     const value = rawRow.values[header];
 
+    // The source system uses a standalone dash to mean that no wing code
+    // was provided. Treat it as an empty optional value, not as a formula.
+    if (field === "wingCode" && normalizeTextCell(value) === "-") {
+      continue;
+    }
+
     if (isFormulaLikeValue(value)) {
       errors.push({
         field,

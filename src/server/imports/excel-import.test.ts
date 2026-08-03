@@ -160,6 +160,63 @@ describe("secure xlsx import parsing", () => {
     expect(result.errors).toContainEqual(expect.objectContaining({ code: "FORMULA_NOT_ALLOWED" }));
   });
 
+  it("treats a standalone dash in wingCode as an empty placeholder", () => {
+    const { mapping } = matchComplaintColumns([
+      "رقم الشكوى",
+      "تاريخ الشكوى",
+      "الموضوع",
+      "رمز الجناح",
+    ]);
+
+    const result = normalizeImportRow(
+      {
+        rowNumber: 2,
+        values: {
+          "رقم الشكوى": "C-WING-1",
+          "تاريخ الشكوى": "2026-07-01",
+          "الموضوع": "شكوى تجريبية",
+          "رمز الجناح": "-",
+        },
+      },
+      mapping
+    );
+
+    expect(result.normalized.wingCode).toBeUndefined();
+    expect(result.errors).not.toContainEqual(
+      expect.objectContaining({ code: "FORMULA_NOT_ALLOWED" })
+    );
+  });
+
+  it("still rejects an actual formula in wingCode", () => {
+    const { mapping } = matchComplaintColumns([
+      "رقم الشكوى",
+      "تاريخ الشكوى",
+      "الموضوع",
+      "رمز الجناح",
+    ]);
+
+    const result = normalizeImportRow(
+      {
+        rowNumber: 2,
+        values: {
+          "رقم الشكوى": "C-WING-2",
+          "تاريخ الشكوى": "2026-07-01",
+          "الموضوع": "شكوى تجريبية",
+          "رمز الجناح": "=1+1",
+        },
+      },
+      mapping
+    );
+
+    expect(result.normalized.wingCode).toBeUndefined();
+    expect(result.errors).toContainEqual(
+      expect.objectContaining({
+        field: "wingCode",
+        code: "FORMULA_NOT_ALLOWED",
+      })
+    );
+  });
+
   it("normalizes Excel serial dates without relying on locale timezone", () => {
     expect(normalizeExcelSerialDate(45108)?.toISOString()).toBe("2023-07-01T00:00:00.000Z");
   });
