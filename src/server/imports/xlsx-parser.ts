@@ -33,6 +33,10 @@ const parser = new XMLParser({
   attributeNamePrefix: "",
   parseTagValue: false,
   parseAttributeValue: false,
+  // Preserve leading/trailing whitespace in text nodes so that
+  // shared strings with xml:space="preserve" are not silently truncated.
+  // Trimming is done downstream by normalizeTextCell.
+  trimValues: false,
 });
 
 function toArray<T>(value: T | T[] | undefined): T[] {
@@ -103,6 +107,10 @@ function extractText(value: unknown): string {
 
   if (typeof value === "object") {
     const record = value as Record<string, unknown>;
+    // fast-xml-parser sets "#text" when an element has both attributes and text
+    // content (e.g. <t xml:space="preserve">text</t>). Handle it before the
+    // named-child checks so the actual text is never discarded.
+    if (record["#text"] !== undefined) return extractText(record["#text"]);
     if (record.t !== undefined) return extractText(record.t);
     if (record.r !== undefined) return extractText(record.r);
     if (record.is !== undefined) return extractText(record.is);

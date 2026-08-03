@@ -456,3 +456,259 @@ describe("XLSX operational confirmation — fields persist to Complaint", () => 
     expect(complaint?.channel).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Shared-string workbook builder (for xml:space="preserve" regression tests)
+// ---------------------------------------------------------------------------
+//
+// Builds a minimal XLSX where description cells are stored as shared strings.
+// Each entry in `siXmlEntries` is a raw <si> body (everything inside <si>…</si>).
+// Data cells reference shared strings via t="s" + <v>index</v>.
+//
+// Example si entries:
+//   plain:          "<t>وصف عربي</t>"
+//   with preserve:  '<t xml:space="preserve">وصف عربي </t>'
+//   rich text:      "<r><t>أول </t></r><r><t>ثاني</t></r>"
+
+async function buildSharedStringWorkbook(config: {
+  headers: string[];
+  siXmlEntries: string[];                          // one <si> body per shared string
+  dataRow: Array<string | number | { ss: number }>; // ss = shared string index
+}): Promise<Buffer> {
+  if (config.headers.length > 26 || config.dataRow.length > 26) {
+    throw new Error(
+      "buildSharedStringWorkbook supports at most 26 columns (A-Z)"
+    );
+  }
+
+  const zip = new JSZip();
+
+  const sharedStringsXml = `<?xml version="1.0" encoding="UTF-8"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+     count="${config.siXmlEntries.length}" uniqueCount="${config.siXmlEntries.length}">
+${config.siXmlEntries.map((body) => `  <si>${body}</si>`).join("\n")}
+</sst>`;
+
+  const headerCells = config.headers
+    .map((h, col) => {
+      const letter = String.fromCharCode(65 + col);
+      return `<c r="${letter}1" t="inlineStr"><is><t>${h}</t></is></c>`;
+    })
+    .join("");
+
+  const dataCells = config.dataRow
+    .map((v, col) => {
+      const letter = String.fromCharCode(65 + col);
+      const ref = `${letter}2`;
+      if (v !== null && typeof v === "object" && "ss" in v) {
+        return `<c r="${ref}" t="s"><v>${v.ss}</v></c>`;
+      }
+      if (typeof v === "number") {
+        return `<c r="${ref}"><v>${v}</v></c>`;
+      }
+      return `<c r="${ref}" t="inlineStr"><is><t>${String(v)}</t></is></c>`;
+    })
+    .join("");
+
+  zip.file("[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/sharedStrings.xml"
+    ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>
+</Types>`);
+
+  zip.file("xl/workbook.xml", `<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="الشكاوى" sheetId="1" r:id="rId1"/></sheets>
+</workbook>`);
+
+  zip.file("xl/_rels/workbook.xml.rels", `<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet"
+    Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings"
+    Target="sharedStrings.xml"/>
+</Relationships>`);
+
+  zip.file("xl/sharedStrings.xml", sharedStringsXml);
+
+  zip.file("xl/worksheets/sheet1.xml", `<?xml version="1.0" encoding="UTF-8"?>
+<worksheet><sheetData>
+<row r="1">${headerCells}</row>
+<row r="2">${dataCells}</row>
+</sheetData></worksheet>`);
+
+  return zip.generateAsync({ type: "nodebuffer" });
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests: xml:space="preserve" in shared strings
+// ---------------------------------------------------------------------------
+
+describe("parseXlsxWorkbook — shared string xml:space=preserve regression", () => {
+  const HEADERS = ["رقم الشكوى", "تاريخ التسجيل", "تفصيل", "الوصف"];
+
+  it("reads a plain shared string <t>وصف عربي</t> as-is", async () => {
+    const buf = await buildSharedStringWorkbook({
+      headers: HEADERS,
+      siXmlEntries: ["<t>وصف عربي</t>"],
+      dataRow: ["COMP/SS-001", 46126, "طلب نقل", { ss: 0 }],
+    });
+    const { rows } = await parseXlsxWorkbook(buf);
+    expect(rows[0]?.values["الوصف"]).toBe("وصف عربي");
+  });
+
+  it('reads <t xml:space="preserve">وصف عربي </t> — trailing space preserved by parser', async () => {
+    const buf = await buildSharedStringWorkbook({
+      headers: HEADERS,
+      siXmlEntries: ['<t xml:space="preserve">وصف عربي </t>'],
+      dataRow: ["COMP/SS-002", 46126, "طلب نقل", { ss: 0 }],
+    });
+    const { rows } = await parseXlsxWorkbook(buf);
+    // Parser must NOT return empty string — the raw value includes trailing space
+    expect(rows[0]?.values["الوصف"]).toBe("وصف عربي ");
+  });
+
+  it('reads <t xml:space="preserve"> وصف عربي</t> — leading space preserved by parser', async () => {
+    const buf = await buildSharedStringWorkbook({
+      headers: HEADERS,
+      siXmlEntries: ['<t xml:space="preserve"> وصف عربي</t>'],
+      dataRow: ["COMP/SS-003", 46126, "طلب نقل", { ss: 0 }],
+    });
+    const { rows } = await parseXlsxWorkbook(buf);
+    expect(rows[0]?.values["الوصف"]).toBe(" وصف عربي");
+  });
+
+  it("reads rich text runs concatenating plain and preserve runs", async () => {
+    const buf = await buildSharedStringWorkbook({
+      headers: HEADERS,
+      siXmlEntries: ['<r><t>وصف </t></r><r><t xml:space="preserve">عربي </t></r>'],
+      dataRow: ["COMP/SS-004", 46126, "طلب نقل", { ss: 0 }],
+    });
+    const { rows } = await parseXlsxWorkbook(buf);
+    expect(rows[0]?.values["الوصف"]).toBe("وصف عربي ");
+  });
+
+  it("multiple shared strings in one workbook — each index resolves correctly", async () => {
+    const buf = await buildSharedStringWorkbook({
+      headers: ["رقم الشكوى", "تاريخ التسجيل", "تفصيل", "الوصف"],
+      siXmlEntries: [
+        "<t>تفصيل الشكوى</t>",
+        '<t xml:space="preserve">وصف كامل </t>',
+      ],
+      dataRow: ["COMP/SS-005", 46126, { ss: 0 }, { ss: 1 }],
+    });
+    const { rows } = await parseXlsxWorkbook(buf);
+    expect(rows[0]?.values["تفصيل"]).toBe("تفصيل الشكوى");
+    expect(rows[0]?.values["الوصف"]).toBe("وصف كامل ");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Regression tests: normalizeImportRow with preserve-space values
+// ---------------------------------------------------------------------------
+
+describe("normalizeImportRow — preserve-space values trimmed by normalizeTextCell", () => {
+  const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "تفصيل", "الوصف"]);
+
+  it("trims trailing space from description after xlsx-parser returns raw value", () => {
+    const result = normalizeImportRow(
+      {
+        rowNumber: 2,
+        values: {
+          "رقم الشكوى": "COMP/TRIM-001",
+          "تاريخ التسجيل": 46126,
+          "الوصف": "وصف عربي ",  // trailing space — as if xml:space="preserve" was used
+        },
+      },
+      mapping
+    );
+
+    expect(result.normalized.description).toBe("وصف عربي");
+    expect(result.warnings.some((w) => w.code === "DESCRIPTION_VALUE_MISSING")).toBe(false);
+  });
+
+  it("trims leading space from description", () => {
+    const result = normalizeImportRow(
+      {
+        rowNumber: 2,
+        values: {
+          "رقم الشكوى": "COMP/TRIM-002",
+          "تاريخ التسجيل": 46126,
+          "الوصف": " وصف عربي",
+        },
+      },
+      mapping
+    );
+
+    expect(result.normalized.description).toBe("وصف عربي");
+    expect(result.warnings.some((w) => w.code === "DESCRIPTION_VALUE_MISSING")).toBe(false);
+  });
+
+  it("produces DESCRIPTION_VALUE_MISSING when the value is only whitespace", () => {
+    const result = normalizeImportRow(
+      {
+        rowNumber: 2,
+        values: {
+          "رقم الشكوى": "COMP/TRIM-003",
+          "تاريخ التسجيل": 46126,
+          "الوصف": "   ",
+        },
+      },
+      mapping
+    );
+
+    expect(result.normalized.description).toBeUndefined();
+    expect(result.warnings.some((w) => w.code === "DESCRIPTION_VALUE_MISSING")).toBe(true);
+  });
+
+  it("does not affect sourceDetail or subject derivation", () => {
+    const result = normalizeImportRow(
+      {
+        rowNumber: 2,
+        values: {
+          "رقم الشكوى": "COMP/TRIM-004",
+          "تاريخ التسجيل": 46126,
+          "تفصيل": " طلب نقل ",
+          "الوصف": " وصف عربي مفصل ",
+        },
+      },
+      mapping
+    );
+
+    expect(result.normalized.sourceDetail).toBe("طلب نقل");
+    expect(result.normalized.subject).toBe("طلب نقل");
+    expect(result.normalized.description).toBe("وصف عربي مفصل");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Acceptance test (requirement 5): end-to-end with xml:space="preserve"
+// ---------------------------------------------------------------------------
+
+describe("acceptance: description stored with xml:space=preserve survives to normalizeImportRow", () => {
+  it("parses the workbook, normalizes description, and emits no DESCRIPTION_MISSING", async () => {
+    const HEADERS = ["رقم الشكوى", "تاريخ التسجيل", "تفصيل", "الوصف"];
+
+    const buf = await buildSharedStringWorkbook({
+      headers: HEADERS,
+      siXmlEntries: ['<t xml:space="preserve">وصف عربي </t>'],
+      dataRow: ["COMP/ACCEPT-001", 46126, "طلب نقل", { ss: 0 }],
+    });
+
+    const { rows } = await parseXlsxWorkbook(buf);
+    expect(rows).toHaveLength(1);
+
+    const rawDescription = rows[0]?.values["الوصف"];
+    // Parser returns the raw value with trailing space preserved
+    expect(rawDescription).toBe("وصف عربي ");
+
+    const { mapping } = matchComplaintColumns(HEADERS);
+    const { normalized, warnings } = normalizeImportRow({ rowNumber: 2, values: rows[0]!.values }, mapping);
+
+    // normalizeTextCell trims the trailing space
+    expect(normalized.description).toBe("وصف عربي");
+    expect(warnings.some((w) => w.code === "DESCRIPTION_VALUE_MISSING")).toBe(false);
+  });
+});
