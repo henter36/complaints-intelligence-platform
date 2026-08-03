@@ -1,10 +1,11 @@
 name: Apply V2 regional comparison table refinement
 
 on:
-  push:
+  pull_request:
     branches:
-      - feat/arabic-complaints-report-redesign
+      - main
     paths:
+      - src/server/reports/report-comparison.ts
       - .github/workflows/apply-v2-region-comparison-table.yml
 
 permissions:
@@ -12,6 +13,7 @@ permissions:
 
 jobs:
   apply-and-verify:
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     env:
       DATABASE_URL: "file:./ci-region-table.db"
