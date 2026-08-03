@@ -31,7 +31,29 @@ import {
   STATUS_LABELS, PRIORITY_LABELS,
 } from "@/lib/ar-utils";
 import { isAbortError } from "@/lib/abort";
-import { evaluateComparison } from "@/lib/analytics/comparison-evaluation";
+import {
+  evaluateComparison,
+  type ComparisonState,
+} from "@/lib/analytics/comparison-evaluation";
+
+// ---------- Comparison helpers ----------
+
+export function getComparisonStateClassName(state: ComparisonState): string {
+  if (state === "INCREASE") return "text-red-600";
+  if (state === "DECREASE") return "text-emerald-600";
+  return "text-muted-foreground";
+}
+
+function ComparisonDirectionIcon({ state }: { state: ComparisonState }) {
+  if (state === "INCREASE") return <TrendingUp className="h-3 w-3" />;
+  if (state === "DECREASE") return <TrendingDown className="h-3 w-3" />;
+  return null;
+}
+
+export function formatComparisonDifference(difference: number | null): string {
+  if (difference === null) return "—";
+  return `${difference > 0 ? "+" : ""}${formatNumber(difference)}`;
+}
 
 // ---------- Types ----------
 interface DashboardData {
@@ -718,15 +740,17 @@ export function Analytics() {
                       <tbody>
                         {comparisonData.byRegion.map((row, i) => {
                           const ev = evaluateComparison(row.current, row.previous, true);
+                          const stateClassName = getComparisonStateClassName(ev.state);
+                          const differenceLabel = formatComparisonDifference(ev.difference);
                           return (
                             <tr key={i} className="border-b last:border-0 hover:bg-muted/40">
                               <td className="py-2 px-3 font-medium">{row.name}</td>
                               <td className="py-2 px-3 text-center tabular-nums">{formatNumber(row.previous)}</td>
                               <td className="py-2 px-3 text-center tabular-nums font-bold">{formatNumber(row.current)}</td>
                               <td className="py-2 px-3 text-center">
-                                <span className={`inline-flex items-center gap-1 ${ev.state === "INCREASE" ? "text-red-600" : ev.state === "DECREASE" ? "text-emerald-600" : "text-muted-foreground"}`}>
-                                  {ev.state === "INCREASE" ? <TrendingUp className="h-3 w-3" /> : ev.state === "DECREASE" ? <TrendingDown className="h-3 w-3" /> : null}
-                                  {ev.difference !== null ? `${ev.difference > 0 ? "+" : ""}${formatNumber(ev.difference)}` : "—"}
+                                <span className={`inline-flex items-center gap-1 ${stateClassName}`}>
+                                  <ComparisonDirectionIcon state={ev.state} />
+                                  {differenceLabel}
                                 </span>
                               </td>
                               <td className="py-2 px-3 text-center">

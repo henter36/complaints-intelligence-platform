@@ -1,7 +1,12 @@
-import { type ComplaintKpiResult } from "@/server/complaints/complaint-kpi-service";
+import {
+  type ComplaintKpiResult,
+  type ComplaintGroupMetrics,
+} from "@/server/complaints/complaint-kpi-service";
 import {
   AnalyticalFindingSchema,
   type AnalyticalFinding,
+  type AnalyticalSeverity,
+  type AnalyticalConfidence,
 } from "@/lib/analytics/analytical-finding";
 import { evaluateComparison } from "@/lib/analytics/comparison-evaluation";
 
@@ -18,6 +23,131 @@ function clampScore(score: number): number {
 function buildFinding(data: AnalyticalFinding): AnalyticalFinding {
   return AnalyticalFindingSchema.parse(data);
 }
+
+// ---------- Period helpers ----------
+
+function buildPeriodKey(period: { from: string | null; to: string | null }): string {
+  return `${period.from ?? ""}:${period.to ?? ""}`;
+}
+
+function buildPeriodFilters(
+  period: { from: string | null; to: string | null }
+): Record<string, string> {
+  const filters: Record<string, string> = {};
+  if (period.from) filters.from = period.from;
+  if (period.to) filters.to = period.to;
+  return filters;
+}
+
+// ---------- Volume spike helpers ----------
+
+function resolveVolumeSpikeSeverity(changeRate: number): AnalyticalSeverity {
+  if (changeRate >= 200) return "CRITICAL";
+  if (changeRate >= 100) return "HIGH";
+  return "MEDIUM";
+}
+
+function resolveVolumeSpikeConfidence(previousCount: number): AnalyticalConfidence {
+  if (previousCount >= 10) return "HIGH";
+  if (previousCount >= 3) return "MEDIUM";
+  return "LOW";
+}
+
+function computeVolumeSpikeSeverityBonus(severity: AnalyticalSeverity): number {
+  if (severity === "CRITICAL") return 40;
+  if (severity === "HIGH") return 20;
+  return 0;
+}
+
+function computeVolumeSpikePriority(changeRate: number, severity: AnalyticalSeverity): number {
+  return clampScore(changeRate * 0.4 + computeVolumeSpikeSeverityBonus(severity));
+}
+
+function buildVolumeSpikeFinding(
+  curr: ComplaintGroupMetrics,
+  prevCount: number | null,
+  period: { from: string | null; to: string | null },
+  detectedAt: string
+): AnalyticalFinding | null {
+  const evaluation = evaluateComparison(curr.total, prevCount, true);
+  if (evaluation.state !== "INCREASE" || evaluation.changeRate === null) return null;
+  if (evaluation.changeRate < 50) return null;
+
+  const severity = resolveVolumeSpikeSeverity(evaluation.changeRate);
+  const previousCount = prevCount ?? 0;
+  const confidence = resolveVolumeSpikeConfidence(previousCount);
+
+  return buildFinding({
+    id: `volume_spike:region:${curr.name}:${buildPeriodKey(period)}`,
+    type: "VOLUME_SPIKE",
+    entityType: "REGION",
+    entityId: null,
+    entityName: curr.name,
+    currentValue: curr.total,
+    previousValue: previousCount,
+    difference: evaluation.difference,
+    changeRate: evaluation.changeRate,
+    severity,
+    priorityScore: computeVolumeSpikePriority(evaluation.changeRate, severity),
+    confidence,
+    detectionSource: "QUANTITATIVE",
+    explanation: `ارتفع عدد شكاوى ${curr.name} بنسبة ${evaluation.changeRate}% مقارنة بالفترة السابقة (${previousCount} → ${curr.total}).`,
+    supportingMetrics: {
+      currentCount: curr.total,
+      previousCount,
+      changeRate: evaluation.changeRate,
+      openComplaints: curr.open,
+      lateComplaints: curr.currentlyLate,
+    },
+    evidenceComplaintIds: [],
+    evidenceSpans: [],
+    limitations: ["المقارنة مبنية على الفترة الزمنية المحددة فقط ولا تأخذ في الحسبان التغيرات الموسمية."],
+    drilldownFilters: {
+      region: curr.name,
+      ...buildPeriodFilters(period),
+    },
+    firstDetectedAt: detectedAt,
+    lastDetectedAt: detectedAt,
+    detectorVersion: DETECTOR_VERSION,
+  });
+}
+
+// ---------- Backlog helpers ----------
+
+function resolveBacklogSeverity(changeRate: number): AnalyticalSeverity {
+  if (changeRate >= 100) return "HIGH";
+  if (changeRate >= 50) return "MEDIUM";
+  return "LOW";
+}
+
+// ---------- Overdue helpers ----------
+
+function resolveOverdueSeverity(lateRate: number): AnalyticalSeverity {
+  if (lateRate >= 40) return "CRITICAL";
+  if (lateRate >= 25) return "HIGH";
+  return "MEDIUM";
+}
+
+function buildOverdueExplanation(
+  lateCount: number,
+  lateRate: number,
+  overdueNoAction: number
+): string {
+  const summary = `${lateCount} شكوى متأخرة حالياً (${lateRate}% من الإجمالي).`;
+  if (overdueNoAction === 0) return summary;
+  const noActionSummary = `منها ${overdueNoAction} بدون إجراء.`;
+  return `${summary} ${noActionSummary}`;
+}
+
+// ---------- Concentration helpers ----------
+
+function resolveConcentrationConfidence(total: number): AnalyticalConfidence {
+  if (total >= 20) return "HIGH";
+  if (total >= 5) return "MEDIUM";
+  return "LOW";
+}
+
+// ---------- Public API ----------
 
 export function computeAnalyticsFindings(
   result: ComplaintKpiResult,
@@ -49,59 +179,17 @@ function detectVolumeSpike(
 ): AnalyticalFinding[] {
   if (!hasPrevious || !result.previousDistributions) return [];
 
+  const previousByRegion = new Map(
+    result.previousDistributions.byRegion.map((r) => [r.name, r.total])
+  );
+
   const findings: AnalyticalFinding[] = [];
-  const { byRegion: prevRegions } = result.previousDistributions;
-
   for (const curr of result.distributions.byRegion) {
-    const prev = prevRegions.find((r) => r.name === curr.name);
-    const evaluation = evaluateComparison(curr.total, prev?.total ?? null, true);
-
-    if (evaluation.state !== "INCREASE" || evaluation.changeRate === null) continue;
-    if (evaluation.changeRate < 50) continue;
-
-    const severity =
-      evaluation.changeRate >= 200 ? "CRITICAL" :
-      evaluation.changeRate >= 100 ? "HIGH" : "MEDIUM";
-
-    const prevCount = prev?.total ?? 0;
-    const confidence =
-      prevCount >= 10 ? "HIGH" :
-      prevCount >= 3 ? "MEDIUM" : "LOW";
-
-    findings.push(buildFinding({
-      id: `volume_spike:region:${curr.name}:${period.from ?? ""}:${period.to ?? ""}`,
-      type: "VOLUME_SPIKE",
-      entityType: "REGION",
-      entityId: null,
-      entityName: curr.name,
-      currentValue: curr.total,
-      previousValue: prevCount,
-      difference: evaluation.difference,
-      changeRate: evaluation.changeRate,
-      severity,
-      priorityScore: clampScore(evaluation.changeRate * 0.4 + (severity === "CRITICAL" ? 40 : severity === "HIGH" ? 20 : 0)),
-      confidence,
-      detectionSource: "QUANTITATIVE",
-      explanation: `ارتفع عدد شكاوى ${curr.name} بنسبة ${evaluation.changeRate}% مقارنة بالفترة السابقة (${prevCount} → ${curr.total}).`,
-      supportingMetrics: {
-        currentCount: curr.total,
-        previousCount: prevCount,
-        changeRate: evaluation.changeRate,
-        openComplaints: curr.open,
-        lateComplaints: curr.currentlyLate,
-      },
-      evidenceComplaintIds: [],
-      evidenceSpans: [],
-      limitations: ["المقارنة مبنية على الفترة الزمنية المحددة فقط ولا تأخذ في الحسبان التغيرات الموسمية."],
-      drilldownFilters: {
-        region: curr.name,
-        ...(period.from ? { from: period.from } : {}),
-        ...(period.to ? { to: period.to } : {}),
-      },
-      firstDetectedAt: detectedAt,
-      lastDetectedAt: detectedAt,
-      detectorVersion: DETECTOR_VERSION,
-    }));
+    const prevCount = previousByRegion.get(curr.name) ?? null;
+    const finding = buildVolumeSpikeFinding(curr, prevCount, period, detectedAt);
+    if (finding !== null) {
+      findings.push(finding);
+    }
   }
 
   return findings.slice(0, 5);
@@ -122,12 +210,10 @@ function detectBacklogGrowth(
   if (evaluation.state !== "INCREASE" || evaluation.changeRate === null) return [];
   if (evaluation.changeRate < 20) return [];
 
-  const severity =
-    evaluation.changeRate >= 100 ? "HIGH" :
-    evaluation.changeRate >= 50 ? "MEDIUM" : "LOW";
+  const severity = resolveBacklogSeverity(evaluation.changeRate);
 
   return [buildFinding({
-    id: `backlog_growth:global:${period.from ?? ""}:${period.to ?? ""}`,
+    id: `backlog_growth:global:${buildPeriodKey(period)}`,
     type: "BACKLOG_GROWTH",
     entityType: "GLOBAL",
     entityId: null,
@@ -153,8 +239,7 @@ function detectBacklogGrowth(
     limitations: ["قد يعكس الارتفاع ضغطاً موسمياً أو تغيرات في سياسات الإغلاق."],
     drilldownFilters: {
       status: "open",
-      ...(period.from ? { from: period.from } : {}),
-      ...(period.to ? { to: period.to } : {}),
+      ...buildPeriodFilters(period),
     },
     firstDetectedAt: detectedAt,
     lastDetectedAt: detectedAt,
@@ -173,12 +258,11 @@ function detectCurrentlyOverdue(
   const lateRate = result.performance.lateRate;
   if (lateCount === 0 || lateRate < 10) return [];
 
-  const severity =
-    lateRate >= 40 ? "CRITICAL" :
-    lateRate >= 25 ? "HIGH" : "MEDIUM";
+  const { overdueNoAction, overdueNoActionRate } = result.performance;
+  const severity = resolveOverdueSeverity(lateRate);
 
   return [buildFinding({
-    id: `overdue:global:${period.from ?? ""}:${period.to ?? ""}`,
+    id: `overdue:global:${buildPeriodKey(period)}`,
     type: "CURRENTLY_OVERDUE",
     entityType: "GLOBAL",
     entityId: null,
@@ -188,15 +272,15 @@ function detectCurrentlyOverdue(
     difference: null,
     changeRate: null,
     severity,
-    priorityScore: clampScore(lateRate + (result.performance.overdueNoAction > 0 ? 20 : 0)),
+    priorityScore: clampScore(lateRate + (overdueNoAction > 0 ? 20 : 0)),
     confidence: "HIGH",
     detectionSource: "QUANTITATIVE",
-    explanation: `${lateCount} شكوى متأخرة حالياً (${lateRate}% من الإجمالي). ${result.performance.overdueNoAction > 0 ? `منها ${result.performance.overdueNoAction} بدون إجراء.` : ""}`,
+    explanation: buildOverdueExplanation(lateCount, lateRate, overdueNoAction),
     supportingMetrics: {
       lateCount,
       lateRate,
-      overdueNoAction: result.performance.overdueNoAction,
-      overdueNoActionRate: result.performance.overdueNoActionRate,
+      overdueNoAction,
+      overdueNoActionRate,
       totalComplaints: result.volume.total,
     },
     evidenceComplaintIds: [],
@@ -204,8 +288,7 @@ function detectCurrentlyOverdue(
     limitations: [],
     drilldownFilters: {
       isLate: true,
-      ...(period.from ? { from: period.from } : {}),
-      ...(period.to ? { to: period.to } : {}),
+      ...buildPeriodFilters(period),
     },
     firstDetectedAt: detectedAt,
     lastDetectedAt: detectedAt,
@@ -230,16 +313,19 @@ function detectConcentration(
   const sharePercent = (topRegion.total / total) * 100;
   if (sharePercent < 40) return [];
 
-  const prevTotal = hasPrevious ? (result.previousDistributions?.byRegion.reduce((s, r) => s + r.total, 0) ?? null) : null;
-  const prevTopRegion = result.previousDistributions?.byRegion.find((r) => r.name === topRegion.name);
-  const prevSharePercent = (prevTotal && prevTotal > 0 && prevTopRegion)
-    ? (prevTopRegion.total / prevTotal) * 100
+  const prevTotal = hasPrevious
+    ? (result.previousDistributions?.byRegion.reduce((s, r) => s + r.total, 0) ?? null)
     : null;
+  const prevTopRegion = result.previousDistributions?.byRegion.find((r) => r.name === topRegion.name);
+  const prevSharePercent =
+    prevTotal !== null && prevTotal > 0 && prevTopRegion
+      ? (prevTopRegion.total / prevTotal) * 100
+      : null;
 
   const severity = sharePercent >= 60 ? "HIGH" : "MEDIUM";
 
   return [buildFinding({
-    id: `concentration:region:${topRegion.name}:${period.from ?? ""}:${period.to ?? ""}`,
+    id: `concentration:region:${topRegion.name}:${buildPeriodKey(period)}`,
     type: "CONCENTRATION",
     entityType: "REGION",
     entityId: null,
@@ -250,7 +336,7 @@ function detectConcentration(
     changeRate: prevSharePercent !== null ? Math.round((sharePercent - prevSharePercent) * 10) / 10 : null,
     severity,
     priorityScore: clampScore(sharePercent - 30),
-    confidence: total >= 20 ? "HIGH" : total >= 5 ? "MEDIUM" : "LOW",
+    confidence: resolveConcentrationConfidence(total),
     detectionSource: "QUANTITATIVE",
     explanation: `منطقة ${topRegion.name} تمثل ${Math.round(sharePercent)}% من إجمالي الشكاوى (${topRegion.total} من ${total}).`,
     supportingMetrics: {
@@ -264,8 +350,7 @@ function detectConcentration(
     limitations: ["التركيز الجغرافي قد يعكس حجم السكان أو معدلات الإبلاغ وليس بالضرورة مشكلة في الخدمة."],
     drilldownFilters: {
       region: topRegion.name,
-      ...(period.from ? { from: period.from } : {}),
-      ...(period.to ? { to: period.to } : {}),
+      ...buildPeriodFilters(period),
     },
     firstDetectedAt: detectedAt,
     lastDetectedAt: detectedAt,
@@ -283,10 +368,10 @@ function detectDataQuality(
   const { missingFields, dataQualityRate } = result.alerts;
   if (dataQualityRate >= 80 || missingFields === 0) return [];
 
-  const severity = dataQualityRate < 60 ? "HIGH" : "MEDIUM";
+  const severity: AnalyticalSeverity = dataQualityRate < 60 ? "HIGH" : "MEDIUM";
 
   return [buildFinding({
-    id: `data_quality:global:${period.from ?? ""}:${period.to ?? ""}`,
+    id: `data_quality:global:${buildPeriodKey(period)}`,
     type: "DATA_QUALITY",
     entityType: "GLOBAL",
     entityId: null,
@@ -310,12 +395,10 @@ function detectDataQuality(
     limitations: ["الحقول المفقودة قد تعود لاختلافات في نماذج الإدخال أو عمليات الاستيراد."],
     drilldownFilters: {
       hasMissingFields: true,
-      ...(period.from ? { from: period.from } : {}),
-      ...(period.to ? { to: period.to } : {}),
+      ...buildPeriodFilters(period),
     },
     firstDetectedAt: detectedAt,
     lastDetectedAt: detectedAt,
     detectorVersion: DETECTOR_VERSION,
   })];
 }
-

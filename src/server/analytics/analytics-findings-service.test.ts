@@ -299,4 +299,163 @@ describe("computeAnalyticsFindings", () => {
       expect(result[i - 1]!.priorityScore).toBeGreaterThanOrEqual(result[i]!.priorityScore);
     }
   });
+
+  describe("VOLUME_SPIKE severity boundaries", () => {
+    function spikeWithChangeRate(prevCount: number, currCount: number) {
+      return computeAnalyticsFindings(
+        baseKpiResult({
+          previousDistributions: baseDistributions({ "الرياض": prevCount }),
+          distributions: baseDistributions({ "الرياض": currCount }),
+          volume: { ...baseKpiResult().volume, total: currCount },
+        })
+      ).find((f) => f.type === "VOLUME_SPIKE" && f.entityName === "الرياض");
+    }
+
+    it("resolves CRITICAL when changeRate >= 200", () => {
+      // previous=10, current=30 → changeRate=200
+      const finding = spikeWithChangeRate(10, 30);
+      expect(finding?.severity).toBe("CRITICAL");
+      expect(finding?.changeRate).toBe(200);
+    });
+
+    it("resolves HIGH when changeRate is exactly 100", () => {
+      // previous=10, current=20 → changeRate=100
+      const finding = spikeWithChangeRate(10, 20);
+      expect(finding?.severity).toBe("HIGH");
+    });
+
+    it("resolves MEDIUM when changeRate is 50 (exact lower bound)", () => {
+      // previous=10, current=15 → changeRate=50
+      const finding = spikeWithChangeRate(10, 15);
+      expect(finding?.severity).toBe("MEDIUM");
+    });
+
+    it("does not fire when changeRate is 49", () => {
+      // previous=100, current=149 → changeRate=49
+      const finding = spikeWithChangeRate(100, 149);
+      expect(finding).toBeUndefined();
+    });
+  });
+
+  describe("VOLUME_SPIKE confidence boundaries", () => {
+    function spikeConfidence(prevCount: number, currCount: number) {
+      return computeAnalyticsFindings(
+        baseKpiResult({
+          previousDistributions: baseDistributions({ "الرياض": prevCount }),
+          distributions: baseDistributions({ "الرياض": currCount }),
+          volume: { ...baseKpiResult().volume, total: currCount },
+        })
+      ).find((f) => f.type === "VOLUME_SPIKE" && f.entityName === "الرياض")?.confidence;
+    }
+
+    it("resolves HIGH when previousCount >= 10", () => {
+      expect(spikeConfidence(10, 25)).toBe("HIGH");
+    });
+
+    it("resolves MEDIUM when previousCount is exactly 3", () => {
+      expect(spikeConfidence(3, 6)).toBe("MEDIUM");
+    });
+
+    it("resolves LOW when previousCount is 2", () => {
+      expect(spikeConfidence(2, 4)).toBe("LOW");
+    });
+  });
+
+  describe("BACKLOG_GROWTH severity boundaries", () => {
+    function backlogWithChangeRate(prevOpen: number, currOpen: number) {
+      return computeAnalyticsFindings(
+        baseKpiResult({
+          volume: { ...baseKpiResult().volume, open: currOpen },
+          kpis: {
+            ...baseKpiResult().kpis,
+            openComplaints: { currentValue: currOpen, previousValue: prevOpen, absoluteChange: currOpen - prevOpen, percentageChange: Math.round(((currOpen - prevOpen) / prevOpen) * 100), trend: "up", direction: "negative" },
+          },
+          previousDistributions: baseDistributions(),
+        })
+      ).find((f) => f.type === "BACKLOG_GROWTH");
+    }
+
+    it("resolves HIGH when changeRate >= 100", () => {
+      // prev=100, curr=200 → changeRate=100
+      const finding = backlogWithChangeRate(100, 200);
+      expect(finding?.severity).toBe("HIGH");
+    });
+
+    it("resolves MEDIUM when changeRate is exactly 50", () => {
+      // prev=100, curr=150 → changeRate=50
+      const finding = backlogWithChangeRate(100, 150);
+      expect(finding?.severity).toBe("MEDIUM");
+    });
+
+    it("resolves LOW when changeRate is 20 (lower threshold)", () => {
+      // prev=100, curr=120 → changeRate=20
+      const finding = backlogWithChangeRate(100, 120);
+      expect(finding?.severity).toBe("LOW");
+    });
+
+    it("does not fire when changeRate is 19", () => {
+      // prev=100, curr=119 → changeRate=19
+      expect(backlogWithChangeRate(100, 119)).toBeUndefined();
+    });
+  });
+
+  describe("CURRENTLY_OVERDUE severity boundaries and explanation", () => {
+    function overdueResult(lateCount: number, lateRate: number, overdueNoAction: number) {
+      return computeAnalyticsFindings(
+        baseKpiResult({
+          volume: { ...baseKpiResult().volume, late: lateCount },
+          performance: { ...baseKpiResult().performance, lateRate, overdueNoAction },
+        })
+      ).find((f) => f.type === "CURRENTLY_OVERDUE");
+    }
+
+    it("resolves CRITICAL when lateRate >= 40", () => {
+      expect(overdueResult(40, 40, 0)?.severity).toBe("CRITICAL");
+    });
+
+    it("resolves HIGH when lateRate is exactly 25", () => {
+      expect(overdueResult(25, 25, 0)?.severity).toBe("HIGH");
+    });
+
+    it("resolves MEDIUM when lateRate is 24", () => {
+      expect(overdueResult(24, 24, 0)?.severity).toBe("MEDIUM");
+    });
+
+    it("explanation has no trailing space when overdueNoAction is 0", () => {
+      const finding = overdueResult(15, 15, 0);
+      expect(finding?.explanation).not.toMatch(/ $/);
+      expect(finding?.explanation).not.toContain("بدون إجراء");
+    });
+
+    it("explanation mentions no-action count when overdueNoAction > 0", () => {
+      const finding = overdueResult(15, 15, 3);
+      expect(finding?.explanation).toContain("3 بدون إجراء");
+    });
+  });
+
+  describe("CONCENTRATION confidence boundaries", () => {
+    function concentrationConfidence(total: number, topCount: number) {
+      return computeAnalyticsFindings(
+        baseKpiResult({
+          volume: { ...baseKpiResult().volume, total },
+          distributions: baseDistributions({ "الرياض": topCount, "جدة": total - topCount }),
+        })
+      ).find((f) => f.type === "CONCENTRATION")?.confidence;
+    }
+
+    it("resolves HIGH when total >= 20", () => {
+      // topRegion=9/20 = 45% → fires
+      expect(concentrationConfidence(20, 9)).toBe("HIGH");
+    });
+
+    it("resolves MEDIUM when total is exactly 5", () => {
+      // topRegion=3/5 = 60% → fires
+      expect(concentrationConfidence(5, 3)).toBe("MEDIUM");
+    });
+
+    it("resolves LOW when total is 4", () => {
+      // topRegion=3/4 = 75% → fires
+      expect(concentrationConfidence(4, 3)).toBe("LOW");
+    });
+  });
 });
