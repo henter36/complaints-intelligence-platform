@@ -25,7 +25,6 @@ import {
 import type {
   ExecutiveBriefKpiCard,
   RegionReferenceRow,
-  ClassificationBriefRow,
   ExecutiveEntityRow,
 } from "@/lib/reports/report-contract";
 import type { ExecutiveBriefV2Data, ReportData } from "./report-data-service";
