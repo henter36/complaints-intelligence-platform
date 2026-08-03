@@ -14,6 +14,10 @@ import { assertClosedAtMatchesStatus } from "@/server/complaints/status";
 import { calculateRowCounters } from "./import-batch-service";
 import { deriveSubject } from "./subject-derive";
 import { startTextRiskScan } from "@/server/analytics/text-risk/text-risk-analysis-service";
+import {
+  countComplaintsByIdentifier,
+  isRepeatedComplainantIdentifier,
+} from "@/server/complaints/repeated-complaint-identifier";
 
 const CONFIRMABLE_ACTIONS = new Set<ImportRowAction>([
   ImportRowAction.NEW,
@@ -62,6 +66,7 @@ type NormalizedConfirmationRow = {
   status?: ComplaintStatus | null;
   subject?: string | null;
   description?: string | null;
+  sourceDetail?: string | null;
   complainantName?: string | null;
   complainantIdentifier?: string | null;
   complainantPhone?: string | null;
@@ -228,6 +233,7 @@ function parseNormalizedRow(row: ConfirmationRow): NormalizedConfirmationRow {
     status: parseStatus(data.status),
     subject: parseText(data.subject),
     description: parseText(data.description),
+    sourceDetail: parseText(data.sourceDetail),
     complainantName: parseText(data.complainantName),
     complainantIdentifier: parseText(data.complainantIdentifier),
     complainantPhone: parseText(data.complainantPhone),
@@ -354,6 +360,7 @@ async function applyNewRow(
       status,
       subject:
         normalized.subject?.trim() ||
+        normalized.sourceDetail?.trim() ||
         (normalized.description ? deriveSubject(normalized.description) : "بدون موضوع"),
       description: normalized.description ?? null,
       complainantName: normalized.complainantName ?? null,
@@ -434,6 +441,7 @@ function assignImportUpdateFields(
     data,
     "subject",
     normalized.subject?.trim() ||
+      normalized.sourceDetail?.trim() ||
       (normalized.description ? deriveSubject(normalized.description) : undefined)
   );
   assignIfDefined(data, "description", normalized.description);
@@ -535,6 +543,28 @@ async function applyUpdateRow(
   });
 }
 
+async function recalculateIsRepeated(tx: Prisma.TransactionClient): Promise<void> {
+  const complaints = await tx.complaint.findMany({
+    where: { isDeleted: false },
+    select: { id: true, complainantIdentifier: true },
+  });
+  const counts = countComplaintsByIdentifier(complaints.map((c) => c.complainantIdentifier));
+  const repeatedIds = complaints
+    .filter((c) => isRepeatedComplainantIdentifier(c.complainantIdentifier, counts))
+    .map((c) => c.id);
+
+  await tx.complaint.updateMany({ where: { isDeleted: false }, data: { isRepeated: false } });
+  if (repeatedIds.length > 0) {
+    const CHUNK = 900;
+    for (let i = 0; i < repeatedIds.length; i += CHUNK) {
+      await tx.complaint.updateMany({
+        where: { id: { in: repeatedIds.slice(i, i + CHUNK) } },
+        data: { isRepeated: true },
+      });
+    }
+  }
+}
+
 export async function confirmReadyImportBatch(
   batchId: string,
   options: { actor?: string; client?: ImportConfirmationClient } = {}
@@ -576,6 +606,8 @@ export async function confirmReadyImportBatch(
         await applyUpdateRow(tx, batchId, row, actor, confirmedAt);
       }
     }
+
+    await recalculateIsRepeated(tx);
 
     const counters = calculateRowCounters(rows);
     await tx.importBatch.update({
@@ -942,6 +974,7 @@ export async function rollbackConfirmedImportBatch(
       addRollbackCounter(counters, changeType);
     }
 
+    await recalculateIsRepeated(tx);
     await finalizeRollbackBatch(tx, { batchId, rolledBackAt, reason, actor, counters });
 
     return {

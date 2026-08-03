@@ -2,6 +2,7 @@ import JSZip from "jszip";
 import { describe, expect, it } from "vitest";
 import { ComplaintStatus } from "@prisma/client";
 import {
+  analyzeColumnMapping,
   matchComplaintColumns,
   normalizeColumnHeader,
 } from "./complaint-column-schema";
@@ -144,6 +145,7 @@ describe("operational workbook column synonyms", () => {
     expect(mapping["تصنيف"]).toBe("classification");
     expect(mapping["الحالة"]).toBe("status");
     expect(mapping["تفصيل"]).toBe("sourceDetail");
+    expect(mapping["آخر تحديث في"]).toBe("sourceUpdatedAt");
     expect(mapping["حالة الاجراء"]).toBe("sourceActionStatus");
     expect(mapping["المصدر"]).toBe("channel");
     expect(mapping["الإجراء المتخذ"]).toBe("resolution");
@@ -151,6 +153,19 @@ describe("operational workbook column synonyms", () => {
     expect(mapping["وصف الإجراء"]).toBeUndefined();
     expect(conflicts.some((item) => item.header === "وصف الإجراء")).toBe(true);
     expect(mapping).not.toHaveProperty("عدد الشكاوي");
+  });
+
+  it("marks عدد الشكاوي as INTENTIONALLY_IGNORED and excludes it from unmappedColumns", () => {
+    const headers = ["رقم الشكوى", "تاريخ التسجيل", "الوصف", "عدد الشكاوي", "عدد الشكاوى"];
+    const { mapping } = matchComplaintColumns(headers);
+    const analysis = analyzeColumnMapping(headers, mapping);
+
+    const ignoredEntries = analysis.entries.filter((e) => e.status === "INTENTIONALLY_IGNORED");
+    expect(ignoredEntries.map((e) => e.header)).toEqual(
+      expect.arrayContaining(["عدد الشكاوي", "عدد الشكاوى"])
+    );
+    expect(analysis.unmappedColumns).not.toContain("عدد الشكاوي");
+    expect(analysis.unmappedColumns).not.toContain("عدد الشكاوى");
   });
 
   it("equates hamza and tatweel variants", () => {
@@ -217,7 +232,9 @@ describe("subject derivation and description-only rows", () => {
 
     expect(derived.errors).toHaveLength(0);
     expect(derived.normalized.description).toBe("وصف صناعي لا يحتوي بيانات تشغيلية");
-    expect(derived.normalized.subject).toBe("وصف صناعي لا يحتوي بيانات تشغيلية");
+    // Subject is no longer derived from description at normalization time;
+    // it is set at confirmation via deriveSubject(description).
+    expect(derived.normalized.subject).toBeUndefined();
 
     const withSubjectMapping = {
       ...mapping,
@@ -236,7 +253,7 @@ describe("subject derivation and description-only rows", () => {
     expect(preserved.normalized.subject).toBe("موضوع موجود");
   });
 
-  it("rejects rows missing both subject and description during validation", () => {
+  it("leaves subject and description undefined when neither column is mapped", () => {
     const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل"]);
     const result = normalizeImportRow({
       rowNumber: 27,
@@ -255,10 +272,20 @@ describe("subject derivation and description-only rows", () => {
       new Date("2026-04-14T00:00:00Z")
     );
 
+    // No error for missing description/subject — description column is simply absent
     expect(validation.errors.some((item) => item.code === "MISSING_TEXT")).toBe(false);
-    expect(result.warnings).toEqual(
-      expect.arrayContaining([expect.objectContaining({ code: "DESCRIPTION_MISSING" })])
-    );
+    // No row-level warning when description column is not in mapping (batch-level instead)
+    expect(result.warnings.some((w) => w.code === "DESCRIPTION_VALUE_MISSING")).toBe(false);
+  });
+
+  it("produces a row warning when description column is mapped but cell is blank", () => {
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "الوصف"]);
+    const result = normalizeImportRow({
+      rowNumber: 5,
+      values: { "رقم الشكوى": "COMP/TEST-002", "تاريخ التسجيل": 46126, "الوصف": "" },
+    }, mapping);
+
+    expect(result.warnings.some((w) => w.code === "DESCRIPTION_VALUE_MISSING")).toBe(true);
   });
 });
 
@@ -453,6 +480,40 @@ describe("operational workbook parsing and normalization", () => {
     expect(result.normalized.sourceActionStatus).toBe("تم الإغلاق");
     expect(result.normalized.status).toBe(ComplaintStatus.NEW);
     expect(result.normalized).not.toHaveProperty("sourceStatus");
+  });
+
+  it("derives subject from sourceDetail when subject column is absent", () => {
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "تفصيل"]);
+    const result = normalizeImportRow({
+      rowNumber: 2,
+      values: { "رقم الشكوى": "COMP/SD-001", "تاريخ التسجيل": 46126, "تفصيل": "  طلب نقل  " },
+    }, mapping);
+
+    expect(result.normalized.subject).toBe("طلب نقل");
+    expect(result.normalized.sourceDetail).toBe("طلب نقل");
+    expect(result.derived.some((d) => d.code === "SUBJECT_DERIVED_FROM_SOURCE_DETAIL")).toBe(true);
+  });
+
+  it("maps آخر تحديث في to sourceUpdatedAt and derives closedAt for closed status", () => {
+    const { mapping } = matchComplaintColumns([
+      "رقم الشكوى", "تاريخ التسجيل", "الوصف", "الحالة", "آخر تحديث في",
+    ]);
+    expect(mapping["آخر تحديث في"]).toBe("sourceUpdatedAt");
+
+    const result = normalizeImportRow({
+      rowNumber: 2,
+      values: {
+        "رقم الشكوى": "COMP/CLOSED-002",
+        "تاريخ التسجيل": "2026-07-01",
+        "الوصف": "وصف مغلق",
+        "الحالة": "مغلقة",
+        "آخر تحديث في": "2026-08-01",
+      },
+    }, mapping);
+
+    expect(result.normalized.closedAt?.toISOString().startsWith("2026-08-01")).toBe(true);
+    expect(result.derived.some((d) => d.code === "CLOSED_AT_DERIVED_FROM_SOURCE_UPDATED_AT")).toBe(true);
+    expect(result.warnings.some((w) => w.code === "CLOSED_STATUS_WITHOUT_SOURCE_UPDATED_AT")).toBe(false);
   });
 
   it("warns for CLOSED without inventing closedAt", () => {

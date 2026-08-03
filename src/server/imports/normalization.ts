@@ -6,7 +6,10 @@ import {
   type ColumnMapping,
 } from "./complaint-column-schema";
 import { parseExcelSerialDate } from "./excel-date-parser";
-import { deriveSubject } from "./subject-derive";
+import {
+  applyOperationalImportSemantics,
+  buildMissingDescriptionRowWarning,
+} from "./operational-import-semantics";
 
 export { normalizeArabic };
 
@@ -25,6 +28,7 @@ export type NormalizedComplaintRow = {
   status?: ComplaintStatus;
   sourceStatus?: string;
   sourceDetail?: string;
+  sourceUpdatedAt?: Date;
   sourceActionStatus?: string;
   subject?: string;
   description?: string;
@@ -88,6 +92,7 @@ const DATE_FIELD_LABELS: Partial<Record<ComplaintImportField, string>> = {
   receivedAt: "تاريخ التسجيل",
   dueDate: "تاريخ الاستحقاق",
   closedAt: "تاريخ الإغلاق",
+  sourceUpdatedAt: "آخر تحديث في المصدر",
 };
 
 function normalizeArabicToken(value: string): string {
@@ -228,7 +233,7 @@ function normalizePriority(value: unknown): ComplaintPriority | undefined {
   return PRIORITY_LABELS.get(normalizeArabicToken(text));
 }
 
-const DATE_FIELDS = new Set<ComplaintImportField>(["complaintDate", "receivedAt", "dueDate", "closedAt"]);
+const DATE_FIELDS = new Set<ComplaintImportField>(["complaintDate", "receivedAt", "dueDate", "closedAt", "sourceUpdatedAt"]);
 const ENUM_FIELDS = new Set<ComplaintImportField>(["status", "priority"]);
 const TEXT_FIELDS = [
   "externalId",
@@ -256,6 +261,7 @@ function assignDateField(target: NormalizedComplaintRow, field: ComplaintImportF
   if (field === "receivedAt") target.receivedAt = date;
   if (field === "dueDate") target.dueDate = date;
   if (field === "closedAt") target.closedAt = date;
+  if (field === "sourceUpdatedAt") target.sourceUpdatedAt = date;
 }
 
 function assignTextField(target: NormalizedComplaintRow, field: TextImportField, value: string): void {
@@ -386,65 +392,16 @@ function applyResolutionFallback(
   }
 }
 
-function applyDerivedSubject(target: NormalizedComplaintRow): void {
-  if (target.subject?.trim()) return;
-  if (!target.description?.trim()) return;
-  target.subject = deriveSubject(target.description);
-}
-
-function applyDescriptionQualityFallbacks(
-  target: NormalizedComplaintRow,
-  warnings: RowMessage[]
-): void {
-  if (target.description?.trim()) return;
-
-  if (target.subject?.trim()) {
-    target.description = target.subject.trim();
-    warnings.push({
-      field: "description",
-      code: "DESCRIPTION_DERIVED_FROM_SUBJECT",
-      message: "الوصف الأصلي غير موجود، وتم استخدام الموضوع كوصف بديل.",
-      level: "derived",
-      originalValue: "",
-      usedValue: target.description,
-      source: "subject",
-    });
-    return;
-  }
-
-  if (target.classification?.trim()) {
-    target.description = `الوصف غير متوفر في المصدر — التصنيف: ${target.classification.trim()}`;
-    warnings.push({
-      field: "description",
-      code: "DESCRIPTION_DERIVED_FROM_CLASSIFICATION",
-      message: "الوصف الأصلي غير موجود، وتم اشتقاق وصف محايد من التصنيف.",
-      level: "derived",
-      originalValue: "",
-      usedValue: target.description,
-      source: "classification",
-    });
-    applyDerivedSubject(target);
-    return;
-  }
-
-  warnings.push({
-    field: "description",
-    code: "DESCRIPTION_MISSING",
-    message: "الوصف غير موجود في المصدر، وسيُستورد الصف دون وصف.",
-    level: "warning",
-    originalValue: "",
-    usedValue: "",
-    source: "none",
-  });
-}
 
 export function normalizeImportRow(
   rawRow: RawImportRow,
   mapping: ColumnMapping
-): { normalized: NormalizedComplaintRow; warnings: RowMessage[]; errors: RowMessage[] } {
+): { normalized: NormalizedComplaintRow; warnings: RowMessage[]; errors: RowMessage[]; derived: RowMessage[] } {
   const normalized: NormalizedComplaintRow = {};
   const warnings: RowMessage[] = [];
   const errors: RowMessage[] = [];
+
+  const hasDescriptionColumn = Object.values(mapping).includes("description");
 
   for (const [header, field] of Object.entries(mapping)) {
     const value = rawRow.values[header];
@@ -462,13 +419,22 @@ export function normalizeImportRow(
   }
 
   applyResolutionFallback(normalized, rawRow, errors);
-  applyDescriptionQualityFallbacks(normalized, warnings);
-  applyDerivedSubject(normalized);
+
+  if (hasDescriptionColumn && !normalized.description?.trim()) {
+    warnings.push(buildMissingDescriptionRowWarning());
+  }
 
   if (!normalized.status) normalized.status = ComplaintStatus.NEW;
   if (!normalized.priority) normalized.priority = ComplaintPriority.MEDIUM;
 
   warnings.push(...collectCrossFieldWarnings(normalized));
 
-  return { normalized, warnings, errors };
+  const semantics = applyOperationalImportSemantics(normalized);
+
+  return {
+    normalized: semantics.row,
+    warnings: [...warnings, ...semantics.warnings],
+    errors,
+    derived: semantics.derived,
+  };
 }

@@ -28,7 +28,7 @@ describe("soft description validation", () => {
     expect(result.warnings.some((item) => item.code?.startsWith("DESCRIPTION_"))).toBe(false);
   });
 
-  it("derives description from subject when description is missing", () => {
+  it("leaves description undefined when only subject column is mapped", () => {
     const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "الموضوع"]);
     const result = normalizeImportRow(
       {
@@ -41,16 +41,9 @@ describe("soft description validation", () => {
       },
       mapping
     );
-    expect(result.normalized.description).toBe("موضوع بديل");
-    expect(result.warnings).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          code: "DESCRIPTION_DERIVED_FROM_SUBJECT",
-          level: "derived",
-          source: "subject",
-        }),
-      ])
-    );
+    expect(result.normalized.description).toBeUndefined();
+    expect(result.normalized.subject).toBe("موضوع بديل");
+    expect(result.warnings.some((item) => item.code?.startsWith("DESCRIPTION_"))).toBe(false);
     const validation = validateNormalizedComplaintRow(result.normalized, {
       categories: [],
       classifications: [],
@@ -58,7 +51,7 @@ describe("soft description validation", () => {
     expect(validation.errors.some((item) => item.code === "MISSING_TEXT")).toBe(false);
   });
 
-  it("derives a neutral description from classification when no text exists", () => {
+  it("leaves description undefined when only classification column is mapped", () => {
     const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "تصنيف"]);
     const result = normalizeImportRow(
       {
@@ -71,15 +64,11 @@ describe("soft description validation", () => {
       },
       mapping
     );
-    expect(result.normalized.description).toContain("الرعاية الصحية");
-    expect(result.warnings).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ code: "DESCRIPTION_DERIVED_FROM_CLASSIFICATION", level: "derived" }),
-      ])
-    );
+    expect(result.normalized.description).toBeUndefined();
+    expect(result.warnings.some((item) => item.code?.startsWith("DESCRIPTION_"))).toBe(false);
   });
 
-  it("warns without rejecting when all text fields are missing", () => {
+  it("produces no row-level description warning when description column is absent from mapping", () => {
     const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل"]);
     const result = normalizeImportRow(
       {
@@ -92,9 +81,7 @@ describe("soft description validation", () => {
       mapping
     );
     expect(result.normalized.description).toBeUndefined();
-    expect(result.warnings).toEqual(
-      expect.arrayContaining([expect.objectContaining({ code: "DESCRIPTION_MISSING", level: "warning" })])
-    );
+    expect(result.warnings.some((item) => item.code?.startsWith("DESCRIPTION_"))).toBe(false);
     const validation = validateNormalizedComplaintRow(result.normalized, {
       categories: [],
       classifications: [],
