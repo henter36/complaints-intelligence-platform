@@ -10,6 +10,7 @@ import type { ExecutiveBriefData } from "./report-data-service";
 import type { ReportType } from "@prisma/client";
 import { renderExecutiveBriefPdf } from "./report-executive-brief-pdf-service";
 import * as chartService from "./report-chart-service";
+import { preparePdfText } from "./arabic-pdf-text";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -128,6 +129,8 @@ function makeReportData(mode: "DIGITAL_EXECUTIVE_BRIEF" | "PRINT_EXECUTIVE_BRIEF
     comparisonData: {
       currentPeriod: { from: new Date("2026-07-01T00:00:00Z"), toExclusive: new Date("2026-07-08T00:00:00Z") },
       previousPeriod: { from: new Date("2026-06-24T00:00:00Z"), toExclusive: new Date("2026-07-01T00:00:00Z") },
+      currentTotal: 100,
+      previousTotal: 80,
       regionTrend: {
         allDates: ["2026-07-01", "2026-07-02"],
         series: [],
@@ -189,10 +192,10 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
       await renderExecutiveBriefPdf(makeReportData("DIGITAL_EXECUTIVE_BRIEF"), "DIGITAL_EXECUTIVE_BRIEF");
       const footerTexts = textSpy.mock.calls
         .map((call) => String(call[0]))
-        .filter((text) => text.includes("صفحة") && text.includes("من 4"));
+        .filter((text) => text.includes("صفحة") && text.includes("من"));
       expect(footerTexts).toHaveLength(4);
-      expect(footerTexts[0]).toContain("صفحة 1 من 4");
-      expect(footerTexts[3]).toContain("صفحة 4 من 4");
+      expect(footerTexts[0]).toContain(preparePdfText("صفحة 1 من 4"));
+      expect(footerTexts[3]).toContain(preparePdfText("صفحة 4 من 4"));
     } finally {
       textSpy.mockRestore();
     }
@@ -203,10 +206,12 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
     try {
       await renderExecutiveBriefPdf(makeReportData("DIGITAL_EXECUTIVE_BRIEF"), "DIGITAL_EXECUTIVE_BRIEF");
       const texts = textSpy.mock.calls.map((call) => String(call[0]));
-      expect(texts.filter((text) => text.startsWith("الفترة من "))).toHaveLength(1);
-      expect(texts.filter((text) => text.startsWith("مقارنة مع الفترة"))).toHaveLength(1);
-      expect(texts.filter((text) => text.startsWith("تاريخ الإنشاء:"))).toHaveLength(0);
-      expect(texts.some((text) => text.startsWith("الفترة:"))).toBe(false);
+      // After preparePdfText, RTL token order is reversed: "الفترة من X إلى Y" → "Y إلى X من الفترة"
+      expect(texts.filter((text) => text.includes("الفترة") && text.includes("2026-07-01"))).toHaveLength(1);
+      // "مقارنة مع الفترة ..." contains both "مقارنة" and "مع"; section titles like "مقارنة المناطق" do not contain "مع"
+      expect(texts.filter((text) => text.includes("مقارنة") && text.includes("مع"))).toHaveLength(1);
+      expect(texts.filter((text) => text.includes("تاريخ") && text.includes("الإنشاء"))).toHaveLength(0);
+      expect(texts.some((text) => text === "الفترة:")).toBe(false);
     } finally {
       textSpy.mockRestore();
     }
@@ -219,9 +224,11 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
     const textSpy = vi.spyOn(PDFDocument.prototype, "text");
     try {
       await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
-      expect(textSpy.mock.calls.some((call) => String(call[0]).startsWith(
-        "مقارنة مع الفترة المماثلة من السنة السابقة"
-      ))).toBe(true);
+      // preparePdfText reverses RTL token order; "مقارنة" is still present as a token
+      expect(textSpy.mock.calls.some((call) => {
+        const t = String(call[0]);
+        return t.includes("مقارنة") && t.includes("السنة") && t.includes("السابقة");
+      })).toBe(true);
     } finally {
       textSpy.mockRestore();
     }
@@ -304,7 +311,8 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
     try {
       await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
       const texts = textSpy.mock.calls.map((call) => String(call[0]));
-      expect(texts.some((text) => text.includes("لا تتوفر فترة") && text.includes("للمقارنة"))).toBe(true);
+      // preparePdfText reverses RTL tokens; "تتوفر" and "للمقارنة" remain present as tokens
+      expect(texts.some((text) => text.includes("تتوفر") && text.includes("للمقارنة"))).toBe(true);
       expect(texts.some((text) => text.includes("جديد"))).toBe(false);
       expect(texts.some((text) => text.includes("persistent") || text.includes("resolved"))).toBe(false);
     } finally {
@@ -367,10 +375,11 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
       expect(result.warnings).toEqual([]);
 
       const renderedText = textSpy.mock.calls.map((call) => call[0]);
-      expect(renderedText.some((text) => String(text).startsWith("+5  (+10%)"))).toBe(true);
-      expect(renderedText.some((text) => String(text).startsWith("−5  (−10%)"))).toBe(true);
-      expect(renderedText.some((text) => String(text).startsWith("0  (0%)"))).toBe(true);
-      expect(renderedText.some((text) => String(text).startsWith("+5"))).toBe(true);
+      // preparePdfText reverses RTL tokens; delta numerics appear at the end of the prepared string
+      expect(renderedText.some((text) => String(text).includes("+5") && String(text).includes("(+10%)"))).toBe(true);
+      expect(renderedText.some((text) => String(text).includes("−5") && String(text).includes("(−10%)"))).toBe(true);
+      expect(renderedText.some((text) => String(text).includes("(0%)"))).toBe(true);
+      expect(renderedText.some((text) => String(text).includes("+5"))).toBe(true);
 
       const colorImmediatelyBefore = (text: string): string | undefined => {
         const textIndex = textSpy.mock.calls.findIndex((call) => call[0] === text);
@@ -455,7 +464,8 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
       expect(chartSpy).toHaveBeenCalledTimes(2);
       const charts = chartSpy.mock.calls.map((call) => call[0]);
       expect(charts.every((chart) => chart.series.length === 1)).toBe(true);
-      expect(textSpy.mock.calls.some((call) => String(call[0]).includes("لا تتوفر فترة"))).toBe(true);
+      // preparePdfText reverses RTL tokens; "تتوفر" and "للمقارنة" remain present as tokens
+      expect(textSpy.mock.calls.some((call) => String(call[0]).includes("تتوفر") && String(call[0]).includes("للمقارنة"))).toBe(true);
     } finally {
       chartSpy.mockRestore();
       textSpy.mockRestore();
@@ -532,7 +542,7 @@ describe("renderExecutiveBriefPdf — DIGITAL_EXECUTIVE_BRIEF", () => {
     try {
       await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
       const texts = textSpy.mock.calls.map((call) => String(call[0]));
-      expect(texts).toContain("تقرير اختبار المناطق");
+      expect(texts).toContain(preparePdfText("تقرير اختبار المناطق"));
     } finally {
       textSpy.mockRestore();
     }
@@ -712,9 +722,10 @@ describe("renderExecutiveBriefPdf — layout review findings", () => {
     const textSpy = vi.spyOn(PDFDocument.prototype, "text");
     try {
       await renderExecutiveBriefPdf(data, "DIGITAL_EXECUTIVE_BRIEF");
-      // Find calls that render page-2 notes (start with "•")
+      // preparePdfText reverses RTL token order, so "•" moves to the end of the string.
+      // Use includes("•") to find bullet calls regardless of token position.
       const bulletCalls = textSpy.mock.calls.filter((call) =>
-        String(call[0]).startsWith("•") &&
+        String(call[0]).includes("•") &&
         typeof call[3] === "object" &&
         call[3] !== null
       );

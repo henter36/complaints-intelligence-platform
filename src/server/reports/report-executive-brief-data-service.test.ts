@@ -190,6 +190,8 @@ function makeComparison(hasPrevious = true): ComparisonResult {
   return {
     currentPeriod: CURRENT_PERIOD,
     previousPeriod: hasPrevious ? PREVIOUS_PERIOD : null,
+    currentTotal: 100,
+    previousTotal: hasPrevious ? 80 : null,
     regionTrend: {
       allDates: ["2026-07-01", "2026-07-02", "2026-07-03", "2026-07-04", "2026-07-05", "2026-07-06", "2026-07-07"],
       series: [
@@ -1210,23 +1212,27 @@ describe("13-month window via buildExecutiveBriefData", () => {
 // ---------------------------------------------------------------------------
 
 describe("buildExecutiveBriefData — conclusions/notes with zero previous data", () => {
-  it("does not generate comparative rise/fall conclusions when all previous counts are zero", async () => {
+  it("does not generate comparative rise/fall conclusions when previousTotal is 0", async () => {
+    // previousTotal = 0 means the previous period was queried and returned zero
+    // complaints (e.g. import-date issue). hasMeaningfulPreviousData must return
+    // false → no comparative rise/fall conclusions.
     const comparison = makeComparison(true);
-    // All previous counts are zero — simulates import-date issue
+    comparison.previousTotal = 0;
     comparison.regionChanges = comparison.regionChanges.map((r) => ({
       ...r, previousCount: 0, difference: r.currentCount, changeRate: null,
     }));
     const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
     const conclusions = data.conclusions ?? [];
-    // No "أعلى زيادة" or "أعلى انخفاض" conclusions should appear
     for (const c of conclusions) {
       expect(c).not.toContain("أعلى زيادة");
       expect(c).not.toContain("أعلى انخفاض");
     }
   });
 
-  it("adds a data-quality note when previous period exists but all previous counts are zero", async () => {
+  it("adds a data-quality note when previousTotal is 0 (previous period had no complaints)", async () => {
+    // previousTotal = 0: a valid period was queried but returned zero results.
     const comparison = makeComparison(true);
+    comparison.previousTotal = 0;
     comparison.regionChanges = comparison.regionChanges.map((r) => ({
       ...r, previousCount: 0, difference: r.currentCount, changeRate: null,
     }));
@@ -1237,12 +1243,29 @@ describe("buildExecutiveBriefData — conclusions/notes with zero previous data"
     expect(hasZeroNote).toBe(true);
   });
 
-  it("does not add zero-data note when previous period actually has data", async () => {
+  it("does not add zero-data note when previousTotal > 0", async () => {
+    // makeComparison(true) has previousTotal: 80 — meaningful previous data.
     const comparison = makeComparison(true);
-    // Previous counts are meaningful
     const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
     const hasZeroNote = (data.notes ?? []).some((n) => n.includes("صفرية"));
     expect(hasZeroNote).toBe(false);
+  });
+
+  it("generates comparative conclusions when previousTotal > 0 even if regionChanges has zero previous counts", async () => {
+    // Root cause of the original bug: complaints existed in the previous period
+    // but had no region, so regionChanges.reduce sum was 0 even though
+    // previousTotal > 0. The fix uses previousTotal exclusively.
+    const comparison = makeComparison(true);
+    // previousTotal = 50: previous period had real data, but complaints had no region.
+    comparison.previousTotal = 50;
+    // regionChanges has no previous counts (all complaints had null region).
+    comparison.regionChanges = comparison.regionChanges.map((r) => ({
+      ...r, previousCount: 0, difference: r.currentCount, changeRate: null,
+    }));
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
+    const noZeroNote = !(data.notes ?? []).some((n) => n.includes("صفرية"));
+    // The zero-data note must NOT appear because hasMeaningfulPreviousData returns true.
+    expect(noZeroNote).toBe(true);
   });
 
   it("adds no-previous-period note when previousPeriod is null", async () => {

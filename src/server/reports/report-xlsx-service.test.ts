@@ -179,6 +179,8 @@ describe("XLSX report rendering", () => {
       comparisonData: {
         currentPeriod: { from: new Date("2026-07-08T00:00:00Z"), toExclusive: new Date("2026-07-15T00:00:00Z") },
         previousPeriod: { from: new Date("2026-07-01T00:00:00Z"), toExclusive: new Date("2026-07-08T00:00:00Z") },
+        currentTotal: 3,
+        previousTotal: 1,
         regionTrend: {
           allDates: ["2026-07-08"],
           series: [{ regionName: "منطقة الرياض", points: [{ date: "2026-07-08", count: 3 }] }],

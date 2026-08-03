@@ -3,6 +3,7 @@ import {
   formatNullableReportNumber,
   REPORT_DESIGN_TOKENS,
 } from "@/lib/reports/design-tokens";
+import { preparePdfText, preparePdfTextLayout } from "./arabic-pdf-text";
 
 export type ReportCoverMetric = {
   label: string;
@@ -118,8 +119,16 @@ export function drawComplaintsReportCover(options: ReportCoverOptions): void {
     wordSpacing: WORD_SPACING,
   };
   doc.font("Bold").fontSize(80).fillColor(COLORS.primary);
-  const titleHeight = doc.heightOfString(title, titleOptions);
-  doc.text(title, margin, titleY, titleOptions);
+  // preparePdfTextLayout wraps the logical text first, then reverses each
+  // wrapped line so that PDFKit does not re-wrap the already-reversed visual
+  // text. This is required for long titles that span two or more lines.
+  const titleLayout = preparePdfTextLayout(doc, title, titleOptions);
+  let ty = titleY;
+  for (const line of titleLayout.lines) {
+    doc.text(line.visualText, margin, ty, { ...titleOptions, lineBreak: false });
+    ty += titleLayout.lineHeight;
+  }
+  const titleHeight = titleLayout.height;
 
   // ── Gold separator with diamond ───────────────────────────────────────────
   const sepY = titleY + titleHeight + 18;
@@ -127,14 +136,14 @@ export function drawComplaintsReportCover(options: ReportCoverOptions): void {
 
   // ── Period text ───────────────────────────────────────────────────────────
   const periodY = sepY + 22;
-  doc.font("Bold").fontSize(17).fillColor(COLORS.text).text(periodText, margin, periodY, {
+  doc.font("Bold").fontSize(17).fillColor(COLORS.text).text(preparePdfText(periodText), margin, periodY, {
     width: CW,
     align: "center",
     wordSpacing: WORD_SPACING,
   });
 
   // ── Comparison text ───────────────────────────────────────────────────────
-  doc.font("Body").fontSize(13).fillColor(COLORS.neutral).text(comparisonText, margin, periodY + 36, {
+  doc.font("Body").fontSize(13).fillColor(COLORS.neutral).text(preparePdfText(comparisonText), margin, periodY + 36, {
     width: CW,
     align: "center",
     wordSpacing: WORD_SPACING,
@@ -164,7 +173,7 @@ export function drawComplaintsReportCover(options: ReportCoverOptions): void {
 
     // Label
     doc.font("Body").fontSize(12).fillColor(COLORS.neutral).text(
-      metric.label,
+      preparePdfText(metric.label),
       x + 6,
       circleY + circR + 10,
       { width: cardW - 12, align: "center", wordSpacing: WORD_SPACING }
@@ -172,7 +181,7 @@ export function drawComplaintsReportCover(options: ReportCoverOptions): void {
 
     // Value
     doc.font("Bold").fontSize(32).fillColor(COLORS.primary).text(
-      formatNullableReportNumber(metric.value),
+      preparePdfText(formatNullableReportNumber(metric.value)),
       x + 6,
       circleY + circR + 32,
       { width: cardW - 12, align: "center", wordSpacing: WORD_SPACING }

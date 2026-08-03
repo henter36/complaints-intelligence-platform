@@ -65,6 +65,8 @@ function comparisonResultWithReference(hasReference: boolean) {
           toExclusive: new Date("2026-07-01T00:00:00Z"),
         }
       : null,
+    currentTotal: 10,
+    previousTotal: hasReference ? 8 : null,
     regionTrend: { allDates: [], series: [], truncated: false, otherSeriesName: null },
     regionChanges: [],
     deptClassRises: [],

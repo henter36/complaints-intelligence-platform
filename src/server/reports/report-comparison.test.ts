@@ -472,6 +472,112 @@ describe("RegionTrendData", () => {
   });
 });
 
+describe("buildComparisonResult — currentTotal and previousTotal", () => {
+  beforeEach(() => dbMocks.findMany.mockReset());
+
+  it("currentTotal equals the number of complaints returned for the current period", async () => {
+    const { buildComparisonResult } = await loadModule();
+    mockPeriods(
+      [row({ region: R_RIYADH }), row({ region: R_MAKKAH }), row({ region: R_MADINAH })],
+      [row({ region: R_RIYADH })]
+    );
+    const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
+    expect(result.currentTotal).toBe(3);
+  });
+
+  it("previousTotal equals the number of complaints returned for the previous period", async () => {
+    const { buildComparisonResult } = await loadModule();
+    mockPeriods(
+      [row({ region: R_RIYADH })],
+      [row({ region: R_RIYADH }), row({ region: R_MAKKAH })]
+    );
+    const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
+    expect(result.previousTotal).toBe(2);
+  });
+
+  it("previousTotal is null when no previous period is queried", async () => {
+    const { buildComparisonResult } = await loadModule();
+    // Invalid date range → no previous period
+    dbMocks.findMany.mockReset();
+    dbMocks.findMany.mockResolvedValueOnce([row()]);
+    const result = await buildComparisonResult(
+      { from: "2026-07-15", to: "2026-07-14" }, // invalid: from > to
+      new Date("2026-07-31T00:00:00Z")
+    );
+    expect(result.previousTotal).toBeNull();
+  });
+
+  it("previousTotal is 0 when previous period is valid but returned no complaints", async () => {
+    // previousTotal = 0 ≠ null: a real query ran but returned nothing.
+    const { buildComparisonResult } = await loadModule();
+    mockPeriods([row({ region: R_RIYADH })], []); // empty previous result
+    const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
+    expect(result.previousTotal).toBe(0);
+    expect(result.previousTotal).not.toBeNull();
+  });
+
+  it("currentTotal counts complaints that have no region (null region)", async () => {
+    // Complaints with no region must still be counted in currentTotal
+    // even though they are excluded from regionChanges.
+    const { buildComparisonResult } = await loadModule();
+    mockPeriods(
+      [
+        row({ region: null }),    // no region — excluded from regionChanges
+        row({ region: R_RIYADH }),
+      ],
+      [row({ region: R_RIYADH })]
+    );
+    const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
+    expect(result.currentTotal).toBe(2); // both complaints counted regardless of region
+  });
+
+  it("previousTotal counts complaints that have no region (null region)", async () => {
+    // previousTotal comes directly from previous.length, so it always
+    // reflects the raw DB query count — even for complaints with null region.
+    // (normalizeRegionName(null) maps to "غير محدد" which also appears in
+    // regionChanges, but previousTotal is correct regardless.)
+    const { buildComparisonResult } = await loadModule();
+    mockPeriods(
+      [row({ region: R_RIYADH })],
+      [
+        row({ region: null }),    // no region → normalised to "غير محدد"
+        row({ region: null }),    // no region → normalised to "غير محدد"
+        row({ region: R_RIYADH }),
+      ]
+    );
+    const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
+    // Raw count includes all 3 complaints.
+    expect(result.previousTotal).toBe(3);
+    // regionChanges groups by normalised name, so "غير محدد" carries 2.
+    const regionChangesSum = result.regionChanges.reduce((s, r) => s + r.previousCount, 0);
+    // Both derivations agree because null maps to a name; previousTotal is
+    // the authoritative source and must equal the raw count.
+    expect(regionChangesSum).toBe(result.previousTotal!);
+  });
+
+  it("distinguishes an empty previous period from an unavailable comparison period", async () => {
+    const { buildComparisonResult } = await loadModule();
+
+    // Case 1: valid filters → a previous period is derived and queried.
+    // The mock returns zero complaints for that period (previousTotal = 0).
+    mockPeriods([row()], []); // current: 1 row, previous: 0 rows
+    const withPrevious = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
+    expect(withPrevious.previousPeriod).not.toBeNull(); // a real period was derived
+    expect(withPrevious.previousTotal).toBe(0);         // queried but found nothing
+
+    // Case 2: invalid date range (from > to) → derivePreviousPeriodRange returns
+    // null because the duration is ≤ 0, so no previous query is issued.
+    dbMocks.findMany.mockReset();
+    dbMocks.findMany.mockResolvedValueOnce([row()]);
+    const withoutPrevious = await buildComparisonResult(
+      { from: "2026-07-15", to: "2026-07-14" }, // invalid: from > to → no period
+      new Date("2026-07-31T00:00:00Z")
+    );
+    expect(withoutPrevious.previousPeriod).toBeNull(); // no comparison period
+    expect(withoutPrevious.previousTotal).toBeNull();  // not 0 — period never queried
+  });
+});
+
 describe("executiveSummaryPoints", () => {
   beforeEach(() => dbMocks.findMany.mockReset());
 

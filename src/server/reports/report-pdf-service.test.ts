@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ReportData, ReportSection } from "./report-data-service";
 import { renderReportPdf } from "./report-pdf-service";
 import * as chartService from "./report-chart-service";
+import { preparePdfText } from "./arabic-pdf-text";
 
 /** PDFKit stores Info strings (Title/Keywords) as UTF-16BE literals, so a
  * title is discoverable in the raw buffer via its UTF-16BE byte sequence.
@@ -208,7 +209,7 @@ describe("PDF report rendering", () => {
       }));
 
       expect(textSpy.mock.calls.map((call) => call[0]))
-        .toContain("تم اختصار عرض بيانات المصفوفة.");
+        .toContain(preparePdfText("تم اختصار عرض بيانات المصفوفة."));
     } finally {
       textSpy.mockRestore();
     }
@@ -321,8 +322,9 @@ describe("PDF report — comparative executive sections", () => {
         kpis: {} as ReportData["kpis"],
       }));
       const drawnText = textSpy.mock.calls.map((call) => String(call[0]));
-      expect(drawnText).toContain("تقرير أداء الإدارات");
-      expect(drawnText.filter((text) => text === "غير متاح")).toHaveLength(3);
+      // preparePdfText reverses RTL token order for Arabic strings
+      expect(drawnText).toContain(preparePdfText("تقرير أداء الإدارات"));
+      expect(drawnText.filter((text) => text === preparePdfText("غير متاح"))).toHaveLength(3);
     } finally {
       textSpy.mockRestore();
     }

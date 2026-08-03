@@ -9,6 +9,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { drawComplaintsReportCover } from "./report-cover";
 import { REPORT_DESIGN_TOKENS } from "@/lib/reports/design-tokens";
+import { preparePdfText } from "./arabic-pdf-text";
 
 type PdfDocumentInstance = InstanceType<typeof PDFDocument>;
 
@@ -95,15 +96,14 @@ describe("drawComplaintsReportCover — separator position", () => {
     const moveSpy = vi.spyOn(doc, "moveTo");
     drawCover(doc, "تقرير الشكاوى");
 
-    // Cast to unknown[][] because PDFKit text() has multiple overloads; the (text, x, y, opts)
-    // form is not the primary overload TypeScript infers for the spy, so call[2] would be
-    // flagged as out-of-bounds on the inferred 2-element tuple type without the cast.
+    // Cast to unknown[][] because PDFKit text() has multiple overloads.
     const allTextCalls = textSpy.mock.calls as unknown[][];
-    const titleCall = allTextCalls.find((c) => String(c[0]) === "تقرير الشكاوى");
+    // Short title: preparePdfTextLayout produces one line with visualText =
+    // preparePdfText("تقرير الشكاوى") = "الشكاوى تقرير".
+    const titleCall = allTextCalls.find((c) => String(c[0]) === preparePdfText("تقرير الشكاوى"));
     expect(titleCall).toBeDefined();
-    const titleY = titleCall![2] as number; // third argument is y
+    const titleY = titleCall![2] as number;
 
-    // First moveTo after the title text call is the separator line start
     const titleCallOrder = textSpy.mock.invocationCallOrder[
       allTextCalls.indexOf(titleCall!)
     ];
@@ -111,11 +111,10 @@ describe("drawComplaintsReportCover — separator position", () => {
       return moveSpy.mock.invocationCallOrder[i] > titleCallOrder;
     });
 
-    // The first moveTo after the title is the separator's left arm
     expect(moveCallsAfterTitle.length).toBeGreaterThan(0);
     const sepY = moveCallsAfterTitle[0][1] as number;
 
-    // Separator must be strictly below titleY (title font is 80pt, so at least 80px gap)
+    // Separator must be strictly below titleY (at least one line height gap)
     expect(sepY).toBeGreaterThan(titleY + 18);
 
     textSpy.mockRestore();
@@ -130,23 +129,30 @@ describe("drawComplaintsReportCover — separator position", () => {
     const longTitle = "تقرير الشكاوى الموحد للمنطقة الإدارية";
     drawCover(doc, longTitle);
 
-    // Same unknown[][] cast as the short-title test — PDFKit text() overload resolution issue.
     const allTextCallsLong = textSpy.mock.calls as unknown[][];
-    const titleCall = allTextCallsLong.find((c) => String(c[0]) === longTitle);
-    expect(titleCall).toBeDefined();
-    const titleY = titleCall![2] as number;
+    // preparePdfTextLayout draws each wrapped line with lineBreak: false.
+    // The first logical word "تقرير" is the LAST visual token of the first line
+    // (RTL token reversal), so we locate the first title line by its last token.
+    const firstTitleLineCall = allTextCallsLong.find((c) => {
+      const tokens = String(c[0]).trim().split(" ");
+      return tokens[tokens.length - 1] === "تقرير";
+    });
+    expect(firstTitleLineCall).toBeDefined();
+    const titleY = firstTitleLineCall![2] as number;
 
-    const titleCallOrder = textSpy.mock.invocationCallOrder[
-      allTextCallsLong.indexOf(titleCall!)
+    // No moveTo calls occur between title line draws.  The first moveTo after
+    // the first title line call is the gold separator.
+    const firstTitleCallOrder = textSpy.mock.invocationCallOrder[
+      allTextCallsLong.indexOf(firstTitleLineCall!)
     ];
     const moveCallsAfterTitle = moveSpy.mock.calls.filter((_, i) => {
-      return moveSpy.mock.invocationCallOrder[i] > titleCallOrder;
+      return moveSpy.mock.invocationCallOrder[i] > firstTitleCallOrder;
     });
 
     expect(moveCallsAfterTitle.length).toBeGreaterThan(0);
     const sepY = moveCallsAfterTitle[0][1] as number;
 
-    // Separator must be at least 18px below titleY (the fixed gap after dynamic height)
+    // Separator must be at least 18px below titleY (gap constant + one+ line heights)
     expect(sepY).toBeGreaterThan(titleY + 18);
 
     textSpy.mockRestore();
@@ -160,10 +166,10 @@ describe("drawComplaintsReportCover — separator position", () => {
 
     drawCover(doc, "تقرير الشكاوى");
 
-    // Same unknown[][] cast — PDFKit text() overload resolution issue.
     const allTextCallsPeriod = textSpy.mock.calls as unknown[][];
-    const titleCall = allTextCallsPeriod.find((c) => String(c[0]) === "تقرير الشكاوى");
-    const periodCall = allTextCallsPeriod.find((c) => String(c[0]).startsWith("الفترة من"));
+    // Short title: one visual line, same string as preparePdfText.
+    const titleCall = allTextCallsPeriod.find((c) => String(c[0]) === preparePdfText("تقرير الشكاوى"));
+    const periodCall = allTextCallsPeriod.find((c) => String(c[0]).includes("الفترة") && String(c[0]).includes("2025-08-01"));
     expect(titleCall).toBeDefined();
     expect(periodCall).toBeDefined();
 
@@ -171,7 +177,6 @@ describe("drawComplaintsReportCover — separator position", () => {
     const periodCallOrder = textSpy.mock.invocationCallOrder[allTextCallsPeriod.indexOf(periodCall!)];
     const periodY = periodCall![2] as number;
 
-    // Find moveTo calls between title text and period text — these belong to the separator
     const sepMoveCalls = moveSpy.mock.calls.filter((_, i) => {
       const order = moveSpy.mock.invocationCallOrder[i];
       return order > titleCallOrder && order < periodCallOrder;
@@ -185,29 +190,30 @@ describe("drawComplaintsReportCover — separator position", () => {
     moveSpy.mockRestore();
   });
 
-  it("title height is measured with the same options used for drawing", () => {
-    // This verifies that the dynamic separator calculation uses consistent options.
-    // We check that a doc.heightOfString call occurs before the first moveTo after the title.
+  it("title is drawn with layout options consistent for drawing and height computation", () => {
+    // preparePdfTextLayout draws each line with lineBreak: false using the
+    // same width, align, and wordSpacing that were used for layout computation.
+    // This test verifies that those options propagate correctly to doc.text().
     const doc = makeDoc();
-    const heightSpy = vi.spyOn(doc, "heightOfString");
     const textSpy = vi.spyOn(doc, "text");
 
     drawCover(doc, "تقرير الشكاوى");
 
-    const titleCall = textSpy.mock.calls.find((c) => String(c[0]) === "تقرير الشكاوى");
+    const allTextCalls = textSpy.mock.calls as unknown[][];
+    // Short title → single visual line with text = preparePdfText("تقرير الشكاوى").
+    const titleCall = allTextCalls.find((c) => String(c[0]) === preparePdfText("تقرير الشكاوى"));
     expect(titleCall).toBeDefined();
 
-    // heightOfString must have been called for the title text
-    const heightCallsForTitle = heightSpy.mock.calls.filter(
-      (c) => String(c[0]) === "تقرير الشكاوى"
-    );
-    expect(heightCallsForTitle.length).toBeGreaterThanOrEqual(1);
+    // The options object passed to doc.text() must include all layout-affecting
+    // fields so that the visual output matches the layout computation.
+    const titleOpts = titleCall![3] as Record<string, unknown>;
+    expect(titleOpts).toMatchObject({
+      width: expect.any(Number),
+      align: "center",
+      wordSpacing: expect.any(Number),
+      lineBreak: false,
+    });
 
-    // The options passed to heightOfString must include width and wordSpacing
-    const heightOpts = heightCallsForTitle[0][1] as Record<string, unknown>;
-    expect(heightOpts).toMatchObject({ width: expect.any(Number) });
-
-    heightSpy.mockRestore();
     textSpy.mockRestore();
   });
 });

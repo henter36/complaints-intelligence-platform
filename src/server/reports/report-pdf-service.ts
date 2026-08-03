@@ -22,6 +22,7 @@ import {
 } from "@/lib/reports/design-tokens";
 import { getComparisonModeDescription } from "@/lib/reports/comparison-mode-labels";
 import { drawComplaintsReportCover } from "./report-cover";
+import { preparePdfText } from "./arabic-pdf-text";
 
 const ASSETS_DIR = path.join(process.cwd(), "src/server/reports/assets");
 const FONT_REGULAR_PATH = path.join(ASSETS_DIR, "fonts/Amiri-Regular.ttf");
@@ -201,7 +202,7 @@ async function renderSection(
   if (section.table.truncated) {
     doc.moveDown(0.2);
     doc.font("Body").fontSize(8).fillColor(COLORS.danger);
-    doc.text(`تم عرض ${section.table.rows.length} من أصل ${section.table.totalMatched} صفاً.`, { align: "right" });
+    doc.text(preparePdfText(`تم عرض ${section.table.rows.length} من أصل ${section.table.totalMatched} صفاً.`), { align: "right" });
     doc.fillColor(COLORS.primary);
   }
 }
@@ -319,14 +320,14 @@ function renderCoverPage(doc: PDFKit.PDFDocument, data: ReportData): void {
 function renderWarnings(doc: PDFKit.PDFDocument, warnings: string[]): void {
   ensureSpace(doc, 20 + warnings.length * 14);
   doc.font("Bold").fontSize(10.5).fillColor(COLORS.danger);
-  doc.text("تنبيهات:", {
+  doc.text(preparePdfText("تنبيهات:"), {
     width: CONTENT_WIDTH,
     align: "right",
     wordSpacing: ARABIC_WORD_SPACING,
   });
   doc.font("Body").fontSize(10.5);
   for (const warning of warnings) {
-    doc.text(`• ${warning}`, {
+    doc.text(preparePdfText(`• ${warning}`), {
       width: CONTENT_WIDTH,
       align: "right",
       wordSpacing: ARABIC_WORD_SPACING,
@@ -339,7 +340,7 @@ function renderWarnings(doc: PDFKit.PDFDocument, warnings: string[]): void {
 function drawSectionTitle(doc: PDFKit.PDFDocument, title: string): void {
   ensureSpace(doc, 24);
   doc.font("Bold").fontSize(REPORT_DESIGN_TOKENS.fontSize.sectionTitle).fillColor(COLORS.primary);
-  doc.text(title, {
+  doc.text(preparePdfText(title), {
     width: CONTENT_WIDTH,
     align: "right",
     wordSpacing: ARABIC_WORD_SPACING,
@@ -354,7 +355,7 @@ function drawTextSection(doc: PDFKit.PDFDocument, section: ReportTextSection): v
   for (const point of section.points) {
     if (!point?.trim()) continue;
     ensureSpace(doc, 18);
-    doc.text(`•  ${point}`, PAGE_MARGIN + 8, doc.y, {
+    doc.text(preparePdfText(`•  ${point}`), PAGE_MARGIN + 8, doc.y, {
       width: CONTENT_WIDTH - 8,
       align: "right",
       wordSpacing: ARABIC_WORD_SPACING,
@@ -371,7 +372,7 @@ function drawMatrixSection(
   drawSectionTitle(doc, section.title);
   if (section.description) {
     doc.font("Body").fontSize(9).fillColor(COLORS.neutral);
-    doc.text(section.description, { width: CONTENT_WIDTH, align: "right" });
+    doc.text(preparePdfText(section.description), { width: CONTENT_WIDTH, align: "right" });
     doc.fillColor(COLORS.primary);
     doc.moveDown(0.2);
   }
@@ -379,7 +380,7 @@ function drawMatrixSection(
   const { rowHeaders, columnHeaders, cells } = section;
   if (rowHeaders.length === 0 || columnHeaders.length === 0) {
     doc.font("Body").fontSize(9).fillColor(COLORS.neutral);
-    doc.text("لا توجد بيانات لعرضها.", { width: CONTENT_WIDTH, align: "right" });
+    doc.text(preparePdfText("لا توجد بيانات لعرضها."), { width: CONTENT_WIDTH, align: "right" });
     doc.fillColor(COLORS.primary);
     return;
   }
@@ -401,7 +402,7 @@ function drawMatrixSection(
     const top = doc.y;
     doc.font("Bold").fontSize(fontSize).fillColor(COLORS.primary);
     // Row/column label in the top-right corner cell
-    doc.text(`${section.rowLabel} / ${section.columnLabel}`, rowLabelX + 2, top + 4, {
+    doc.text(preparePdfText(`${section.rowLabel} / ${section.columnLabel}`), rowLabelX + 2, top + 4, {
       width: headerColWidth - 4,
       height: headerHeight - 4,
       align: "right",
@@ -411,7 +412,7 @@ function drawMatrixSection(
     // Column headers extend leftward from rowLabelX
     columnHeaders.forEach((colHeader, ci) => {
       const x = rowLabelX - (ci + 1) * cellWidth;
-      doc.text(colHeader, x + 2, top + 4, {
+      doc.text(preparePdfText(colHeader), x + 2, top + 4, {
         width: cellWidth - 4,
         height: headerHeight - 4,
         align: "center",
@@ -442,7 +443,7 @@ function drawMatrixSection(
     }
     // Row label at the right
     doc.font("Bold").fontSize(fontSize).fillColor(COLORS.primary);
-    doc.text(rowHeader, rowLabelX + 2, rowTop + 3, {
+    doc.text(preparePdfText(rowHeader), rowLabelX + 2, rowTop + 3, {
       width: headerColWidth - 4,
       height: rowHeight - 3,
       align: "right",
@@ -468,7 +469,7 @@ function drawMatrixSection(
   if (truncMsg) {
     doc.moveDown(0.2);
     doc.font("Body").fontSize(8).fillColor(COLORS.danger);
-    doc.text(truncMsg, { width: CONTENT_WIDTH, align: "right" });
+    doc.text(preparePdfText(truncMsg), { width: CONTENT_WIDTH, align: "right" });
     doc.fillColor(COLORS.primary);
   }
 }
@@ -481,7 +482,7 @@ async function drawChartSection(
   drawSectionTitle(doc, section.title);
   if (section.description) {
     doc.font("Body").fontSize(9).fillColor(COLORS.neutral);
-    doc.text(section.description, { width: CONTENT_WIDTH, align: "right" });
+    doc.text(preparePdfText(section.description), { width: CONTENT_WIDTH, align: "right" });
     doc.fillColor(COLORS.primary);
     doc.moveDown(0.2);
   }
@@ -504,7 +505,7 @@ async function drawChartSection(
     const top = doc.y;
     doc.rect(PAGE_MARGIN, top, CONTENT_WIDTH, boxHeight).fillAndStroke(COLORS.background, COLORS.danger);
     doc.font("Body").fontSize(11).fillColor(COLORS.danger);
-    doc.text("تعذر عرض الرسم البياني", PAGE_MARGIN + 8, top + 22, { width: CONTENT_WIDTH - 16, align: "center" });
+    doc.text(preparePdfText("تعذر عرض الرسم البياني"), PAGE_MARGIN + 8, top + 22, { width: CONTENT_WIDTH - 16, align: "center" });
     doc.fillColor(COLORS.primary);
     doc.y = top + boxHeight;
     warnings.push(`تعذر عرض الرسم البياني "${section.title}": ${reason}`);
@@ -513,7 +514,7 @@ async function drawChartSection(
   if (section.truncated && section.truncatedMessage) {
     doc.moveDown(0.2);
     doc.font("Body").fontSize(8).fillColor(COLORS.danger);
-    doc.text(section.truncatedMessage, { width: CONTENT_WIDTH, align: "right" });
+    doc.text(preparePdfText(section.truncatedMessage), { width: CONTENT_WIDTH, align: "right" });
     doc.fillColor(COLORS.primary);
   }
 }
@@ -533,7 +534,7 @@ function drawKpiGrid(doc: PDFKit.PDFDocument, cards: ReportKpiCard[], columns = 
       const x = PAGE_MARGIN + slot * (cardWidth + gap);
       doc.roundedRect(x, rowTop, cardWidth, cardHeight, REPORT_DESIGN_TOKENS.card.radius).fillAndStroke(COLORS.background, COLORS.border);
       doc.font("Body").fontSize(8).fillColor(COLORS.neutral);
-      doc.text(card.label, x + 6, rowTop + 6, {
+      doc.text(preparePdfText(card.label), x + 6, rowTop + 6, {
         width: cardWidth - 12,
         height: 14,
         align: "right",
@@ -542,7 +543,7 @@ function drawKpiGrid(doc: PDFKit.PDFDocument, cards: ReportKpiCard[], columns = 
         wordSpacing: ARABIC_WORD_SPACING,
       });
       doc.font("Bold").fontSize(14).fillColor(COLORS.primary);
-      doc.text(formatKpiValue(card), x + 6, rowTop + 20, {
+      doc.text(preparePdfText(formatKpiValue(card)), x + 6, rowTop + 20, {
         width: cardWidth - 12,
         height: 18,
         align: "right",
@@ -609,7 +610,7 @@ function estimateLines(doc: PDFKit.PDFDocument, text: string, width: number, fon
 function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
   if (table.columns.length === 0 || table.rows.length === 0) {
     doc.font("Body").fontSize(9).fillColor(COLORS.neutral);
-    doc.text("لا توجد بيانات لعرضها.", { width: CONTENT_WIDTH, align: "right" });
+    doc.text(preparePdfText("لا توجد بيانات لعرضها."), { width: CONTENT_WIDTH, align: "right" });
     doc.fillColor(COLORS.primary);
     return;
   }
@@ -635,7 +636,7 @@ function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
     const top = doc.y;
     doc.font("Bold").fontSize(bodyFontSize).fillColor(COLORS.primary);
     columns.forEach((column, index) => {
-      doc.text(column.label, xOffsets[index] + 2, top + 5, {
+      doc.text(preparePdfText(column.label), xOffsets[index] + 2, top + 5, {
         width: widths[index] - 4,
         height: headerHeight - 8,
         align: "right",
@@ -674,7 +675,7 @@ function drawTable(doc: PDFKit.PDFDocument, table: ReportTable): void {
       doc.fillColor(COLORS.primary);
     }
     columns.forEach((column, index) => {
-      doc.text(cellTexts[index], xOffsets[index] + 2, top + cellPadding, {
+      doc.text(preparePdfText(cellTexts[index]), xOffsets[index] + 2, top + cellPadding, {
         width: widths[index] - 4,
         height: rowHeight - cellPadding,
         align: "right",
@@ -696,7 +697,7 @@ function drawFooters(doc: PDFKit.PDFDocument): void {
     const originalBottomMargin = doc.page.margins.bottom;
     doc.page.margins.bottom = 0;
     doc.font("Body").fontSize(9).fillColor(COLORS.neutral);
-    doc.text(`صفحة ${pageNumber} من ${range.count}`, PAGE_MARGIN, y, {
+    doc.text(preparePdfText(`صفحة ${pageNumber} من ${range.count}`), PAGE_MARGIN, y, {
       width: CONTENT_WIDTH,
       align: "center",
       lineBreak: false,

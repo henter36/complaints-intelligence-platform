@@ -92,6 +92,14 @@ export type DeptClassPeriodCount = {
 export type ComparisonResult = {
   currentPeriod: PeriodRange;
   previousPeriod: PeriodRange | null;
+  /** Total complaints in the current period from raw DB query count. */
+  currentTotal: number;
+  /**
+   * Total complaints in the previous period from raw DB query count.
+   * null = no previous period was queried.
+   * 0   = a valid previous period was queried and returned zero complaints.
+   */
+  previousTotal: number | null;
   regionTrend: RegionTrendData;
   regionChanges: RegionChangeRow[];
   deptClassRises: DeptClassRiseRow[];
@@ -573,6 +581,8 @@ export async function buildComparisonResult(
   return {
     currentPeriod,
     previousPeriod,
+    currentTotal: current.length,
+    previousTotal: previousPeriod ? previous.length : null,
     regionTrend: trend.data,
     regionChanges,
     deptClassRises: rises.rows,
