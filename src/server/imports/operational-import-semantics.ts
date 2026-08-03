@@ -19,7 +19,7 @@ export const DESCRIPTION_VALUE_MISSING_ROW_MESSAGE =
   "قيمة وصف الشكوى فارغة في هذا الصف، وسيُستورد السجل دون وصف.";
 
 function cloneDate(value: Date | undefined): Date | undefined {
-  return value ? new Date(value.getTime()) : undefined;
+  return value ? new Date(value) : undefined;
 }
 
 function copyOperationalRow(input: OperationalImportRow): OperationalImportRow {
