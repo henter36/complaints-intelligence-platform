@@ -37,10 +37,12 @@ import {
   type RawImportRow,
   type RowMessage,
 } from "./normalization";
+import { DESCRIPTION_COLUMN_MISSING_BATCH_MESSAGE } from "./operational-import-semantics";
 import { maskIdentifier } from "./privacy";
 import { validateNormalizedComplaintRow } from "./row-validation";
 import { parseXlsxWorkbook } from "./xlsx-parser";
 import { resolveImportRowReference } from "./error-report";
+import { resolveSourceDetailClassification } from "@/server/classifications/source-detail-classification-resolver";
 
 const WRITE_CHUNK_SIZE = 500;
 export const DUPLICATE_BLOCKING_IMPORT_STATUSES = [
@@ -104,6 +106,11 @@ export type ImportUploadResult = {
   columnCount: number;
   errors: Array<{ row: number; errors: RowMessage[]; warnings: RowMessage[] }>;
   preview: Array<Record<string, unknown>>;
+  previewTotal: number;
+  qualityIssueRowsTotal: number;
+  previewTruncated: boolean;
+  qualityIssuesTruncated: boolean;
+  batchWarnings: RowMessage[];
   canApprove: boolean;
   failureCode?: string | null;
   failureNotes?: string | null;
@@ -230,7 +237,8 @@ function resolveValidationStatus(
   warnings: RowMessage[]
 ): ImportRowValidationStatus {
   if (errors.length > 0) return ImportRowValidationStatus.INVALID;
-  if (warnings.length > 0) return ImportRowValidationStatus.WARNING;
+  const realWarnings = warnings.filter((w) => w.level !== "derived");
+  if (realWarnings.length > 0) return ImportRowValidationStatus.WARNING;
   return ImportRowValidationStatus.VALID;
 }
 
@@ -488,6 +496,7 @@ type ProcessedWorkbook = {
   columnCount: number;
   processedRows: ProcessedImportRow[];
   counters: ReturnType<typeof calculateRowCounters>;
+  batchWarnings: RowMessage[];
 };
 
 export function resolveEffectiveColumnMapping(input: {
@@ -539,6 +548,19 @@ export function resolveEffectiveColumnMapping(input: {
   return { columnMapping, mappingAnalysis, manuallyMapped };
 }
 
+function buildImportBatchWarnings(columnMapping: ColumnMapping): RowMessage[] {
+  const warnings: RowMessage[] = [];
+  if (!Object.values(columnMapping).includes("description")) {
+    warnings.push({
+      field: "description",
+      code: "DESCRIPTION_COLUMN_MISSING",
+      message: DESCRIPTION_COLUMN_MISSING_BATCH_MESSAGE,
+      level: "warning",
+    });
+  }
+  return warnings;
+}
+
 async function processWorkbookPreview(
   buffer: Buffer,
   callerMapping?: unknown,
@@ -551,36 +573,66 @@ async function processWorkbookPreview(
     storedMapping,
   });
 
-  const taxonomy = {
-    categories: await db.category.findMany({ where: { isActive: true, isDeleted: false } }),
-    classifications: await db.classification.findMany({
+  const [categoryList, classificationList] = await Promise.all([
+    db.category.findMany({ where: { isActive: true, isDeleted: false } }),
+    db.classification.findMany({
       where: { isActive: true, isDeleted: false, category: { isActive: true, isDeleted: false } },
       include: { category: true },
     }),
-  };
+  ]);
+  const taxonomy = { categories: categoryList, classifications: classificationList };
 
-  const preservedColumnWarnings: RowMessage[] =
-    mappingAnalysis.unmappedPreservedCount > 0
-      ? [
-          {
-            field: "rawData",
-            code: "UNMAPPED_COLUMNS_PRESERVED",
-            message: mappingAnalysis.summary,
-          },
-        ]
-      : [];
+  const batchWarnings = buildImportBatchWarnings(columnMapping);
 
   const normalizedRows = workbook.rows.map((row) => {
-    const normalized = normalizeImportRow(row, columnMapping);
-    const validation = validateNormalizedComplaintRow(normalized.normalized, taxonomy);
+    const normResult = normalizeImportRow(row, columnMapping);
+    const normalized = normResult.normalized;
+
+    const classificationResolution = resolveSourceDetailClassification({
+      sourceDetail: normalized.sourceDetail,
+      explicitClassification: normalized.classification,
+      explicitCategory: normalized.category,
+      classifications: classificationList,
+    });
+    if (classificationResolution.status === "MATCHED") {
+      normalized.classification = classificationResolution.match.classificationName;
+      if (!normalized.category?.trim()) {
+        normalized.category = classificationResolution.match.categoryName;
+      }
+      normResult.derived.push({
+        field: "classification",
+        code: "CLASSIFICATION_RESOLVED_FROM_SOURCE_DETAIL",
+        message: `تم تحديد التصنيف «${classificationResolution.match.classificationName}» من قيمة تفصيل.`,
+        level: "derived",
+        originalValue: normalized.sourceDetail ?? "",
+        usedValue: classificationResolution.match.classificationName,
+        source: "sourceDetail",
+      });
+    } else if (classificationResolution.status === "CATEGORY_CONFLICT") {
+      normResult.warnings.push({
+        field: "classification",
+        code: "SOURCE_DETAIL_CATEGORY_CONFLICT",
+        message: `قيمة «تفصيل» مرتبطة بتصنيف يتبع فئة مختلفة عن الفئة الواردة في الملف؛ لم يُعتمد التصنيف تلقائيًا.`,
+        level: "warning",
+      });
+    } else if (classificationResolution.status === "AMBIGUOUS") {
+      normResult.warnings.push({
+        field: "classification",
+        code: "SOURCE_DETAIL_CLASSIFICATION_AMBIGUOUS",
+        message: `قيمة التفصيل تطابق أكثر من تصنيف: ${classificationResolution.matches.map((m) => m.classificationName).join("، ")}.`,
+        level: "warning",
+      });
+    }
+
+    const validation = validateNormalizedComplaintRow(normalized, taxonomy);
     return {
-      row: normalized.normalized,
+      row: normalized,
       warnings: [
-        ...normalized.warnings,
+        ...normResult.warnings,
+        ...normResult.derived,
         ...validation.warnings,
-        ...(row.rowNumber === workbook.rows[0]?.rowNumber ? preservedColumnWarnings : []),
       ],
-      errors: [...normalized.errors, ...validation.errors],
+      errors: [...normResult.errors, ...validation.errors],
     };
   });
 
@@ -600,6 +652,7 @@ async function processWorkbookPreview(
     columnCount: workbook.headers.filter(Boolean).length,
     processedRows,
     counters: calculateRowCounters(processedRows),
+    batchWarnings,
   };
 }
 
@@ -663,6 +716,8 @@ async function finalizeReadyImportBatch(input: {
   auditAction: "IMPORT_REPROCESSED" | "IMPORT_VALIDATION_COMPLETED";
 }): Promise<void> {
   await db.$transaction(async (tx) => {
+    await persistPreviewRows(input.batchId, input.processed.processedRows, tx);
+
     if (input.includeValidatedTransition) {
       await tx.importBatch.update({
         where: { id: input.batchId },
@@ -700,7 +755,7 @@ async function finalizeReadyImportBatch(input: {
       entityId: input.batchId,
       actor: input.actor,
     });
-  });
+  }, { maxWait: 10_000, timeout: 60_000 });
 }
 
 function toImportUploadResult(
@@ -709,6 +764,12 @@ function toImportUploadResult(
   processed: ProcessedWorkbook,
   status: ImportBatchStatus = ImportBatchStatus.READY_FOR_CONFIRMATION
 ): ImportUploadResult {
+  const qualityIssueRows = processed.processedRows.filter(
+    (row) => row.validationStatus !== ImportRowValidationStatus.VALID
+  );
+  const PREVIEW_LIMIT = 50;
+  const QUALITY_LIMIT = 100;
+
   return {
     batchId,
     fileName,
@@ -727,9 +788,9 @@ function toImportUploadResult(
     unmappedColumns: processed.mappingAnalysis.unmappedColumns,
     mappingAnalysis: processed.mappingAnalysis,
     columnCount: processed.columnCount,
-    errors: processed.processedRows
-      .filter((row) => row.validationErrors || row.validationWarnings)
-      .slice(0, 100)
+    batchWarnings: processed.batchWarnings,
+    errors: qualityIssueRows
+      .slice(0, QUALITY_LIMIT)
       .map((row) => ({
         row: row.rowNumber,
         complaintNumber: resolveImportRowReference({
@@ -742,7 +803,9 @@ function toImportUploadResult(
         validationStatus: row.validationStatus,
         imported: getImportRowOutcome(row.validationStatus),
       })),
-    preview: processed.processedRows.slice(0, 50).map((row) => {
+    qualityIssueRowsTotal: qualityIssueRows.length,
+    qualityIssuesTruncated: qualityIssueRows.length > QUALITY_LIMIT,
+    preview: processed.processedRows.slice(0, PREVIEW_LIMIT).map((row) => {
       const normalized = row.normalizedData as Record<string, unknown> | null;
       const identifier =
         typeof normalized?.complainantIdentifier === "string"
@@ -771,6 +834,8 @@ function toImportUploadResult(
         complainantIdentifierMasked: identifier ? maskIdentifier(identifier) : null,
       };
     }),
+    previewTotal: processed.counters.totalRows,
+    previewTruncated: processed.counters.totalRows > PREVIEW_LIMIT,
     canApprove:
       status === ImportBatchStatus.READY_FOR_CONFIRMATION &&
       processed.counters.invalidRows === 0 &&
@@ -816,6 +881,7 @@ export async function loadImportBatchForResume(batchId: string): Promise<ImportU
     columnCount: headers.length,
     processedRows,
     counters: calculateRowCounters(processedRows),
+    batchWarnings: buildImportBatchWarnings(columnMapping),
   }, batch.status);
   return {
     ...result,
@@ -901,7 +967,6 @@ export async function processUploadedImportFile(input: UploadInput): Promise<Imp
     });
 
     const processed = await processWorkbookPreview(buffer);
-    await persistPreviewRows(batch.id, processed.processedRows);
 
     await finalizeReadyImportBatch({
       batchId: batch.id,
@@ -953,7 +1018,6 @@ export async function reprocessImportBatch(batchId: string, mapping?: unknown): 
   let processed: ProcessedWorkbook;
   try {
     processed = await processWorkbookPreview(buffer, mapping, batch.columnMapping);
-    await persistPreviewRows(batchId, processed.processedRows);
     await finalizeReadyImportBatch({
       batchId,
       actor,

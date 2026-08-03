@@ -10,6 +10,7 @@ export const COMPLAINT_IMPORT_FIELDS = [
   "closedAt",
   "status",
   "sourceDetail",
+  "sourceUpdatedAt",
   "sourceActionStatus",
   "subject",
   "description",
@@ -34,7 +35,8 @@ export type ColumnMappingStatus =
   | "MANUALLY_MAPPED"
   | "UNMAPPED_PRESERVED"
   | "CONFLICT"
-  | "MISSING_REQUIRED";
+  | "MISSING_REQUIRED"
+  | "INTENTIONALLY_IGNORED";
 
 export type ColumnMappingEntry = {
   header: string;
@@ -67,7 +69,8 @@ const FIELD_LABELS: Record<ComplaintImportField, string> = {
   dueDate: "تاريخ الاستحقاق",
   closedAt: "تاريخ الإغلاق",
   status: "الحالة",
-  sourceDetail: "تفصيل",
+  sourceDetail: "موضوع الشكوى (تفصيل)",
+  sourceUpdatedAt: "آخر تحديث في المصدر",
   sourceActionStatus: "حالة الإجراء",
   subject: "الموضوع",
   description: "وصف الشكوى",
@@ -76,7 +79,7 @@ const FIELD_LABELS: Record<ComplaintImportField, string> = {
   complainantPhone: "هاتف مقدم الشكوى",
   region: "المنطقة",
   facility: "المنشأة",
-  department: "الإدارة",
+  department: "الإدارة المختصة",
   category: "الفئة",
   classification: "التصنيف",
   priority: "الأولوية",
@@ -130,6 +133,7 @@ const SYNONYMS: Record<ComplaintImportField, string[]> = {
   closedAt: ["تاريخ الإغلاق", "closure date", "closed at"],
   status: ["الحالة", "حالة الشكوى", "status"],
   sourceDetail: ["تفصيل", "source detail"],
+  sourceUpdatedAt: ["آخر تحديث في", "اخر تحديث في", "source updated at", "last updated at"],
   sourceActionStatus: ["حالة الاجراء", "حالة الإجراء", "action status"],
   subject: ["الموضوع", "عنوان الشكوى", "subject"],
   description: [
@@ -174,6 +178,10 @@ export function normalizeColumnHeader(value: string): string {
     .replaceAll(/\s+/g, " ")
     .toLocaleLowerCase("ar-SA");
 }
+
+const INTENTIONALLY_IGNORED_NORMALIZED = new Set<string>(
+  ["عدد الشكاوي", "عدد الشكاوى", "complaint count"].map(normalizeColumnHeader)
+);
 
 const SYNONYM_INDEX = new Map<string, ComplaintImportField>();
 
@@ -260,6 +268,15 @@ function classifyHeaderMappingEntry(input: {
   const normalizedHeader = normalizeColumnHeader(input.trimmed);
   const field = input.mapping[input.trimmed] ?? input.mapping[input.header] ?? null;
   const suggested = SYNONYM_INDEX.get(normalizedHeader);
+
+  if (INTENTIONALLY_IGNORED_NORMALIZED.has(normalizedHeader)) {
+    return {
+      header: input.trimmed,
+      normalizedHeader,
+      field: null,
+      status: "INTENTIONALLY_IGNORED",
+    };
+  }
 
   if (input.conflictHeaders.has(input.trimmed) || input.conflictHeaders.has(input.header)) {
     return {
@@ -366,7 +383,8 @@ export function analyzeColumnMapping(
     unmappedColumns: headers
       .map((header) => header.trim())
       .filter(Boolean)
-      .filter((header) => !mappedHeaders.has(header)),
+      .filter((header) => !mappedHeaders.has(header))
+      .filter((header) => !INTENTIONALLY_IGNORED_NORMALIZED.has(normalizeColumnHeader(header))),
     conflicts,
   };
 }
