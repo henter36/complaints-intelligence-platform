@@ -259,4 +259,70 @@ describe("complaint KPI service", () => {
     );
     expect(dbMocks.findMany).toHaveBeenCalledTimes(1);
   });
+
+  describe("byRegionPriority", () => {
+    it("counts complaints per region broken down by priority", async () => {
+      dbMocks.findMany.mockResolvedValueOnce([
+        complaint({ id: "c1", region: "الرياض", priority: ComplaintPriority.CRITICAL }),
+        complaint({ id: "c2", region: "الرياض", priority: ComplaintPriority.HIGH }),
+        complaint({ id: "c3", region: "الرياض", priority: ComplaintPriority.MEDIUM }),
+        complaint({ id: "c4", region: "جدة", priority: ComplaintPriority.LOW }),
+        complaint({ id: "c5", region: "جدة", priority: ComplaintPriority.MEDIUM }),
+      ]);
+
+      const result = await getComplaintKpis(new URLSearchParams(), new Date("2026-07-31T00:00:00Z"));
+      const riyadh = result.distributions.byRegionPriority.find((r) => r.region.includes("الرياض"));
+      const jeddah = result.distributions.byRegionPriority.find((r) => r.region.includes("جدة"));
+
+      expect(riyadh).toMatchObject({ critical: 1, high: 1, medium: 1, low: 0, unknown: 0, total: 3 });
+      expect(jeddah).toMatchObject({ critical: 0, high: 0, medium: 1, low: 1, unknown: 0, total: 2 });
+    });
+
+    it("sorts rows by descending total", async () => {
+      dbMocks.findMany.mockResolvedValueOnce([
+        complaint({ id: "c1", region: "جدة", priority: ComplaintPriority.MEDIUM }),
+        complaint({ id: "c2", region: "الرياض", priority: ComplaintPriority.HIGH }),
+        complaint({ id: "c3", region: "الرياض", priority: ComplaintPriority.LOW }),
+      ]);
+
+      const result = await getComplaintKpis(new URLSearchParams(), new Date("2026-07-31T00:00:00Z"));
+      expect(result.distributions.byRegionPriority[0]!.total).toBeGreaterThanOrEqual(
+        result.distributions.byRegionPriority[1]!.total
+      );
+    });
+  });
+
+  describe("previousDistributions", () => {
+    it("returns previousDistributions when a comparison period is available", async () => {
+      dbMocks.findMany
+        .mockResolvedValueOnce([
+          complaint({ id: "curr", region: "الرياض" }),
+        ])
+        .mockResolvedValueOnce([
+          complaint({ id: "prev1", region: "جدة" }),
+          complaint({ id: "prev2", region: "جدة" }),
+        ]);
+
+      const result = await getComplaintKpis(
+        new URLSearchParams("from=2026-07-01&to=2026-07-31"),
+        new Date("2026-07-31T00:00:00Z")
+      );
+
+      expect(result.previousDistributions).not.toBeNull();
+      const prevJeddah = result.previousDistributions?.byRegion.find((r) => r.name.includes("جدة"));
+      expect(prevJeddah?.total).toBe(2);
+    });
+
+    it("returns null previousDistributions when no comparison period is derivable", async () => {
+      dbMocks.findMany.mockResolvedValueOnce([complaint()]);
+
+      // No from/to → no previous period
+      const result = await getComplaintKpis(
+        new URLSearchParams(),
+        new Date("2026-07-31T00:00:00Z")
+      );
+
+      expect(result.previousDistributions).toBeNull();
+    });
+  });
 });

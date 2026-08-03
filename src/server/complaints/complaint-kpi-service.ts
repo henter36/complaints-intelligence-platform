@@ -104,6 +104,32 @@ export type ComplaintGroupMetrics = {
   unclassified: number;
 };
 
+export type RegionPriorityBreakdownRow = {
+  region: string;
+  critical: number;
+  high: number;
+  medium: number;
+  low: number;
+  unknown: number;
+  total: number;
+};
+
+export type ComplaintDistributions = {
+  byRegion: ComplaintGroupMetrics[];
+  byFacility: ComplaintGroupMetrics[];
+  byDepartment: ComplaintGroupMetrics[];
+  byClassification: ComplaintGroupMetrics[];
+  byCategory: ComplaintGroupMetrics[];
+  byChannel: ComplaintGroupMetrics[];
+  byStatus: { name: string; count: number }[];
+  byPriority: { name: string; count: number }[];
+  bySeverity: { name: string; count: number }[];
+  byDelayReason: { name: string; count: number }[];
+  bySubject: { name: string; count: number }[];
+  byMonth: { name: string; count: number }[];
+  byRegionPriority: RegionPriorityBreakdownRow[];
+};
+
 export type ComplaintKpiResult = {
   kpis: ComplaintKpiSummary;
   volume: {
@@ -141,20 +167,7 @@ export type ComplaintKpiResult = {
     growthRate: number | null;
     trendData: { date: string; total: number; closed: number; open: number }[];
   };
-  distributions: {
-    byRegion: ComplaintGroupMetrics[];
-    byFacility: ComplaintGroupMetrics[];
-    byDepartment: ComplaintGroupMetrics[];
-    byClassification: ComplaintGroupMetrics[];
-    byCategory: ComplaintGroupMetrics[];
-    byChannel: ComplaintGroupMetrics[];
-    byStatus: { name: string; count: number }[];
-    byPriority: { name: string; count: number }[];
-    bySeverity: { name: string; count: number }[];
-    byDelayReason: { name: string; count: number }[];
-    bySubject: { name: string; count: number }[];
-    byMonth: { name: string; count: number }[];
-  };
+  distributions: ComplaintDistributions;
   crossTabs: {
     classificationByRegion: CrossTabRow[];
     classificationByDepartment: CrossTabRow[];
@@ -165,6 +178,7 @@ export type ComplaintKpiResult = {
     missingFields: number;
     dataQualityRate: number;
   };
+  previousDistributions: ComplaintDistributions | null;
 };
 
 export type CrossTabRow = {
@@ -322,6 +336,7 @@ function buildKpiResult(
     },
     distributions: buildDistributions(current, now),
     crossTabs: buildCrossTabs(current),
+    previousDistributions: previous ? buildDistributions(previous, now) : null,
     alerts: {
       criticalComplaints: current.filter((complaint) =>
         complaint.priority === ComplaintPriority.CRITICAL || complaint.severity === ComplaintPriority.CRITICAL
@@ -433,7 +448,7 @@ function negativeWhenHigher(key: keyof RawMetrics): boolean {
   ].includes(key);
 }
 
-function buildDistributions(complaints: KpiComplaint[], now: Date): ComplaintKpiResult["distributions"] {
+function buildDistributions(complaints: KpiComplaint[], now: Date): ComplaintDistributions {
   return {
     byRegion: groupMetrics(complaints, now, (complaint) => ({ name: normalizeRegionName(complaint.region) })),
     byFacility: groupMetrics(complaints, now, (complaint) => ({ name: complaint.facility ?? UNSPECIFIED_LABEL })),
@@ -453,7 +468,24 @@ function buildDistributions(complaints: KpiComplaint[], now: Date): ComplaintKpi
     byDelayReason: groupCount(complaints.filter((complaint) => complaint.delayReason), (complaint) => complaint.delayReason ?? UNSPECIFIED_LABEL),
     bySubject: groupCount(complaints, (complaint) => complaint.subject),
     byMonth: groupCount(complaints, (complaint) => monthKey(complaint.complaintDate ?? complaint.receivedAt)),
+    byRegionPriority: buildRegionPriorityBreakdown(complaints),
   };
+}
+
+function buildRegionPriorityBreakdown(complaints: KpiComplaint[]): RegionPriorityBreakdownRow[] {
+  const map = new Map<string, RegionPriorityBreakdownRow>();
+  for (const c of complaints) {
+    const region = normalizeRegionName(c.region);
+    const row = map.get(region) ?? { region, critical: 0, high: 0, medium: 0, low: 0, unknown: 0, total: 0 };
+    if (c.priority === ComplaintPriority.CRITICAL) row.critical++;
+    else if (c.priority === ComplaintPriority.HIGH) row.high++;
+    else if (c.priority === ComplaintPriority.MEDIUM) row.medium++;
+    else if (c.priority === ComplaintPriority.LOW) row.low++;
+    else row.unknown++;
+    row.total++;
+    map.set(region, row);
+  }
+  return Array.from(map.values()).sort((a, b) => b.total - a.total || a.region.localeCompare(b.region, "ar"));
 }
 
 function groupMetrics(

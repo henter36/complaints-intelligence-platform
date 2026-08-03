@@ -31,6 +31,33 @@ import {
   STATUS_LABELS, PRIORITY_LABELS,
 } from "@/lib/ar-utils";
 import { isAbortError } from "@/lib/abort";
+import {
+  evaluateComparison,
+  type ComparisonState,
+} from "@/lib/analytics/comparison-evaluation";
+
+// ---------- Comparison helpers ----------
+
+export function getComparisonStateClassName(state: ComparisonState): string {
+  if (state === "INCREASE") return "text-red-600";
+  if (state === "DECREASE") return "text-emerald-600";
+  return "text-muted-foreground";
+}
+
+type ComparisonDirectionIconProps = Readonly<{
+  state: ComparisonState;
+}>;
+
+function ComparisonDirectionIcon({ state }: ComparisonDirectionIconProps) {
+  if (state === "INCREASE") return <TrendingUp className="h-3 w-3" />;
+  if (state === "DECREASE") return <TrendingDown className="h-3 w-3" />;
+  return null;
+}
+
+export function formatComparisonDifference(difference: number | null): string {
+  if (difference === null) return "—";
+  return `${difference > 0 ? "+" : ""}${formatNumber(difference)}`;
+}
 
 // ---------- Types ----------
 interface DashboardData {
@@ -716,23 +743,28 @@ export function Analytics() {
                       </thead>
                       <tbody>
                         {comparisonData.byRegion.map((row, i) => {
-                          const diff = row.current - row.previous;
-                          const pct = row.previous > 0 ? (diff / row.previous) * 100 : (row.current > 0 ? 100 : 0);
+                          const ev = evaluateComparison(row.current, row.previous, true);
+                          const stateClassName = getComparisonStateClassName(ev.state);
+                          const differenceLabel = formatComparisonDifference(ev.difference);
                           return (
                             <tr key={i} className="border-b last:border-0 hover:bg-muted/40">
                               <td className="py-2 px-3 font-medium">{row.name}</td>
                               <td className="py-2 px-3 text-center tabular-nums">{formatNumber(row.previous)}</td>
                               <td className="py-2 px-3 text-center tabular-nums font-bold">{formatNumber(row.current)}</td>
                               <td className="py-2 px-3 text-center">
-                                <span className={`inline-flex items-center gap-1 ${diff > 0 ? "text-red-600" : diff < 0 ? "text-emerald-600" : "text-muted-foreground"}`}>
-                                  {diff > 0 ? <TrendingUp className="h-3 w-3" /> : diff < 0 ? <TrendingDown className="h-3 w-3" /> : null}
-                                  {diff > 0 ? "+" : ""}{formatNumber(diff)}
+                                <span className={`inline-flex items-center gap-1 ${stateClassName}`}>
+                                  <ComparisonDirectionIcon state={ev.state} />
+                                  {differenceLabel}
                                 </span>
                               </td>
                               <td className="py-2 px-3 text-center">
-                                <Badge variant={pct > 0 ? "destructive" : "secondary"} className="tabular-nums">
-                                  {pct > 0 ? "+" : ""}{formatPercent(Math.abs(pct))}
-                                </Badge>
+                                {ev.changeRate !== null ? (
+                                  <Badge variant={ev.changeRate > 0 ? "destructive" : "secondary"} className="tabular-nums">
+                                    {ev.changeRate > 0 ? "+" : ""}{formatPercent(Math.abs(ev.changeRate))}
+                                  </Badge>
+                                ) : (
+                                  <Badge variant="outline" className="tabular-nums">{ev.label}</Badge>
+                                )}
                               </td>
                             </tr>
                           );
@@ -1358,11 +1390,9 @@ function ComparisonStat({
   higherIsBad?: boolean;
   hideGrowth?: boolean;
 }) {
-  const diff = current - previous;
-  const pct = previous > 0 ? (diff / previous) * 100 : (current > 0 ? 100 : 0);
-  const isUp = diff > 0;
+  const ev = evaluateComparison(current, previous, true);
+  const isUp = ev.state === "INCREASE";
   const isPositiveTrend = higherIsBad ? !isUp : isUp;
-
   const fmt = (n: number) => isPercent ? formatPercent(n) : formatNumber(n);
 
   return (
@@ -1371,15 +1401,15 @@ function ComparisonStat({
         <p className="text-xs text-muted-foreground">{label}</p>
         <div className="flex items-baseline gap-2">
           <p className="text-2xl font-bold tabular-nums">{fmt(current)}</p>
-          {!hideGrowth && previous > 0 && (
+          {!hideGrowth && ev.changeRate !== null && (
             <span className={`text-xs font-medium tabular-nums flex items-center gap-0.5 ${isPositiveTrend ? "text-emerald-600" : "text-red-600"}`}>
               {isUp ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
-              {pct > 0 ? "+" : ""}{formatPercent(Math.abs(pct))}
+              {ev.changeRate > 0 ? "+" : ""}{formatPercent(Math.abs(ev.changeRate))}
             </span>
           )}
         </div>
-        {!hideGrowth && previous > 0 && (
-          <p className="text-xs text-muted-foreground">السابقة: {fmt(previous)}</p>
+        {!hideGrowth && ev.previous !== null && (
+          <p className="text-xs text-muted-foreground">السابقة: {fmt(ev.previous)}</p>
         )}
       </CardContent>
     </Card>

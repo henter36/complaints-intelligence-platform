@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 import { getComplaintKpis } from "@/server/complaints/complaint-kpi-service";
 import { isComplaintQueryValidationError } from "@/server/complaints/complaint-query-service";
+import { computeAnalyticsFindings } from "@/server/analytics/analytics-findings-service";
 
 export const compareArabicLabels = (left: string, right: string): number =>
   left.localeCompare(right, "ar");
@@ -32,6 +33,9 @@ export async function GET(req: NextRequest) {
     const regions = result.distributions.byRegion.map((item) => item.name).sort(compareArabicLabels);
     const departments = result.distributions.byDepartment.map((item) => item.name).sort(compareArabicLabels);
 
+    const fromDate = url.searchParams.get("from");
+    const toDate = url.searchParams.get("to");
+
     return NextResponse.json({
       kpis: result.kpis,
       crossTabs: {
@@ -57,7 +61,24 @@ export async function GET(req: NextRequest) {
         departments: computeAnomalies(toCount(result.distributions.byDepartment)),
         classifications: computeAnomalies(toCount(result.distributions.byClassification)),
       },
-      regionPriorityBreakdown: result.distributions.byRegion.map((item) => ({ region: item.name, total: item.total })),
+      regionPriorityBreakdown: result.distributions.byRegionPriority.map((r) => ({
+        region: r.region,
+        حرجة: r.critical,
+        عالية: r.high,
+        متوسطة: r.medium,
+        منخفضة: r.low,
+        مجهولة: r.unknown,
+        total: r.total,
+      })),
+      previousDistributions: result.previousDistributions
+        ? {
+          byRegion: result.previousDistributions.byRegion.map((r) => ({ name: r.name, count: r.total })),
+          byDepartment: result.previousDistributions.byDepartment.map((r) => ({ name: r.name, count: r.total })),
+          byClassification: result.previousDistributions.byClassification.map((r) => ({ name: r.name, count: r.total })),
+          byChannel: result.previousDistributions.byChannel.map((r) => ({ name: r.name, count: r.total })),
+        }
+        : null,
+      findings: computeAnalyticsFindings(result, fromDate, toDate),
       totalCount: result.volume.total,
       distributions: result.distributions,
     });
