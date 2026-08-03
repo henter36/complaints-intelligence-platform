@@ -12,12 +12,21 @@ import {
   type Prisma,
   PrismaClient,
 } from "@prisma/client";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   confirmReadyImportBatch,
   ImportConfirmationError,
   rollbackConfirmedImportBatch,
 } from "./import-confirmation-service";
+
+// Mock startTextRiskScan to keep integration tests isolated from the analysis service.
+// The scan is fire-and-forget, so mocking it has no effect on confirmation assertions.
+const startTextRiskScanMock = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({ runId: "scan-mock", status: "COMPLETE", processed: 0, matched: 0 })
+);
+vi.mock("@/server/analytics/text-risk/text-risk-analysis-service", () => ({
+  startTextRiskScan: startTextRiskScanMock,
+}));
 
 let prisma: PrismaClient;
 let tempDir: string;
@@ -578,5 +587,63 @@ describe("transactional import confirmation", () => {
       subject: "وصف صناعي لا يحتوي بيانات تشغيلية",
     });
     expect(JSON.stringify(audit?.metadata ?? {})).not.toContain("1000000000");
+  });
+});
+
+describe("scan trigger on import confirmation", () => {
+  it("confirmation resolves correctly even when startTextRiskScan rejects", async () => {
+    // The scan is fire-and-forget: its rejection must not propagate to the caller.
+    startTextRiskScanMock.mockRejectedValueOnce(new Error("scan unavailable"));
+
+    const batch = await createReadyBatch();
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 1,
+      action: ImportRowAction.NEW,
+      normalizedData: {
+        externalId: `EXT-SCAN-FAIL-${crypto.randomUUID()}`,
+        complaintDate: "2026-07-02T00:00:00.000Z",
+        subject: "شكوى اختبار الفحص",
+      },
+    });
+    await prisma.importBatch.update({
+      where: { id: batch.id },
+      data: { totalRows: 1, newRows: 1 },
+    });
+
+    const result = await confirmReadyImportBatch(batch.id, { client: prisma });
+    expect(result).toMatchObject({ status: "CONFIRMED", created: 1 });
+
+    // Flush the micro-task queue so the .catch chain runs; any unhandled rejection
+    // would be caught by Vitest and fail this test.
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  it("startTextRiskScan is called with the confirmed batch id", async () => {
+    startTextRiskScanMock.mockClear();
+
+    const batch = await createReadyBatch();
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 1,
+      action: ImportRowAction.NEW,
+      normalizedData: {
+        externalId: `EXT-SCAN-ID-${crypto.randomUUID()}`,
+        complaintDate: "2026-07-02T00:00:00.000Z",
+        subject: "شكوى اختبار معرّف الدفعة",
+      },
+    });
+    await prisma.importBatch.update({
+      where: { id: batch.id },
+      data: { totalRows: 1, newRows: 1 },
+    });
+
+    await confirmReadyImportBatch(batch.id, { client: prisma });
+    await Promise.resolve();
+
+    expect(startTextRiskScanMock).toHaveBeenCalledWith(
+      expect.objectContaining({ importBatchId: batch.id })
+    );
   });
 });

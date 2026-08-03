@@ -7,6 +7,7 @@ export type ScreenId =
   | "import"
   | "explorer"
   | "analytics"
+  | "text-risks"
   | "reports"
   | "classifications"
   | "import-log"

@@ -13,6 +13,7 @@ import { writeAuditLog, AUDIT_ACTOR_SINGLE_ADMIN } from "@/server/audit/audit-lo
 import { assertClosedAtMatchesStatus } from "@/server/complaints/status";
 import { calculateRowCounters } from "./import-batch-service";
 import { deriveSubject } from "./subject-derive";
+import { startTextRiskScan } from "@/server/analytics/text-risk/text-risk-analysis-service";
 
 const CONFIRMABLE_ACTIONS = new Set<ImportRowAction>([
   ImportRowAction.NEW,
@@ -603,7 +604,26 @@ export async function confirmReadyImportBatch(
       unchanged: counters.noChangeRows,
       duplicates: counters.duplicateRows,
     };
-  }, { maxWait: 10_000, timeout: 60_000 });
+  }, { maxWait: 10_000, timeout: 60_000 }).then((result) => {
+    // Trigger text-risk scan after the transaction commits.
+    // Failure here must not propagate — the import is already confirmed.
+    startTextRiskScan({ importBatchId: batchId, actor }).catch((scanError: unknown) => {
+      const errorCode = scanError instanceof Error
+        ? scanError.message.slice(0, 200)
+        : "UNKNOWN";
+      writeAuditLog(db, {
+        action: "TEXT_RISK_SCAN_START_FAILED",
+        entityType: "ImportBatch",
+        entityId: batchId,
+        actor,
+        metadata: { importBatchId: batchId, errorCode },
+      }).catch((logError: unknown) => {
+        const logCode = logError instanceof Error ? logError.message.slice(0, 100) : "UNKNOWN";
+        console.error(`[TEXT_RISK] scan start failed for batch ${batchId}: ${logCode}`);
+      });
+    });
+    return result;
+  });
 }
 
 function restoreOptionalDateField(data: Record<string, unknown>, key: string): Date | null | undefined {

@@ -53,6 +53,7 @@ const menuItems: {
   { id: "import", label: "مركز الاستيراد", icon: Upload, description: "رفع ومعالجة الملفات", group: "البيانات" },
   { id: "explorer", label: "مستكشف الشكاوى", icon: Search, description: "البحث والتصفية", group: "البيانات" },
   { id: "analytics", label: "التحليلات", icon: BarChart3, description: "الاتجاهات والمقارنات", group: "التحليل" },
+  { id: "text-risks", label: "مراجعة إشارات الخطر", icon: ShieldCheck, description: "إشارات المخاطر المستخرجة من النص", group: "التحليل" },
   { id: "ai-analysis", label: "التحليل الذكي", icon: Sparkles, description: "تحليل بالذكاء الاصطناعي", group: "التحليل" },
   { id: "reports", label: "مركز التقارير", icon: FileText, description: "إنشاء وتصدير التقارير", group: "التقارير" },
   { id: "classifications", label: "إدارة التصنيفات", icon: Tags, description: "التصنيفات والكلمات الدالة", group: "الإدارة" },
