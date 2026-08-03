@@ -13,6 +13,7 @@ import { writeAuditLog, AUDIT_ACTOR_SINGLE_ADMIN } from "@/server/audit/audit-lo
 import { assertClosedAtMatchesStatus } from "@/server/complaints/status";
 import { calculateRowCounters } from "./import-batch-service";
 import { deriveSubject } from "./subject-derive";
+import { startTextRiskScan } from "@/server/analytics/text-risk/text-risk-analysis-service";
 
 const CONFIRMABLE_ACTIONS = new Set<ImportRowAction>([
   ImportRowAction.NEW,
@@ -603,7 +604,14 @@ export async function confirmReadyImportBatch(
       unchanged: counters.noChangeRows,
       duplicates: counters.duplicateRows,
     };
-  }, { maxWait: 10_000, timeout: 60_000 });
+  }, { maxWait: 10_000, timeout: 60_000 }).then((result) => {
+    // Trigger text-risk scan after the transaction commits.
+    // Failure here must not propagate — the import is already confirmed.
+    startTextRiskScan({ importBatchId: batchId, actor }).catch(() => {
+      // Errors are recorded by the scan run and audit log internally.
+    });
+    return result;
+  });
 }
 
 function restoreOptionalDateField(data: Record<string, unknown>, key: string): Date | null | undefined {

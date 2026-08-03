@@ -183,6 +183,7 @@ model Complaint {
   statusHistory         ComplaintStatusHistory[]
   matchedImportRows     ImportBatchRow[]         @relation("MatchedComplaintRows")
   createdImportRows     ImportBatchRow[]         @relation("CreatedComplaintRows")
+  textRiskSignals       TextRiskSignal[]
 
   @@index([sourceReference])
   @@index([status])
@@ -445,6 +446,110 @@ model ReportArtifact {
   @@index([reportRunId])
   @@index([expiresAt])
   @@index([deletedAt])
+}
+
+// ─── Phase 9: Text Risk Rule Engine ─────────────────────────────────────────
+
+enum TextRiskSignalType {
+  SERVICE_OUTAGE
+  PROCEDURE_FAILURE
+  PUBLIC_HEALTH
+  POISONING
+  SENTENCE_EXPIRY
+  LEGAL_DELAY
+  SECURITY_INCIDENT
+  MEDICATION_SHORTAGE
+  FOOD_OR_WATER_SAFETY
+  INFRASTRUCTURE_FAILURE
+}
+
+enum TextRiskDetectionSource {
+  RULE
+}
+
+enum TextRiskReviewStatus {
+  PENDING_REVIEW
+  CONFIRMED
+  DISMISSED
+  DUPLICATE
+  NEEDS_MORE_DATA
+}
+
+enum TextRiskCertainty {
+  CONFIRMED_IN_TEXT
+  SUSPECTED
+  ALLEGED
+  HISTORICAL_RESOLVED
+  UNCLEAR
+}
+
+enum TextRiskScanStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+model TextRiskSignal {
+  id                     String                  @id @default(cuid())
+  complaintId            String
+  complaint              Complaint               @relation(fields: [complaintId], references: [id])
+  signalType             TextRiskSignalType
+  ruleId                 String
+  ruleVersion            String
+  title                  String
+  description            String
+  severity               ComplaintPriority
+  confidenceScore        Float
+  certainty              TextRiskCertainty
+  isOngoing              Boolean?
+  evidenceSpans          Json
+  normalizedEvidenceHash String
+  sourceTextHash         String
+  detectedBy             TextRiskDetectionSource @default(RULE)
+  reviewStatus           TextRiskReviewStatus    @default(PENDING_REVIEW)
+  region                 String?
+  facility               String?
+  department             String?
+  reviewedBy             String?
+  reviewedAt             DateTime?
+  reviewReason           String?
+  createdAt              DateTime                @default(now())
+  updatedAt              DateTime                @updatedAt
+
+  @@unique([complaintId, ruleId, ruleVersion, normalizedEvidenceHash])
+  @@index([complaintId])
+  @@index([signalType])
+  @@index([severity])
+  @@index([reviewStatus])
+  @@index([ruleVersion])
+  @@index([createdAt])
+  @@index([region])
+  @@index([facility])
+  @@index([department])
+}
+
+model TextRiskScanRun {
+  id                  String             @id @default(cuid())
+  status              TextRiskScanStatus @default(PENDING)
+  ruleVersion         String
+  importBatchId       String?
+  totalComplaints     Int                @default(0)
+  processedComplaints Int                @default(0)
+  matchedSignals      Int                @default(0)
+  lastComplaintId     String?
+  startedAt           DateTime?
+  completedAt         DateTime?
+  failedAt            DateTime?
+  errorCode           String?
+  errorMessage        String?
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  @@index([status])
+  @@index([importBatchId])
+  @@index([ruleVersion])
+  @@index([createdAt])
 }
 
 // ─── Phase 8: Governed AI ───────────────────────────────────────────────────

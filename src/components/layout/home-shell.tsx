@@ -9,6 +9,7 @@ import { ReportsCenter } from "@/components/screens/reports-center";
 import { ClassificationsManager } from "@/components/screens/classifications-manager";
 import { ImportLog } from "@/components/screens/import-log";
 import { AiAnalysis } from "@/components/screens/ai-analysis";
+import { TextRisks } from "@/components/screens/text-risks";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import type { ScreenId } from "@/app/page";
@@ -51,6 +52,7 @@ export function HomeShell({ username }: Readonly<{ username: string }>) {
             {activeScreen === "import" && <ImportCenter batchId={resumeBatchId} />}
             {activeScreen === "explorer" && <ComplaintsExplorer />}
             {activeScreen === "analytics" && <Analytics />}
+            {activeScreen === "text-risks" && <TextRisks />}
             {activeScreen === "reports" && <ReportsCenter />}
             {activeScreen === "classifications" && <ClassificationsManager />}
             {activeScreen === "import-log" && <ImportLog onResume={(batchId) => navigate("import", batchId)} />}
