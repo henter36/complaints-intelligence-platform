@@ -81,7 +81,7 @@ const COLORS = REPORT_DESIGN_TOKENS.colors;
 
 const SERIES_STYLES: SeriesStyle[] = [
   { color: COLORS.primary, dash: "0", width: 2 },
-  { color: COLORS.neutral, dash: "6,3", width: 2 },
+  { color: COLORS.gold, dash: "6,3", width: 2 },
   { color: COLORS.primary, dash: "2,3", width: 2 },
   { color: COLORS.neutral, dash: "6,3,2,3", width: 2 },
   { color: COLORS.primary, dash: "10,4", width: 2 },
@@ -164,7 +164,13 @@ function yForValue(geo: ChartGeometry, value: number, yMax: number): number {
   return geo.plotBottom - t * (geo.plotBottom - geo.plotTop);
 }
 
-function renderAxes(geo: ChartGeometry, yTicks: number[], yMax: number, dates: string[]): string {
+function renderAxes(
+  geo: ChartGeometry,
+  yTicks: number[],
+  yMax: number,
+  dates: string[],
+  chartType: ReportChartSection["chartType"]
+): string {
   const parts: string[] = [];
   parts.push(
     `<line x1="${geo.plotLeft}" y1="${geo.plotTop}" x2="${geo.plotLeft}" y2="${geo.plotBottom}" stroke="${COLORS.border}" stroke-width="1"/>`,
@@ -174,22 +180,24 @@ function renderAxes(geo: ChartGeometry, yTicks: number[], yMax: number, dates: s
     const y = yForValue(geo, tick, yMax);
     parts.push(
       `<line x1="${geo.plotLeft}" y1="${y}" x2="${geo.plotRight}" y2="${y}" stroke="${COLORS.border}" stroke-width="1"/>`,
-      `<text x="${geo.plotRight + 6}" y="${y + 4}" text-anchor="start" font-size="10" fill="${COLORS.neutral}">${formatReportNumber(tick)}</text>`
+      `<text x="${geo.plotRight + 6}" y="${y + 4}" text-anchor="start" font-size="11" fill="${COLORS.neutral}">${formatReportNumber(tick)}</text>`
     );
   }
   const maxLabels = 12;
   const step = Math.max(1, Math.ceil(dates.length / maxLabels));
   dates.forEach((date, index) => {
     if (index % step !== 0 && index !== dates.length - 1) return;
-    const x = xForIndex(geo, index);
+    const x = chartType === "bar"
+      ? geo.plotLeft + (index + 0.5) * (geo.plotRight - geo.plotLeft) / Math.max(1, dates.length)
+      : xForIndex(geo, index);
     parts.push(
-      `<text x="${x}" y="${geo.plotBottom + 16}" text-anchor="middle" font-size="9" fill="${COLORS.neutral}">${escapeXml(shortDateLabel(date))}</text>`
+      `<text x="${x}" y="${geo.plotBottom + 18}" text-anchor="middle" font-size="11" fill="${COLORS.neutral}" direction="rtl">${escapeXml(shortDateLabel(date))}</text>`
     );
   });
   return parts.join("\n");
 }
 
-function renderSeries(geo: ChartGeometry, section: ReportChartSection, yMax: number): string {
+function renderLineSeries(geo: ChartGeometry, section: ReportChartSection, yMax: number): string {
   const parts: string[] = [];
   section.series.forEach((series, seriesIndex) => {
     const style = seriesStyle(seriesIndex, series.isOther === true);
@@ -209,32 +217,101 @@ function renderSeries(geo: ChartGeometry, section: ReportChartSection, yMax: num
   return parts.join("\n");
 }
 
-function renderLegend(section: ReportChartSection, width: number, legendTop: number): string {
+/**
+ * Builds a canonical category list by taking the union of all point.x values
+ * across every series, in first-occurrence order. This is the single source of
+ * truth for bar chart axis labels and bar positions so that:
+ *  - missing categories in a series are filled with zero (bar simply absent)
+ *  - no bar appears under the wrong category label
+ *  - order is stable and predictable regardless of which series is "first"
+ *
+ * Exported for unit tests; not part of the public rendering API.
+ */
+export function buildCategoryUnion(section: ReportChartSection): string[] {
+  const seen = new Set<string>();
+  const categories: string[] = [];
+  for (const series of section.series) {
+    for (const point of series.points) {
+      if (!seen.has(point.x)) {
+        seen.add(point.x);
+        categories.push(point.x);
+      }
+    }
+  }
+  return categories;
+}
+
+function renderBarSeries(
+  geo: ChartGeometry,
+  section: ReportChartSection,
+  yMax: number,
+  categories: string[]
+): string {
   const parts: string[] = [];
-  const itemHeight = 16;
-  const swatchWidth = 22;
-  let currentY = legendTop;
-  let currentX = width - 12;
-  const columnWidth = 150;
+  const categoryCount = Math.max(1, categories.length);
+  const seriesCount = Math.max(1, section.series.length);
+  const categoryWidth = (geo.plotRight - geo.plotLeft) / categoryCount;
+  const groupWidth = categoryWidth * 0.72;
+  const barWidth = Math.max(2, groupWidth / seriesCount);
+  const categoryIndex = new Map(categories.map((cat, i) => [cat, i]));
   section.series.forEach((series, seriesIndex) => {
     const style = seriesStyle(seriesIndex, series.isOther === true);
-    if (currentX - columnWidth < 12) {
-      currentX = width - 12;
-      currentY += itemHeight;
-    }
-    const lineY = currentY + 6;
-    const dashAttr = style.dash === "0" ? "" : ` stroke-dasharray="${style.dash}"`;
-    parts.push(
-      `<line x1="${currentX - swatchWidth}" y1="${lineY}" x2="${currentX}" y2="${lineY}" stroke="${style.color}" stroke-width="${style.width}"${dashAttr}/>`,
-      `<text x="${currentX - swatchWidth - 4}" y="${lineY + 4}" text-anchor="end" font-size="10" fill="${COLORS.primary}" direction="rtl">${escapeXml(series.name)}</text>`
-    );
-    currentX -= columnWidth;
+    series.points.forEach((point) => {
+      const catIdx = categoryIndex.get(point.x);
+      if (catIdx === undefined) return;
+      const valueY = yForValue(geo, point.y, yMax);
+      const x = geo.plotLeft
+        + catIdx * categoryWidth
+        + (categoryWidth - groupWidth) / 2
+        + seriesIndex * barWidth;
+      parts.push(
+        `<rect x="${x.toFixed(1)}" y="${valueY.toFixed(1)}" width="${Math.max(1, barWidth - 1).toFixed(1)}" height="${Math.max(0, geo.plotBottom - valueY).toFixed(1)}" fill="${style.color}"/>`
+      );
+    });
   });
   return parts.join("\n");
 }
 
-function buildChartSvg(section: ReportChartSection, width: number, height: number): string {
-  const dates = section.series[0]?.points.map((p) => p.x) ?? [];
+function renderSeries(
+  geo: ChartGeometry,
+  section: ReportChartSection,
+  yMax: number,
+  categories: string[]
+): string {
+  return section.chartType === "bar"
+    ? renderBarSeries(geo, section, yMax, categories)
+    : renderLineSeries(geo, section, yMax);
+}
+
+function renderLegend(section: ReportChartSection, width: number, legendTop: number): string {
+  const parts: string[] = [];
+  const itemHeight = 16;
+  const swatchWidth = 22;
+  section.series.forEach((series, seriesIndex) => {
+    const style = seriesStyle(seriesIndex, series.isOther === true);
+    const row = Math.floor(seriesIndex / 3);
+    const column = seriesIndex % 3;
+    const centerX = width - (column + 0.5) * width / 3;
+    const currentX = centerX + 52;
+    const lineY = legendTop + row * itemHeight + 6;
+    const dashAttr = style.dash === "0" ? "" : ` stroke-dasharray="${style.dash}"`;
+    parts.push(
+      `<line x1="${currentX - swatchWidth}" y1="${lineY}" x2="${currentX}" y2="${lineY}" stroke="${style.color}" stroke-width="${style.width}"${dashAttr}/>`,
+      `<text x="${currentX - swatchWidth - 4}" y="${lineY + 4}" text-anchor="end" font-size="11" fill="${COLORS.primary}" direction="rtl">${escapeXml(series.name)}</text>`
+    );
+  });
+  return parts.join("\n");
+}
+
+/** Exported for snapshot tests; not part of the public rendering API. */
+export function buildChartSvg(section: ReportChartSection, width: number, height: number): string {
+  // Bar charts build a union of all series categories so every bar aligns
+  // with its correct label even when series have different or missing entries.
+  // Line charts use the first series as the shared time axis (all series are
+  // expected to share the same date points).
+  const categories = section.chartType === "bar"
+    ? buildCategoryUnion(section)
+    : (section.series[0]?.points.map((p) => p.x) ?? []);
   const maxValue = section.series.reduce(
     (max, series) => series.points.reduce((seriesMax, p) => Math.max(seriesMax, p.y), max),
     0
@@ -243,19 +320,19 @@ function buildChartSvg(section: ReportChartSection, width: number, height: numbe
   const legendRows = Math.max(1, Math.ceil(section.series.length / 3));
   const legendHeight = 12 + legendRows * 16;
   const geo: ChartGeometry = {
-    plotLeft: 40,
-    plotRight: width - 44,
-    plotTop: 40,
-    plotBottom: height - 40 - legendHeight,
-    xCount: dates.length,
+    plotLeft: 54,
+    plotRight: width - 76,
+    plotTop: 48,
+    plotBottom: height - 46 - legendHeight,
+    xCount: categories.length,
   };
   const title = escapeXml(section.title);
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
     ${fontStyleBlock()}
     <rect width="${width}" height="${height}" fill="${COLORS.white}" stroke="${COLORS.border}"/>
-    <text x="${width - 12}" y="24" text-anchor="end" font-size="14" fill="${COLORS.primary}" direction="rtl">${title}</text>
-    ${renderAxes(geo, ticks, yMax, dates)}
-    ${renderSeries(geo, section, yMax)}
+    <text x="${width / 2}" y="28" text-anchor="middle" font-size="16" fill="${COLORS.primary}" direction="rtl" unicode-bidi="plaintext">${title}</text>
+    ${renderAxes(geo, ticks, yMax, categories, section.chartType)}
+    ${renderSeries(geo, section, yMax, categories)}
     ${renderLegend(section, width, geo.plotBottom + 28)}
   </svg>`;
 }

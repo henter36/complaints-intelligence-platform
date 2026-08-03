@@ -1,5 +1,6 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { previousInclusivePeriod } from "@/lib/reports/period-range";
 
 const dbMocks = vi.hoisted(() => ({
   findMany: vi.fn(),
@@ -60,6 +61,15 @@ async function loadModule() {
 }
 
 describe("derivePreviousPeriodRange", () => {
+  it("normalizes inclusive boundaries to midnight UTC before shifting", () => {
+    const previous = previousInclusivePeriod(
+      new Date("2026-07-08T14:30:00Z"),
+      new Date("2026-07-14T22:15:00Z")
+    );
+    expect(previous?.from.toISOString()).toBe("2026-07-01T00:00:00.000Z");
+    expect(previous?.to.toISOString()).toBe("2026-07-07T00:00:00.000Z");
+  });
+
   it("weekly period: previous is exactly 7 days before, no overlap", async () => {
     const { derivePreviousPeriodRange } = await loadModule();
     const from = new Date("2026-07-08T00:00:00Z");
@@ -76,6 +86,27 @@ describe("derivePreviousPeriodRange", () => {
     const prev = derivePreviousPeriodRange(from, toExclusive)!;
     const duration = prev.toExclusive.getTime() - prev.from.getTime();
     expect(duration).toBe(3 * 24 * 60 * 60 * 1000);
+  });
+
+  it("monthly selection compares with the immediately previous equal-duration period", async () => {
+    const { derivePreviousPeriodRange } = await loadModule();
+    const prev = derivePreviousPeriodRange(
+      new Date("2026-07-01T00:00:00Z"),
+      new Date("2026-08-01T00:00:00Z")
+    )!;
+    expect(prev.from.toISOString()).toBe("2026-05-31T00:00:00.000Z");
+    expect(prev.toExclusive.toISOString()).toBe("2026-07-01T00:00:00.000Z");
+  });
+
+  it("supports the same inclusive dates from the previous year", async () => {
+    const { derivePreviousPeriodRange } = await loadModule();
+    const prev = derivePreviousPeriodRange(
+      new Date("2026-01-03T00:00:00Z"),
+      new Date("2026-08-03T00:00:00Z"),
+      "SAME_PERIOD_LAST_YEAR"
+    )!;
+    expect(prev.from.toISOString()).toBe("2025-01-03T00:00:00.000Z");
+    expect(prev.toExclusive.toISOString()).toBe("2025-08-03T00:00:00.000Z");
   });
 
   it("no overlap: previous.toExclusive === current.from", async () => {
@@ -122,6 +153,25 @@ describe("buildComparisonResult without a reference period", () => {
     expect(result.deptClassAllPairs).toEqual([
       expect.objectContaining({ currentCount: 1, previousCount: 0 }),
     ]);
+  });
+});
+
+describe("buildComparisonResult temporal comparison source", () => {
+  it("uses complaint dates for previous-year comparison and never import metadata", async () => {
+    const { buildComparisonResult } = await loadModule();
+    mockPeriods([row()], [row({ complaintDate: new Date("2025-07-10T00:00:00Z") })]);
+    await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"), {
+      comparisonMode: "SAME_PERIOD_LAST_YEAR",
+      includeComparison: true,
+    });
+    expect(dbMocks.findMany).toHaveBeenCalledTimes(2);
+    const previousQuery = dbMocks.findMany.mock.calls[1][0];
+    const serialized = JSON.stringify(previousQuery);
+    expect(previousQuery.where.AND).toHaveLength(2);
+    expect(previousQuery.where.AND[1]).toHaveProperty("OR");
+    expect(serialized).toContain("2025-07-08");
+    expect(serialized).toContain("complaintDate");
+    expect(serialized).not.toMatch(/importBatch|uploadedAt|createdAt/);
   });
 });
 
@@ -203,7 +253,7 @@ describe("RegionChangeRow", () => {
     );
     expect(rows.find((r) => r.regionName === R_MAKKAH)!.difference).toBe(2);
     expect(rows.find((r) => r.regionName === R_RIYADH)!.difference).toBe(0);
-    expect(rows.find((r) => r.regionName === R_SHARQIYA)!.difference).toBe(-1);
+    expect(rows.find((r) => r.regionName === "المنطقة الشرقية")!.difference).toBe(-1);
   });
 
   it("sort order: ارتفاع first, then جديد, then دون تغير, then انخفاض, then دون شكاوى", async () => {
@@ -387,7 +437,7 @@ describe("RegionTrendData", () => {
     expect(data.otherSeriesName).toBeNull();
   });
 
-  it("9 regions: top 8 shown, 9th aggregated into مناطق أخرى, counting each complaint once", async () => {
+  it("uses one readable total series without grouping regions as مناطق أخرى", async () => {
     const inRange = new Date("2026-07-10T00:00:00Z");
     const rows: Row[] = [];
     for (let i = 0; i < 9; i++) {
@@ -395,31 +445,136 @@ describe("RegionTrendData", () => {
       for (let j = 0; j < count; j++) rows.push(row({ region: `منطقة ${i}`, complaintDate: inRange, receivedAt: inRange }));
     }
     const data = await trend(rows);
-    expect(data.truncated).toBe(true);
-    expect(data.otherSeriesName).toBe("مناطق أخرى");
-    // 8 named + 1 aggregated = 9 series.
-    expect(data.series).toHaveLength(9);
-    const other = data.series.find((s) => s.regionName === "مناطق أخرى")!;
-    const otherTotal = other.points.reduce((sum, p) => sum + p.count, 0);
-    // The 9th region (index 8) has 1 complaint.
-    expect(otherTotal).toBe(1);
+    expect(data.truncated).toBe(false);
+    expect(data.otherSeriesName).toBeNull();
+    expect(data.series).toHaveLength(1);
+    expect(data.series[0].regionName).toBe("إجمالي الشكاوى");
+    expect(data.series[0].points.reduce((sum, point) => sum + point.count, 0)).toBe(45);
   });
 
   it("empty data: empty series, allDates spans full period", async () => {
     const data = await trend([]);
-    expect(data.series).toHaveLength(0);
+    expect(data.series).toHaveLength(1);
+    expect(data.series[0].points.every((point) => point.count === 0)).toBe(true);
     expect(data.allDates).toHaveLength(7);
   });
 
-  it("series sorted by total count descending", async () => {
+  it("keeps the total trend independent of region ordering", async () => {
     const rows = [
-      row({ region: R_RIYADH }),
-      row({ region: R_MAKKAH }),
-      row({ region: R_MAKKAH }),
-      row({ region: R_MAKKAH }),
+      row({ region: R_RIYADH, complaintDate: new Date("2026-07-10T00:00:00Z") }),
+      row({ region: R_MAKKAH, complaintDate: new Date("2026-07-10T00:00:00Z") }),
+      row({ region: R_MAKKAH, complaintDate: new Date("2026-07-10T00:00:00Z") }),
+      row({ region: R_MAKKAH, complaintDate: new Date("2026-07-10T00:00:00Z") }),
     ];
     const data = await trend(rows);
-    expect(data.series[0].regionName).toBe(R_MAKKAH);
+    expect(data.series[0].regionName).toBe("إجمالي الشكاوى");
+    expect(data.series[0].points.reduce((sum, point) => sum + point.count, 0)).toBe(4);
+  });
+});
+
+describe("buildComparisonResult — currentTotal and previousTotal", () => {
+  beforeEach(() => dbMocks.findMany.mockReset());
+
+  it("currentTotal equals the number of complaints returned for the current period", async () => {
+    const { buildComparisonResult } = await loadModule();
+    mockPeriods(
+      [row({ region: R_RIYADH }), row({ region: R_MAKKAH }), row({ region: R_MADINAH })],
+      [row({ region: R_RIYADH })]
+    );
+    const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
+    expect(result.currentTotal).toBe(3);
+  });
+
+  it("previousTotal equals the number of complaints returned for the previous period", async () => {
+    const { buildComparisonResult } = await loadModule();
+    mockPeriods(
+      [row({ region: R_RIYADH })],
+      [row({ region: R_RIYADH }), row({ region: R_MAKKAH })]
+    );
+    const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
+    expect(result.previousTotal).toBe(2);
+  });
+
+  it("previousTotal is null when no previous period is queried", async () => {
+    const { buildComparisonResult } = await loadModule();
+    // Invalid date range → no previous period
+    dbMocks.findMany.mockReset();
+    dbMocks.findMany.mockResolvedValueOnce([row()]);
+    const result = await buildComparisonResult(
+      { from: "2026-07-15", to: "2026-07-14" }, // invalid: from > to
+      new Date("2026-07-31T00:00:00Z")
+    );
+    expect(result.previousTotal).toBeNull();
+  });
+
+  it("previousTotal is 0 when previous period is valid but returned no complaints", async () => {
+    // previousTotal = 0 ≠ null: a real query ran but returned nothing.
+    const { buildComparisonResult } = await loadModule();
+    mockPeriods([row({ region: R_RIYADH })], []); // empty previous result
+    const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
+    expect(result.previousTotal).toBe(0);
+    expect(result.previousTotal).not.toBeNull();
+  });
+
+  it("currentTotal counts complaints that have no region (null region)", async () => {
+    // Complaints with no region must still be counted in currentTotal
+    // even though they are excluded from regionChanges.
+    const { buildComparisonResult } = await loadModule();
+    mockPeriods(
+      [
+        row({ region: null }),    // no region — excluded from regionChanges
+        row({ region: R_RIYADH }),
+      ],
+      [row({ region: R_RIYADH })]
+    );
+    const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
+    expect(result.currentTotal).toBe(2); // both complaints counted regardless of region
+  });
+
+  it("previousTotal counts complaints that have no region (null region)", async () => {
+    // previousTotal comes directly from previous.length, so it always
+    // reflects the raw DB query count — even for complaints with null region.
+    // (normalizeRegionName(null) maps to "غير محدد" which also appears in
+    // regionChanges, but previousTotal is correct regardless.)
+    const { buildComparisonResult } = await loadModule();
+    mockPeriods(
+      [row({ region: R_RIYADH })],
+      [
+        row({ region: null }),    // no region → normalised to "غير محدد"
+        row({ region: null }),    // no region → normalised to "غير محدد"
+        row({ region: R_RIYADH }),
+      ]
+    );
+    const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
+    // Raw count includes all 3 complaints.
+    expect(result.previousTotal).toBe(3);
+    // regionChanges groups by normalised name, so "غير محدد" carries 2.
+    const regionChangesSum = result.regionChanges.reduce((s, r) => s + r.previousCount, 0);
+    // Both derivations agree because null maps to a name; previousTotal is
+    // the authoritative source and must equal the raw count.
+    expect(regionChangesSum).toBe(result.previousTotal!);
+  });
+
+  it("distinguishes an empty previous period from an unavailable comparison period", async () => {
+    const { buildComparisonResult } = await loadModule();
+
+    // Case 1: valid filters → a previous period is derived and queried.
+    // The mock returns zero complaints for that period (previousTotal = 0).
+    mockPeriods([row()], []); // current: 1 row, previous: 0 rows
+    const withPrevious = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
+    expect(withPrevious.previousPeriod).not.toBeNull(); // a real period was derived
+    expect(withPrevious.previousTotal).toBe(0);         // queried but found nothing
+
+    // Case 2: invalid date range (from > to) → derivePreviousPeriodRange returns
+    // null because the duration is ≤ 0, so no previous query is issued.
+    dbMocks.findMany.mockReset();
+    dbMocks.findMany.mockResolvedValueOnce([row()]);
+    const withoutPrevious = await buildComparisonResult(
+      { from: "2026-07-15", to: "2026-07-14" }, // invalid: from > to → no period
+      new Date("2026-07-31T00:00:00Z")
+    );
+    expect(withoutPrevious.previousPeriod).toBeNull(); // no comparison period
+    expect(withoutPrevious.previousTotal).toBeNull();  // not 0 — period never queried
   });
 });
 

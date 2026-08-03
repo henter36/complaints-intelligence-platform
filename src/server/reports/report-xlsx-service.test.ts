@@ -179,6 +179,8 @@ describe("XLSX report rendering", () => {
       comparisonData: {
         currentPeriod: { from: new Date("2026-07-08T00:00:00Z"), toExclusive: new Date("2026-07-15T00:00:00Z") },
         previousPeriod: { from: new Date("2026-07-01T00:00:00Z"), toExclusive: new Date("2026-07-08T00:00:00Z") },
+        currentTotal: 3,
+        previousTotal: 1,
         regionTrend: {
           allDates: ["2026-07-08"],
           series: [{ regionName: "منطقة الرياض", points: [{ date: "2026-07-08", count: 3 }] }],
@@ -223,5 +225,53 @@ describe("XLSX report rendering", () => {
     const workbook = await readBack(buffer);
     const sheetNames = workbook.worksheets.map((s) => s.name);
     expect(sheetNames).not.toContain("اتجاه المناطق");
+  });
+
+  describe("comparisonModeLabel in summary sheet", () => {
+    async function getSummaryFieldValue(report: ReportData, fieldLabel: string): Promise<string | null> {
+      const { buffer } = await renderReportXlsx(report);
+      const workbook = await readBack(buffer);
+      const sheet = workbook.getWorksheet("الملخص")!;
+      let found: string | null = null;
+      sheet.eachRow((row) => {
+        if (row.getCell(1).value === fieldLabel) {
+          found = String(row.getCell(2).value ?? "");
+        }
+      });
+      return found;
+    }
+
+    it("shows 'لا توجد فترة مقارنة' when no previousPeriod", async () => {
+      const value = await getSummaryFieldValue(baseReport({ previousPeriod: undefined }), "نوع المقارنة");
+      expect(value).toBe("لا توجد فترة مقارنة");
+    });
+
+    it("shows correct label for SAME_PERIOD_LAST_YEAR", async () => {
+      const report = baseReport({
+        comparisonMode: "SAME_PERIOD_LAST_YEAR",
+        previousPeriod: { from: "2025-07-01", to: "2025-07-31" },
+      });
+      const value = await getSummaryFieldValue(report, "نوع المقارنة");
+      expect(value).toBe("الفترة المماثلة من السنة السابقة");
+    });
+
+    it("shows correct label for PREVIOUS_EQUIVALENT_PERIOD", async () => {
+      const report = baseReport({
+        comparisonMode: "PREVIOUS_EQUIVALENT_PERIOD",
+        previousPeriod: { from: "2026-06-01", to: "2026-06-30" },
+      });
+      const value = await getSummaryFieldValue(report, "نوع المقارنة");
+      expect(value).toBe("الفترة السابقة المماثلة في المدة");
+    });
+
+    it("does not classify undefined comparisonMode as PREVIOUS_EQUIVALENT_PERIOD", async () => {
+      const report = baseReport({
+        comparisonMode: undefined,
+        previousPeriod: { from: "2026-06-01", to: "2026-06-30" },
+      });
+      const value = await getSummaryFieldValue(report, "نوع المقارنة");
+      expect(value).not.toBe("الفترة السابقة المماثلة في المدة");
+      expect(value).toBe("وضع المقارنة غير محدد");
+    });
   });
 });

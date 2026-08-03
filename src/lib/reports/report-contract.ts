@@ -19,8 +19,8 @@
 export type ReportMode =
   | "STANDARD"                 // Existing full-section report
   | "DIGITAL_EXECUTIVE_BRIEF"  // 3-page 16:9 digital slides (1440×810 pt)
-  | "FULL_ANALYTICAL"          // Unlimited-page A4 portrait deep-dive
-  | "PRINT_EXECUTIVE_BRIEF";   // 3-page A4 landscape print copy
+  | "FULL_ANALYTICAL"          // Unlimited-page portrait deep-dive on the readable report canvas
+  | "PRINT_EXECUTIVE_BRIEF";   // 4-page print-oriented complaints report
 
 export const REPORT_MODES = [
   "STANDARD",
@@ -33,11 +33,25 @@ export function isReportMode(value: unknown): value is ReportMode {
   return typeof value === "string" && (REPORT_MODES as readonly string[]).includes(value);
 }
 
+export type ComparisonMode =
+  | "PREVIOUS_EQUIVALENT_PERIOD"
+  | "SAME_PERIOD_LAST_YEAR";
+
+export const COMPARISON_MODES = [
+  "PREVIOUS_EQUIVALENT_PERIOD",
+  "SAME_PERIOD_LAST_YEAR",
+] as const satisfies readonly ComparisonMode[];
+
+export function isComparisonMode(value: unknown): value is ComparisonMode {
+  return typeof value === "string"
+    && (COMPARISON_MODES as readonly string[]).includes(value);
+}
+
 // ---------------------------------------------------------------------------
 // Executive brief page plan
 // ---------------------------------------------------------------------------
 
-export type ExecutiveBriefPreviewPage = 1 | 2 | 3;
+export type ExecutiveBriefPreviewPage = 1 | 2 | 3 | 4;
 
 export type ExecutiveBriefPagePlanEntry = {
   page: ExecutiveBriefPreviewPage;
@@ -46,24 +60,29 @@ export type ExecutiveBriefPagePlanEntry = {
 };
 
 /**
- * Shared page ownership for the three-page executive brief. Renderers own the
+ * Shared page ownership for the four-page complaints report. Renderers own the
  * visual layout, while data builders and previews share this stable metadata.
  */
 export const EXECUTIVE_BRIEF_PAGE_PLAN = [
   {
     page: 1,
-    title: "النظرة التنفيذية",
-    sectionIds: ["kpi_overview", "executive_summary_text", "region_trend_chart"],
+    title: "الغلاف",
+    sectionIds: [],
   },
   {
     page: 2,
-    title: "المقارنة والأداء",
-    sectionIds: ["comparison", "region_changes", "top_regions", "top_departments"],
+    title: "ملخص المؤشرات والاتجاه الزمني",
+    sectionIds: ["kpi_overview", "region_trend_chart", "comparison"],
   },
   {
     page: 3,
-    title: "التصنيفات والاستنتاجات",
-    sectionIds: ["top_classifications", "dept_class_rises", "overdue_table"],
+    title: "المناطق",
+    sectionIds: ["region_changes", "top_regions"],
+  },
+  {
+    page: 4,
+    title: "التصنيفات والإدارات والاستنتاجات",
+    sectionIds: ["top_classifications", "top_departments", "dept_class_rises", "executive_summary_text", "overdue_table"],
   },
 ] as const satisfies readonly ExecutiveBriefPagePlanEntry[];
 
@@ -98,7 +117,7 @@ export type KpiAssessment = "positive" | "negative" | "neutral" | "warning";
 export type ExecutiveBriefKpiCard = {
   key: string;
   label: string;
-  value: number;
+  value: number | null;
   previousValue: number | null;
   difference: number | null;
   changeRate: number | null;
@@ -124,6 +143,8 @@ export type RegionReferenceRow = {
   changeRate: number | null;
   complianceRate: number | null;
   averageResolutionDays: number | null;
+  openCount?: number;
+  closedCount?: number;
   currentlyLate: number;
   direction: string;
 };
@@ -147,6 +168,15 @@ export type ClassificationBriefRow = {
   shareOfTotal: number;
 };
 
+export type ExecutiveEntityRow = {
+  name: string;
+  total: number;
+  open: number;
+  closed: number;
+  currentlyLate: number;
+  shareOfTotal: number;
+};
+
 // ---------------------------------------------------------------------------
 // Comparative timeline chart (current vs previous, relative day axis)
 // ---------------------------------------------------------------------------
@@ -156,7 +186,7 @@ export type ClassificationBriefRow = {
  * `relativeDay` starts at 1 (first day of each period) regardless of the
  * absolute calendar date, allowing a direct visual overlay of both periods.
  */
-export type ComparativeTimelinePoint = { relativeDay: number; count: number };
+export type ComparativeTimelinePoint = { relativeDay: number; count: number; label?: string };
 
 export type ComparativeTimelineSeries = {
   label: string;
@@ -167,6 +197,7 @@ export type ComparativeTimelineData = {
   current: ComparativeTimelineSeries;
   previous: ComparativeTimelineSeries | null;
   periodDays: number;
+  aggregation?: "daily" | "weekly" | "monthly";
 };
 
 // ---------------------------------------------------------------------------

@@ -68,7 +68,7 @@ describe("GET /api/dashboard", () => {
     expect(body.volume.total).toBe(1);
     expect(body.volume.late).toBe(1);
     expect(body.kpis.currentlyLateComplaints.currentValue).toBe(1);
-    expect(body.distributions.byRegion[0]).toMatchObject({ name: "الرياض", count: 1 });
+    expect(body.distributions.byRegion[0]).toMatchObject({ name: "منطقة الرياض", count: 1 });
   });
 
   it("returns 500 when the database read fails", async () => {

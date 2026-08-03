@@ -3,7 +3,12 @@
 // Unit tests for the shared report contract types and helpers.
 
 import { describe, expect, it } from "vitest";
-import { REPORT_MODES, isReportMode } from "./report-contract";
+import {
+  COMPARISON_MODES,
+  REPORT_MODES,
+  isComparisonMode,
+  isReportMode,
+} from "./report-contract";
 
 describe("REPORT_MODES", () => {
   it("contains exactly 4 modes", () => {
@@ -74,5 +79,20 @@ describe("isReportMode", () => {
   it("is case-sensitive", () => {
     expect(isReportMode("digital_executive_brief")).toBe(false);
     expect(isReportMode("DIGITAL_executive_BRIEF")).toBe(false);
+  });
+});
+
+describe("comparison modes", () => {
+  it("contains the two temporal comparison strategies", () => {
+    expect(COMPARISON_MODES).toEqual([
+      "PREVIOUS_EQUIVALENT_PERIOD",
+      "SAME_PERIOD_LAST_YEAR",
+    ]);
+  });
+
+  it("accepts only supported temporal comparison modes", () => {
+    expect(isComparisonMode("PREVIOUS_EQUIVALENT_PERIOD")).toBe(true);
+    expect(isComparisonMode("SAME_PERIOD_LAST_YEAR")).toBe(true);
+    expect(isComparisonMode("IMPORT_BATCH")).toBe(false);
   });
 });

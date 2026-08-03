@@ -37,7 +37,9 @@ import {
 } from "lucide-react";
 import { formatDate, formatDateTime } from "@/lib/ar-utils";
 import {
+  COMPARISON_MODES,
   EXECUTIVE_BRIEF_PAGE_PLAN,
+  type ComparisonMode,
   type ExecutiveBriefPreviewPage,
   type ReportMatrixSection,
   type ReportMode,
@@ -46,6 +48,10 @@ import {
   formatReportNumber as formatNumber,
   REPORT_DESIGN_TOKENS,
 } from "@/lib/reports/design-tokens";
+import {
+  getComparisonModeDescription,
+  getComparisonModeLabelShort,
+} from "@/lib/reports/comparison-mode-labels";
 import { buildMatrixTruncationMessage } from "@/lib/reports/matrix-truncation";
 
 // =========================================================================
@@ -81,7 +87,7 @@ type FiltersData = {
   channels: string[];
 };
 
-type ReportKpiCard = { key: string; label: string; value: number; format: "number" | "percent" | "days" | "hours" };
+type ReportKpiCard = { key: string; label: string; value: number | null; format: "number" | "percent" | "days" | "hours" };
 type ReportTableColumn = { key: string; label: string; format?: "number" | "signed-number" | "percent" | "date" | "text" };
 type ReportTable = {
   id: string; title: string; columns: ReportTableColumn[];
@@ -97,7 +103,7 @@ type ReportSection =
   | (ReportSectionPreviewMetadata & { id: string; kind: "kpi"; title: string; cards: ReportKpiCard[] })
   | (ReportSectionPreviewMetadata & { id: string; kind: "table"; title: string; table: ReportTable })
   | (ReportSectionPreviewMetadata & { id: string; kind: "text"; title: string; points: string[] })
-  | (ReportSectionPreviewMetadata & { id: string; kind: "chart"; chartType: "line"; title: string; series: ChartSeries[]; description?: string; emptyState?: string; unit?: string; truncated?: boolean; truncatedMessage?: string })
+  | (ReportSectionPreviewMetadata & { id: string; kind: "chart"; chartType: "line" | "bar"; title: string; series: ChartSeries[]; description?: string; emptyState?: string; unit?: string; truncated?: boolean; truncatedMessage?: string })
   | ReportMatrixSection;
 
 type ReportData = {
@@ -105,11 +111,13 @@ type ReportData = {
   title: string;
   generatedAt: string;
   period: { from: string; to: string };
+  previousPeriod?: { from: string; to: string } | null;
   filters: Record<string, unknown>;
   sections: ReportSection[];
   warnings: string[];
   rowCount: number;
   reportMode?: ReportMode;
+  comparisonMode?: ComparisonMode;
 };
 
 type ReportTemplate = {
@@ -120,7 +128,7 @@ type ReportTemplate = {
   isActive: boolean;
   lastRunAt: string | null;
   createdAt: string;
-  options?: { reportMode?: ReportMode };
+  options?: { reportMode?: ReportMode; comparisonMode?: ComparisonMode };
   schedules: ReportSchedule[];
 };
 
@@ -147,7 +155,7 @@ type ReportRunRow = {
   failedAt: string | null;
   errorMessage: string | null;
   createdAt: string;
-  optionsSnapshot?: { reportMode?: ReportMode } | null;
+  optionsSnapshot?: { reportMode?: ReportMode; comparisonMode?: ComparisonMode } | null;
   reportTemplate?: { id: string; name: string } | null;
   artifacts: { id: string; format: "PDF" | "XLSX"; fileName: string; fileSize: number }[];
 };
@@ -172,6 +180,7 @@ const FILTER_KEYS: ReportFilterKey[] = [
 
 type OptionsForm = {
   reportMode: ReportMode;
+  comparisonMode: ComparisonMode;
   includeComparison: boolean;
   includeCharts: boolean;
   includeDetailedRows: boolean;
@@ -186,13 +195,13 @@ const REPORT_MODE_OPTIONS: readonly {
   {
     value: "DIGITAL_EXECUTIVE_BRIEF",
     label: "التقرير التنفيذي المختصر — عرض رقمي",
-    description: "ثلاث صفحات أفقية احترافية مناسبة للشاشة والاجتماعات التنفيذية.",
+    description: "أربع صفحات عربية منظمة للعرض والمراجعة.",
     recommended: true,
   },
   {
     value: "PRINT_EXECUTIVE_BRIEF",
     label: "التقرير التنفيذي المختصر — طباعة",
-    description: "ثلاث صفحات أفقية محسنة للطباعة.",
+    description: "أربع صفحات محسنة للطباعة بخطوط وجداول واضحة.",
   },
   {
     value: "FULL_ANALYTICAL",
@@ -205,6 +214,11 @@ const REPORT_MODE_OPTIONS: readonly {
     description: "التقرير التقليدي بكامل الأقسام المعتادة.",
   },
 ];
+
+// Derived from the shared helper so labels stay in sync automatically.
+const COMPARISON_MODE_LABELS: Record<ComparisonMode, string> = Object.fromEntries(
+  COMPARISON_MODES.map((mode) => [mode, getComparisonModeLabelShort(mode)])
+) as Record<ComparisonMode, string>;
 
 const REPORT_MODE_LEGEND_ID = "report-mode-legend";
 
@@ -296,6 +310,7 @@ function defaultOptions(reportType: ReportType | null): OptionsForm {
     reportMode: reportType === "EXECUTIVE_SUMMARY"
       ? "DIGITAL_EXECUTIVE_BRIEF"
       : "STANDARD",
+    comparisonMode: "PREVIOUS_EQUIVALENT_PERIOD",
     includeComparison: true,
     includeCharts: true,
     includeDetailedRows: false,
@@ -346,6 +361,7 @@ const KPI_FORMAT_SUFFIX: Record<ReportKpiCard["format"], string> = {
 };
 
 function formatKpiValue(card: ReportKpiCard): string {
+  if (card.value === null) return "غير متاح";
   return `${formatNumber(card.value)}${KPI_FORMAT_SUFFIX[card.format]}`;
 }
 
@@ -1006,10 +1022,30 @@ export function ReportsCenter() {
 
                 {selectedType === "EXECUTIVE_SUMMARY" && <Separator />}
 
+                {selectedType === "EXECUTIVE_SUMMARY" && options.includeComparison && (
+                  <div className="space-y-2">
+                    <Label htmlFor="comparison-mode">نوع المقارنة الزمنية</Label>
+                    <select
+                      id="comparison-mode"
+                      aria-label="نوع المقارنة الزمنية"
+                      className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+                      value={options.comparisonMode}
+                      onChange={(event) => setOptions((previous) => ({
+                        ...previous,
+                        comparisonMode: event.target.value as ComparisonMode,
+                      }))}
+                    >
+                      {Object.entries(COMPARISON_MODE_LABELS).map(([value, label]) => (
+                        <option key={value} value={value}>{label}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                   <label className="flex items-center gap-2 cursor-pointer text-sm">
                     <Checkbox checked={options.includeComparison} onCheckedChange={() => setOptions((p) => ({ ...p, includeComparison: !p.includeComparison }))} />
-                    مقارنة بالفترة السابقة
+                    تضمين مقارنة زمنية
                   </label>
                   <label className="flex items-center gap-2 cursor-pointer text-sm">
                     <Checkbox checked={options.includeCharts} onCheckedChange={() => setOptions((p) => ({ ...p, includeCharts: !p.includeCharts }))} />
@@ -1087,6 +1123,11 @@ export function ReportsCenter() {
                               {tpl.options?.reportMode && (
                                 <div className="text-xs text-muted-foreground">
                                   {REPORT_MODE_LABELS[tpl.options.reportMode]}
+                                </div>
+                              )}
+                              {tpl.options?.comparisonMode && (
+                                <div className="text-xs text-muted-foreground">
+                                  {COMPARISON_MODE_LABELS[tpl.options.comparisonMode]}
                                 </div>
                               )}
                             </TableCell>
@@ -1213,6 +1254,11 @@ export function ReportsCenter() {
                             {run.optionsSnapshot?.reportMode && (
                               <div className="text-xs text-muted-foreground">
                                 {REPORT_MODE_LABELS[run.optionsSnapshot.reportMode]}
+                              </div>
+                            )}
+                            {run.optionsSnapshot?.comparisonMode && (
+                              <div className="text-xs text-muted-foreground">
+                                {COMPARISON_MODE_LABELS[run.optionsSnapshot.comparisonMode]}
                               </div>
                             )}
                           </TableCell>
@@ -1470,9 +1516,10 @@ function isBriefReportMode(mode: ReportMode | undefined): boolean {
 }
 
 function executivePreviewPages(data: ReportData): readonly ReportSection[][] {
-  const pages: Array<Array<{ section: ReportSection; sourceOrder: number }>> = [[], [], []];
+  const pages: Array<Array<{ section: ReportSection; sourceOrder: number }>> =
+    EXECUTIVE_BRIEF_PAGE_PLAN.map(() => []);
   data.sections.forEach((section, sourceOrder) => {
-    const page = section.previewPage ?? 3;
+    const page = section.previewPage ?? 4;
     if (section.previewPage === undefined && process.env.NODE_ENV === "development") {
       console.warn("Executive brief preview section has no page metadata", { sectionId: section.id });
     }
@@ -1489,45 +1536,79 @@ function executivePreviewPages(data: ReportData): readonly ReportSection[][] {
   });
 }
 
+function executivePreviewPageContent(
+  data: ReportData,
+  pageIndex: number,
+  sections: readonly ReportSection[],
+  coverCards: readonly ReportKpiCard[]
+): ReactNode {
+  if (pageIndex === 0) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-6 text-center">
+        <h4 className="text-3xl font-bold">{data.title}</h4>
+        <p>الفترة من {data.period.from} إلى {data.period.to}</p>
+        <p className="text-sm text-muted-foreground">
+          {getComparisonModeDescription(data.comparisonMode, data.previousPeriod)}
+        </p>
+        <p className="text-xs text-muted-foreground">تاريخ الإنشاء: {formatDateTime(data.generatedAt)}</p>
+        <div className="grid w-full grid-cols-3 gap-3">
+          {coverCards.map((card) => (
+            <div key={card.key} className="rounded-lg border p-3">
+              <p className="text-xs text-muted-foreground">{card.label}</p>
+              <p className="text-xl font-bold">{formatKpiValue(card)}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (sections.length === 0) {
+    return (
+      <div className="flex h-full items-center justify-center rounded-lg bg-muted/20 text-sm text-muted-foreground">
+        لا توجد بيانات كافية لهذا القسم.
+      </div>
+    );
+  }
+  return sections.map((section) => (
+    <section key={section.id} className="space-y-1">
+      <h4 className="text-sm font-semibold">{section.title}</h4>
+      <SectionBody section={section} />
+    </section>
+  ));
+}
+
 function ExecutiveReportPreview({ data }: Readonly<{ data: ReportData }>) {
   const pages = executivePreviewPages(data);
-  const digital = data.reportMode === "DIGITAL_EXECUTIVE_BRIEF";
   const pageTitles = EXECUTIVE_BRIEF_PAGE_PLAN.map((page) => page.title);
+  const coverSection = data.sections.find((section) => section.kind === "kpi");
+  const coverCards = coverSection?.kind === "kpi" ? coverSection.cards.slice(0, 3) : [];
   return (
     <Card id="report-preview">
       <CardHeader className="border-b bg-muted/30">
         <CardTitle>{data.title}</CardTitle>
         <CardDescription>
-          معاينة {digital ? "رقمية بنسبة 16:9" : "طباعة أفقية"} — ثلاث صفحات
+          معاينة وفق تخطيط التقرير المرجعي — أربع صفحات
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5 p-4 md:p-6">
         {pages.map((sections, pageIndex) => (
           <article
             key={pageTitles[pageIndex]}
-            aria-label={`صفحة ${pageIndex + 1} من 3`}
-            className="mx-auto flex w-full max-w-6xl flex-col overflow-hidden rounded-lg border bg-white p-5 shadow-sm"
+            aria-label={`صفحة ${pageIndex + 1} من 4`}
+            className="mx-auto flex w-full max-w-4xl flex-col overflow-hidden rounded-lg border p-5 shadow-sm"
             style={{
-              aspectRatio: digital ? "16 / 9" : `${841.89} / ${595.28}`,
+              aspectRatio: "3 / 4",
               borderColor: REPORT_DESIGN_TOKENS.colors.border,
               color: REPORT_DESIGN_TOKENS.colors.primary,
+              backgroundColor: REPORT_DESIGN_TOKENS.colors.background,
             }}
           >
             <header className="mb-3 flex items-center justify-between border-b pb-2">
-              <span className="text-xs text-muted-foreground">صفحة {pageIndex + 1} من 3</span>
+              <span className="text-xs text-muted-foreground">صفحة {pageIndex + 1} من 4</span>
               <h3 className="text-base font-semibold">{pageTitles[pageIndex]}</h3>
             </header>
             <div className="min-h-0 flex-1 space-y-3 overflow-auto text-right" dir="rtl">
-              {sections.length === 0 ? (
-                <div className="flex h-full items-center justify-center rounded-lg bg-muted/20 text-sm text-muted-foreground">
-                  لا توجد بيانات كافية لهذا القسم.
-                </div>
-              ) : sections.map((section) => (
-                <section key={section.id} className="space-y-1">
-                  <h4 className="text-sm font-semibold">{section.title}</h4>
-                  <SectionBody section={section} />
-                </section>
-              ))}
+              {executivePreviewPageContent(data, pageIndex, sections, coverCards)}
             </div>
           </article>
         ))}

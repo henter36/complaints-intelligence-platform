@@ -15,7 +15,6 @@ import {
 import {
   buildComparisonResult,
   comparisonWarningMessage,
-  MAX_TREND_SERIES,
   type ComparisonResult,
   type DeptClassRiseRow,
   type RegionChangeRow,
@@ -28,10 +27,12 @@ import {
 import type {
   ReportMatrixSection,
   ReportMode,
+  ComparisonMode,
   ExecutiveBriefKpiCard,
   RegionReferenceRow,
   ClassificationBriefRow,
   ComparativeTimelineData,
+  ExecutiveEntityRow,
   ConcentrationBand,
   NetBacklogFlow,
   PerfVolumeRow,
@@ -67,7 +68,7 @@ export function isReportRowLimitExceededError(error: unknown): error is ReportRo
 export type ReportKpiCard = {
   key: string;
   label: string;
-  value: number;
+  value: number | null;
   format: "number" | "percent" | "days" | "hours";
 };
 
@@ -100,7 +101,7 @@ type ReportSectionPreviewMetadata = {
 export type ReportChartSection = ReportSectionPreviewMetadata & {
   id: string;
   kind: "chart";
-  chartType: "line";
+  chartType: "line" | "bar";
   title: string;
   description?: string;
   xAxisLabel?: string;
@@ -148,6 +149,7 @@ export type ReportData = {
   comparisonData?: ComparisonResult;
   // Mode-specific extended data (only present for the new report modes).
   reportMode?: ReportMode;
+  comparisonMode?: ComparisonMode;
   briefData?: ExecutiveBriefData | FullAnalyticalData;
 };
 
@@ -158,6 +160,9 @@ export type ExecutiveBriefData = {
   topClassifications: ClassificationBriefRow[];
   comparativeTimeline: ComparativeTimelineData;
   concentrationBands: ConcentrationBand[];
+  topDepartments?: ExecutiveEntityRow[];
+  conclusions?: string[];
+  notes?: string[];
 };
 
 /** Extended payload for FULL_ANALYTICAL mode (super-set of ExecutiveBriefData). */
@@ -178,6 +183,7 @@ export function isFullAnalyticalData(
 export type {
   ReportMatrixSection,
   ReportMode,
+  ComparisonMode,
   ExecutiveBriefKpiCard,
   RegionReferenceRow,
   ClassificationBriefRow,
@@ -189,7 +195,7 @@ export type {
 };
 const PREVIEW_TABLE_ROW_CAP = 100;
 
-function kpi(key: string, label: string, value: number, format: ReportKpiCard["format"] = "number"): ReportKpiCard {
+function kpi(key: string, label: string, value: number | null, format: ReportKpiCard["format"] = "number"): ReportKpiCard {
   return { key, label, value, format };
 }
 
@@ -249,16 +255,14 @@ function regionTrendChartSection(trend: RegionTrendData): ReportChartSection {
     id: "region_trend_chart",
     kind: "chart",
     chartType: "line",
-    title: "الاتجاه الزمني للشكاوى حسب المنطقة",
-    description: "عدد الشكاوى المستقبلة يومياً لكل منطقة خلال الفترة الحالية.",
+    title: "الاتجاه الزمني لإجمالي الشكاوى",
+    description: "عدد الشكاوى خلال الفترة الحالية وفق التجميع الزمني المناسب.",
     xAxisLabel: "اليوم",
     yAxisLabel: "عدد الشكاوى",
     unit: "شكوى",
     emptyState: "لا توجد بيانات لعرضها في الرسم البياني.",
     truncated: trend.truncated,
-    truncatedMessage: trend.truncated
-      ? `تم عرض أعلى ${MAX_TREND_SERIES} مناطق فقط، وتم تجميع البقية ضمن "${trend.otherSeriesName ?? "مناطق أخرى"}".`
-      : undefined,
+    truncatedMessage: undefined,
     series: trend.series.map((series) => ({
       name: series.regionName,
       isOther: series.regionName === trend.otherSeriesName,
@@ -450,8 +454,14 @@ async function buildExecutiveSummaryCore(
 ): Promise<ExecutiveSummaryCore> {
   const { filters, options } = request;
   const params = buildComplaintQueryParams(filters);
-  const result = await getComplaintKpis(params, now);
-  const comparison = await buildComparisonResult(filters, now);
+  const result = await getComplaintKpis(params, now, {
+    comparisonMode: options.comparisonMode ?? "PREVIOUS_EQUIVALENT_PERIOD",
+    includeComparison: options.includeComparison,
+  });
+  const comparison = await buildComparisonResult(filters, now, {
+    comparisonMode: options.comparisonMode ?? "PREVIOUS_EQUIVALENT_PERIOD",
+    includeComparison: options.includeComparison,
+  });
   const warnings: string[] = comparison.warnings.map(comparisonWarningMessage);
 
   const sections: ReportSection[] = [];
@@ -460,7 +470,7 @@ async function buildExecutiveSummaryCore(
     sections.push({
       id: "executive_summary_text",
       kind: "text",
-      title: "الملخص التنفيذي",
+      title: "الملخص",
       points: comparison.executiveSummaryPoints,
     });
   }
@@ -473,8 +483,8 @@ async function buildExecutiveSummaryCore(
       kind: "kpi",
       title: "مقارنة بالفترة السابقة",
       cards: [
-        kpi("previousTotal", "إجمالي الفترة السابقة", result.trend.previousTotal ?? 0),
-        kpi("growthRate", "نسبة التغير%", result.trend.growthRate ?? 0, "percent"),
+        kpi("previousTotal", "إجمالي الفترة السابقة", result.trend.previousTotal),
+        kpi("growthRate", "نسبة التغير%", result.trend.growthRate, "percent"),
       ],
     });
   }
@@ -550,6 +560,7 @@ async function buildExecutiveSummaryCore(
     warnings,
     rowCount: 0,
     comparisonData: comparison,
+    comparisonMode: options.comparisonMode ?? "PREVIOUS_EQUIVALENT_PERIOD",
   };
   return { data, kpiResult: result, comparison };
 }
@@ -574,9 +585,9 @@ async function buildExecutiveSummaryWithMode(
 
   const modeTitle: Record<ReportMode, string> = {
     STANDARD: getReportDefinition(ReportType.EXECUTIVE_SUMMARY).title,
-    DIGITAL_EXECUTIVE_BRIEF: "تقرير تنفيذي مختصر — عرض رقمي",
-    PRINT_EXECUTIVE_BRIEF: "تقرير تنفيذي مختصر — طباعة",
-    FULL_ANALYTICAL: "التقرير التحليلي الكامل",
+    DIGITAL_EXECUTIVE_BRIEF: "تقرير الشكاوى",
+    PRINT_EXECUTIVE_BRIEF: "تقرير الشكاوى",
+    FULL_ANALYTICAL: "تقرير الشكاوى",
   };
 
   const title = request.title ?? modeTitle[reportMode];
@@ -594,7 +605,7 @@ async function buildExecutiveSummaryWithMode(
       "to",
       new Date(comparison.previousPeriod.toExclusive.getTime() - DAY_MS).toISOString().slice(0, 10)
     );
-    previousResult = await getComplaintKpis(prevParams, now);
+    previousResult = await getComplaintKpis(prevParams, now, { includeComparison: false });
   }
 
   if (reportMode === "FULL_ANALYTICAL") {

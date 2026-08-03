@@ -30,7 +30,7 @@ interface DashboardData {
     validated: number; notValidated: number; potentialDuplicates: number;
   };
   performance: {
-    closureRate: number; onTimeRate: number; lateRate: number;
+    closureRate: number; onTimeRate: number | null; lateRate: number;
     avgFirstResponseHours: number; avgProcessingHours: number; avgOpenAgeHours: number;
     overdueNoAction: number; overdueNoActionRate: number; reopenRate: number;
     validityRate: number; avgSatisfaction: number; satisfactionRate: number;
@@ -594,7 +594,7 @@ function MiniStat({ label, value, icon }: { label: string; value: number; icon: 
 function PerfCard({
   title, value, suffix, icon, color, target, inverse,
 }: {
-  title: string; value: number; suffix: string; icon: React.ReactNode;
+  title: string; value: number | null; suffix: string; icon: React.ReactNode;
   color: "emerald" | "blue" | "red" | "purple";
   target: number; inverse?: boolean;
 }) {
@@ -605,7 +605,16 @@ function PerfCard({
     purple: { bg: "bg-purple-100 dark:bg-purple-900/30", text: "text-purple-600", bar: "bg-purple-500" },
   };
   const c = colors[color];
-  const isGood = inverse ? value <= target : value >= target;
+  const isGood = value !== null && (inverse ? value <= target : value >= target);
+  let badgeVariant: "outline" | "secondary" | "destructive" = "destructive";
+  let badgeText = "تحت المستهدف";
+  if (value === null) {
+    badgeVariant = "outline";
+    badgeText = "غير متاح";
+  } else if (isGood) {
+    badgeVariant = "secondary";
+    badgeText = "ضمن المستهدف";
+  }
   return (
     <Card className="card-hover">
       <CardContent className="p-4">
@@ -613,13 +622,13 @@ function PerfCard({
           <div className={`flex h-10 w-10 items-center justify-center rounded-lg ${c.bg} ${c.text}`}>
             {icon}
           </div>
-          <Badge variant={isGood ? "secondary" : "destructive"} className="text-xs">
-            {isGood ? "ضمن المستهدف" : "تحت المستهدف"}
+          <Badge variant={badgeVariant} className="text-xs">
+            {badgeText}
           </Badge>
         </div>
-        <p className="text-2xl font-bold tabular-nums">{value}{suffix}</p>
+        <p className="text-2xl font-bold tabular-nums">{value === null ? "غير متاح" : `${value}${suffix}`}</p>
         <p className="text-xs text-muted-foreground mt-1">{title}</p>
-        <Progress value={value} className="h-1.5 mt-2" />
+        <Progress value={value ?? 0} className="h-1.5 mt-2" />
       </CardContent>
     </Card>
   );

@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ReportData, ReportSection } from "./report-data-service";
 import { renderReportPdf } from "./report-pdf-service";
 import * as chartService from "./report-chart-service";
+import { preparePdfText } from "./arabic-pdf-text";
 
 /** PDFKit stores Info strings (Title/Keywords) as UTF-16BE literals, so a
  * title is discoverable in the raw buffer via its UTF-16BE byte sequence.
@@ -154,7 +155,7 @@ describe("PDF report rendering", () => {
     });
     const { buffer } = await renderReportPdf(report);
     const pageCount = (buffer.toString("binary").match(/\/Type\s*\/Page\s*\/Parent/g) ?? []).length;
-    expect(pageCount).toBe(1);
+    expect(pageCount).toBe(2);
     expect(bufferContainsText(buffer, "صافي تدفق التراكم")).toBe(true);
     expect(bufferContainsText(buffer, "الأداء مقابل الحجم")).toBe(true);
     expect(bufferContainsText(buffer, "الاستمرارية")).toBe(false);
@@ -208,7 +209,7 @@ describe("PDF report rendering", () => {
       }));
 
       expect(textSpy.mock.calls.map((call) => call[0]))
-        .toContain("تم اختصار عرض بيانات المصفوفة.");
+        .toContain(preparePdfText("تم اختصار عرض بيانات المصفوفة."));
     } finally {
       textSpy.mockRestore();
     }
@@ -301,9 +302,32 @@ describe("PDF report — comparative executive sections", () => {
     expect(buffer.toString("binary")).not.toContain("[object Object]");
   });
 
-  it("renders a methodology note only for executive summaries", async () => {
-    const { buffer } = await renderReportPdf(executiveReport());
-    expect(bufferContainsText(buffer, "منهجية الاحتساب")).toBe(true);
+  it("omits the removed methodology wording", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderReportPdf(executiveReport());
+      const drawnText = textSpy.mock.calls.map((call) => String(call[0]));
+      expect(drawnText).not.toContain("منهجية الاحتساب");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("uses the actual report title and preserves unavailable cover metrics", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderReportPdf(baseReport({
+        title: "تقرير أداء الإدارات",
+        sections: [],
+        kpis: {} as ReportData["kpis"],
+      }));
+      const drawnText = textSpy.mock.calls.map((call) => String(call[0]));
+      // preparePdfText reverses RTL token order for Arabic strings
+      expect(drawnText).toContain(preparePdfText("تقرير أداء الإدارات"));
+      expect(drawnText.filter((text) => text === preparePdfText("غير متاح"))).toHaveLength(3);
+    } finally {
+      textSpy.mockRestore();
+    }
   });
 
   it("renders a visible placeholder instead of crashing when a chart has no data", async () => {

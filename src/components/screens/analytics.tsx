@@ -40,7 +40,7 @@ interface DashboardData {
     validated: number; notValidated: number; potentialDuplicates: number;
   };
   performance: {
-    closureRate: number; onTimeRate: number; lateRate: number;
+    closureRate: number; onTimeRate: number | null; lateRate: number;
     avgFirstResponseHours: number; avgProcessingHours: number; avgOpenAgeHours: number;
     overdueNoAction: number; overdueNoActionRate: number; reopenRate: number;
     validityRate: number; avgSatisfaction: number; satisfactionRate: number;

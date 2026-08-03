@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { ReportType } from "@prisma/client";
-import { REPORT_MODES } from "@/lib/reports/report-contract";
+import { COMPARISON_MODES, REPORT_MODES } from "@/lib/reports/report-contract";
 
 export { ReportType };
 
@@ -80,7 +80,7 @@ const OVERDUE_COLUMNS = [
 export const REPORT_DEFINITIONS: Record<ReportType, ReportDefinition> = {
   EXECUTIVE_SUMMARY: {
     type: ReportType.EXECUTIVE_SUMMARY,
-    title: "التقرير التنفيذي الشامل",
+    title: "تقرير الشكاوى",
     description: "نظرة شاملة على أداء الشكاوى خلال الفترة المحددة مع مقارنة بالفترة السابقة.",
     supportedFilters: COMMON_FILTERS,
     sections: [
@@ -241,6 +241,7 @@ export const reportOptionsSchema = z
     maxRows: z.coerce.number().int().positive().max(10_000).optional(),
     columns: z.array(z.string().trim().min(1).max(100)).max(50).optional(),
     reportMode: z.enum(REPORT_MODES).optional(),
+    comparisonMode: z.enum(COMPARISON_MODES).optional(),
   })
   .strict();
 
@@ -294,6 +295,8 @@ export function parseReportRequest(input: unknown): ReportRequest {
   const reportMode = parsed.data.type === ReportType.EXECUTIVE_SUMMARY
     ? parsed.data.options.reportMode ?? "STANDARD"
     : "STANDARD";
+  const comparisonMode = parsed.data.options.comparisonMode
+    ?? "PREVIOUS_EQUIVALENT_PERIOD";
 
   if (parsed.data.options.columns) {
     const allowed = new Set(definition.defaultColumns);
@@ -309,7 +312,12 @@ export function parseReportRequest(input: unknown): ReportRequest {
 
   return {
     ...parsed.data,
-    options: { ...parsed.data.options, maxRows: effectiveMaxRows, reportMode },
+    options: {
+      ...parsed.data.options,
+      maxRows: effectiveMaxRows,
+      reportMode,
+      comparisonMode,
+    },
   };
 }
 

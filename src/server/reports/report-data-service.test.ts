@@ -65,6 +65,8 @@ function comparisonResultWithReference(hasReference: boolean) {
           toExclusive: new Date("2026-07-01T00:00:00Z"),
         }
       : null,
+    currentTotal: 10,
+    previousTotal: hasReference ? 8 : null,
     regionTrend: { allDates: [], series: [], truncated: false, otherSeriesName: null },
     regionChanges: [],
     deptClassRises: [],
@@ -97,7 +99,11 @@ describe("report data service — parity with the central KPI service", () => {
     const request = parseReportRequest({ type: "EXECUTIVE_SUMMARY", filters: VALID_FILTERS });
     const now = new Date("2026-07-31T00:00:00Z");
 
-    const directKpis = await getComplaintKpis(buildComplaintQueryParams(request.filters), now);
+    const directKpis = await getComplaintKpis(
+      buildComplaintQueryParams(request.filters),
+      now,
+      { includeComparison: request.options.includeComparison }
+    );
     const report = await buildReportData(request, "preview", now);
 
     // The report's headline KPI object must be identical to the central
@@ -123,11 +129,11 @@ describe("report data service — parity with the central KPI service", () => {
     // Comparison data is threaded through for the XLSX/PDF renderers.
     expect(report.comparisonData).toBeDefined();
     expect(report.sections.find((section) => section.id === "kpi_overview"))
-      .toMatchObject({ previewPage: 1, previewOrder: 0 });
+      .toMatchObject({ previewPage: 2, previewOrder: 0 });
     expect(report.sections.find((section) => section.id === "region_changes"))
-      .toMatchObject({ previewPage: 2, previewOrder: 1 });
-    expect(report.sections.find((section) => section.id === "top_classifications"))
       .toMatchObject({ previewPage: 3, previewOrder: 0 });
+    expect(report.sections.find((section) => section.id === "top_classifications"))
+      .toMatchObject({ previewPage: 4, previewOrder: 0 });
   });
 
   it("STANDARD skips the unused reference-period KPI query", async () => {
