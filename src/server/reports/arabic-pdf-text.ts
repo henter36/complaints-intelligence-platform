@@ -182,6 +182,87 @@ export type PreparedPdfTextLayout = {
   height: number;
 };
 
+// ---------------------------------------------------------------------------
+// preparePdfTextLayout helpers
+// ---------------------------------------------------------------------------
+
+function resolveMaxWidth(options: PDFKit.Mixins.TextOptions): number {
+  return options.width !== undefined ? options.width : Infinity;
+}
+
+/** Returns true when the paragraph must be wrapped using RTL token reversal. */
+function shouldWrapRtlParagraph(paragraph: string, maxWidth: number): boolean {
+  return (
+    containsArabic(paragraph) &&
+    paragraphDirection(paragraph) === "rtl" &&
+    Number.isFinite(maxWidth)
+  );
+}
+
+/**
+ * Wraps a single RTL paragraph into visual lines by measuring logical token
+ * widths. The LOGICAL token order is preserved per line; callers reverse each
+ * line independently.
+ */
+function wrapLogicalRtlParagraph(
+  doc: PDFKit.PDFDocument,
+  paragraph: string,
+  maxWidth: number,
+  wordSpacing: number
+): string[][] {
+  const tokens = paragraph.split(" ").filter((t) => t.length > 0);
+  const spaceWidth = doc.widthOfString(" ") + wordSpacing;
+  const wrappedLines: string[][] = [];
+  let lineTokens: string[] = [];
+  let lineWidth = 0;
+
+  for (const token of tokens) {
+    const tokenWidth = doc.widthOfString(token);
+    if (lineTokens.length > 0 && lineWidth + spaceWidth + tokenWidth > maxWidth) {
+      wrappedLines.push(lineTokens);
+      lineTokens = [token];
+      lineWidth = tokenWidth;
+    } else {
+      lineWidth = lineTokens.length > 0 ? lineWidth + spaceWidth + tokenWidth : tokenWidth;
+      lineTokens.push(token);
+    }
+  }
+  if (lineTokens.length > 0) wrappedLines.push(lineTokens);
+
+  return wrappedLines;
+}
+
+/**
+ * Processes one \n-delimited paragraph and appends the resulting
+ * PreparedPdfLine entries to `target`.
+ */
+function appendPreparedParagraph(
+  target: PreparedPdfLine[],
+  doc: PDFKit.PDFDocument,
+  paragraph: string,
+  maxWidth: number,
+  wordSpacing: number
+): void {
+  if (!paragraph) {
+    target.push({ logicalText: "", visualText: "", width: maxWidth });
+    return;
+  }
+
+  if (!shouldWrapRtlParagraph(paragraph, maxWidth)) {
+    target.push({ logicalText: paragraph, visualText: paragraph, width: maxWidth });
+    return;
+  }
+
+  const wrappedLines = wrapLogicalRtlParagraph(doc, paragraph, maxWidth, wordSpacing);
+  for (const wTokens of wrappedLines) {
+    target.push({
+      logicalText: wTokens.join(" "),
+      visualText: wTokens.toReversed().join(" "),
+      width: maxWidth,
+    });
+  }
+}
+
 /**
  * Prepares multi-line text for PDF rendering with correct RTL layout.
  *
@@ -215,51 +296,13 @@ export function preparePdfTextLayout(
   text: string,
   options: PDFKit.Mixins.TextOptions
 ): PreparedPdfTextLayout {
-  const maxWidth = options.width !== undefined ? options.width : Infinity;
+  const maxWidth = resolveMaxWidth(options);
   const wordSpacing = (options as { wordSpacing?: number }).wordSpacing ?? 0;
   const lineHeight = doc.currentLineHeight(true);
   const allLines: PreparedPdfLine[] = [];
 
   for (const paragraph of text.split("\n")) {
-    if (!paragraph) {
-      allLines.push({ logicalText: "", visualText: "", width: maxWidth });
-      continue;
-    }
-
-    const isRtl = containsArabic(paragraph) && paragraphDirection(paragraph) === "rtl";
-    if (!isRtl || !isFinite(maxWidth)) {
-      // LTR paragraphs and no-wrap cases: pass through as a single line.
-      allLines.push({ logicalText: paragraph, visualText: paragraph, width: maxWidth });
-      continue;
-    }
-
-    // RTL paragraph with a finite width: wrap logical tokens, then reverse each line.
-    const tokens = paragraph.split(" ").filter((t) => t.length > 0);
-    const wrappedLines: string[][] = [];
-    let lineTokens: string[] = [];
-    let lineWidth = 0;
-    const spaceWidth = doc.widthOfString(" ") + wordSpacing;
-
-    for (const token of tokens) {
-      const tokenWidth = doc.widthOfString(token);
-      if (lineTokens.length > 0 && lineWidth + spaceWidth + tokenWidth > maxWidth) {
-        wrappedLines.push(lineTokens);
-        lineTokens = [token];
-        lineWidth = tokenWidth;
-      } else {
-        lineWidth = lineTokens.length > 0 ? lineWidth + spaceWidth + tokenWidth : tokenWidth;
-        lineTokens.push(token);
-      }
-    }
-    if (lineTokens.length > 0) wrappedLines.push(lineTokens);
-
-    for (const wTokens of wrappedLines) {
-      allLines.push({
-        logicalText: wTokens.join(" "),
-        visualText: wTokens.toReversed().join(" "),
-        width: maxWidth,
-      });
-    }
+    appendPreparedParagraph(allLines, doc, paragraph, maxWidth, wordSpacing);
   }
 
   return {

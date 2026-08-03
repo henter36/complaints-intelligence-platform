@@ -346,18 +346,20 @@ describe("preparePdfText — number ordering", () => {
 // ---------------------------------------------------------------------------
 
 describe("preparePdfText — real report sentences", () => {
-  it("RTL reading of conclusion 1 is semantically correct", () => {
-    const input = "منطقة الرياض الأعلى حجماً بعدد شكويين وتمثل 66.7% من الإجمالي.";
-    expect(readRtl(preparePdfText(input))).toBe(input);
-  });
-
-  it("RTL reading of conclusion 2 is semantically correct", () => {
-    const input = "أعلى زيادة مطلقة في منطقة الرياض: شكويان.";
-    expect(readRtl(preparePdfText(input))).toBe(input);
-  });
-
-  it("page footer 'page X of Y' reconstructs correctly", () => {
-    const input = "صفحة 1 من 4";
+  it.each([
+    [
+      "conclusion with percentage",
+      "منطقة الرياض الأعلى حجماً بعدد شكويين وتمثل 66.7% من الإجمالي.",
+    ],
+    [
+      "regional increase conclusion",
+      "أعلى زيادة مطلقة في منطقة الرياض: شكويان.",
+    ],
+    [
+      "page footer",
+      "صفحة 1 من 4",
+    ],
+  ])("preserves RTL semantic order for %s", (_caseName, input) => {
     expect(readRtl(preparePdfText(input))).toBe(input);
   });
 });

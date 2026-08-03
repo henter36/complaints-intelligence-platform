@@ -555,25 +555,26 @@ describe("buildComparisonResult — currentTotal and previousTotal", () => {
     expect(regionChangesSum).toBe(result.previousTotal!);
   });
 
-  it("null vs 0 previousTotal: both are distinguishable from undefined", async () => {
+  it("distinguishes an empty previous period from an unavailable comparison period", async () => {
     const { buildComparisonResult } = await loadModule();
-    // With previous period: previousTotal is a number (≥ 0)
-    mockPeriods([row()], []);
-    const withPrevious = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
-    expect(typeof withPrevious.previousTotal).toBe("number");
 
-    // Without previous period: previousTotal is null
+    // Case 1: valid filters → a previous period is derived and queried.
+    // The mock returns zero complaints for that period (previousTotal = 0).
+    mockPeriods([row()], []); // current: 1 row, previous: 0 rows
+    const withPrevious = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
+    expect(withPrevious.previousPeriod).not.toBeNull(); // a real period was derived
+    expect(withPrevious.previousTotal).toBe(0);         // queried but found nothing
+
+    // Case 2: invalid date range (from > to) → derivePreviousPeriodRange returns
+    // null because the duration is ≤ 0, so no previous query is issued.
     dbMocks.findMany.mockReset();
     dbMocks.findMany.mockResolvedValueOnce([row()]);
     const withoutPrevious = await buildComparisonResult(
-      { from: "2026-07-15", to: "2026-07-14" },
+      { from: "2026-07-15", to: "2026-07-14" }, // invalid: from > to → no period
       new Date("2026-07-31T00:00:00Z")
     );
-    expect(withoutPrevious.previousTotal).toBeNull();
-
-    // Confirm distinctness: null ≠ 0
-    expect(null).not.toBe(0);
-    expect(withPrevious.previousTotal).not.toBeNull();
+    expect(withoutPrevious.previousPeriod).toBeNull(); // no comparison period
+    expect(withoutPrevious.previousTotal).toBeNull();  // not 0 — period never queried
   });
 });
 
