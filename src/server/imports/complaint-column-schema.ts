@@ -25,6 +25,13 @@ export const COMPLAINT_IMPORT_FIELDS = [
   "priority",
   "channel",
   "resolution",
+  "actionTaken",
+  "actionDescription",
+  "closedBy",
+  "wingCode",
+  "lastModifiedAt",
+  "lastUpdatedBy",
+  "complaintCount",
 ] as const;
 
 export type ComplaintImportField = (typeof COMPLAINT_IMPORT_FIELDS)[number];
@@ -85,15 +92,19 @@ const FIELD_LABELS: Record<ComplaintImportField, string> = {
   priority: "الأولوية",
   channel: "القناة",
   resolution: "الإجراء أو الحل",
+  actionTaken: "الإجراء المتخذ",
+  actionDescription: "وصف الإجراء",
+  closedBy: "مُغلق من",
+  wingCode: "رمز الجناح",
+  lastModifiedAt: "آخر تعديل في",
+  lastUpdatedBy: "آخر من حدّث",
+  complaintCount: "عدد الشكاوي",
 };
 
-/** Prefer primary action text over descriptive action text when both headers are present. */
 const RESOLUTION_HEADER_PRIORITY = [
-  "الاجراء المتخذ",
   "الاجراء او الحل",
   "الحل",
   "resolution",
-  "وصف الاجراء",
 ];
 
 const SYNONYMS: Record<ComplaintImportField, string[]> = {
@@ -163,13 +174,52 @@ const SYNONYMS: Record<ComplaintImportField, string[]> = {
   priority: ["الأولوية", "priority"],
   channel: ["المصدر", "مصدر الشكوى", "القناة", "channel", "source"],
   resolution: [
-    "الإجراء المتخذ",
-    "الاجراء المتخذ",
-    "وصف الإجراء",
-    "وصف الاجراء",
     "الإجراء أو الحل",
     "الحل",
     "resolution",
+  ],
+  actionTaken: [
+    "الإجراء المتخذ",
+    "الاجراء المتخذ",
+    "action taken",
+  ],
+  actionDescription: [
+    "وصف الإجراء",
+    "وصف الاجراء",
+    "action description",
+  ],
+  closedBy: [
+    "مُغلق من",
+    "مغلق من",
+    "أُغلق من قبل",
+    "مغلق بواسطة",
+    "أغلقت بواسطة",
+    "اغلقت بواسطة",
+    "closed by",
+  ],
+  wingCode: [
+    "رمز الجناح",
+    "الجناح",
+    "كود الجناح",
+    "wing code",
+  ],
+  lastModifiedAt: [
+    "آخر تعديل في",
+    "اخر تعديل في",
+    "تاريخ آخر تعديل",
+    "last modified at",
+    "modified at",
+  ],
+  lastUpdatedBy: [
+    "آخر من حدّث",
+    "اخر من حدث",
+    "آخر تحديث بواسطة",
+    "last updated by",
+  ],
+  complaintCount: [
+    "عدد الشكاوي",
+    "عدد الشكاوى",
+    "complaint count",
   ],
 };
 
@@ -178,10 +228,6 @@ export function normalizeColumnHeader(value: string): string {
     .replaceAll(/\s+/g, " ")
     .toLocaleLowerCase("ar-SA");
 }
-
-const INTENTIONALLY_IGNORED_NORMALIZED = new Set<string>(
-  ["عدد الشكاوي", "عدد الشكاوى", "complaint count"].map(normalizeColumnHeader)
-);
 
 const SYNONYM_INDEX = new Map<string, ComplaintImportField>();
 
@@ -268,15 +314,6 @@ function classifyHeaderMappingEntry(input: {
   const normalizedHeader = normalizeColumnHeader(input.trimmed);
   const field = input.mapping[input.trimmed] ?? input.mapping[input.header] ?? null;
   const suggested = SYNONYM_INDEX.get(normalizedHeader);
-
-  if (INTENTIONALLY_IGNORED_NORMALIZED.has(normalizedHeader)) {
-    return {
-      header: input.trimmed,
-      normalizedHeader,
-      field: null,
-      status: "INTENTIONALLY_IGNORED",
-    };
-  }
 
   if (input.conflictHeaders.has(input.trimmed) || input.conflictHeaders.has(input.header)) {
     return {
@@ -383,8 +420,7 @@ export function analyzeColumnMapping(
     unmappedColumns: headers
       .map((header) => header.trim())
       .filter(Boolean)
-      .filter((header) => !mappedHeaders.has(header))
-      .filter((header) => !INTENTIONALLY_IGNORED_NORMALIZED.has(normalizeColumnHeader(header))),
+      .filter((header) => !mappedHeaders.has(header)),
     conflicts,
   };
 }

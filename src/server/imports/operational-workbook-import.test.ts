@@ -148,24 +148,30 @@ describe("operational workbook column synonyms", () => {
     expect(mapping["آخر تحديث في"]).toBe("sourceUpdatedAt");
     expect(mapping["حالة الاجراء"]).toBe("sourceActionStatus");
     expect(mapping["المصدر"]).toBe("channel");
-    expect(mapping["الإجراء المتخذ"]).toBe("resolution");
+    expect(mapping["الإجراء المتخذ"]).toBe("actionTaken");
+    expect(mapping["وصف الإجراء"]).toBe("actionDescription");
     expect(mapping["المُعرف"]).toBe("sourceReference");
-    expect(mapping["وصف الإجراء"]).toBeUndefined();
-    expect(conflicts.some((item) => item.header === "وصف الإجراء")).toBe(true);
-    expect(mapping).not.toHaveProperty("عدد الشكاوي");
+    expect(mapping["عدد الشكاوي"]).toBe("complaintCount");
+    expect(mapping["أغلقت بواسطة"]).toBe("closedBy");
+    expect(mapping["آخر تحديث بواسطة"]).toBe("lastUpdatedBy");
+    expect(conflicts).toHaveLength(0);
   });
 
-  it("marks عدد الشكاوي as INTENTIONALLY_IGNORED and excludes it from unmappedColumns", () => {
+  it("maps عدد الشكاوي to complaintCount; عدد الشكاوى becomes a conflict when both appear", () => {
     const headers = ["رقم الشكوى", "تاريخ التسجيل", "الوصف", "عدد الشكاوي", "عدد الشكاوى"];
-    const { mapping } = matchComplaintColumns(headers);
+    const { mapping, conflicts } = matchComplaintColumns(headers);
     const analysis = analyzeColumnMapping(headers, mapping);
 
-    const ignoredEntries = analysis.entries.filter((e) => e.status === "INTENTIONALLY_IGNORED");
-    expect(ignoredEntries.map((e) => e.header)).toEqual(
-      expect.arrayContaining(["عدد الشكاوي", "عدد الشكاوى"])
-    );
+    expect(mapping["عدد الشكاوي"]).toBe("complaintCount");
+    expect(conflicts.some((c) => c.header === "عدد الشكاوى")).toBe(true);
+    const mappedEntries = analysis.entries.filter((e) => e.status === "AUTO_MAPPED");
+    expect(mappedEntries.some((e) => e.field === "complaintCount")).toBe(true);
     expect(analysis.unmappedColumns).not.toContain("عدد الشكاوي");
-    expect(analysis.unmappedColumns).not.toContain("عدد الشكاوى");
+  });
+
+  it("maps عدد الشكاوى to complaintCount when it appears alone", () => {
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "الوصف", "عدد الشكاوى"]);
+    expect(mapping["عدد الشكاوى"]).toBe("complaintCount");
   });
 
   it("equates hamza and tatweel variants", () => {
@@ -397,7 +403,9 @@ describe("operational workbook parsing and normalization", () => {
       department: "إدارة تجريبية",
       description: "وصف صناعي لا يحتوي بيانات تشغيلية",
       sourceReference: "TEST-REF-001",
-      resolution: "إجراء متخذ تجريبي",
+      actionTaken: "إجراء متخذ تجريبي",
+      actionDescription: "وصف إجراء بديل",
+      lastUpdatedBy: "مستخدم تجريبي",
       sourceDetail: "تفصيل تجريبي",
       sourceStatus: "حالة مصدرية تجريبية",
       sourceActionStatus: "حالة إجراء تجريبية",
@@ -628,4 +636,94 @@ describe("operational workbook parsing and normalization", () => {
       code: "IMPORT_TOO_MANY_ROWS",
     });
   }, 60_000);
+});
+
+describe("new operational fields normalization", () => {
+  function makeRow(overrides: Record<string, unknown> = {}) {
+    return {
+      rowNumber: 2,
+      values: {
+        "رقم الشكوى": "COMP/OP-001",
+        "تاريخ التسجيل": "2026-07-01",
+        "الوصف": "وصف",
+        ...overrides,
+      },
+    };
+  }
+
+  it("normalizes actionTaken from الإجراء المتخذ", () => {
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "الوصف", "الإجراء المتخذ"]);
+    const result = normalizeImportRow(makeRow({ "الإجراء المتخذ": "تم الرد على المستفيد" }), mapping);
+    expect(result.normalized.actionTaken).toBe("تم الرد على المستفيد");
+    expect(result.normalized.resolution).toBeUndefined();
+  });
+
+  it("normalizes actionDescription from وصف الإجراء", () => {
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "الوصف", "وصف الإجراء"]);
+    const result = normalizeImportRow(makeRow({ "وصف الإجراء": "تفاصيل الإجراء المتخذ" }), mapping);
+    expect(result.normalized.actionDescription).toBe("تفاصيل الإجراء المتخذ");
+    expect(result.normalized.resolution).toBeUndefined();
+  });
+
+  it("resolution field remains independent from actionTaken and actionDescription", () => {
+    const { mapping } = matchComplaintColumns([
+      "رقم الشكوى", "تاريخ التسجيل", "الوصف",
+      "الإجراء أو الحل", "الإجراء المتخذ", "وصف الإجراء",
+    ]);
+    const result = normalizeImportRow(
+      makeRow({
+        "الإجراء أو الحل": "الحل النهائي",
+        "الإجراء المتخذ": "الإجراء الأول",
+        "وصف الإجراء": "وصف الإجراء هنا",
+      }),
+      mapping
+    );
+    expect(result.normalized.resolution).toBe("الحل النهائي");
+    expect(result.normalized.actionTaken).toBe("الإجراء الأول");
+    expect(result.normalized.actionDescription).toBe("وصف الإجراء هنا");
+  });
+
+  it("normalizes closedBy from أغلقت بواسطة", () => {
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "الوصف", "أغلقت بواسطة"]);
+    const result = normalizeImportRow(makeRow({ "أغلقت بواسطة": "محمد" }), mapping);
+    expect(result.normalized.closedBy).toBe("محمد");
+  });
+
+  it("normalizes wingCode from رمز الجناح", () => {
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "الوصف", "رمز الجناح"]);
+    const result = normalizeImportRow(makeRow({ "رمز الجناح": "A-12" }), mapping);
+    expect(result.normalized.wingCode).toBe("A-12");
+  });
+
+  it("normalizes lastModifiedAt from آخر تعديل في", () => {
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "الوصف", "آخر تعديل في"]);
+    const result = normalizeImportRow(makeRow({ "آخر تعديل في": "2026-07-15" }), mapping);
+    expect(result.normalized.lastModifiedAt?.toISOString()).toBe("2026-07-15T00:00:00.000Z");
+  });
+
+  it("normalizes lastUpdatedBy from آخر تحديث بواسطة", () => {
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "الوصف", "آخر تحديث بواسطة"]);
+    const result = normalizeImportRow(makeRow({ "آخر تحديث بواسطة": "عمر" }), mapping);
+    expect(result.normalized.lastUpdatedBy).toBe("عمر");
+  });
+
+  it("normalizes complaintCount as integer", () => {
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "الوصف", "عدد الشكاوي"]);
+    expect(normalizeImportRow(makeRow({ "عدد الشكاوي": 3 }), mapping).normalized.complaintCount).toBe(3);
+    expect(normalizeImportRow(makeRow({ "عدد الشكاوي": "2" }), mapping).normalized.complaintCount).toBe(2);
+    expect(normalizeImportRow(makeRow({ "عدد الشكاوي": 1.9 }), mapping).normalized.complaintCount).toBe(1);
+  });
+
+  it("rejects non-numeric complaintCount", () => {
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "الوصف", "عدد الشكاوي"]);
+    const result = normalizeImportRow(makeRow({ "عدد الشكاوي": "غير رقمي" }), mapping);
+    expect(result.errors.some((e) => e.code === "INVALID_COMPLAINT_COUNT")).toBe(true);
+  });
+
+  it("leaves complaintCount undefined when cell is empty", () => {
+    const { mapping } = matchComplaintColumns(["رقم الشكوى", "تاريخ التسجيل", "الوصف", "عدد الشكاوي"]);
+    const result = normalizeImportRow(makeRow({ "عدد الشكاوي": "" }), mapping);
+    expect(result.normalized.complaintCount).toBeUndefined();
+    expect(result.errors).toHaveLength(0);
+  });
 });

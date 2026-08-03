@@ -70,14 +70,16 @@ function taxonomyFixture() {
   };
 }
 
-describe("resolution fallback formula protection", () => {
-  it("uses plain وصف الإجراء text as resolution fallback", () => {
+describe("actionDescription and actionTaken fields", () => {
+  it("maps وصف الإجراء to actionDescription (not resolution)", () => {
     const { mapping } = matchComplaintColumns([
       "رقم الشكوى",
       "تاريخ التسجيل",
       "الوصف",
       "وصف الإجراء",
     ]);
+    expect(mapping["وصف الإجراء"]).toBe("actionDescription");
+
     const result = normalizeImportRow(
       {
         rowNumber: 2,
@@ -92,10 +94,11 @@ describe("resolution fallback formula protection", () => {
     );
 
     expect(result.errors).toHaveLength(0);
-    expect(result.normalized.resolution).toBe("حل نصي");
+    expect(result.normalized.actionDescription).toBe("حل نصي");
+    expect(result.normalized.resolution).toBeUndefined();
   });
 
-  it("rejects formula-like وصف الإجراء fallback without storing it", () => {
+  it("rejects formula-like وصف الإجراء value without storing it", () => {
     const { mapping } = matchComplaintColumns([
       "رقم الشكوى",
       "تاريخ التسجيل",
@@ -115,14 +118,14 @@ describe("resolution fallback formula protection", () => {
       mapping
     );
 
-    expect(result.normalized.resolution).toBeUndefined();
+    expect(result.normalized.actionDescription).toBeUndefined();
     expect(result.errors).toEqual(
       expect.arrayContaining([expect.objectContaining({ code: "FORMULA_NOT_ALLOWED" })])
     );
   });
 
-  it("keeps mapped الإجراء المتخذ ahead of وصف الإجراء and still rejects formula-like mapped values", () => {
-    const { mapping } = matchComplaintColumns([
+  it("maps الإجراء المتخذ to actionTaken and وصف الإجراء to actionDescription independently", () => {
+    const { mapping, conflicts } = matchComplaintColumns([
       "رقم الشكوى",
       "تاريخ التسجيل",
       "الوصف",
@@ -130,7 +133,11 @@ describe("resolution fallback formula protection", () => {
       "وصف الإجراء",
     ]);
 
-    const mappedPlain = normalizeImportRow(
+    expect(mapping["الإجراء المتخذ"]).toBe("actionTaken");
+    expect(mapping["وصف الإجراء"]).toBe("actionDescription");
+    expect(conflicts).toHaveLength(0);
+
+    const result = normalizeImportRow(
       {
         rowNumber: 2,
         values: {
@@ -143,25 +150,9 @@ describe("resolution fallback formula protection", () => {
       },
       mapping
     );
-    expect(mappedPlain.normalized.resolution).toBe("إجراء أساسي");
-
-    const mappedFormula = normalizeImportRow(
-      {
-        rowNumber: 2,
-        values: {
-          "رقم الشكوى": "C-1",
-          "تاريخ التسجيل": 46126,
-          "الوصف": "وصف",
-          "الإجراء المتخذ": "+1234",
-          "وصف الإجراء": "=OTHER()",
-        },
-      },
-      mapping
-    );
-    expect(mappedFormula.normalized.resolution).toBeUndefined();
-    expect(mappedFormula.errors).toEqual(
-      expect.arrayContaining([expect.objectContaining({ code: "FORMULA_NOT_ALLOWED", field: "resolution" })])
-    );
+    expect(result.normalized.actionTaken).toBe("إجراء أساسي");
+    expect(result.normalized.actionDescription).toBe("وصف بديل");
+    expect(result.normalized.resolution).toBeUndefined();
   });
 });
 
@@ -351,7 +342,7 @@ describe("resolution synonym الحل", () => {
     expect(mapping["الحل"]).toBe("resolution");
   });
 
-  it("prefers الإجراء المتخذ over الحل when both are present", () => {
+  it("maps الإجراء المتخذ to actionTaken and الحل to resolution without conflict", () => {
     const { mapping, conflicts } = matchComplaintColumns([
       "رقم الشكوى",
       "تاريخ الشكوى",
@@ -359,9 +350,9 @@ describe("resolution synonym الحل", () => {
       "الإجراء المتخذ",
       "الحل",
     ]);
-    expect(mapping["الإجراء المتخذ"]).toBe("resolution");
-    expect(mapping["الحل"]).toBeUndefined();
-    expect(conflicts.some((item) => item.header === "الحل")).toBe(true);
+    expect(mapping["الإجراء المتخذ"]).toBe("actionTaken");
+    expect(mapping["الحل"]).toBe("resolution");
+    expect(conflicts).toHaveLength(0);
   });
 });
 

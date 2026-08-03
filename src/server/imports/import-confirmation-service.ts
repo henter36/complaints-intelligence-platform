@@ -45,6 +45,14 @@ const SNAPSHOT_FIELDS = [
   "severity",
   "channel",
   "resolution",
+  "actionTaken",
+  "actionDescription",
+  "closedBy",
+  "wingCode",
+  "lastUpdatedAt",
+  "lastModifiedAt",
+  "lastUpdatedBy",
+  "complaintCount",
 ] as const;
 
 type SnapshotField = (typeof SNAPSHOT_FIELDS)[number];
@@ -75,6 +83,14 @@ type NormalizedConfirmationRow = {
   priority?: ComplaintPriority | null;
   channel?: string | null;
   resolution?: string | null;
+  actionTaken?: string | null;
+  actionDescription?: string | null;
+  closedBy?: string | null;
+  wingCode?: string | null;
+  lastUpdatedAt?: Date | null;
+  lastModifiedAt?: Date | null;
+  lastUpdatedBy?: string | null;
+  complaintCount?: number | null;
 };
 
 export type ImportConfirmationResult = {
@@ -171,6 +187,13 @@ function parseText(value: unknown): string | null | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function parseNumber(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value === "number") return Number.isFinite(value) ? Math.trunc(value) : undefined;
+  return undefined;
+}
+
 function hasOwn(value: Record<string, unknown>, key: string): boolean {
   return Object.hasOwn(value, key);
 }
@@ -242,6 +265,14 @@ function parseNormalizedRow(row: ConfirmationRow): NormalizedConfirmationRow {
     priority: parsePriority(data.priority),
     channel: parseText(data.channel),
     resolution: parseText(data.resolution),
+    actionTaken: parseText(data.actionTaken),
+    actionDescription: parseText(data.actionDescription),
+    closedBy: parseText(data.closedBy),
+    wingCode: parseText(data.wingCode),
+    lastUpdatedAt: parseDate(data.sourceUpdatedAt),
+    lastModifiedAt: parseDate(data.lastModifiedAt),
+    lastUpdatedBy: parseText(data.lastUpdatedBy),
+    complaintCount: parseNumber(data.complaintCount),
   };
 }
 
@@ -374,6 +405,14 @@ async function applyNewRow(
       severity: normalized.priority ?? ComplaintPriority.MEDIUM,
       channel: normalized.channel ?? null,
       resolution: normalized.resolution ?? null,
+      actionTaken: normalized.actionTaken ?? null,
+      actionDescription: normalized.actionDescription ?? null,
+      closedBy: normalized.closedBy ?? null,
+      wingCode: normalized.wingCode ?? null,
+      lastUpdatedAt: normalized.lastUpdatedAt ?? null,
+      lastModifiedAt: normalized.lastModifiedAt ?? null,
+      lastUpdatedBy: normalized.lastUpdatedBy ?? null,
+      complaintCount: normalized.complaintCount ?? null,
       importBatchId: batchId,
     },
   });
@@ -463,6 +502,14 @@ function assignImportUpdateFields(
   assignIfDefined(data, "severity", normalized.priority === null ? current.severity : normalized.priority);
   assignIfDefined(data, "channel", normalized.channel);
   assignIfDefined(data, "resolution", normalized.resolution);
+  assignIfDefined(data, "actionTaken", normalized.actionTaken);
+  assignIfDefined(data, "actionDescription", normalized.actionDescription);
+  assignIfDefined(data, "closedBy", normalized.closedBy);
+  assignIfDefined(data, "wingCode", normalized.wingCode);
+  assignIfDefined(data, "lastUpdatedAt", normalized.lastUpdatedAt);
+  assignIfDefined(data, "lastModifiedAt", normalized.lastModifiedAt);
+  assignIfDefined(data, "lastUpdatedBy", normalized.lastUpdatedBy);
+  assignIfDefined(data, "complaintCount", normalized.complaintCount);
 }
 
 function buildUpdateData(
