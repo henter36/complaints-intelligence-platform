@@ -9,7 +9,8 @@ UPDATE "TextRiskSignal" SET "severityRank" = CASE
   WHEN "severity" = 'HIGH'     THEN 3
   WHEN "severity" = 'MEDIUM'   THEN 2
   ELSE 1
-END;
+END
+WHERE "severityRank" = 0;
 
 -- Composite index for severity-ordered pagination
 CREATE INDEX "TextRiskSignal_severityRank_createdAt_idx" ON "TextRiskSignal"("severityRank", "createdAt");

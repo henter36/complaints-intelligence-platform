@@ -122,7 +122,7 @@ describe("TextRisks screen", () => {
 
     // Click the refresh button to trigger a second fetch
     const refreshBtn = screen.getByRole("button", { name: "تحديث القائمة" });
-    await act(async () => { fireEvent.click(refreshBtn); });
+    fireEvent.click(refreshBtn);
 
     // Resolve the newer (second) fetch first
     await act(async () => {

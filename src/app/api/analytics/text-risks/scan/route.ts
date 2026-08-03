@@ -33,17 +33,58 @@ const ScanRequestSchema = z
     }
   });
 
+async function readRequestBody(req: NextRequest): Promise<unknown> {
+  try {
+    return await req.json();
+  } catch {
+    return {};
+  }
+}
+
+async function executeValidScanRequest(
+  data: z.infer<typeof ScanRequestSchema>
+): Promise<NextResponse> {
+  if (data.resumeRunId) {
+    const summary = await resumeTextRiskScan(data.resumeRunId);
+    return NextResponse.json(summary, { status: 202 });
+  }
+  const summary = await startTextRiskScan({ importBatchId: data.importBatchId });
+  return NextResponse.json(summary, { status: 202 });
+}
+
+function mapScanDomainError(error: unknown): NextResponse | null {
+  const code = error instanceof Error ? error.message : null;
+  switch (code) {
+    case "TEXT_RISK_SCAN_BATCH_NOT_CONFIRMED":
+      return NextResponse.json(
+        { error: { code: "BATCH_NOT_CONFIRMED", message: "لا يمكن فحص دفعة غير مؤكدة" } },
+        { status: 409 }
+      );
+    case "SCAN_RUN_NOT_FOUND":
+      return NextResponse.json(
+        { error: { code: "RUN_NOT_FOUND", message: "جلسة الفحص غير موجودة" } },
+        { status: 404 }
+      );
+    case "SCAN_RUN_NOT_RESUMABLE":
+      return NextResponse.json(
+        { error: { code: "RUN_NOT_RESUMABLE", message: "لا يمكن استئناف هذه الجلسة" } },
+        { status: 409 }
+      );
+    case "TEXT_RISK_SCAN_ALREADY_RUNNING":
+      return NextResponse.json(
+        { error: { code: "TEXT_RISK_SCAN_ALREADY_RUNNING", message: "توجد عملية تحليل مخاطر نصية قيد التشغيل" } },
+        { status: 409 }
+      );
+    default:
+      return null;
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
     await requireAdminApiSession(req);
 
-    let body: unknown;
-    try {
-      body = await req.json();
-    } catch {
-      body = {};
-    }
-
+    const body = await readRequestBody(req);
     const parsed = ScanRequestSchema.safeParse(body);
     if (!parsed.success) {
       return NextResponse.json(
@@ -52,45 +93,13 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const { importBatchId, resumeRunId } = parsed.data;
-
-    if (resumeRunId) {
-      const summary = await resumeTextRiskScan(resumeRunId);
-      return NextResponse.json(summary, { status: 202 });
-    }
-
-    // importBatchId scan, fullScan=true, or default (no args = full scan)
-    const summary = await startTextRiskScan({ importBatchId });
-    return NextResponse.json(summary, { status: 202 });
+    return await executeValidScanRequest(parsed.data);
   } catch (error) {
     const authResponse = mapAuthError(error);
     if (authResponse) return authResponse;
 
-    const message = error instanceof Error ? error.message : "UNKNOWN";
-    if (message === "TEXT_RISK_SCAN_BATCH_NOT_CONFIRMED") {
-      return NextResponse.json(
-        { error: { code: "BATCH_NOT_CONFIRMED", message: "لا يمكن فحص دفعة غير مؤكدة" } },
-        { status: 409 }
-      );
-    }
-    if (message === "SCAN_RUN_NOT_FOUND") {
-      return NextResponse.json(
-        { error: { code: "RUN_NOT_FOUND", message: "جلسة الفحص غير موجودة" } },
-        { status: 404 }
-      );
-    }
-    if (message === "SCAN_RUN_NOT_RESUMABLE") {
-      return NextResponse.json(
-        { error: { code: "RUN_NOT_RESUMABLE", message: "لا يمكن استئناف هذه الجلسة" } },
-        { status: 409 }
-      );
-    }
-    if (message === "TEXT_RISK_SCAN_ALREADY_RUNNING") {
-      return NextResponse.json(
-        { error: { code: "TEXT_RISK_SCAN_ALREADY_RUNNING", message: "توجد عملية تحليل مخاطر نصية قيد التشغيل" } },
-        { status: 409 }
-      );
-    }
+    const domainResponse = mapScanDomainError(error);
+    if (domainResponse) return domainResponse;
 
     return NextResponse.json(
       { error: { code: "SCAN_FAILED", message: "تعذر بدء الفحص" } },
