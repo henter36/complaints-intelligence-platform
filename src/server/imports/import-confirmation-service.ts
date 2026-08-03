@@ -708,7 +708,7 @@ export async function confirmReadyImportBatch(
       unchanged: counters.noChangeRows,
       duplicates: counters.duplicateRows,
     };
-  }, { maxWait: 10_000, timeout: 60_000 }).then((result) => {
+  }, { maxWait: 30_000, timeout: 600_000 }).then((result) => {
     // Trigger text-risk scan after the transaction commits.
     // Failure here must not propagate — the import is already confirmed.
     startTextRiskScan({ importBatchId: batchId, actor }).catch((scanError: unknown) => {
