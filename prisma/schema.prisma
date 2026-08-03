@@ -158,6 +158,17 @@ model Complaint {
   severity              ComplaintPriority        @default(MEDIUM)
   channel               String?
   resolution            String?
+  actionTaken           String?
+  actionDescription     String?
+  sourceClosedBy        String?
+  wingCode              String?
+  sourceUpdatedAt       DateTime?
+  sourceModifiedAt      DateTime?
+  sourceUpdatedBy       String?
+  sourceOrigin          String?
+  sourceStatus          String?
+  sourceDetail          String?
+  sourceActionStatus    String?
   firstActionAt         DateTime?
   processingStartedAt   DateTime?
   delayReason           String?

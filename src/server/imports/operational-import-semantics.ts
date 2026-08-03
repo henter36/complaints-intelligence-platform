@@ -53,51 +53,21 @@ function applySubjectFallback(
 
 function applyClosedAtRule(
   row: OperationalImportRow,
-  warnings: RowMessage[],
   derived: RowMessage[]
 ): void {
   const status = row.status ?? ComplaintStatus.NEW;
 
-  if (!isClosedComplaintStatus(status)) {
-    if (row.closedAt) {
-      derived.push({
-        field: "closedAt",
-        code: "CLOSED_AT_IGNORED_FOR_NON_CLOSED_STATUS",
-        message: "تم تجاهل تاريخ الإغلاق لأن حالة الشكوى غير مغلقة.",
-        level: "derived",
-        originalValue: row.closedAt.toISOString(),
-        usedValue: "",
-        source: "status",
-      });
-      delete row.closedAt;
-    }
-    return;
-  }
-
-  if (!row.closedAt && row.sourceUpdatedAt) {
-    row.closedAt = cloneDate(row.sourceUpdatedAt);
+  if (!isClosedComplaintStatus(status) && row.closedAt) {
     derived.push({
       field: "closedAt",
-      code: "CLOSED_AT_DERIVED_FROM_SOURCE_UPDATED_AT",
-      message: "تم استخدام «آخر تحديث في» كتاريخ إغلاق للشكوى المغلقة.",
+      code: "CLOSED_AT_IGNORED_FOR_NON_CLOSED_STATUS",
+      message: "تم تجاهل تاريخ الإغلاق لأن حالة الشكوى غير مغلقة.",
       level: "derived",
-      originalValue: "",
-      usedValue: row.closedAt?.toISOString() ?? "",
-      source: "sourceUpdatedAt",
-    });
-  }
-
-  if (!row.closedAt) {
-    warnings.push({
-      field: "closedAt",
-      code: "CLOSED_STATUS_WITHOUT_SOURCE_UPDATED_AT",
-      message:
-        "حالة الشكوى مغلقة، ولكن قيمة «آخر تحديث في» غير متوفرة؛ تعذر تحديد تاريخ الإغلاق.",
-      level: "warning",
-      originalValue: "",
+      originalValue: row.closedAt.toISOString(),
       usedValue: "",
-      source: "sourceUpdatedAt",
+      source: "status",
     });
+    delete row.closedAt;
   }
 }
 
@@ -109,7 +79,7 @@ export function applyOperationalImportSemantics(
   const derived: RowMessage[] = [];
 
   applySubjectFallback(row, derived);
-  applyClosedAtRule(row, warnings, derived);
+  applyClosedAtRule(row, derived);
 
   return { row, warnings, derived };
 }

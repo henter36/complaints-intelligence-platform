@@ -220,6 +220,15 @@ export function hasMeaningfulChange(row: NormalizedComplaintRow, complaint: Comp
     [row.department, complaint.department],
     [row.channel, complaint.channel],
     [row.resolution, complaint.resolution],
+    [row.actionTaken, complaint.actionTaken],
+    [row.actionDescription, complaint.actionDescription],
+    [row.sourceOrigin, complaint.sourceOrigin],
+    [row.sourceClosedBy, complaint.sourceClosedBy],
+    [row.wingCode, complaint.wingCode],
+    [row.sourceUpdatedBy, complaint.sourceUpdatedBy],
+    [row.sourceStatus, complaint.sourceStatus],
+    [row.sourceDetail, complaint.sourceDetail],
+    [row.sourceActionStatus, complaint.sourceActionStatus],
     [row.complainantIdentifier, complaint.complainantIdentifier],
     [row.complainantName, complaint.complainantName],
     [row.complainantPhone, complaint.complainantPhone],
@@ -227,6 +236,8 @@ export function hasMeaningfulChange(row: NormalizedComplaintRow, complaint: Comp
     [toOptionalDateKey(row.receivedAt), toOptionalDateKey(complaint.receivedAt)],
     [toOptionalDateKey(row.dueDate), toOptionalDateKey(complaint.dueDate)],
     [toOptionalDateKey(row.closedAt), toOptionalDateKey(complaint.closedAt)],
+    [toOptionalDateKey(row.sourceUpdatedAt), toOptionalDateKey(complaint.sourceUpdatedAt)],
+    [toOptionalDateKey(row.sourceModifiedAt), toOptionalDateKey(complaint.sourceModifiedAt)],
   ];
 
   return comparisons.some(([left, right]) => left !== undefined && left !== right);
@@ -548,13 +559,24 @@ export function resolveEffectiveColumnMapping(input: {
   return { columnMapping, mappingAnalysis, manuallyMapped };
 }
 
-function buildImportBatchWarnings(columnMapping: ColumnMapping): RowMessage[] {
+function buildImportBatchWarnings(
+  columnMapping: ColumnMapping,
+  unmappedColumns: string[]
+): RowMessage[] {
   const warnings: RowMessage[] = [];
   if (!Object.values(columnMapping).includes("description")) {
     warnings.push({
       field: "description",
       code: "DESCRIPTION_COLUMN_MISSING",
       message: DESCRIPTION_COLUMN_MISSING_BATCH_MESSAGE,
+      level: "warning",
+    });
+  }
+  if (unmappedColumns.length > 0) {
+    warnings.push({
+      field: "unmappedColumns",
+      code: "UNMAPPED_COLUMNS",
+      message: `الأعمدة التالية لم تُربط بأي حقل وستُحفظ في البيانات الأصلية فقط: ${unmappedColumns.join("، ")}.`,
       level: "warning",
     });
   }
@@ -581,8 +603,6 @@ async function processWorkbookPreview(
     }),
   ]);
   const taxonomy = { categories: categoryList, classifications: classificationList };
-
-  const batchWarnings = buildImportBatchWarnings(columnMapping);
 
   const normalizedRows = workbook.rows.map((row) => {
     const normResult = normalizeImportRow(row, columnMapping);
@@ -652,7 +672,7 @@ async function processWorkbookPreview(
     columnCount: workbook.headers.filter(Boolean).length,
     processedRows,
     counters: calculateRowCounters(processedRows),
-    batchWarnings,
+    batchWarnings: buildImportBatchWarnings(columnMapping, mappingAnalysis.unmappedColumns),
   };
 }
 
@@ -818,7 +838,15 @@ function toImportUploadResult(
         complaintNumber: row.externalId,
         externalId: row.externalId,
         receivedDate: normalized?.receivedAt ?? normalized?.complaintDate ?? null,
-        channel: normalized?.channel ?? null,
+        sourceOrigin: normalized?.sourceOrigin ?? null,
+        description: normalized?.description ?? null,
+        actionTaken: normalized?.actionTaken ?? null,
+        actionDescription: normalized?.actionDescription ?? null,
+        sourceClosedBy: normalized?.sourceClosedBy ?? null,
+        wingCode: normalized?.wingCode ?? null,
+        sourceUpdatedAt: normalized?.sourceUpdatedAt ?? null,
+        sourceModifiedAt: normalized?.sourceModifiedAt ?? null,
+        sourceUpdatedBy: normalized?.sourceUpdatedBy ?? null,
         subject: normalized?.subject ?? null,
         sourceDetail: normalized?.sourceDetail ?? null,
         sourceStatus: normalized?.sourceStatus ?? null,
@@ -881,7 +909,7 @@ export async function loadImportBatchForResume(batchId: string): Promise<ImportU
     columnCount: headers.length,
     processedRows,
     counters: calculateRowCounters(processedRows),
-    batchWarnings: buildImportBatchWarnings(columnMapping),
+    batchWarnings: buildImportBatchWarnings(columnMapping, mappingAnalysis.unmappedColumns),
   }, batch.status);
   return {
     ...result,

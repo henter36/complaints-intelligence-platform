@@ -72,10 +72,26 @@ interface ImportError {
 
 interface ImportPreviewRow {
   row: number;
+  action?: string;
+  validationStatus?: string;
   complaintNumber?: string;
+  externalId?: string;
   receivedDate?: string;
-  channel?: string;
+  sourceOrigin?: string;
+  description?: string;
+  actionTaken?: string;
+  actionDescription?: string;
+  sourceClosedBy?: string;
+  wingCode?: string;
+  sourceUpdatedAt?: string;
+  sourceModifiedAt?: string;
+  sourceUpdatedBy?: string;
+  sourceDetail?: string;
+  sourceStatus?: string;
+  sourceActionStatus?: string;
+  statusDisplay?: string;
   region?: string;
+  facility?: string;
   location?: string;
   department?: string;
   classification?: string;
@@ -83,7 +99,7 @@ interface ImportPreviewRow {
   status?: string;
   priority?: string;
   severity?: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 interface UploadResult {
@@ -148,6 +164,7 @@ const COLUMN_MAPPING_STATUS_LABELS: Record<string, string> = {
   UNMAPPED_PRESERVED: "غير مطابق — تم الاحتفاظ به",
   MISSING_REQUIRED: "حقل إلزامي مفقود",
   CONFLICT: "تعارض في المطابقة",
+  INTENTIONALLY_IGNORED: "متجاهل وفق قاعدة العمل — يعتمد النظام عدد السجلات الفعلية",
 };
 
 export function toColumnMappingStatusLabel(status: string): string {
@@ -314,6 +331,14 @@ const FIELD_LABELS: Record<string, string> = {
   complaintNumber: "رقم الشكوى",
   receivedDate: "تاريخ الورود",
   channel: "القناة",
+  sourceOrigin: "المصدر",
+  actionTaken: "الإجراء المتخذ",
+  actionDescription: "وصف الإجراء",
+  sourceClosedBy: "أغلقت بواسطة",
+  wingCode: "رمز الجناح",
+  sourceUpdatedAt: "آخر تحديث في",
+  sourceModifiedAt: "آخر تعديل في",
+  sourceUpdatedBy: "آخر تحديث بواسطة",
   region: "المنطقة",
   location: "الموقع",
   department: "الإدارة",
@@ -341,6 +366,8 @@ const IMPORT_MAPPING_FIELDS = [
   "status", "sourceDetail", "sourceActionStatus", "subject", "description", "complainantName",
   "complainantIdentifier", "complainantPhone", "region", "facility", "department", "category",
   "classification", "priority", "channel", "resolution",
+  "sourceOrigin", "actionTaken", "actionDescription", "sourceClosedBy", "wingCode",
+  "sourceUpdatedAt", "sourceModifiedAt", "sourceUpdatedBy",
 ] as const;
 
 const NON_CONFIRMABLE_RESUME_STATUSES = new Set([
@@ -1347,7 +1374,7 @@ export function ImportCenter({ batchId }: Readonly<{ batchId?: string | null }>)
                                   <TableHead className="w-12">#</TableHead>
                                   <TableHead>رقم الشكوى</TableHead>
                                   <TableHead>التاريخ</TableHead>
-                                  <TableHead>القناة</TableHead>
+                                  <TableHead>المصدر</TableHead>
                                   <TableHead>الموضوع</TableHead>
                                   <TableHead>تفصيل</TableHead>
                                   <TableHead>الحالة المصدرية</TableHead>
@@ -1370,7 +1397,7 @@ export function ImportCenter({ batchId }: Readonly<{ batchId?: string | null }>)
                                         : "-"}
                                     </TableCell>
                                     <TableCell className="text-xs">
-                                      {row.channel || "-"}
+                                      {row.sourceOrigin || "-"}
                                     </TableCell>
                                     <TableCell className="text-xs max-w-[200px] truncate">
                                       {row.subject || "-"}

@@ -45,6 +45,17 @@ const SNAPSHOT_FIELDS = [
   "severity",
   "channel",
   "resolution",
+  "actionTaken",
+  "actionDescription",
+  "sourceOrigin",
+  "sourceClosedBy",
+  "wingCode",
+  "sourceUpdatedAt",
+  "sourceModifiedAt",
+  "sourceUpdatedBy",
+  "sourceStatus",
+  "sourceDetail",
+  "sourceActionStatus",
 ] as const;
 
 type SnapshotField = (typeof SNAPSHOT_FIELDS)[number];
@@ -64,6 +75,8 @@ type NormalizedConfirmationRow = {
   subject?: string | null;
   description?: string | null;
   sourceDetail?: string | null;
+  sourceActionStatus?: string | null;
+  sourceStatus?: string | null;
   complainantName?: string | null;
   complainantIdentifier?: string | null;
   complainantPhone?: string | null;
@@ -75,6 +88,14 @@ type NormalizedConfirmationRow = {
   priority?: ComplaintPriority | null;
   channel?: string | null;
   resolution?: string | null;
+  actionTaken?: string | null;
+  actionDescription?: string | null;
+  sourceOrigin?: string | null;
+  sourceClosedBy?: string | null;
+  wingCode?: string | null;
+  sourceUpdatedAt?: Date | null;
+  sourceModifiedAt?: Date | null;
+  sourceUpdatedBy?: string | null;
 };
 
 export type ImportConfirmationResult = {
@@ -231,6 +252,8 @@ function parseNormalizedRow(row: ConfirmationRow): NormalizedConfirmationRow {
     subject: parseText(data.subject),
     description: parseText(data.description),
     sourceDetail: parseText(data.sourceDetail),
+    sourceActionStatus: parseText(data.sourceActionStatus),
+    sourceStatus: parseText(data.sourceStatus),
     complainantName: parseText(data.complainantName),
     complainantIdentifier: parseText(data.complainantIdentifier),
     complainantPhone: parseText(data.complainantPhone),
@@ -242,6 +265,14 @@ function parseNormalizedRow(row: ConfirmationRow): NormalizedConfirmationRow {
     priority: parsePriority(data.priority),
     channel: parseText(data.channel),
     resolution: parseText(data.resolution),
+    actionTaken: parseText(data.actionTaken),
+    actionDescription: parseText(data.actionDescription),
+    sourceOrigin: parseText(data.sourceOrigin),
+    sourceClosedBy: parseText(data.sourceClosedBy),
+    wingCode: parseText(data.wingCode),
+    sourceUpdatedAt: parseDate(data.sourceUpdatedAt),
+    sourceModifiedAt: parseDate(data.sourceModifiedAt),
+    sourceUpdatedBy: parseText(data.sourceUpdatedBy),
   };
 }
 
@@ -374,6 +405,17 @@ async function applyNewRow(
       severity: normalized.priority ?? ComplaintPriority.MEDIUM,
       channel: normalized.channel ?? null,
       resolution: normalized.resolution ?? null,
+      actionTaken: normalized.actionTaken ?? null,
+      actionDescription: normalized.actionDescription ?? null,
+      sourceOrigin: normalized.sourceOrigin ?? null,
+      sourceClosedBy: normalized.sourceClosedBy ?? null,
+      wingCode: normalized.wingCode ?? null,
+      sourceUpdatedAt: normalized.sourceUpdatedAt ?? null,
+      sourceModifiedAt: normalized.sourceModifiedAt ?? null,
+      sourceUpdatedBy: normalized.sourceUpdatedBy ?? null,
+      sourceStatus: normalized.sourceStatus ?? null,
+      sourceDetail: normalized.sourceDetail ?? null,
+      sourceActionStatus: normalized.sourceActionStatus ?? null,
       importBatchId: batchId,
     },
   });
@@ -463,6 +505,17 @@ function assignImportUpdateFields(
   assignIfDefined(data, "severity", normalized.priority === null ? current.severity : normalized.priority);
   assignIfDefined(data, "channel", normalized.channel);
   assignIfDefined(data, "resolution", normalized.resolution);
+  assignIfDefined(data, "actionTaken", normalized.actionTaken);
+  assignIfDefined(data, "actionDescription", normalized.actionDescription);
+  assignIfDefined(data, "sourceOrigin", normalized.sourceOrigin);
+  assignIfDefined(data, "sourceClosedBy", normalized.sourceClosedBy);
+  assignIfDefined(data, "wingCode", normalized.wingCode);
+  assignIfDefined(data, "sourceUpdatedAt", normalized.sourceUpdatedAt);
+  assignIfDefined(data, "sourceModifiedAt", normalized.sourceModifiedAt);
+  assignIfDefined(data, "sourceUpdatedBy", normalized.sourceUpdatedBy);
+  assignIfDefined(data, "sourceStatus", normalized.sourceStatus);
+  assignIfDefined(data, "sourceDetail", normalized.sourceDetail);
+  assignIfDefined(data, "sourceActionStatus", normalized.sourceActionStatus);
 }
 
 function buildUpdateData(

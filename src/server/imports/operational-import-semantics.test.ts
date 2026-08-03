@@ -39,23 +39,24 @@ describe("applyOperationalImportSemantics", () => {
     );
   });
 
-  it("derives closedAt from sourceUpdatedAt for a closed complaint", () => {
+  it("does NOT derive closedAt from sourceUpdatedAt — stores sourceUpdatedAt independently", () => {
     const sourceUpdatedAt = new Date("2026-07-01T10:30:00.000Z");
     const result = applyOperationalImportSemantics({
       status: ComplaintStatus.CLOSED,
       sourceUpdatedAt,
     });
 
-    expect(result.row.closedAt?.toISOString()).toBe(sourceUpdatedAt.toISOString());
+    expect(result.row.closedAt).toBeUndefined();
+    expect(result.row.sourceUpdatedAt?.toISOString()).toBe(sourceUpdatedAt.toISOString());
     expect(result.warnings).toHaveLength(0);
-    expect(result.derived).toEqual(
+    expect(result.derived).not.toEqual(
       expect.arrayContaining([
         expect.objectContaining({ code: "CLOSED_AT_DERIVED_FROM_SOURCE_UPDATED_AT" }),
       ])
     );
   });
 
-  it("preserves an explicit closedAt over sourceUpdatedAt", () => {
+  it("preserves an explicit closedAt unchanged for a closed complaint", () => {
     const explicitClosedAt = new Date("2026-06-30T10:30:00.000Z");
     const result = applyOperationalImportSemantics({
       status: ComplaintStatus.CLOSED,
@@ -64,22 +65,14 @@ describe("applyOperationalImportSemantics", () => {
     });
 
     expect(result.row.closedAt?.toISOString()).toBe(explicitClosedAt.toISOString());
-    expect(result.derived).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ code: "CLOSED_AT_DERIVED_FROM_SOURCE_UPDATED_AT" }),
-      ])
-    );
+    expect(result.warnings).toHaveLength(0);
   });
 
-  it("warns only when a closed complaint has no usable close date", () => {
+  it("produces no warnings when a closed complaint has no closedAt — that is a row-validation concern", () => {
     const closed = applyOperationalImportSemantics({ status: ComplaintStatus.CLOSED });
     const open = applyOperationalImportSemantics({ status: ComplaintStatus.OPEN });
 
-    expect(closed.warnings).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ code: "CLOSED_STATUS_WITHOUT_SOURCE_UPDATED_AT" }),
-      ])
-    );
+    expect(closed.warnings).toHaveLength(0);
     expect(open.warnings).toHaveLength(0);
   });
 
