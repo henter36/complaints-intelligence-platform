@@ -188,7 +188,11 @@ export type FullAnalyticalData = ExecutiveBriefData & {
 export function isExecutiveBriefV2Data(
   data: ExecutiveBriefData | ExecutiveBriefV2Data | FullAnalyticalData
 ): data is ExecutiveBriefV2Data {
-  return "allTimeTotal" in data && "monthlyStockFlow" in data;
+  return (
+    "allTimeTotal" in data &&
+    "monthlyStockFlow" in data &&
+    "classificationOpenLate" in data
+  );
 }
 
 /** Returns true when all FULL_ANALYTICAL-only payload fields are present. */

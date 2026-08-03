@@ -1,7 +1,9 @@
 /**
  * PRINT_EXECUTIVE_BRIEF_V2 — standalone 4-page PDF renderer.
  *
- * Page layout (all pages are A4-portrait at 900×1200 pt):
+ * Page layout targets A4-portrait (PRINT_EXECUTIVE_PAGE_SIZE). createV2Layout may
+ * expand the height when many regions need cards + table space so content fits.
+ *
  *   1. Cover   — large title + 3 summary cards + all-time total
  *   2. KPIs    — 8 icon-KPI cards + monthly inflow/closed chart + notes
  *   3. Regions — comparison chart + volume cards + delta/topic table
@@ -187,7 +189,7 @@ function drawIcon(doc: PDFKit.PDFDocument, type: IconType, cx: number, cy: numbe
     // Concentric circles + crosshair
     doc.circle(cx, cy, s * 0.8).stroke();
     doc.circle(cx, cy, s * 0.5).stroke();
-    doc.circle(cx, cy, 2).fill(COLORS.gold).stroke();
+    doc.circle(cx, cy, 2).fill(COLORS.gold);
   } else if (type === "calendar") {
     // Calendar rectangle
     doc.roundedRect(cx - s * 0.65, cy - s * 0.55, s * 1.3, s * 1.2, 2).stroke();
@@ -251,9 +253,7 @@ function formatKpiValue(card: ExecutiveBriefKpiCard): string {
 function formatKpiDelta(card: ExecutiveBriefKpiCard): string {
   if (card.difference === null) return "";
   const diff = formatReportNumber(card.difference, { sign: true });
-  if (card.changeRate === null) {
-    return card.previousValue !== null ? `${diff}` : diff;
-  }
+  if (card.changeRate === null) return diff;
   return `${diff}  (${formatReportNumber(card.changeRate, { sign: true, percent: true })})`;
 }
 
@@ -334,15 +334,18 @@ function drawTable<Row extends object>(
     doc.font("Body").fontSize(REPORT_DESIGN_TOKENS.fontSize.table).fillColor(COLORS.primary);
     cols.forEach((col, i) => {
       const cellText = formatCell(row, col.key);
-      // Show negative differences in red
-      const isNegDiff = col.key === "difference" && cellText.startsWith("−") || cellText.startsWith("-");
-      if (isNegDiff && (col.key === "difference" || col.key === "changeRate")) {
+      // Show negative differences and change rates in red (U+2212 or ASCII -)
+      const isDeltaColumn = col.key === "difference" || col.key === "changeRate";
+      const isNegative =
+        isDeltaColumn &&
+        (cellText.startsWith("−") || cellText.startsWith("-"));
+      if (isNegative) {
         doc.fillColor(COLORS.danger);
       }
       doc.text(preparePdfText(cellText), offsets[i] + 4, rowY + 5, {
         width: widths[i] - 8, height: rowH - 6, align: "right", ellipsis: true, wordSpacing: WORD_SPACING,
       });
-      if (isNegDiff && (col.key === "difference" || col.key === "changeRate")) {
+      if (isNegative) {
         doc.fillColor(COLORS.primary);
       }
     });
@@ -722,9 +725,7 @@ async function renderPage2(ctx: V2Context): Promise<void> {
 
   // Info methodology box
   const infoText = "تعتمد شكاوى الفترة على تاريخ إنشاء الشكوى، بينما تمثل المفتوحة والمتأخرة نهاية الفترة مؤشرات الرصيد القائم حتى نهاية الفترة ولو أنشئت الشكوى قبل بداية الفترة.";
-  const infoBoxH = 46;
-  drawInfoBox(doc, infoText, margin, y, contentWidth);
-  y += infoBoxH + 8;
+  y = drawInfoBox(doc, infoText, margin, y, contentWidth) + 8;
 
   // Notes
   const noteLines = (brief.notes ?? []).slice(0, 5);
@@ -915,7 +916,11 @@ async function renderPage3(ctx: V2Context): Promise<void> {
 function renderPage4(ctx: V2Context): void {
   const { doc, data, brief, layout } = ctx;
   const { margin, contentWidth } = layout;
-  const hasPrev = (brief.allRegions ?? []).some((r) => r.previousCount > 0);
+  const hasPrevPeriod = Boolean(data.previousPeriod);
+  const classRows = brief.topClassifications.slice(0, 8);
+  const deptRows = (brief.topDepartments ?? []).slice(0, 8);
+  const hasClassComparison = classRows.some((r) => r.previousCount > 0);
+  // Departments table has no previous columns today; keep rise list gated on real previous period.
 
   let y = drawPageHeader(ctx, "التصنيفات والإدارات والاستنتاجات");
   const gap = 14;
@@ -923,7 +928,7 @@ function renderPage4(ctx: V2Context): void {
 
   // ── Notable rises (text box) ──────────────────────────────────────────────
   y = drawSectionTitle(doc, "الارتفاعات الملحوظة", margin, y, contentWidth);
-  const rises = hasPrev ? (data.comparisonData?.deptClassRises ?? []).slice(0, 6) : [];
+  const rises = hasPrevPeriod ? (data.comparisonData?.deptClassRises ?? []).slice(0, 6) : [];
   const riseTexts = rises.length > 0
     ? rises.map((r) => `${r.departmentName} / ${r.classificationName}: ${formatReportNumber(r.difference, { sign: true })} شكوى`)
     : ["لا توجد ارتفاعات إدارية حادة في هذه الفترة."];
@@ -942,8 +947,7 @@ function renderPage4(ctx: V2Context): void {
 
   // ── Classifications table ─────────────────────────────────────────────────
   y = drawSectionTitle(doc, "أعلى التصنيفات", margin, y, contentWidth);
-  const classRows = brief.topClassifications.slice(0, 8);
-  const classCols: ColDef[] = hasPrev
+  const classCols: ColDef[] = hasClassComparison
     ? [
         { key: "classificationName", label: "التصنيف", weight: 2.4 },
         { key: "currentCount", label: "شكاوى الفترة", weight: 0.9 },
@@ -978,7 +982,6 @@ function renderPage4(ctx: V2Context): void {
 
   // ── Departments table ──────────────────────────────────────────────────────
   y = drawSectionTitle(doc, "أعلى الإدارات", margin, y, contentWidth);
-  const deptRows = (brief.topDepartments ?? []).slice(0, 8);
   const deptCols: ColDef[] = [
     { key: "name", label: "الإدارة", weight: 2.2 },
     { key: "total", label: "شكاوى الفترة", weight: 0.9 },
@@ -1018,10 +1021,12 @@ function renderPage4(ctx: V2Context): void {
 
 // ── Footers ───────────────────────────────────────────────────────────────────
 
-function drawFooters(doc: PDFKit.PDFDocument, layout: V2Layout): void {
+function drawFooters(doc: PDFKit.PDFDocument, layout: V2Layout, warnings: string[]): void {
   const range = doc.bufferedPageRange();
   if (range.count !== PAGE_COUNT) {
-    throw new Error(`V2_PAGE_COUNT_MISMATCH:${range.count}`);
+    warnings.push(
+      `عدد صفحات التقرير ${formatReportNumber(range.count)} بدلًا من ${formatReportNumber(PAGE_COUNT)} المتوقع.`
+    );
   }
   for (let pi = range.start; pi < range.start + range.count; pi++) {
     doc.switchToPage(pi);
@@ -1081,31 +1086,49 @@ export async function renderExecutiveBriefV2Pdf(data: ReportData): Promise<Execu
 
   const chunks: Buffer[] = [];
   doc.on("data", (chunk: Buffer) => chunks.push(chunk));
+  let settled = false;
   const done = new Promise<Buffer>((resolve, reject) => {
-    doc.once("error", reject);
-    doc.once("end", () => resolve(Buffer.concat(chunks)));
+    doc.once("error", (err) => {
+      settled = true;
+      reject(err);
+    });
+    doc.once("end", () => {
+      if (!settled) {
+        settled = true;
+        resolve(Buffer.concat(chunks));
+      }
+    });
   });
 
   const ctx: V2Context = { doc, data, brief, warnings, layout };
+  let ended = false;
+  const endDoc = () => {
+    if (ended) return;
+    ended = true;
+    doc.end();
+  };
 
-  if (brief.allRegions.length > MAX_REGION_ROWS) {
-    warnings.push(`تم عرض أول ${MAX_REGION_ROWS} منطقة فقط.`);
+  try {
+    if (brief.allRegions.length > MAX_REGION_ROWS) {
+      warnings.push(`تم عرض أول ${MAX_REGION_ROWS} منطقة فقط.`);
+    }
+
+    // Page 1
+    renderCoverPage(ctx);
+    // Page 2
+    doc.addPage();
+    await renderPage2(ctx);
+    // Page 3
+    doc.addPage();
+    await renderPage3(ctx);
+    // Page 4
+    doc.addPage();
+    renderPage4(ctx);
+
+    drawFooters(doc, layout, warnings);
+  } finally {
+    endDoc();
   }
-
-  // Page 1
-  renderCoverPage(ctx);
-  // Page 2
-  doc.addPage();
-  await renderPage2(ctx);
-  // Page 3
-  doc.addPage();
-  await renderPage3(ctx);
-  // Page 4
-  doc.addPage();
-  renderPage4(ctx);
-
-  drawFooters(doc, layout);
-  doc.end();
 
   return { buffer: await done, warnings };
 }

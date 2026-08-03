@@ -752,6 +752,54 @@ export async function buildFullAnalyticalData(
 // V2: monthly stock-and-flow timeline
 // ---------------------------------------------------------------------------
 
+type StockFlowComplaint = {
+  complaintDate: Date | null;
+  receivedAt: Date;
+  closedAt: Date | null;
+  dueDate: Date | null;
+};
+
+/** Count inflow (created) and closed counts within [startMs, endMs). */
+function countInflowAndClosed(
+  complaints: readonly StockFlowComplaint[],
+  startMs: number,
+  endMs: number
+): { inflow: number; closed: number } {
+  let inflow = 0;
+  let closed = 0;
+  for (const c of complaints) {
+    const effectiveMs = (c.complaintDate ?? c.receivedAt).getTime();
+    if (effectiveMs >= startMs && effectiveMs < endMs) inflow++;
+    if (c.closedAt) {
+      const closedMs = c.closedAt.getTime();
+      if (closedMs >= startMs && closedMs < endMs) closed++;
+    }
+  }
+  return { inflow, closed };
+}
+
+/**
+ * Open and late stock at the exclusive period end (`endMs`).
+ * A complaint is open at end when it was created before end and not closed before end.
+ * Late when additionally dueDate is before end.
+ */
+function countOpenAndLateAtEnd(
+  complaints: readonly StockFlowComplaint[],
+  endMs: number
+): { openAtEnd: number; lateAtEnd: number } {
+  let openAtEnd = 0;
+  let lateAtEnd = 0;
+  for (const c of complaints) {
+    const effectiveMs = (c.complaintDate ?? c.receivedAt).getTime();
+    if (effectiveMs >= endMs) continue;
+    const closedBeforeEnd = c.closedAt && c.closedAt.getTime() < endMs;
+    if (closedBeforeEnd) continue;
+    openAtEnd++;
+    if (c.dueDate && c.dueDate.getTime() < endMs) lateAtEnd++;
+  }
+  return { openAtEnd, lateAtEnd };
+}
+
 async function buildMonthlyStockFlow(
   filters: ReportFilters,
   comparison: ComparisonResult,
@@ -774,30 +822,8 @@ async function buildMonthlyStockFlow(
   return buckets.map((bucket) => {
     const startMs = bucket.from.getTime();
     const endMs = bucket.toExclusive.getTime();
-    let inflow = 0;
-    let closed = 0;
-    let openAtEnd = 0;
-    let lateAtEnd = 0;
-
-    for (const c of complaints) {
-      const effectiveMs = (c.complaintDate ?? c.receivedAt).getTime();
-
-      if (effectiveMs >= startMs && effectiveMs < endMs) inflow++;
-
-      if (c.closedAt) {
-        const closedMs = c.closedAt.getTime();
-        if (closedMs >= startMs && closedMs < endMs) closed++;
-      }
-
-      if (effectiveMs < endMs) {
-        const closedBeforeEnd = c.closedAt && c.closedAt.getTime() < endMs;
-        if (!closedBeforeEnd) {
-          openAtEnd++;
-          if (c.dueDate && c.dueDate.getTime() < endMs) lateAtEnd++;
-        }
-      }
-    }
-
+    const { inflow, closed } = countInflowAndClosed(complaints, startMs, endMs);
+    const { openAtEnd, lateAtEnd } = countOpenAndLateAtEnd(complaints, endMs);
     return { monthLabel: bucket.label, inflow, closed, openAtEnd, lateAtEnd };
   });
 }
