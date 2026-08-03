@@ -160,6 +160,17 @@ export function isFormulaLikeValue(value: unknown): boolean {
   return typeof value === "string" && /^[=+\-@]/.test(value.trim());
 }
 
+/**
+ * Source placeholders for missing wing codes: only dash-like characters (ASCII/Unicode).
+ * Scoped to wingCode only — dashes may be meaningful in other fields.
+ */
+export function isEmptyWingCodePlaceholder(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  const text = value.trim();
+  if (!text) return false;
+  return /^[-–—−]+$/u.test(text);
+}
+
 export function normalizeExcelSerialDate(serial: number): Date | null {
   return parseExcelSerialDate(serial);
 }
@@ -388,9 +399,9 @@ export function normalizeImportRow(
   for (const [header, field] of Object.entries(mapping)) {
     const value = rawRow.values[header];
 
-    // The source system uses a standalone dash to mean that no wing code
-    // was provided. Treat it as an empty optional value, not as a formula.
-    if (field === "wingCode" && normalizeTextCell(value) === "-") {
+    // Source systems use dash-only placeholders for missing wing codes.
+    // Normalize them to empty before formula detection (e.g. "--" starts with "-").
+    if (field === "wingCode" && isEmptyWingCodePlaceholder(value)) {
       continue;
     }
 

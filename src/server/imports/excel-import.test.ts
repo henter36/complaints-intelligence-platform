@@ -8,19 +8,30 @@ import {
 } from "./complaint-column-schema";
 import { deleteStoredImportFileForBatch, getRequiredUncompressedSize, validateXlsxZip } from "./file-storage";
 import { buildImportErrorCsv, toSafeMessage } from "./error-report";
-import { normalizeDateCell, normalizeExcelSerialDate, normalizeImportRow, normalizeTextCell } from "./normalization";
+import { normalizeDateCell, normalizeExcelSerialDate, normalizeImportRow, normalizeTextCell, isEmptyWingCodePlaceholder } from "./normalization";
 import { parseXlsxWorkbook } from "./xlsx-parser";
 import {
   DUPLICATE_BLOCKING_IMPORT_STATUSES,
+  classifyNormalizedImportRows,
   complaintCandidateIdentityKeys,
+  findExistingComplaintByIdentity,
   getImportRowOutcome,
   hasMeaningfulChange,
   loadImportBatchForResume,
   normalizedCandidateIdentityKeys,
   persistPreviewRows,
   resolveEffectiveColumnMapping,
+  resolveIncomingIdentity,
+  type ComplaintIndexEntry,
   type ProcessedImportRow,
 } from "./excel-import-service";
+import {
+  buildQualityObservationsSummary,
+  orderQualityObservationsForDisplay,
+  resolvePreviewValue,
+  QUALITY_OBSERVATION_DISPLAY_LIMIT,
+} from "./import-preview-presentation";
+import { buildComplaintFingerprint } from "@/server/complaints/identity-service";
 import { db } from "@/lib/db";
 import {
   ComplaintPriority,
@@ -28,6 +39,7 @@ import {
   ImportBatchStatus,
   ImportRowAction,
   ImportRowValidationStatus,
+  type Complaint,
 } from "@prisma/client";
 import { validateNormalizedComplaintRow } from "./row-validation";
 
@@ -185,6 +197,84 @@ describe("secure xlsx import parsing", () => {
     expect(result.errors).not.toContainEqual(
       expect.objectContaining({ code: "FORMULA_NOT_ALLOWED" })
     );
+  });
+
+  it.each([
+    "-",
+    "--",
+    "---",
+    "–",
+    "—",
+    "−",
+    " -- ",
+    "––",
+    "——",
+  ])("treats wingCode placeholder %j as empty without FORMULA_NOT_ALLOWED", (placeholder) => {
+    expect(isEmptyWingCodePlaceholder(placeholder)).toBe(true);
+
+    const { mapping } = matchComplaintColumns([
+      "رقم الشكوى",
+      "تاريخ الشكوى",
+      "الموضوع",
+      "رمز الجناح",
+    ]);
+
+    const result = normalizeImportRow(
+      {
+        rowNumber: 2,
+        values: {
+          "رقم الشكوى": `C-WING-${placeholder}`,
+          "تاريخ الشكوى": "2026-07-01",
+          "الموضوع": "شكوى تجريبية",
+          "رمز الجناح": placeholder,
+        },
+      },
+      mapping
+    );
+
+    expect(result.normalized.wingCode).toBeUndefined();
+    expect(result.errors).not.toContainEqual(
+      expect.objectContaining({ code: "FORMULA_NOT_ALLOWED" })
+    );
+  });
+
+  it.each(["-1", "-أ", "جناح-1", "A-"])(
+    "does not treat %j as an empty wingCode placeholder",
+    (value) => {
+      expect(isEmptyWingCodePlaceholder(value)).toBe(false);
+    }
+  );
+
+  it("still rejects actual formulas in wingCode", () => {
+    const { mapping } = matchComplaintColumns([
+      "رقم الشكوى",
+      "تاريخ الشكوى",
+      "الموضوع",
+      "رمز الجناح",
+    ]);
+
+    for (const formula of ["=1+1", "+1", "@value"] as const) {
+      const result = normalizeImportRow(
+        {
+          rowNumber: 2,
+          values: {
+            "رقم الشكوى": `C-WING-F-${formula}`,
+            "تاريخ الشكوى": "2026-07-01",
+            "الموضوع": "شكوى تجريبية",
+            "رمز الجناح": formula,
+          },
+        },
+        mapping
+      );
+
+      expect(result.normalized.wingCode).toBeUndefined();
+      expect(result.errors).toContainEqual(
+        expect.objectContaining({
+          field: "wingCode",
+          code: "FORMULA_NOT_ALLOWED",
+        })
+      );
+    }
   });
 
   it("still rejects an actual formula in wingCode", () => {
@@ -472,6 +562,185 @@ describe("secure xlsx import parsing", () => {
     expect(hasMeaningfulChange({ dueDate: new Date("2026-07-10T00:00:00Z") }, complaint)).toBe(false);
   });
 
+  it("builds exclusive incoming identity keys (no weaker fallback keys)", () => {
+    const complaint = {
+      externalId: "C-1",
+      sourceReference: "SRC-1",
+      complaintDate: new Date("2026-07-01T00:00:00Z"),
+      region: "الرياض",
+      facility: "المركز",
+      department: "الدعم",
+      subject: "اختبار",
+    };
+
+    const complaintKeys = complaintCandidateIdentityKeys(complaint);
+    const rowKeys = normalizedCandidateIdentityKeys({
+      externalId: "C-1",
+      sourceReference: "SRC-1",
+      complaintDate: new Date("2026-07-01T00:00:00Z"),
+      region: "الرياض",
+      facility: "المركز",
+      department: "الدعم",
+      subject: "اختبار",
+    });
+
+    expect(complaintKeys).toEqual(expect.arrayContaining([
+      "externalId:c-1",
+      "sourceReferenceDate:src-1|2026-07-01",
+    ]));
+    // Existing complaints are multi-indexed for performance; fingerprint remains available for lookup.
+    expect(complaintKeys.some((key) => key.startsWith("fingerprint:"))).toBe(true);
+
+    // Incoming rows use exclusive externalId-only strategy when present.
+    expect(rowKeys).toEqual(["externalId:c-1"]);
+    expect(rowKeys.some((key) => key.startsWith("fingerprint:"))).toBe(false);
+  });
+
+  it("never falls back to fingerprint when externalId differs from an existing match", () => {
+    const date = new Date("2026-07-01T00:00:00Z");
+    const shared = {
+      complaintDate: date,
+      region: "الرياض",
+      facility: "سجن",
+      department: "الإدارة",
+      subject: "نفس الموضوع",
+    };
+    const existing = {
+      id: "cmp-existing",
+      version: 1,
+      externalId: "COMP/06313",
+      ...shared,
+    } as Complaint;
+
+    const existingByIdentity = new Map<string, ComplaintIndexEntry>();
+    for (const key of complaintCandidateIdentityKeys(existing)) {
+      existingByIdentity.set(key, { kind: "match", complaint: existing });
+    }
+
+    // Same fingerprint signal, different externalId
+    const fingerprintKey = `fingerprint:${buildComplaintFingerprint(shared)}`;
+    expect(existingByIdentity.has(fingerprintKey)).toBe(true);
+
+    const incoming = {
+      externalId: "COMP/06271",
+      ...shared,
+    };
+
+    expect(resolveIncomingIdentity(incoming)).toEqual({
+      kind: "EXTERNAL_ID",
+      key: "externalId:comp/06271",
+    });
+    expect(findExistingComplaintByIdentity(
+      resolveIncomingIdentity(incoming),
+      existingByIdentity
+    )).toBeUndefined();
+
+    const classified = classifyNormalizedImportRows(
+      [
+        { externalId: "COMP/06313", ...shared },
+        { externalId: "COMP/06271", ...shared },
+      ],
+      existingByIdentity
+    );
+
+    expect(classified[0]).toMatchObject({
+      action: ImportRowAction.NO_CHANGE,
+      matchedComplaintId: "cmp-existing",
+      errors: [],
+    });
+    expect(classified[1]).toMatchObject({
+      action: ImportRowAction.NEW,
+      matchedComplaintId: null,
+      errors: [],
+    });
+    expect(classified[1].errors.some((e) => e.code === "DUPLICATE_TARGET_COMPLAINT")).toBe(false);
+  });
+
+  it("uses sourceReference+date exclusively without fingerprint fallback", () => {
+    const date = new Date("2026-07-01T00:00:00Z");
+    const shared = {
+      complaintDate: date,
+      region: "الرياض",
+      facility: "سجن",
+      department: "الإدارة",
+      subject: "موضوع",
+    };
+    const existing = {
+      id: "cmp-src",
+      version: 2,
+      externalId: null,
+      sourceReference: "SRC-MATCH",
+      ...shared,
+    } as Complaint;
+
+    const index = new Map<string, ComplaintIndexEntry>();
+    for (const key of complaintCandidateIdentityKeys(existing)) {
+      index.set(key, { kind: "match", complaint: existing });
+    }
+
+    expect(resolveIncomingIdentity({ sourceReference: "SRC-MATCH", ...shared })).toMatchObject({
+      kind: "SOURCE_REFERENCE_DATE",
+    });
+
+    // Unmatched sourceReference must not fall through to fingerprint of shared subject fields
+    const miss = classifyNormalizedImportRows(
+      [{ sourceReference: "SRC-OTHER", ...shared }],
+      index
+    );
+    expect(miss[0]).toMatchObject({ action: ImportRowAction.NEW, matchedComplaintId: null });
+
+    const hit = classifyNormalizedImportRows(
+      [{ sourceReference: "SRC-MATCH", ...shared }],
+      index
+    );
+    expect(hit[0]).toMatchObject({
+      action: ImportRowAction.NO_CHANGE,
+      matchedComplaintId: "cmp-src",
+    });
+  });
+
+  it("uses fingerprint only when stronger identities are absent", () => {
+    const date = new Date("2026-07-01T00:00:00Z");
+    const shared = {
+      complaintDate: date,
+      region: "الرياض",
+      facility: "سجن",
+      department: "الإدارة",
+      subject: "بصمة",
+    };
+    const existing = {
+      id: "cmp-fp",
+      version: 1,
+      externalId: null,
+      sourceReference: null,
+      ...shared,
+    } as Complaint;
+
+    const index = new Map<string, ComplaintIndexEntry>();
+    for (const key of complaintCandidateIdentityKeys(existing)) {
+      index.set(key, { kind: "match", complaint: existing });
+    }
+
+    expect(resolveIncomingIdentity(shared).kind).toBe("FINGERPRINT");
+    const classified = classifyNormalizedImportRows([shared], index);
+    expect(classified[0]).toMatchObject({
+      action: ImportRowAction.NO_CHANGE,
+      matchedComplaintId: "cmp-fp",
+    });
+  });
+
+  it("detects true in-file duplicates for the same externalId", () => {
+    const row = {
+      externalId: "COMP/DUPE",
+      complaintDate: new Date("2026-07-01T00:00:00Z"),
+      subject: "مكرر",
+    };
+    const classified = classifyNormalizedImportRows([row, row], new Map());
+    expect(classified[0].action).toBe(ImportRowAction.NEW);
+    expect(classified[1].action).toBe(ImportRowAction.DUPLICATE);
+    expect(classified[1].errors.some((e) => e.code === "DUPLICATE_ROW_IN_FILE")).toBe(true);
+  });
+
   it("builds complaint identity keys for all supported strategies", () => {
     const complaint = {
       externalId: "C-1",
@@ -498,7 +767,144 @@ describe("secure xlsx import parsing", () => {
       "externalId:c-1",
       "sourceReferenceDate:src-1|2026-07-01",
     ]));
-    expect(rowKeys.some((key) => key.startsWith("fingerprint:"))).toBe(true);
+    // Legacy name: now exclusive for incoming rows (externalId wins).
+    expect(rowKeys).toEqual(["externalId:c-1"]);
+  });
+
+  describe("import preview presentation", () => {
+    it("prefers normalizedData, falls back to rawData, then empty", () => {
+      expect(
+        resolvePreviewValue({ subject: "منظم" }, { "الموضوع": "خام" }, "subject", {
+          "الموضوع": "subject",
+        })
+      ).toBe("منظم");
+      expect(
+        resolvePreviewValue(null, { "الموضوع": "خام", "رقم الشكوى": "COMP/1" }, "subject", {
+          "الموضوع": "subject",
+          "رقم الشكوى": "externalId",
+        })
+      ).toBe("خام");
+      expect(
+        resolvePreviewValue(null, { "رقم الشكوى": "COMP/1" }, "subject", {
+          "رقم الشكوى": "externalId",
+        })
+      ).toBeUndefined();
+    });
+
+    it("orders blocking rows before warnings and respects the 100 display limit", () => {
+      const blocking = Array.from({ length: 2 }, (_, i) => ({ id: `b${i}` }));
+      const warnings = Array.from({ length: 120 }, (_, i) => ({ id: `w${i}` }));
+      const displayed = orderQualityObservationsForDisplay(blocking, warnings);
+
+      expect(displayed).toHaveLength(QUALITY_OBSERVATION_DISPLAY_LIMIT);
+      expect(displayed.slice(0, 2).map((r) => r.id)).toEqual(["b0", "b1"]);
+      expect(displayed.filter((r) => r.id.startsWith("b"))).toHaveLength(2);
+      expect(displayed.filter((r) => r.id.startsWith("w"))).toHaveLength(98);
+
+      const counts = {
+        blockingRowCount: 2,
+        warningRowCount: 6007,
+        displayedObservationCount: 100,
+        qualityDisplayLimit: 100,
+      };
+      expect(buildQualityObservationsSummary(counts)).toContain("مانع");
+      expect(buildQualityObservationsSummary(counts)).toContain(
+        new Intl.NumberFormat("ar-SA").format(6007)
+      );
+      expect(counts.blockingRowCount).not.toBe(counts.displayedObservationCount);
+    });
+  });
+
+  describe("Issue #44 reference synthetic fixture", () => {
+    it("treats different externalId as NEW despite shared fingerprint, accepts -- wingCode, and keeps matching externalId as NO_CHANGE", () => {
+      const date = new Date("2026-07-01T00:00:00Z");
+      const sharedFingerprint = {
+        complaintDate: date,
+        region: "الرياض",
+        facility: "سجن",
+        department: "الإدارة",
+        subject: "شكوى مشتركة البصمة",
+      };
+      const existing = {
+        id: "cmp-ref-06313",
+        version: 3,
+        externalId: "COMP/06313",
+        ...sharedFingerprint,
+      } as Complaint;
+
+      const index = new Map<string, ComplaintIndexEntry>();
+      for (const key of complaintCandidateIdentityKeys(existing)) {
+        index.set(key, { kind: "match", complaint: existing });
+      }
+
+      // Row 3 style: existing externalId → NO_CHANGE
+      // Row 44 style: different externalId, same fingerprint → NEW (not DUPLICATE_TARGET)
+      const classified = classifyNormalizedImportRows(
+        [
+          { externalId: "COMP/06313", ...sharedFingerprint },
+          { externalId: "COMP/06271", ...sharedFingerprint },
+        ],
+        index
+      );
+
+      expect(classified[0]).toMatchObject({
+        action: ImportRowAction.NO_CHANGE,
+        matchedComplaintId: "cmp-ref-06313",
+      });
+      expect(classified[1]).toMatchObject({
+        action: ImportRowAction.NEW,
+        matchedComplaintId: null,
+        errors: [],
+      });
+
+      // Row 3207 style: wingCode "--" is not REJECT
+      const { mapping } = matchComplaintColumns([
+        "رقم الشكوى",
+        "تاريخ الشكوى",
+        "الموضوع",
+        "رمز الجناح",
+        "المنطقة",
+        "السجن",
+        "القسم",
+      ]);
+      const wing = normalizeImportRow(
+        {
+          rowNumber: 3207,
+          values: {
+            "رقم الشكوى": "COMP/03074",
+            "تاريخ الشكوى": "2026-07-01",
+            "الموضوع": "موضوع",
+            "رمز الجناح": "--",
+            "المنطقة": "الرياض",
+            "السجن": "سجن",
+            "القسم": "الإدارة",
+          },
+        },
+        mapping
+      );
+      expect(wing.normalized.wingCode).toBeUndefined();
+      expect(wing.errors).toEqual([]);
+
+      // Preview of INVALID row with null normalized still surfaces raw complaint number
+      expect(
+        resolvePreviewValue(
+          null,
+          { "رقم الشكوى": "COMP/06271", "الموضوع": "شكوى" },
+          "externalId",
+          { "رقم الشكوى": "externalId", "الموضوع": "subject" }
+        )
+      ).toBe("COMP/06271");
+
+      // Approve eligibility counters independent of warning flood
+      const summary = buildQualityObservationsSummary({
+        blockingRowCount: 0,
+        warningRowCount: 6007,
+        displayedObservationCount: 100,
+        qualityDisplayLimit: 100,
+      });
+      expect(summary).toMatch(/ملاحظات جودة غير مانعة/);
+      expect(summary).not.toMatch(/صف مانع|صفوف مانعة|صفان مانعان/);
+    });
   });
 
   it("blocks duplicate uploads for active import states only", () => {
