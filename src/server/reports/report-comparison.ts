@@ -16,6 +16,7 @@ import type { ComparisonMode } from "@/lib/reports/report-contract";
 // ---------------------------------------------------------------------------
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const UNSPECIFIED_SUBJECT = "غير محدد";
 export const DEPT_CLASS_RISES_LIMIT = 20;
 export const DEFAULT_MINIMUM_INCREASE_COUNT = 1;
 
@@ -49,6 +50,16 @@ export type TrendDirection = "ارتفاع" | "انخفاض" | "دون تغير"
 
 export type RegionChangeRow = {
   regionName: string;
+  currentCount: number;
+  previousCount: number;
+  difference: number;
+  changeRate: number | null;
+  direction: TrendDirection;
+};
+
+export type RegionSubjectChangeRow = {
+  regionName: string;
+  subject: string;
   currentCount: number;
   previousCount: number;
   difference: number;
@@ -102,6 +113,8 @@ export type ComparisonResult = {
   previousTotal: number | null;
   regionTrend: RegionTrendData;
   regionChanges: RegionChangeRow[];
+  /** Strongest subject increase/decrease per region. Optional for old fixtures. */
+  regionSubjectChanges?: RegionSubjectChangeRow[];
   deptClassRises: DeptClassRiseRow[];
   deptClassRisesTotal: number;
   /** All dept×class pairs with counts from both periods (used for continuity). */
@@ -117,6 +130,7 @@ const comparisonSelect = {
   complaintDate: true,
   receivedAt: true,
   region: true,
+  subject: true,
   department: true,
   classificationId: true,
   classification: { select: { id: true, nameAr: true } },
@@ -167,6 +181,10 @@ function complaintDay(complaint: ComparisonComplaint): string {
 
 function regionName(complaint: ComparisonComplaint): string {
   return normalizeRegionName(complaint.region);
+}
+
+function subjectName(complaint: ComparisonComplaint): string {
+  return complaint.subject.trim() || UNSPECIFIED_SUBJECT;
 }
 
 function roundRate(value: number): number {
@@ -291,6 +309,88 @@ function buildRegionChanges(
 }
 
 // ---------------------------------------------------------------------------
+// Strongest subject change per region
+// ---------------------------------------------------------------------------
+
+type RegionSubjectAccumulator = {
+  regionName: string;
+  subject: string;
+  currentCount: number;
+  previousCount: number;
+};
+
+function regionSubjectKey(region: string, subject: string): string {
+  return `${region}\u0000${subject}`;
+}
+
+function accumulateRegionSubjects(
+  map: Map<string, RegionSubjectAccumulator>,
+  complaints: ComparisonComplaint[],
+  field: "currentCount" | "previousCount"
+): void {
+  for (const complaint of complaints) {
+    const region = regionName(complaint);
+    const subject = subjectName(complaint);
+    const key = regionSubjectKey(region, subject);
+    const existing = map.get(key) ?? {
+      regionName: region,
+      subject,
+      currentCount: 0,
+      previousCount: 0,
+    };
+    existing[field] += 1;
+    map.set(key, existing);
+  }
+}
+
+function compareSubjectChangeMagnitude(
+  candidate: RegionSubjectChangeRow,
+  current: RegionSubjectChangeRow
+): number {
+  const absoluteDifference = Math.abs(candidate.difference) - Math.abs(current.difference);
+  if (absoluteDifference !== 0) return absoluteDifference;
+
+  const candidateVolume = candidate.currentCount + candidate.previousCount;
+  const currentVolume = current.currentCount + current.previousCount;
+  if (candidateVolume !== currentVolume) return candidateVolume - currentVolume;
+
+  return -candidate.subject.localeCompare(current.subject, "ar");
+}
+
+function buildRegionSubjectChanges(
+  current: ComparisonComplaint[],
+  previous: ComparisonComplaint[]
+): RegionSubjectChangeRow[] {
+  const accumulators = new Map<string, RegionSubjectAccumulator>();
+  accumulateRegionSubjects(accumulators, current, "currentCount");
+  accumulateRegionSubjects(accumulators, previous, "previousCount");
+
+  const strongestByRegion = new Map<string, RegionSubjectChangeRow>();
+  for (const accumulator of accumulators.values()) {
+    const difference = accumulator.currentCount - accumulator.previousCount;
+    if (difference === 0) continue;
+
+    const candidate: RegionSubjectChangeRow = {
+      regionName: accumulator.regionName,
+      subject: accumulator.subject,
+      currentCount: accumulator.currentCount,
+      previousCount: accumulator.previousCount,
+      difference,
+      changeRate: computeChangeRate(accumulator.currentCount, accumulator.previousCount),
+      direction: resolveDirection(accumulator.currentCount, accumulator.previousCount),
+    };
+    const existing = strongestByRegion.get(candidate.regionName);
+    if (!existing || compareSubjectChangeMagnitude(candidate, existing) > 0) {
+      strongestByRegion.set(candidate.regionName, candidate);
+    }
+  }
+
+  return [...strongestByRegion.values()].sort((a, b) =>
+    a.regionName.localeCompare(b.regionName, "ar")
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Department + classification rises
 // ---------------------------------------------------------------------------
 
@@ -304,7 +404,7 @@ type DeptClassAccumulator = {
 };
 
 function deptClassKey(departmentId: string, classificationId: string): string {
-  return `${departmentId} ${classificationId}`;
+  return `${departmentId}\u0000${classificationId}`;
 }
 
 /** True when a complaint has both a usable department and classification id. */
@@ -565,6 +665,7 @@ export async function buildComparisonResult(
   if (trend.warning) warnings.push(trend.warning);
 
   const regionChanges = previousPeriod ? buildRegionChanges(current, previous) : buildRegionChanges(current, []);
+  const regionSubjectChanges = previousPeriod ? buildRegionSubjectChanges(current, previous) : [];
 
   const rises = previousPeriod
     ? buildDeptClassRises(current, previous, minimumIncreaseCount)
@@ -585,6 +686,7 @@ export async function buildComparisonResult(
     previousTotal: previousPeriod ? previous.length : null,
     regionTrend: trend.data,
     regionChanges,
+    regionSubjectChanges,
     deptClassRises: rises.rows,
     deptClassRisesTotal: rises.total,
     deptClassAllPairs: rises.allPairs,
