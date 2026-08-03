@@ -1,7 +1,102 @@
+import type { Prisma } from "@prisma/client";
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 import { parseClassificationKeywords } from "@/server/classifications/classification-keywords";
+
+type ClassificationRequestBody = {
+  id?: string | null;
+  name: string;
+  description?: string | null;
+  color?: string | null;
+  keywords?: Prisma.InputJsonValue | null;
+  parentId?: string | null;
+};
+
+function invalidParentResponse(
+  parentId: string | null | undefined,
+  normalizedParentId: string
+): NextResponse | null {
+  if (parentId == null || normalizedParentId.length > 0) return null;
+
+  return NextResponse.json(
+    { error: "INVALID_PARENT_CATEGORY", message: "parentId must reference an active category." },
+    { status: 400 }
+  );
+}
+
+function invalidKeywordsResponse(keywords: Prisma.InputJsonValue | null | undefined): NextResponse | null {
+  if (keywords === undefined || keywords === null) return null;
+
+  try {
+    parseClassificationKeywords(keywords);
+    return null;
+  } catch {
+    return NextResponse.json(
+      { error: "INVALID_CLASSIFICATION_KEYWORDS", message: "يجب أن تكون الكلمات المفتاحية قائمة من النصوص." },
+      { status: 400 }
+    );
+  }
+}
+
+async function createOrUpdateClassification(
+  body: ClassificationRequestBody,
+  parentCategoryId: string
+): Promise<NextResponse> {
+  const data = {
+    categoryId: parentCategoryId,
+    nameAr: body.name,
+    description: body.description,
+    color: body.color || "#64748b",
+    keywords: body.keywords ?? undefined,
+  };
+  const normalizedId = typeof body.id === "string" ? body.id.trim() : "";
+  const classification = normalizedId
+    ? await db.classification.update({ where: { id: normalizedId }, data })
+    : await db.classification.create({ data });
+
+  return NextResponse.json({
+    ...classification,
+    name: classification.nameAr,
+    parentId: classification.categoryId,
+  }, { status: 201 });
+}
+
+async function createClassificationOrCategory(
+  body: ClassificationRequestBody,
+  normalizedParentId: string
+): Promise<NextResponse> {
+  if (!normalizedParentId) {
+    const category = await db.category.create({
+      data: {
+        nameAr: body.name,
+        description: body.description,
+      },
+    });
+    return NextResponse.json({
+      ...category,
+      name: category.nameAr,
+      color: "#64748b",
+      parentId: null,
+    }, { status: 201 });
+  }
+
+  const parentCategory = await db.category.findFirst({
+    where: {
+      id: normalizedParentId,
+      isDeleted: false,
+    },
+    select: { id: true },
+  });
+  if (!parentCategory) {
+    return NextResponse.json(
+      { error: "CATEGORY_NOT_FOUND", message: "Parent category was not found or is inactive." },
+      { status: 404 }
+    );
+  }
+
+  return createOrUpdateClassification(body, parentCategory.id);
+}
 
 export async function GET(req: NextRequest) {
   try {
@@ -47,83 +142,16 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     await requireAdminApiSession(req);
-    const body = await req.json();
-    const { id, name, description, color, keywords, parentId } = body;
-    const normalizedParentId = typeof parentId === "string" ? parentId.trim() : "";
+    const body = await req.json() as ClassificationRequestBody;
+    const normalizedParentId = typeof body.parentId === "string" ? body.parentId.trim() : "";
 
-    if (parentId != null && normalizedParentId.length === 0) {
-      return NextResponse.json(
-        { error: "INVALID_PARENT_CATEGORY", message: "parentId must reference an active category." },
-        { status: 400 }
-      );
-    }
+    const parentError = invalidParentResponse(body.parentId, normalizedParentId);
+    if (parentError) return parentError;
 
-    if (keywords !== undefined && keywords !== null) {
-      try {
-        parseClassificationKeywords(keywords);
-      } catch {
-        return NextResponse.json(
-          { error: "INVALID_CLASSIFICATION_KEYWORDS", message: "يجب أن تكون الكلمات المفتاحية قائمة من النصوص." },
-          { status: 400 }
-        );
-      }
-    }
+    const keywordsError = invalidKeywordsResponse(body.keywords);
+    if (keywordsError) return keywordsError;
 
-    if (normalizedParentId) {
-      const parentCategory = await db.category.findFirst({
-        where: {
-          id: normalizedParentId,
-          isDeleted: false,
-        },
-        select: { id: true },
-      });
-
-      if (!parentCategory) {
-        return NextResponse.json(
-          { error: "CATEGORY_NOT_FOUND", message: "Parent category was not found or is inactive." },
-          { status: 404 }
-        );
-      }
-
-      const classification = typeof id === "string" && id.trim()
-        ? await db.classification.update({
-            where: { id: id.trim() },
-            data: {
-              categoryId: parentCategory.id,
-              nameAr: name,
-              description,
-              color: color || "#64748b",
-              keywords: keywords ?? undefined,
-            },
-          })
-        : await db.classification.create({
-            data: {
-              categoryId: parentCategory.id,
-              nameAr: name,
-              description,
-              color: color || "#64748b",
-              keywords: keywords ?? undefined,
-            },
-          });
-      return NextResponse.json({
-        ...classification,
-        name: classification.nameAr,
-        parentId: classification.categoryId,
-      }, { status: 201 });
-    }
-
-    const category = await db.category.create({
-      data: {
-        nameAr: name,
-        description,
-      },
-    });
-    return NextResponse.json({
-      ...category,
-      name: category.nameAr,
-      color: "#64748b",
-      parentId: null,
-    }, { status: 201 });
+    return createClassificationOrCategory(body, normalizedParentId);
   } catch (error) {
     const authResponse = mapAuthError(error);
     if (authResponse) return authResponse;
