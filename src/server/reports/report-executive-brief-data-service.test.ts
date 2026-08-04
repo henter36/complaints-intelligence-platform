@@ -128,6 +128,16 @@ function makeKpiResult(overrides: Partial<ComplaintKpiResult> = {}): ComplaintKp
       validityRate: 90.0,
       avgSatisfaction: 4.2,
       satisfactionRate: 84.0,
+      // Seven-day SLA fields
+      slaEligibleCount: 62,
+      slaCompliantCount: 59,
+      slaNonCompliantCount: 3,
+      openWithinSlaCount: 22,
+      closedWithinSlaCount: 37,
+      closedLateCount: 3,
+      closedWithoutTrustedDateCount: 2,
+      averageResolutionEligibleCount: 40,
+      onTimeEligibleClosed: 62, // alias for slaEligibleCount
     },
     trend: {
       previousTotal: 80,
@@ -315,10 +325,13 @@ describe("buildExecutiveBriefData — KPI cards", () => {
     ]);
   });
 
-  it("keeps compliance unavailable when no closed complaint has a valid due date", async () => {
+  it("keeps compliance unavailable when slaEligibleCount is 0 (all complaints closed without trusted closedAt)", async () => {
     const result = makeKpiResult();
     result.performance.onTimeRate = null;
-    result.kpis.dueDateComplianceRate.available = false;
+    result.performance.slaEligibleCount = 0;
+    result.performance.slaCompliantCount = 0;
+    result.performance.slaNonCompliantCount = 0;
+    result.performance.closedWithoutTrustedDateCount = 65;
     const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
     expect(data.briefKpis.find((kpi) => kpi.key === "complianceRate")?.value).toBeNull();
   });
@@ -1272,6 +1285,117 @@ describe("buildExecutiveBriefData — conclusions/notes with zero previous data"
     const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(false), undefined, NOW);
     const hasNote = (data.notes ?? []).some((n) => n.includes("لا تتوفر فترة سابقة"));
     expect(hasNote).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: seven-day SLA integration with buildExecutiveBriefData
+// ---------------------------------------------------------------------------
+
+describe("buildExecutiveBriefData — seven-day SLA notes and KPIs", () => {
+  it("SLA note is always the first note regardless of other conditions", async () => {
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
+    expect((data.notes ?? []).length).toBeGreaterThan(0);
+    expect((data.notes ?? [])[0]).toContain("7 أيام");
+  });
+
+  it("CWTTD note appears when closedWithoutTrustedDateCount > 0", async () => {
+    const result = makeKpiResult();
+    result.performance.closedWithoutTrustedDateCount = 10;
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
+    const notes = data.notes ?? [];
+    const hasCwttdNote = notes.some((n) => n.includes("بلا تاريخ إغلاق") || n.includes("موثوق"));
+    expect(hasCwttdNote).toBe(true);
+  });
+
+  it("CWTTD note is absent when closedWithoutTrustedDateCount is 0", async () => {
+    const result = makeKpiResult();
+    result.performance.closedWithoutTrustedDateCount = 0;
+    result.performance.onTimeRate = 95.0;
+    result.performance.slaEligibleCount = 62;
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
+    const notes = data.notes ?? [];
+    const hasCwttdNote = notes.some((n) => n.includes("بلا تاريخ إغلاق") || n.includes("موثوق"));
+    expect(hasCwttdNote).toBe(false);
+  });
+
+  it("insufficient-data note appears when onTimeRate is null and closedWithoutTrustedDateCount is 0", async () => {
+    const result = makeKpiResult();
+    result.performance.onTimeRate = null;
+    result.performance.slaEligibleCount = 0;
+    result.performance.closedWithoutTrustedDateCount = 0;
+    result.performance.closedWithinSlaCount = 0;
+    result.performance.closedLateCount = 0;
+    result.performance.openWithinSlaCount = 0;
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
+    const notes = data.notes ?? [];
+    const hasInsufficientNote = notes.some((n) => n.includes("بيانات") || n.includes("قياس"));
+    expect(hasInsufficientNote).toBe(true);
+  });
+
+  it("averageResolutionDays KPI value is null when averageResolutionEligibleCount is 0", async () => {
+    const result = makeKpiResult();
+    result.performance.averageResolutionEligibleCount = 0;
+    result.performance.averageResolutionDays = null as unknown as number;
+    result.kpis.averageResolutionDays.available = false;
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
+    expect(data.briefKpis.find((k) => k.key === "averageResolutionDays")?.value).toBeNull();
+  });
+
+  it("averageResolutionDays KPI value is 0 when same-day closure (averageResolutionEligibleCount > 0)", async () => {
+    const result = makeKpiResult();
+    result.performance.averageResolutionDays = 0;
+    result.performance.averageResolutionEligibleCount = 5;
+    result.kpis.averageResolutionDays.currentValue = 0;
+    result.kpis.averageResolutionDays.available = true;
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
+    expect(data.briefKpis.find((k) => k.key === "averageResolutionDays")?.value).toBe(0);
+  });
+
+  it("allRegions table averageResolutionDays shows null for groups where averageResolutionEligibleCount is 0", async () => {
+    const result = makeKpiResult();
+    // Override byRegion distributions to have a group with no eligible count
+    (result.distributions as { byRegion: unknown[] }).byRegion = [
+      {
+        name: "الرياض", id: null, count: 5, total: 5,
+        open: 3, closed: 2, currentlyLate: 0, closedLate: 0,
+        withinDueDate: 0, complianceRate: null, averageResolutionDays: 0,
+        highPriorityOpen: 0, unclassified: 0,
+        averageResolutionEligibleCount: 0, // no eligible → should show null
+      },
+    ];
+    dbMocks.complaintGroupBy.mockResolvedValue([{ region: "الرياض" }]);
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
+    // The allRegions table row for الرياض should not show an average when eligibleCount = 0
+    const row = data.allRegions.find((r) => r.regionName.includes("الرياض"));
+    expect(row).toBeDefined();
+    // averageResolutionDays in the allRegions row should be null (no eligible)
+    expect(row!.averageResolutionDays).toBeNull();
+  });
+
+  it("previousComplianceRate uses slaEligibleCount from previous result to gate availability", async () => {
+    // Previous result has slaEligibleCount = 0 → previous complianceRate previousValue must be null
+    const result = makeKpiResult();
+    const previousResult = makeKpiResult();
+    previousResult.performance.slaEligibleCount = 0;
+    previousResult.performance.onTimeRate = null;
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), previousResult, NOW);
+    const complianceCard = data.briefKpis.find((k) => k.key === "complianceRate");
+    expect(complianceCard?.previousValue).toBeNull();
+  });
+
+  it("notes array has at most 4 entries", async () => {
+    const result = makeKpiResult();
+    result.performance.closedWithoutTrustedDateCount = 10;
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
+    expect((data.notes ?? []).length).toBeLessThanOrEqual(4);
+  });
+
+  it("closed KPI label uses updated Arabic text (current period)", async () => {
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
+    const closedCard = data.briefKpis.find((k) => k.key === "closed");
+    expect(closedCard?.label).toBeDefined();
+    expect(typeof closedCard?.label).toBe("string");
   });
 });
 

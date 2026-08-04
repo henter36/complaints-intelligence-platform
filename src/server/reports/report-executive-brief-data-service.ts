@@ -14,6 +14,7 @@
 
 import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
+import { COMPLAINT_SLA_DURATION_MS } from "@/server/complaints/complaint-sla-timing";
 import type { ComplaintGroupMetrics, ComplaintKpiResult } from "@/server/complaints/complaint-kpi-service";
 import { buildComplaintWhere, parseComplaintQuery } from "@/server/complaints/complaint-query-service";
 import type { DeptClassPeriodCount, ComparisonResult, PeriodRange } from "./report-comparison";
@@ -130,11 +131,11 @@ function buildBriefKpis(
   const previousKpis = previousResult?.kpis;
   const perf = result.performance;
   const vol = result.volume;
-  const previousAverageAvailable = previousResult === undefined
-    || previousResult.volume.closed > 0;
-  const previousAverageResolutionDays = p && previousAverageAvailable
-    ? (previousKpis?.averageResolutionDays.currentValue ?? kpis.averageResolutionDays.previousValue)
+  const previousAverageEligible = (previousResult?.performance.averageResolutionEligibleCount ?? 0) > 0;
+  const previousAverageResolutionDays = p && previousAverageEligible
+    ? (previousResult?.performance.averageResolutionDays ?? null)
     : null;
+  const previousSlaEligible = (previousResult?.performance.slaEligibleCount ?? 0) > 0;
 
   const specs: KpiSpec[] = [
     {
@@ -155,7 +156,7 @@ function buildBriefKpis(
     },
     {
       key: "closed",
-      label: "المغلقة",
+      label: "المغلقة حالياً من شكاوى الفترة",
       value: vol.closed,
       previousValue: p ? (previousKpis?.closedComplaints.currentValue ?? kpis.closedComplaints.previousValue) : null,
       format: "number",
@@ -181,8 +182,8 @@ function buildBriefKpis(
       key: "complianceRate",
       label: "الالتزام ضمن المهلة",
       value: perf.onTimeRate,
-      previousValue: p && previousKpis?.dueDateComplianceRate.available !== false
-        ? (previousKpis?.dueDateComplianceRate.currentValue ?? kpis.dueDateComplianceRate.previousValue)
+      previousValue: p && previousSlaEligible
+        ? (previousResult?.performance.onTimeRate ?? null)
         : null,
       format: "percent",
       higherIsBetter: true,
@@ -190,8 +191,8 @@ function buildBriefKpis(
     {
       key: "averageResolutionDays",
       label: "متوسط الإغلاق",
-      value: vol.closed > 0 ? roundRate(perf.averageResolutionDays) : null,
-      previousValue: previousAverageResolutionDays,
+      value: perf.averageResolutionEligibleCount > 0 ? roundRate(perf.averageResolutionDays ?? 0) : null,
+      previousValue: previousAverageResolutionDays !== null ? roundRate(previousAverageResolutionDays) : null,
       format: "days",
       higherIsBetter: false,
     },
@@ -257,8 +258,8 @@ function buildAllRegionsTable(
       changeRate: computeChangeRate(currentCount, previousCount),
       complianceRate: metrics?.complianceRate ?? null,
       averageResolutionDays:
-        metrics?.averageResolutionDays != null && metrics.averageResolutionDays > 0
-          ? roundRate(metrics.averageResolutionDays)
+        (metrics?.averageResolutionEligibleCount ?? 0) > 0
+          ? roundRate(metrics!.averageResolutionDays)
           : null,
       openCount: metrics?.open ?? 0,
       closedCount: metrics?.closed ?? 0,
@@ -326,16 +327,28 @@ function buildConclusions(
 
 function buildNotes(result: ComplaintKpiResult, comparison: ComparisonResult): string[] {
   const notes: string[] = [];
+
+  // 1. Fixed SLA policy — always present as context for all compliance figures.
+  notes.push("المهلة المعتمدة: 7 أيام من تاريخ إنشاء الشكوى.");
+
+  // 2. Closed without a trusted closure date — explains null average/compliance.
+  const closedWithoutTrustedDate = result.performance.closedWithoutTrustedDateCount;
+  if (closedWithoutTrustedDate > 0) {
+    notes.push(
+      `${closedWithoutTrustedDate} شكوى مغلقة بلا تاريخ إغلاق موثوق، ولم تدخل في متوسط مدة الإغلاق أو قياس الالتزام الزمني.`
+    );
+  } else if (result.performance.onTimeRate === null) {
+    notes.push("لا تتوفر بيانات زمنية كافية لقياس الالتزام.");
+  }
+
+  // 3. Unclassified complaints (unchanged).
   if (result.kpis.unclassifiedComplaints.currentValue > 0) {
     notes.push(
       `${result.kpis.unclassifiedComplaints.currentValue} شكوى بلا تصنيف، ما يحد من دقة تحليل الأسباب.`
     );
   }
-  if (result.kpis.withoutDueDate.currentValue > 0) {
-    notes.push(
-      `${result.kpis.withoutDueDate.currentValue} شكوى بلا موعد مستهدف ولا تدخل في مقام الالتزام.`
-    );
-  }
+
+  // 4. Comparison quality.
   if (!comparison.previousPeriod) {
     notes.push("لا تتوفر فترة سابقة صالحة للمقارنة الزمنية.");
   } else if (!hasMeaningfulPreviousData(comparison)) {
@@ -343,6 +356,7 @@ function buildNotes(result: ComplaintKpiResult, comparison: ComparisonResult): s
       "بيانات الفترة السابقة صفرية — قد يكون سبب ذلك غياب تاريخ الشكوى أو استيراد البيانات بتاريخ موحد."
     );
   }
+
   return notes.slice(0, 4);
 }
 
@@ -625,7 +639,7 @@ function buildPerfVolumeRows(
     totalComplaints: group.total,
     complianceRate: group.complianceRate,
     averageResolutionDays:
-      group.averageResolutionDays > 0 ? roundRate(group.averageResolutionDays) : null,
+      group.averageResolutionEligibleCount > 0 ? roundRate(group.averageResolutionDays) : null,
     currentlyLate: group.currentlyLate,
     share: totalComplaints > 0 ? roundRate((group.total / totalComplaints) * 100) : 0,
   }));
@@ -756,7 +770,6 @@ type StockFlowComplaint = {
   complaintDate: Date | null;
   receivedAt: Date;
   closedAt: Date | null;
-  dueDate: Date | null;
 };
 
 /** Count inflow (created) and closed counts within [startMs, endMs). */
@@ -781,7 +794,7 @@ function countInflowAndClosed(
 /**
  * Open and late stock at the exclusive period end (`endMs`).
  * A complaint is open at end when it was created before end and not closed before end.
- * Late when additionally dueDate is before end.
+ * Late when additionally the seven-day SLA deadline (createdAt + 7 days) is before endMs.
  */
 function countOpenAndLateAtEnd(
   complaints: readonly StockFlowComplaint[],
@@ -795,7 +808,8 @@ function countOpenAndLateAtEnd(
     const closedBeforeEnd = c.closedAt && c.closedAt.getTime() < endMs;
     if (closedBeforeEnd) continue;
     openAtEnd++;
-    if (c.dueDate && c.dueDate.getTime() < endMs) lateAtEnd++;
+    const slaDeadlineMs = effectiveMs + COMPLAINT_SLA_DURATION_MS;
+    if (slaDeadlineMs < endMs) lateAtEnd++;
   }
   return { openAtEnd, lateAtEnd };
 }
@@ -816,7 +830,7 @@ async function buildMonthlyStockFlow(
   // One query covers all needed dates; JS bucketing avoids N separate round-trips.
   const complaints = await db.complaint.findMany({
     where: { ...baseWhere, isDeleted: false },
-    select: { complaintDate: true, receivedAt: true, closedAt: true, dueDate: true },
+    select: { complaintDate: true, receivedAt: true, closedAt: true },
   });
 
   return buckets.map((bucket) => {
@@ -868,7 +882,6 @@ async function fetchClassificationOpenLate(
       complaintDate: true,
       receivedAt: true,
       closedAt: true,
-      dueDate: true,
     },
   });
 
@@ -884,7 +897,8 @@ async function fetchClassificationOpenLate(
     const key = c.classificationId ?? "__unclassified__";
     if (!result[key]) result[key] = { openAtEnd: 0, lateAtEnd: 0 };
     result[key].openAtEnd++;
-    if (c.dueDate && c.dueDate.getTime() < periodEndMs) result[key].lateAtEnd++;
+    const slaDeadlineMs = effectiveMs + COMPLAINT_SLA_DURATION_MS;
+    if (slaDeadlineMs < periodEndMs) result[key].lateAtEnd++;
   }
 
   return result;

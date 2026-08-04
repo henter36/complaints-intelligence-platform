@@ -611,7 +611,7 @@ const ICON_KEY_MAP: Record<string, IconType> = {
 
 function kpiSpecialSubText(card: ExecutiveBriefKpiCard): string | null {
   if (card.key === "allTimeTotal") return "منذ بدء التشغيل";
-  if (card.key === "complianceRate") return "للحالات ذات موعد مستهدف";
+  if (card.key === "complianceRate") return "مهلة 7 أيام من تاريخ الإنشاء";
   return null;
 }
 
