@@ -1397,10 +1397,18 @@ describe("buildExecutiveBriefData — seven-day SLA notes and KPIs", () => {
   });
 
   it("closed KPI label uses updated Arabic text (current period)", async () => {
-    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
+    const data = await buildExecutiveBriefData(
+      BASE_FILTERS,
+      makeKpiResult(),
+      makeComparison(),
+      undefined,
+      NOW
+    );
     const closedCard = data.briefKpis.find((k) => k.key === "closed");
-    expect(closedCard?.label).toBeDefined();
-    expect(typeof closedCard?.label).toBe("string");
+
+    expect(closedCard?.label).toBe(
+      "المغلقة حالياً من شكاوى الفترة"
+    );
   });
 });
 

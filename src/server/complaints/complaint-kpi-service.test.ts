@@ -350,24 +350,70 @@ describe("complaint KPI service", () => {
       expect(result.performance.averageResolutionDays).toBeNull();
     });
 
-    it("11. invariant: slaEligibleCount = slaCompliantCount + slaNonCompliantCount", async () => {
-      const createdAt = new Date("2026-07-01T00:00:00Z");
-      const deadline = new Date(createdAt.getTime() + 7 * DAY_MS);
+    it("11. counts a mixed SLA fixture and preserves the eligibility invariant", async () => {
+      const oldCreatedAt = new Date("2026-07-01T00:00:00Z");
+      const recentCreatedAt = new Date("2026-07-05T00:00:00Z");
+      const measuredAt = new Date("2026-07-10T00:00:00Z");
+      const oldDeadline = new Date(oldCreatedAt.getTime() + 7 * DAY_MS);
+
       dbMocks.findMany.mockResolvedValueOnce([
-        complaint({ id: "within", complaintDate: createdAt, status: ComplaintStatus.OPEN }),
-        complaint({ id: "late", id2: "c2", complaintDate: createdAt, status: ComplaintStatus.OPEN }),
-        complaint({ id: "closed-within", complaintDate: createdAt, status: ComplaintStatus.CLOSED, closedAt: deadline }),
-        complaint({ id: "closed-late", complaintDate: createdAt, status: ComplaintStatus.CLOSED, closedAt: new Date(deadline.getTime() + DAY_MS) }),
-        complaint({ id: "no-date", complaintDate: createdAt, status: ComplaintStatus.CLOSED, closedAt: null }),
+        complaint({
+          id: "open-within",
+          complaintDate: recentCreatedAt,
+          status: ComplaintStatus.OPEN,
+        }),
+        complaint({
+          id: "open-late",
+          complaintDate: oldCreatedAt,
+          status: ComplaintStatus.OPEN,
+        }),
+        complaint({
+          id: "closed-within",
+          complaintDate: oldCreatedAt,
+          status: ComplaintStatus.CLOSED,
+          closedAt: oldDeadline,
+        }),
+        complaint({
+          id: "closed-late",
+          complaintDate: oldCreatedAt,
+          status: ComplaintStatus.CLOSED,
+          closedAt: new Date(oldDeadline.getTime() + DAY_MS),
+        }),
+        complaint({
+          id: "closed-without-date",
+          complaintDate: oldCreatedAt,
+          status: ComplaintStatus.CLOSED,
+          closedAt: null,
+        }),
       ]);
 
       const result = await getComplaintKpis(
         new URLSearchParams(),
-        new Date(deadline.getTime() + DAY_MS) // 1 day after deadline → all open are OPEN_LATE
+        measuredAt
       );
 
-      const { slaEligibleCount, slaCompliantCount, slaNonCompliantCount } = result.performance;
-      expect(slaEligibleCount).toBe(slaCompliantCount + slaNonCompliantCount);
+      const {
+        slaEligibleCount,
+        slaCompliantCount,
+        slaNonCompliantCount,
+        openWithinSlaCount,
+        closedWithinSlaCount,
+        closedLateCount,
+        closedWithoutTrustedDateCount,
+      } = result.performance;
+
+      expect(openWithinSlaCount).toBe(1);
+      expect(result.kpis.currentlyLateComplaints.currentValue).toBe(1);
+      expect(closedWithinSlaCount).toBe(1);
+      expect(closedLateCount).toBe(1);
+      expect(closedWithoutTrustedDateCount).toBe(1);
+
+      expect(slaEligibleCount).toBe(4);
+      expect(slaCompliantCount).toBe(2);
+      expect(slaNonCompliantCount).toBe(2);
+      expect(slaEligibleCount).toBe(
+        slaCompliantCount + slaNonCompliantCount
+      );
     });
 
     it("mixed SLA states produce correct counts across four eligibility categories", async () => {
