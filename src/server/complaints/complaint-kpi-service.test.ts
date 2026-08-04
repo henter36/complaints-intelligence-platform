@@ -529,4 +529,58 @@ describe("complaint KPI service", () => {
       expect(result.performance.onTimeRate).toBeNull();
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Backward-compatibility alias tests
+  // ---------------------------------------------------------------------------
+
+  describe("kpis backward-compatibility aliases", () => {
+    it("dueDateComplianceRate equals slaComplianceRate", async () => {
+      const createdAt = new Date("2026-07-01T00:00:00Z");
+      const deadline = new Date(createdAt.getTime() + 7 * DAY_MS);
+      dbMocks.findMany.mockResolvedValueOnce([
+        complaint({ complaintDate: createdAt, status: ComplaintStatus.CLOSED, closedAt: deadline }),
+        complaint({ id: "c2", complaintDate: createdAt, status: ComplaintStatus.OPEN }),
+      ]);
+
+      const result = await getComplaintKpis(
+        new URLSearchParams(),
+        new Date(createdAt.getTime() + 10 * DAY_MS)
+      );
+
+      expect(result.kpis.dueDateComplianceRate.currentValue).toBe(result.kpis.slaComplianceRate.currentValue);
+      expect(result.kpis.dueDateComplianceRate.previousValue).toBe(result.kpis.slaComplianceRate.previousValue);
+      expect(result.kpis.dueDateComplianceRate.available).toBe(result.kpis.slaComplianceRate.available);
+    });
+
+    it("closedWithinDueDate equals closedWithinSlaCount", async () => {
+      const createdAt = new Date("2026-07-01T00:00:00Z");
+      const beforeDeadline = new Date(createdAt.getTime() + 5 * DAY_MS);
+      dbMocks.findMany.mockResolvedValueOnce([
+        complaint({ complaintDate: createdAt, status: ComplaintStatus.CLOSED, closedAt: beforeDeadline }),
+        complaint({ id: "c2", complaintDate: createdAt, status: ComplaintStatus.CLOSED, closedAt: null }),
+      ]);
+
+      const result = await getComplaintKpis(
+        new URLSearchParams(),
+        new Date(createdAt.getTime() + 10 * DAY_MS)
+      );
+
+      expect(result.kpis.closedWithinDueDate.currentValue).toBe(result.kpis.closedWithinSlaCount.currentValue);
+      expect(result.kpis.closedWithinDueDate.direction).toBe(result.kpis.closedWithinSlaCount.direction);
+    });
+
+    it("withoutDueDate equals closedWithoutTrustedDateCount", async () => {
+      dbMocks.findMany.mockResolvedValueOnce([
+        complaint({ status: ComplaintStatus.CLOSED, closedAt: null }),
+        complaint({ id: "c2", status: ComplaintStatus.CLOSED, closedAt: null }),
+        complaint({ id: "c3", status: ComplaintStatus.CLOSED, closedAt: null }),
+      ]);
+
+      const result = await getComplaintKpis(new URLSearchParams(), new Date("2026-07-31T00:00:00Z"));
+
+      expect(result.kpis.withoutDueDate.currentValue).toBe(result.kpis.closedWithoutTrustedDateCount.currentValue);
+      expect(result.kpis.withoutDueDate.currentValue).toBe(3);
+    });
+  });
 });

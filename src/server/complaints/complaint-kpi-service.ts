@@ -80,19 +80,25 @@ export type ComplaintKpiSummary = {
   cancelledComplaints: KpiValue;
   currentlyLateComplaints: KpiValue;
   closedLateComplaints: KpiValue;
-  /** @deprecated alias — now fed from SLA closedWithinSlaCount */
-  closedWithinDueDate: KpiValue;
-  /** @deprecated alias — now fed from SLA closedWithoutTrustedDateCount */
-  withoutDueDate: KpiValue;
+  // Canonical SLA KPI fields
+  slaComplianceRate: KpiValue;
+  closedWithinSlaCount: KpiValue;
+  closedWithoutTrustedDateCount: KpiValue;
   unclassifiedComplaints: KpiValue;
   highPriorityOpenComplaints: KpiValue;
   averageResolutionDays: KpiValue;
   medianResolutionDays: KpiValue;
   averageOpenAgeDays: KpiValue;
-  /** @deprecated alias — now fed from SLA complianceRate */
-  dueDateComplianceRate: KpiValue;
   closureRate: KpiValue;
   reopenCount: KpiValue;
+  // Backward-compatibility aliases — mirrors of the canonical SLA fields above.
+  // Kept at the output boundary only; not used in internal calculations.
+  /** @deprecated use slaComplianceRate */
+  dueDateComplianceRate: KpiValue;
+  /** @deprecated use closedWithinSlaCount */
+  closedWithinDueDate: KpiValue;
+  /** @deprecated use closedWithoutTrustedDateCount */
+  withoutDueDate: KpiValue;
 };
 
 export type ComplaintGroupMetrics = {
@@ -209,7 +215,6 @@ export type CrossTabRow = {
   count: number;
 };
 
-// Internal aggregate — keeps deprecated alias field names for KPI_METRIC_KEYS compat.
 type RawMetrics = {
   totalComplaints: number;
   openComplaints: number;
@@ -217,29 +222,23 @@ type RawMetrics = {
   cancelledComplaints: number;
   currentlyLateComplaints: number;
   closedLateComplaints: number;
-  /** @deprecated alias for sla.closedWithinSlaCount */
-  closedWithinDueDate: number;
-  /** @deprecated alias for sla.closedWithoutTrustedDateCount */
-  withoutDueDate: number;
+  // Canonical SLA fields — used in KPI_METRIC_KEYS and all internal calculations
+  slaComplianceRate: number;
+  closedWithinSlaCount: number;
+  closedWithoutTrustedDateCount: number;
   unclassifiedComplaints: number;
   highPriorityOpenComplaints: number;
   averageResolutionDays: number;
   medianResolutionDays: number;
   averageOpenAgeDays: number;
-  /** @deprecated alias for sla.complianceRate ?? 0 */
-  dueDateComplianceRate: number;
-  /** @deprecated alias for sla.eligibleCount */
-  dueDateEligibleClosed: number;
   closureRate: number;
   reopenCount: number;
-  // SLA fields (not in KPI_METRIC_KEYS)
+  // SLA fields used internally but not surfaced as individual KpiValue entries
   slaEligibleCount: number;
   slaCompliantCount: number;
   slaNonCompliantCount: number;
   openWithinSlaCount: number;
-  closedWithinSlaCount: number;
   closedLateCount: number;
-  closedWithoutTrustedDateCount: number;
   averageResolutionEligibleCount: number;
   averageResolutionDaysNullable: number | null;
   medianResolutionDaysNullable: number | null;
@@ -252,17 +251,17 @@ const KPI_METRIC_KEYS = [
   "cancelledComplaints",
   "currentlyLateComplaints",
   "closedLateComplaints",
-  "closedWithinDueDate",
-  "withoutDueDate",
+  "slaComplianceRate",
+  "closedWithinSlaCount",
+  "closedWithoutTrustedDateCount",
   "unclassifiedComplaints",
   "highPriorityOpenComplaints",
   "averageResolutionDays",
   "medianResolutionDays",
   "averageOpenAgeDays",
-  "dueDateComplianceRate",
   "closureRate",
   "reopenCount",
-] as const satisfies readonly (keyof ComplaintKpiSummary)[];
+] as const satisfies readonly (keyof RawMetrics & keyof ComplaintKpiSummary)[];
 
 type ComplaintKpiOptions = {
   comparisonMode?: ComparisonMode;
@@ -314,10 +313,11 @@ function buildKpiResult(
 ): ComplaintKpiResult {
   const currentRaw = calculateRawMetrics(current, now);
   const previousRaw = previous ? calculateRawMetrics(previous, now) : null;
-  const kpis = buildKpiValues(currentRaw, previousRaw);
-  kpis.dueDateComplianceRate.available = currentRaw.slaEligibleCount > 0;
-  kpis.averageResolutionDays.available = currentRaw.averageResolutionEligibleCount > 0;
-  kpis.medianResolutionDays.available = currentRaw.averageResolutionEligibleCount > 0;
+  const canonical = buildKpiValues(currentRaw, previousRaw);
+  canonical.slaComplianceRate.available = currentRaw.slaEligibleCount > 0;
+  canonical.averageResolutionDays.available = currentRaw.averageResolutionEligibleCount > 0;
+  canonical.medianResolutionDays.available = currentRaw.averageResolutionEligibleCount > 0;
+  const kpis = addLegacyKpiAliases(canonical);
   const firstResponses = current
     .filter((complaint) => complaint.firstActionAt)
     .map((complaint) => hoursBetween(complaint.complaintDate ?? complaint.receivedAt, complaint.firstActionAt!));
@@ -350,7 +350,7 @@ function buildKpiResult(
     },
     performance: {
       closureRate: currentRaw.closureRate,
-      onTimeRate: currentRaw.slaEligibleCount > 0 ? currentRaw.dueDateComplianceRate : null,
+      onTimeRate: currentRaw.slaEligibleCount > 0 ? currentRaw.slaComplianceRate : null,
       onTimeEligibleClosed: currentRaw.slaEligibleCount,
       lateRate: rate(currentRaw.currentlyLateComplaints, currentRaw.totalComplaints),
       avgFirstResponseHours: roundToTenth(averageNumbers(firstResponses)),
@@ -419,32 +419,29 @@ function calculateRawMetrics(complaints: KpiComplaint[], now: Date): RawMetrics 
     openComplaints: complaints.filter((c) => isOpenComplaintStatus(c.status)).length,
     closedComplaints: complaints.filter((c) => isClosedComplaintStatus(c.status)).length,
     cancelledComplaints: complaints.filter((c) => c.status === ComplaintStatus.CANCELLED).length,
-    // SLA-derived timing fields
+    // SLA-derived timing fields (canonical names only)
     currentlyLateComplaints: sla.openLateCount,
     closedLateComplaints: sla.closedLateCount,
-    closedWithinDueDate: sla.closedWithinSlaCount,      // @deprecated alias
-    withoutDueDate: sla.closedWithoutTrustedDateCount,  // @deprecated alias
+    slaComplianceRate: sla.complianceRate ?? 0,
+    closedWithinSlaCount: sla.closedWithinSlaCount,
+    closedWithoutTrustedDateCount: sla.closedWithoutTrustedDateCount,
     unclassifiedComplaints: complaints.filter((c) => !c.classificationId).length,
     highPriorityOpenComplaints: complaints.filter((c) =>
       isOpenComplaintStatus(c.status)
       && (c.priority === ComplaintPriority.HIGH || c.priority === ComplaintPriority.CRITICAL)
     ).length,
-    // averageResolutionDays/medianResolutionDays kept as 0 for KpiValue compat (see *Nullable fields)
+    // averageResolutionDays/medianResolutionDays: 0 for KpiValue compat (see *Nullable variants)
     averageResolutionDays: sla.averageResolutionDays ?? 0,
     medianResolutionDays: sla.medianResolutionDays ?? 0,
     averageOpenAgeDays: roundToTenth(averageNumbers(openAgeDays)),
-    dueDateComplianceRate: sla.complianceRate ?? 0,  // @deprecated alias
-    dueDateEligibleClosed: sla.eligibleCount,         // @deprecated alias
     closureRate: rate(complaints.filter((c) => isClosedComplaintStatus(c.status)).length, complaints.length),
     reopenCount: countReopenTransitions(complaints),
-    // SLA-specific fields
+    // SLA fields used internally but not surfaced as individual KpiValue entries
     slaEligibleCount: sla.eligibleCount,
     slaCompliantCount: sla.compliantCount,
     slaNonCompliantCount: sla.nonCompliantCount,
     openWithinSlaCount: sla.openWithinSlaCount,
-    closedWithinSlaCount: sla.closedWithinSlaCount,
     closedLateCount: sla.closedLateCount,
-    closedWithoutTrustedDateCount: sla.closedWithoutTrustedDateCount,
     averageResolutionEligibleCount: sla.averageResolutionEligibleCount,
     averageResolutionDaysNullable: sla.averageResolutionDays,
     medianResolutionDaysNullable: sla.medianResolutionDays,
@@ -460,13 +457,24 @@ function countReopenTransitions(complaints: KpiComplaint[]): number {
   }, 0);
 }
 
-function buildKpiValues(current: RawMetrics, previous: RawMetrics | null): ComplaintKpiSummary {
+type CanonicalKpiSummary = Omit<ComplaintKpiSummary, "dueDateComplianceRate" | "closedWithinDueDate" | "withoutDueDate">;
+
+function buildKpiValues(current: RawMetrics, previous: RawMetrics | null): CanonicalKpiSummary {
   return Object.fromEntries(
     KPI_METRIC_KEYS.map((key) => [
       key,
       compareMetric(current[key], previous?.[key] ?? null, negativeWhenHigher(key)),
     ])
-  ) as ComplaintKpiSummary;
+  ) as CanonicalKpiSummary;
+}
+
+function addLegacyKpiAliases(canonical: CanonicalKpiSummary): ComplaintKpiSummary {
+  return {
+    ...canonical,
+    dueDateComplianceRate: canonical.slaComplianceRate,
+    closedWithinDueDate: canonical.closedWithinSlaCount,
+    withoutDueDate: canonical.closedWithoutTrustedDateCount,
+  };
 }
 
 function compareMetric(current: number, previous: number | null, higherIsNegative: boolean): KpiValue {
@@ -500,11 +508,11 @@ function resolvePercentageChange(current: number, previous: number | null): numb
   return percentageChange(current, previous);
 }
 
-function negativeWhenHigher(key: keyof RawMetrics): boolean {
+function negativeWhenHigher(key: string): boolean {
   return [
     "currentlyLateComplaints",
     "closedLateComplaints",
-    "withoutDueDate",
+    "closedWithoutTrustedDateCount",
     "unclassifiedComplaints",
     "averageResolutionDays",
     "medianResolutionDays",
@@ -580,8 +588,8 @@ function groupMetrics(
         closed: raw.closedComplaints,
         currentlyLate: raw.currentlyLateComplaints,
         closedLate: raw.closedLateComplaints,
-        withinDueDate: raw.closedWithinDueDate,
-        complianceRate: raw.slaEligibleCount > 0 ? raw.dueDateComplianceRate : null,
+        withinDueDate: raw.closedWithinSlaCount,
+        complianceRate: raw.slaEligibleCount > 0 ? raw.slaComplianceRate : null,
         averageResolutionDays: raw.averageResolutionDays,
         averageResolutionEligibleCount: raw.averageResolutionEligibleCount,
         slaEligibleCount: raw.slaEligibleCount,
