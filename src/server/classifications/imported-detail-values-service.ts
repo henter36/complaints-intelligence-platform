@@ -93,8 +93,10 @@ const NORMALIZED_DETAIL_HEADERS = new Set([
   normalizeColumnHeader("التفصيل"),
 ]);
 
-/** @deprecated Prefer normalizeClassificationKeyword from shared lib. Alias for temporary compatibility. */
-export const normalizeImportedDetailValue = normalizeClassificationKeyword;
+/** @deprecated استخدم normalizeClassificationKeyword من الملف المشترك. */
+export {
+  normalizeClassificationKeyword as normalizeImportedDetailValue,
+} from "@/lib/classifications/classification-keyword-normalizer";
 
 function positiveInteger(value: number | undefined, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0
