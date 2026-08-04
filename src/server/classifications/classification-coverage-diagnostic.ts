@@ -1,3 +1,8 @@
+import {
+  resolveSourceDetailClassification,
+  type SourceDetailClassificationCandidate,
+} from "./source-detail-classification-resolver";
+
 export type ClassificationDiagnosticComplaint = {
   id: string;
   classificationId: string | null;
@@ -23,6 +28,19 @@ export type ClassificationCoverageDiagnostic = {
   unresolved: number;
   missingClassificationInput: number;
   classificationCoverageRate: number;
+};
+
+export type CurrentResolverCoverageDiagnostic = {
+  evaluatedUnclassifiedWithSourceDetail: number;
+  currentMatchedComplaints: number;
+  currentAmbiguousComplaints: number;
+  currentUnmatchedComplaints: number;
+  distinctSourceDetailValues: number;
+  currentMatchedDistinctValues: number;
+  currentAmbiguousDistinctValues: number;
+  currentUnmatchedDistinctValues: number;
+  projectedClassifiedById: number;
+  projectedClassificationCoverageRate: number;
 };
 
 const MATCHED_CODE = "CLASSIFICATION_RESOLVED_FROM_SOURCE_DETAIL";
@@ -59,6 +77,12 @@ function latestRowsByComplaint(
     }
   }
   return latest;
+}
+
+function percentage(numerator: number, denominator: number): number {
+  return denominator > 0
+    ? Math.round((numerator / denominator) * 1000) / 10
+    : 0;
 }
 
 export function analyzeClassificationCoverage(
@@ -111,9 +135,66 @@ export function analyzeClassificationCoverage(
     }
   }
 
-  result.classificationCoverageRate = result.periodTotal > 0
-    ? Math.round((result.classifiedById / result.periodTotal) * 1000) / 10
-    : 0;
+  result.classificationCoverageRate = percentage(
+    result.classifiedById,
+    result.periodTotal
+  );
 
   return result;
+}
+
+export function analyzeCurrentResolverCoverage(
+  complaints: readonly ClassificationDiagnosticComplaint[],
+  classifications: readonly SourceDetailClassificationCandidate[]
+): CurrentResolverCoverageDiagnostic {
+  const distinctStatuses = new Map<string, "MATCHED" | "AMBIGUOUS" | "UNMATCHED">();
+  let evaluated = 0;
+  let matched = 0;
+  let ambiguous = 0;
+  let unmatched = 0;
+
+  for (const complaint of complaints) {
+    if (complaint.classificationId) continue;
+    const sourceDetail = nonEmptyString(complaint.sourceDetail);
+    if (!sourceDetail) continue;
+
+    const resolution = resolveSourceDetailClassification({
+      sourceDetail,
+      classifications,
+    });
+    evaluated += 1;
+
+    if (resolution.status === "MATCHED") {
+      matched += 1;
+      distinctStatuses.set(resolution.normalizedValue, "MATCHED");
+    } else if (resolution.status === "AMBIGUOUS") {
+      ambiguous += 1;
+      distinctStatuses.set(resolution.normalizedValue, "AMBIGUOUS");
+    } else if (resolution.status === "UNMATCHED") {
+      unmatched += 1;
+      distinctStatuses.set(resolution.normalizedValue, "UNMATCHED");
+    }
+  }
+
+  const existingClassified = complaints.filter(
+    (complaint) => Boolean(complaint.classificationId)
+  ).length;
+  const distinctValues = [...distinctStatuses.values()];
+  const projectedClassifiedById = existingClassified + matched;
+
+  return {
+    evaluatedUnclassifiedWithSourceDetail: evaluated,
+    currentMatchedComplaints: matched,
+    currentAmbiguousComplaints: ambiguous,
+    currentUnmatchedComplaints: unmatched,
+    distinctSourceDetailValues: distinctStatuses.size,
+    currentMatchedDistinctValues: distinctValues.filter((status) => status === "MATCHED").length,
+    currentAmbiguousDistinctValues: distinctValues.filter((status) => status === "AMBIGUOUS").length,
+    currentUnmatchedDistinctValues: distinctValues.filter((status) => status === "UNMATCHED").length,
+    projectedClassifiedById,
+    projectedClassificationCoverageRate: percentage(
+      projectedClassifiedById,
+      complaints.length
+    ),
+  };
 }
