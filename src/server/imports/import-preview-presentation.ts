@@ -1,7 +1,6 @@
 import type { ColumnMapping } from "./complaint-column-schema";
 
 export const QUALITY_OBSERVATION_DISPLAY_LIMIT = 100;
-export const PREVIEW_EMPTY_DISPLAY = "—";
 
 /**
  * Presentation-only value resolution: prefer normalized, then raw (via mapping/aliases), else empty.
@@ -44,16 +43,6 @@ export function resolvePreviewValue(
   return undefined;
 }
 
-export function formatPreviewDisplayValue(value: unknown): string {
-  if (!isPresentPreviewValue(value)) {
-    return PREVIEW_EMPTY_DISPLAY;
-  }
-  if (value instanceof Date) {
-    return value.toISOString();
-  }
-  return String(value);
-}
-
 function isPresentPreviewValue(value: unknown): boolean {
   if (value == null) return false;
   if (typeof value === "string" && value.trim() === "") return false;
@@ -75,6 +64,7 @@ export function orderQualityObservationsForDisplay<T>(
   return [...blockingRows, ...warningRows].slice(0, displayLimit);
 }
 
+/** Single source of truth for quality-observation summary copy (client + server). */
 export function buildQualityObservationsSummary(counts: QualityObservationCounts): string {
   const { blockingRowCount, warningRowCount, qualityDisplayLimit } = counts;
   const limitText = formatObservationCount(qualityDisplayLimit);

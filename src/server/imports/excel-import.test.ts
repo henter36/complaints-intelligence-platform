@@ -729,6 +729,19 @@ describe("secure xlsx import parsing", () => {
     });
   });
 
+  it("returns NONE for date-only rows (fingerprint needs date plus a descriptive field)", () => {
+    expect(
+      resolveIncomingIdentity({
+        complaintDate: new Date("2026-07-01T00:00:00Z"),
+      })
+    ).toEqual({ kind: "NONE" });
+    expect(
+      resolveIncomingIdentity({
+        subject: "موضوع فقط بدون تاريخ",
+      })
+    ).toEqual({ kind: "NONE" });
+  });
+
   it("detects true in-file duplicates for the same externalId", () => {
     const row = {
       externalId: "COMP/DUPE",
