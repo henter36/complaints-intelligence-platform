@@ -1,22 +1,12 @@
-import { z } from "zod";
 import { NextRequest, NextResponse } from "next/server";
 import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
+import { createClassificationPayloadSchema } from "@/server/classifications/classification-management-contract";
+import { handleClassificationManagementRouteError } from "@/server/classifications/classification-management-route-error";
 import {
   createClassification,
   mapClassificationResponse,
-  toClassificationManagementErrorResponse,
 } from "@/server/classifications/classification-management-service";
 import { db } from "@/lib/db";
-
-const createClassificationSchema = z
-  .object({
-    categoryId: z.string().min(1, "معرّف الفئة مطلوب"),
-    name: z.string().min(1, "اسم التصنيف مطلوب"),
-    description: z.string().nullable().optional(),
-    color: z.string().nullable().optional(),
-    keywords: z.array(z.string()).optional(),
-  })
-  .strict();
 
 export async function GET(req: NextRequest) {
   try {
@@ -67,39 +57,13 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const session = await requireAdminApiSession(req);
-    const body = createClassificationSchema.parse(await req.json());
+    const body = createClassificationPayloadSchema.parse(await req.json());
     const classification = await createClassification({
-      categoryId: body.categoryId,
-      name: body.name,
-      description: body.description,
-      color: body.color,
-      keywords: body.keywords,
+      ...body,
       actor: session.username,
     });
     return NextResponse.json(mapClassificationResponse(classification), { status: 201 });
   } catch (error) {
-    const authResponse = mapAuthError(error);
-    if (authResponse) return authResponse;
-    const management = toClassificationManagementErrorResponse(error);
-    if (management) {
-      return NextResponse.json(management.body, { status: management.status });
-    }
-    if (error instanceof z.ZodError) {
-      return NextResponse.json(
-        {
-          error: {
-            code: "INVALID_CLASSIFICATION_PAYLOAD",
-            message: "بيانات التصنيف غير صالحة. استخدم categoryId لإنشاء تصنيف فقط.",
-            details: error.flatten(),
-          },
-        },
-        { status: 400 }
-      );
-    }
-    console.error("Create classification error:", error instanceof Error ? error.message : "unknown");
-    return NextResponse.json(
-      { error: { code: "CLASSIFICATION_CREATE_FAILED", message: "تعذر إنشاء التصنيف" } },
-      { status: 500 }
-    );
+    return handleClassificationManagementRouteError(error, "CLASSIFICATION_CREATE");
   }
 }
