@@ -1,13 +1,16 @@
 import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
+import { normalizeClassificationKeyword as sharedNormalize } from "@/lib/classifications/classification-keyword-normalizer";
 import { writeAuditLog, AUDIT_ACTOR_SINGLE_ADMIN } from "@/server/audit/audit-log-service";
 import { parseClassificationKeywords } from "@/server/classifications/classification-keywords";
-import { normalizeImportedDetailValue } from "@/server/classifications/imported-detail-values-service";
+import { logger } from "@/server/logger";
 
 export type ManagementClient = Pick<
   typeof db,
   "$transaction" | "category" | "classification" | "auditLog"
 >;
+
+type TransactionClient = Parameters<Parameters<ManagementClient["$transaction"]>[0]>[0];
 
 export type KeywordConflict = {
   keyword: string;
@@ -43,9 +46,9 @@ export function toClassificationManagementErrorResponse(error: unknown):
   };
 }
 
-/** Shared keyword normalization for management + import resolver consistency. */
+/** Shared keyword normalization — re-export of client/server helper. */
 export function normalizeClassificationKeyword(value: string): string {
-  return normalizeImportedDetailValue(value);
+  return sharedNormalize(value);
 }
 
 export type NormalizedKeywordList = {
@@ -56,6 +59,7 @@ export type NormalizedKeywordList = {
 /**
  * Trim, drop empties, collapse duplicates by normalized form,
  * keep first Arabic display variant for each normalized key.
+ * Strict validation for user-supplied payloads.
  */
 export function normalizeAndValidateKeywords(raw: unknown): NormalizedKeywordList {
   let parsed: string[];
@@ -69,8 +73,49 @@ export function normalizeAndValidateKeywords(raw: unknown): NormalizedKeywordLis
     );
   }
 
+  return collapseKeywordDisplayForms(parsed);
+}
+
+/**
+ * Tolerant reader for keywords already stored in the database.
+ * Never throws INVALID_CLASSIFICATION_KEYWORDS for legacy/malformed rows.
+ */
+export function normalizeStoredClassificationKeywords(
+  value: unknown,
+  classificationId?: string
+): NormalizedKeywordList {
+  if (!Array.isArray(value)) {
+    if (value !== null && value !== undefined && classificationId) {
+      logger.warn("Stored classification keywords are not an array; treating as empty", {
+        classificationId,
+        invalidCount: 1,
+      });
+    }
+    return { displayKeywords: [], byNormalized: new Map() };
+  }
+
+  const strings: string[] = [];
+  let invalidCount = 0;
+  for (const item of value) {
+    if (typeof item === "string") {
+      strings.push(item);
+    } else {
+      invalidCount += 1;
+    }
+  }
+  if (invalidCount > 0 && classificationId) {
+    logger.warn("Stored classification keywords contain non-string entries; ignoring them", {
+      classificationId,
+      invalidCount,
+    });
+  }
+
+  return collapseKeywordDisplayForms(strings);
+}
+
+function collapseKeywordDisplayForms(items: string[]): NormalizedKeywordList {
   const byNormalized = new Map<string, string>();
-  for (const item of parsed) {
+  for (const item of items) {
     const display = item.trim();
     if (!display) continue;
     const normalized = normalizeClassificationKeyword(display);
@@ -79,7 +124,6 @@ export function normalizeAndValidateKeywords(raw: unknown): NormalizedKeywordLis
       byNormalized.set(normalized, display);
     }
   }
-
   return {
     displayKeywords: [...byNormalized.values()],
     byNormalized,
@@ -101,8 +145,66 @@ function keywordCounts(previous: string[], next: string[]) {
   };
 }
 
+function isRetryableTransactionError(error: unknown): boolean {
+  if (error instanceof ClassificationManagementError) return false;
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) {
+    const message = error instanceof Error ? error.message.toLowerCase() : "";
+    return (
+      message.includes("serialization")
+      || message.includes("could not serialize")
+      || message.includes("database is locked")
+      || message.includes("sqlite_busy")
+      || message.includes("deadlock")
+    );
+  }
+  return (
+    error.code === "P2034"
+    || error.code === "P1008"
+    || error.code === "P2028"
+    || /busy|locked|serialization|deadlock/i.test(error.message)
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+/**
+ * Serializable transaction with bounded retry for keyword conflict safety under concurrency.
+ * Domain errors are never retried; conflict checks always re-run inside a fresh transaction.
+ */
+export async function runSerializableClassificationMutation<T>(
+  client: ManagementClient,
+  operation: (tx: TransactionClient) => Promise<T>,
+  maxAttempts = 3
+): Promise<T> {
+  let attempt = 0;
+  while (attempt < maxAttempts) {
+    attempt += 1;
+    try {
+      return await client.$transaction(
+        async (tx) => operation(tx as TransactionClient),
+        {
+          isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+          maxWait: 5_000,
+          timeout: 15_000,
+        }
+      );
+    } catch (error) {
+      if (error instanceof ClassificationManagementError) throw error;
+      if (!isRetryableTransactionError(error) || attempt >= maxAttempts) {
+        throw error;
+      }
+      await sleep(Math.min(40 * attempt, 120));
+    }
+  }
+  throw new Error("runSerializableClassificationMutation exhausted retries");
+}
+
 async function findKeywordConflicts(
-  client: ManagementClient | Prisma.TransactionClient,
+  client: ManagementClient | TransactionClient | Prisma.TransactionClient,
   keywords: NormalizedKeywordList,
   excludeClassificationId?: string
 ): Promise<KeywordConflict[]> {
@@ -119,7 +221,10 @@ async function findKeywordConflicts(
 
   const conflicts: KeywordConflict[] = [];
   for (const classification of classifications) {
-    const existing = normalizeAndValidateKeywords(classification.keywords ?? []).byNormalized;
+    const existing = normalizeStoredClassificationKeywords(
+      classification.keywords,
+      classification.id
+    ).byNormalized;
     for (const [normalized, display] of keywords.byNormalized) {
       if (!existing.has(normalized)) continue;
       conflicts.push({
@@ -130,6 +235,21 @@ async function findKeywordConflicts(
     }
   }
   return conflicts;
+}
+
+async function assertNoKeywordConflicts(
+  client: ManagementClient | TransactionClient | Prisma.TransactionClient,
+  keywords: NormalizedKeywordList,
+  excludeClassificationId?: string
+): Promise<void> {
+  const conflicts = await findKeywordConflicts(client, keywords, excludeClassificationId);
+  if (conflicts.length === 0) return;
+  throw new ClassificationManagementError(
+    "KEYWORD_ALREADY_LINKED_TO_ANOTHER_CLASSIFICATION",
+    "كلمة مفتاحية واحدة أو أكثر مرتبطة بتصنيف آخر",
+    409,
+    { conflicts }
+  );
 }
 
 export async function createCategory(
@@ -227,6 +347,35 @@ export async function updateCategory(
   });
 }
 
+async function requireActiveCategory(
+  client: TransactionClient | Prisma.TransactionClient,
+  categoryId: string
+) {
+  const category = await client.category.findFirst({
+    where: { id: categoryId, isDeleted: false, isActive: true },
+    select: { id: true },
+  });
+  if (!category) {
+    throw new ClassificationManagementError(
+      "CATEGORY_NOT_FOUND",
+      "الفئة المحددة غير موجودة أو غير نشطة",
+      404
+    );
+  }
+  return category;
+}
+
+function translateClassificationUniqueConflict(error: unknown): never {
+  if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+    throw new ClassificationManagementError(
+      "CLASSIFICATION_NAME_CONFLICT",
+      "اسم التصنيف مستخدم بالفعل ضمن هذه الفئة",
+      409
+    );
+  }
+  throw error;
+}
+
 export async function createClassification(
   input: {
     categoryId: string;
@@ -249,33 +398,14 @@ export async function createClassification(
 
   const keywordList = normalizeAndValidateKeywords(input.keywords ?? []);
 
-  return client.$transaction(async (tx) => {
-    const category = await tx.category.findFirst({
-      where: { id: input.categoryId, isDeleted: false, isActive: true },
-      select: { id: true },
-    });
-    if (!category) {
-      throw new ClassificationManagementError(
-        "CATEGORY_NOT_FOUND",
-        "الفئة المحددة غير موجودة أو غير نشطة",
-        404
-      );
-    }
-
-    const conflicts = await findKeywordConflicts(tx, keywordList);
-    if (conflicts.length > 0) {
-      throw new ClassificationManagementError(
-        "KEYWORD_ALREADY_LINKED_TO_ANOTHER_CLASSIFICATION",
-        "كلمة مفتاحية واحدة أو أكثر مرتبطة بتصنيف آخر",
-        409,
-        { conflicts }
-      );
-    }
+  return runSerializableClassificationMutation(client, async (tx) => {
+    await requireActiveCategory(tx, input.categoryId);
+    await assertNoKeywordConflicts(tx, keywordList);
 
     try {
       const classification = await tx.classification.create({
         data: {
-          categoryId: category.id,
+          categoryId: input.categoryId,
           nameAr: name,
           description: input.description?.trim() || null,
           color: input.color?.trim() || "#64748b",
@@ -301,16 +431,125 @@ export async function createClassification(
       }
       return classification;
     } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-        throw new ClassificationManagementError(
-          "CLASSIFICATION_NAME_CONFLICT",
-          "اسم التصنيف مستخدم بالفعل ضمن هذه الفئة",
-          409
-        );
-      }
-      throw error;
+      translateClassificationUniqueConflict(error);
     }
   });
+}
+
+async function findActiveClassificationOrThrow(
+  client: TransactionClient | Prisma.TransactionClient,
+  classificationId: string
+) {
+  const existing = await client.classification.findFirst({
+    where: { id: classificationId, isDeleted: false, isActive: true },
+  });
+  if (!existing) {
+    throw new ClassificationManagementError(
+      "CLASSIFICATION_NOT_FOUND",
+      "التصنيف غير موجود أو غير نشط",
+      404
+    );
+  }
+  return existing;
+}
+
+async function resolveTargetCategoryId(
+  client: TransactionClient | Prisma.TransactionClient,
+  existingCategoryId: string,
+  requestedCategoryId?: string
+): Promise<string> {
+  if (!requestedCategoryId) return existingCategoryId;
+  await requireActiveCategory(client, requestedCategoryId);
+  return requestedCategoryId;
+}
+
+function resolveClassificationName(
+  existingName: string,
+  requestedName?: string
+): string {
+  const name = requestedName !== undefined ? requestedName.trim() : existingName;
+  if (!name) {
+    throw new ClassificationManagementError(
+      "INVALID_CLASSIFICATION_NAME",
+      "اسم التصنيف مطلوب",
+      400
+    );
+  }
+  return name;
+}
+
+function readStoredKeywordsTolerantly(
+  keywords: Prisma.JsonValue | null,
+  classificationId: string
+): string[] {
+  return normalizeStoredClassificationKeywords(keywords, classificationId).displayKeywords;
+}
+
+function resolveNextKeywordList(
+  previousKeywords: string[],
+  inputKeywords: unknown | undefined
+): NormalizedKeywordList {
+  if (inputKeywords !== undefined) {
+    return normalizeAndValidateKeywords(inputKeywords);
+  }
+  return collapseKeywordDisplayForms(previousKeywords);
+}
+
+function buildClassificationUpdateData(
+  existing: { color: string },
+  input: {
+    description?: string | null;
+    color?: string | null;
+    keywords?: unknown;
+  },
+  nextCategoryId: string,
+  name: string,
+  nextKeywords: NormalizedKeywordList
+): Prisma.ClassificationUpdateInput {
+  return {
+    category: { connect: { id: nextCategoryId } },
+    nameAr: name,
+    ...(input.description !== undefined
+      ? { description: input.description?.trim() || null }
+      : {}),
+    ...(input.color !== undefined
+      ? { color: input.color?.trim() || existing.color }
+      : {}),
+    ...(input.keywords !== undefined ? { keywords: nextKeywords.displayKeywords } : {}),
+  };
+}
+
+async function writeClassificationUpdateAudit(
+  tx: TransactionClient | Prisma.TransactionClient,
+  input: {
+    classificationId: string;
+    actor?: string;
+    previousKeywords: string[];
+    nextKeywords: NormalizedKeywordList;
+    categoryChanged: boolean;
+    keywordsChanged: boolean;
+  }
+) {
+  const counts = keywordCounts(input.previousKeywords, input.nextKeywords.displayKeywords);
+  await writeAuditLog(tx, {
+    action: "CLASSIFICATION_UPDATED",
+    entityType: "Classification",
+    entityId: input.classificationId,
+    actor: input.actor ?? AUDIT_ACTOR_SINGLE_ADMIN,
+    metadata: { ...counts, categoryChanged: input.categoryChanged },
+  });
+  if (
+    input.keywordsChanged
+    && (counts.addedKeywordCount > 0 || counts.removedKeywordCount > 0)
+  ) {
+    await writeAuditLog(tx, {
+      action: "CLASSIFICATION_KEYWORDS_UPDATED",
+      entityType: "Classification",
+      entityId: input.classificationId,
+      actor: input.actor ?? AUDIT_ACTOR_SINGLE_ADMIN,
+      metadata: counts,
+    });
+  }
 }
 
 export async function updateClassification(
@@ -325,115 +564,52 @@ export async function updateClassification(
   },
   client: ManagementClient = db
 ) {
-  return client.$transaction(async (tx) => {
-    const existing = await tx.classification.findFirst({
-      where: { id: classificationId, isDeleted: false, isActive: true },
-    });
-    if (!existing) {
-      throw new ClassificationManagementError(
-        "CLASSIFICATION_NOT_FOUND",
-        "التصنيف غير موجود أو غير نشط",
-        404
-      );
-    }
+  const keywordsChanged = input.keywords !== undefined;
+  const run = async (tx: TransactionClient) => {
+    const existing = await findActiveClassificationOrThrow(tx, classificationId);
+    const nextCategoryId = await resolveTargetCategoryId(
+      tx,
+      existing.categoryId,
+      input.categoryId
+    );
+    const name = resolveClassificationName(existing.nameAr, input.name);
+    const previousKeywords = readStoredKeywordsTolerantly(existing.keywords, existing.id);
+    const nextKeywords = resolveNextKeywordList(previousKeywords, input.keywords);
 
-    const nextCategoryId = input.categoryId ?? existing.categoryId;
-    if (input.categoryId) {
-      const category = await tx.category.findFirst({
-        where: { id: input.categoryId, isDeleted: false, isActive: true },
-        select: { id: true },
-      });
-      if (!category) {
-        throw new ClassificationManagementError(
-          "CATEGORY_NOT_FOUND",
-          "الفئة المحددة غير موجودة أو غير نشطة",
-          404
-        );
-      }
-    }
-
-    const name = input.name !== undefined ? input.name.trim() : existing.nameAr;
-    if (!name) {
-      throw new ClassificationManagementError(
-        "INVALID_CLASSIFICATION_NAME",
-        "اسم التصنيف مطلوب",
-        400
-      );
-    }
-
-    let previousKeywords: string[] = [];
-    try {
-      previousKeywords = parseClassificationKeywords(existing.keywords);
-    } catch {
-      previousKeywords = [];
-    }
-
-    const nextKeywords =
-      input.keywords !== undefined
-        ? normalizeAndValidateKeywords(input.keywords)
-        : normalizeAndValidateKeywords(previousKeywords);
-
-    if (input.keywords !== undefined) {
-      const conflicts = await findKeywordConflicts(tx, nextKeywords, classificationId);
-      if (conflicts.length > 0) {
-        throw new ClassificationManagementError(
-          "KEYWORD_ALREADY_LINKED_TO_ANOTHER_CLASSIFICATION",
-          "كلمة مفتاحية واحدة أو أكثر مرتبطة بتصنيف آخر",
-          409,
-          { conflicts }
-        );
-      }
+    if (keywordsChanged) {
+      await assertNoKeywordConflicts(tx, nextKeywords, classificationId);
     }
 
     try {
       const classification = await tx.classification.update({
         where: { id: classificationId },
-        data: {
-          categoryId: nextCategoryId,
-          nameAr: name,
-          ...(input.description !== undefined
-            ? { description: input.description?.trim() || null }
-            : {}),
-          ...(input.color !== undefined
-            ? { color: input.color?.trim() || existing.color }
-            : {}),
-          ...(input.keywords !== undefined ? { keywords: nextKeywords.displayKeywords } : {}),
-        },
+        data: buildClassificationUpdateData(
+          existing,
+          input,
+          nextCategoryId,
+          name,
+          nextKeywords
+        ),
       });
 
-      const categoryChanged = nextCategoryId !== existing.categoryId;
-      const counts = keywordCounts(previousKeywords, nextKeywords.displayKeywords);
-      await writeAuditLog(tx, {
-        action: "CLASSIFICATION_UPDATED",
-        entityType: "Classification",
-        entityId: classification.id,
-        actor: input.actor ?? AUDIT_ACTOR_SINGLE_ADMIN,
-        metadata: { ...counts, categoryChanged },
+      await writeClassificationUpdateAudit(tx, {
+        classificationId: classification.id,
+        actor: input.actor,
+        previousKeywords,
+        nextKeywords,
+        categoryChanged: nextCategoryId !== existing.categoryId,
+        keywordsChanged,
       });
-      if (
-        input.keywords !== undefined
-        && (counts.addedKeywordCount > 0 || counts.removedKeywordCount > 0)
-      ) {
-        await writeAuditLog(tx, {
-          action: "CLASSIFICATION_KEYWORDS_UPDATED",
-          entityType: "Classification",
-          entityId: classification.id,
-          actor: input.actor ?? AUDIT_ACTOR_SINGLE_ADMIN,
-          metadata: counts,
-        });
-      }
       return classification;
     } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-        throw new ClassificationManagementError(
-          "CLASSIFICATION_NAME_CONFLICT",
-          "اسم التصنيف مستخدم بالفعل ضمن هذه الفئة",
-          409
-        );
-      }
-      throw error;
+      translateClassificationUniqueConflict(error);
     }
-  });
+  };
+
+  if (keywordsChanged) {
+    return runSerializableClassificationMutation(client, run);
+  }
+  return client.$transaction(async (tx) => run(tx as TransactionClient));
 }
 
 export function mapCategoryResponse(category: {

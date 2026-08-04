@@ -5,9 +5,9 @@ import {
   type Prisma,
 } from "@prisma/client";
 import { db } from "@/lib/db";
+import { normalizeClassificationKeyword } from "@/lib/classifications/classification-keyword-normalizer";
 import { logger } from "@/server/logger";
 import { writeAuditLog, AUDIT_ACTOR_SINGLE_ADMIN } from "@/server/audit/audit-log-service";
-import { normalizeArabic } from "@/server/imports/arabic-normalize";
 import { normalizeColumnHeader } from "@/server/imports/complaint-column-schema";
 import { ImportValidationError } from "@/server/imports/import-errors";
 import { normalizeTextCell } from "@/server/imports/normalization";
@@ -93,11 +93,8 @@ const NORMALIZED_DETAIL_HEADERS = new Set([
   normalizeColumnHeader("التفصيل"),
 ]);
 
-export function normalizeImportedDetailValue(value: string): string {
-  return normalizeArabic(value)
-    .replaceAll(/\s+/g, " ")
-    .toLocaleLowerCase("ar-SA");
-}
+/** @deprecated Prefer normalizeClassificationKeyword from shared lib. Alias for temporary compatibility. */
+export const normalizeImportedDetailValue = normalizeClassificationKeyword;
 
 function positiveInteger(value: number | undefined, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0

@@ -1,10 +1,11 @@
 import { Prisma } from "@prisma/client";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ClassificationManagementError,
   createCategory,
   createClassification,
   normalizeAndValidateKeywords,
+  normalizeStoredClassificationKeywords,
   updateCategory,
   updateClassification,
 } from "./classification-management-service";
@@ -186,7 +187,10 @@ function createMemoryClient() {
   };
 
   return {
-    $transaction: async <T>(fn: (t: typeof tx) => Promise<T>) => fn(tx),
+    $transaction: async <T>(
+      fn: (t: typeof tx) => Promise<T>,
+      _options?: unknown
+    ) => fn(tx),
     category: tx.category,
     classification: tx.classification,
     auditLog: tx.auditLog,
@@ -344,5 +348,67 @@ describe("classification management service", () => {
       client as never
     );
     expect(active.keywords).toEqual(["حصرية"]);
+  });
+
+  it("reads non-array stored keywords as empty without failing the request", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const category = await createCategory({ name: "فئة", actor: "admin" }, client as never);
+    const classification = await createClassification(
+      { categoryId: category.id, name: "تصنيف", keywords: ["ok"], actor: "admin" },
+      client as never
+    );
+    const row = client._state.classifications.get(classification.id)!;
+    row.keywords = { broken: true } as never;
+
+    const sibling = await createClassification(
+      { categoryId: category.id, name: "آخر", keywords: ["ok"], actor: "admin" },
+      client as never
+    );
+    expect(sibling.keywords).toEqual(["ok"]);
+
+    const stored = normalizeStoredClassificationKeywords({ broken: true }, classification.id);
+    expect(stored.displayKeywords).toEqual([]);
+    warn.mockRestore();
+  });
+
+  it("uses valid strings inside a malformed stored array for conflict detection", async () => {
+    const category = await createCategory({ name: "فئة", actor: "admin" }, client as never);
+    const first = await createClassification(
+      { categoryId: category.id, name: "أ", keywords: [], actor: "admin" },
+      client as never
+    );
+    const row = client._state.classifications.get(first.id)!;
+    row.keywords = ["وكالة", 42, { x: 1 }, "موعد"] as never;
+
+    const second = await createClassification(
+      { categoryId: category.id, name: "ب", keywords: [], actor: "admin" },
+      client as never
+    );
+    await expect(
+      updateClassification(
+        second.id,
+        { keywords: ["وكاله"], actor: "admin" },
+        client as never
+      )
+    ).rejects.toMatchObject({
+      code: "KEYWORD_ALREADY_LINKED_TO_ANOTHER_CLASSIFICATION",
+    });
+    expect(client._state.classifications.get(second.id)?.keywords).toEqual([]);
+  });
+
+  it("updates self when previous keywords array is malformed without 400", async () => {
+    const category = await createCategory({ name: "فئة", actor: "admin" }, client as never);
+    const classification = await createClassification(
+      { categoryId: category.id, name: "أ", keywords: [], actor: "admin" },
+      client as never
+    );
+    client._state.classifications.get(classification.id)!.keywords = "not-array" as never;
+
+    const updated = await updateClassification(
+      classification.id,
+      { keywords: ["جديد"], actor: "admin" },
+      client as never
+    );
+    expect(updated.keywords).toEqual(["جديد"]);
   });
 });

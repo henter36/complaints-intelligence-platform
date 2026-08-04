@@ -61,12 +61,7 @@ import {
 } from "lucide-react";
 import { formatNumber } from "@/lib/ar-utils";
 import { isAbortError } from "@/lib/abort";
-import { normalizeArabic } from "@/server/imports/arabic-normalize";
-
-/** Match server normalizeImportedDetailValue / management keywords. */
-function normalizeDraftKeyword(value: string): string {
-  return normalizeArabic(value).replaceAll(/\s+/g, " ").toLocaleLowerCase("ar-SA");
-}
+import { normalizeClassificationKeyword } from "@/lib/classifications/classification-keyword-normalizer";
 
 // ---------- Types ----------
 type NodeType = "CATEGORY" | "CLASSIFICATION";
@@ -110,6 +105,205 @@ function readApiErrorMessage(payload: unknown, fallback: string): string {
     if (typeof message === "string" && message.trim()) return message;
   }
   return fallback;
+}
+
+export type ClassificationDialogMode =
+  | "EDIT_CATEGORY"
+  | "EDIT_CLASSIFICATION"
+  | "CREATE_CATEGORY"
+  | "CREATE_CLASSIFICATION";
+
+export type ClassificationDialogPresentation = {
+  mode: ClassificationDialogMode;
+  title: string;
+  description: string;
+  icon: "edit" | "plus";
+};
+
+export function getClassificationDialogPresentation(
+  editing: Classification | null,
+  creatingCategory: boolean
+): ClassificationDialogPresentation {
+  if (editing) {
+    if (isCategoryNode(editing)) {
+      return {
+        mode: "EDIT_CATEGORY",
+        title: "تعديل الفئة الرئيسية",
+        description: "عدّل اسم ووصف الفئة الرئيسية فقط",
+        icon: "edit",
+      };
+    }
+    if (isClassificationNode(editing)) {
+      return {
+        mode: "EDIT_CLASSIFICATION",
+        title: "تعديل التصنيف",
+        description:
+          "عدّل بيانات التصنيف والكلمات المفتاحية. الحفظ يتم بزر حفظ التغييرات فقط.",
+        icon: "edit",
+      };
+    }
+    return {
+      mode: "EDIT_CLASSIFICATION",
+      title: "تعديل التصنيف",
+      description: "نوع عقدة التصنيف غير مدعوم",
+      icon: "edit",
+    };
+  }
+  if (creatingCategory) {
+    return {
+      mode: "CREATE_CATEGORY",
+      title: "إضافة فئة رئيسية",
+      description: "أنشئ فئة رئيسية جديدة بدون كلمات مفتاحية",
+      icon: "plus",
+    };
+  }
+  return {
+    mode: "CREATE_CLASSIFICATION",
+    title: "إضافة تصنيف فرعي",
+    description:
+      "أدخل بيانات التصنيف الفرعي والكلمات المفتاحية (مسودة حتى الحفظ)",
+    icon: "plus",
+  };
+}
+
+export type ClassificationMutationRequest = {
+  url: string;
+  method: "POST" | "PATCH";
+  body: Record<string, unknown>;
+};
+
+export type ClassificationMutationState = {
+  editing: Classification | null;
+  creatingCategory: boolean;
+  formName: string;
+  formDescription: string;
+  formColor: string;
+  formKeywords: string[];
+  formParentId: string;
+};
+
+export function buildClassificationMutationRequest(
+  state: ClassificationMutationState
+): ClassificationMutationRequest {
+  const {
+    editing,
+    creatingCategory,
+    formName,
+    formDescription,
+    formColor,
+    formKeywords,
+    formParentId,
+  } = state;
+  const name = formName.trim();
+  const description = formDescription.trim() || null;
+
+  if (editing) {
+    switch (editing.nodeType) {
+      case "CATEGORY":
+        return {
+          url: `/api/categories/${editing.id}`,
+          method: "PATCH",
+          body: { name, description },
+        };
+      case "CLASSIFICATION":
+        return {
+          url: `/api/classifications/${editing.id}`,
+          method: "PATCH",
+          body: {
+            name,
+            description,
+            color: formColor,
+            keywords: formKeywords,
+            categoryId: formParentId || editing.parentId,
+          },
+        };
+      default:
+        throw new Error("نوع عقدة التصنيف غير مدعوم");
+    }
+  }
+
+  if (creatingCategory) {
+    return {
+      url: "/api/categories",
+      method: "POST",
+      body: { name, description },
+    };
+  }
+
+  if (!formParentId) {
+    throw new Error("اختر فئة أب للتصنيف الفرعي");
+  }
+  return {
+    url: "/api/classifications",
+    method: "POST",
+    body: {
+      categoryId: formParentId,
+      name,
+      description,
+      color: formColor,
+      keywords: formKeywords,
+    },
+  };
+}
+
+export function normalizeClassificationTree(
+  classData: Classification[]
+): Classification[] {
+  return classData.map((node) => ({
+    ...node,
+    nodeType: node.nodeType ?? ("CATEGORY" as NodeType),
+    children: (node.children ?? []).map((child) => ({
+      ...child,
+      nodeType: child.nodeType ?? ("CLASSIFICATION" as NodeType),
+    })),
+  }));
+}
+
+export function buildDistributionMap(dashData: DashboardData): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const item of dashData.distributions?.byClassification ?? []) {
+    map.set(item.name, item.count);
+  }
+  return map;
+}
+
+async function loadClassificationTree(signal?: AbortSignal): Promise<Classification[]> {
+  const classRes = await fetch("/api/classifications", { signal });
+  if (!classRes.ok) throw new Error("فشل تحميل التصنيفات");
+  const classData: Classification[] = await classRes.json();
+  return normalizeClassificationTree(classData);
+}
+
+async function loadDashboardDistribution(
+  signal?: AbortSignal
+): Promise<Map<string, number> | null> {
+  const dashRes = await fetch("/api/dashboard", { signal });
+  if (!dashRes.ok) return null;
+  const dashData: DashboardData = await dashRes.json();
+  return buildDistributionMap(dashData);
+}
+
+export async function loadClassificationManagerData(signal?: AbortSignal): Promise<{
+  tree: Classification[];
+  distribution: Map<string, number> | null;
+}> {
+  const [tree, distribution] = await Promise.all([
+    loadClassificationTree(signal),
+    loadDashboardDistribution(signal),
+  ]);
+  return { tree, distribution };
+}
+
+function mergeKeywordsIntoDraft(previous: string[], values: string[]): string[] {
+  const seen = new Set(previous.map(normalizeClassificationKeyword).filter(Boolean));
+  const next = [...previous];
+  for (const value of values) {
+    const normalized = normalizeClassificationKeyword(value);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    next.push(value);
+  }
+  return next;
 }
 
 
@@ -182,7 +376,7 @@ export function ImportedDetailPicker({
   const existingNormalized = useMemo(() => {
     const set = new Set<string>();
     for (const keyword of existingKeywords) {
-      const normalized = normalizeDraftKeyword(keyword);
+      const normalized = normalizeClassificationKeyword(keyword);
       if (normalized) set.add(normalized);
     }
     return set;
@@ -258,7 +452,7 @@ export function ImportedDetailPicker({
   const addSelectedToDraft = () => {
     if (selected.size === 0) return;
     const values = [...selected.values()].filter((value) => {
-      const n = normalizeDraftKeyword(value);
+      const n = normalizeClassificationKeyword(value);
       return n && !existingNormalized.has(n);
     });
     if (values.length === 0) {
@@ -348,14 +542,23 @@ export function ImportedDetailPicker({
                 <span className="min-w-0 flex-1 truncate text-sm">{item.displayValue}</span>
                 <span className="text-xs text-muted-foreground">{formatNumber(item.occurrences)} ظهور</span>
                 {item.alreadyLinkedToCurrentClassification && <Badge variant="secondary">مضافة مسبقًا</Badge>}
-                {!item.alreadyLinkedToCurrentClassification && item.linkedToOtherClassification && (
+                {!item.alreadyLinkedToCurrentClassification
+                  && item.linkedToOtherClassification && (
                   <Badge variant="destructive">
                     {item.linkedClassificationName
                       ? `مرتبطة: ${item.linkedClassificationName}`
                       : "مرتبطة بتصنيف آخر"}
                   </Badge>
                 )}
-                {item.linkedKeywordsCount === 0 && !item.linkedToOtherClassification && (
+                {existingNormalized.has(item.normalizedValue)
+                  && !item.alreadyLinkedToCurrentClassification
+                  && !item.linkedToOtherClassification && (
+                  <Badge variant="outline">مضافة إلى المسودة</Badge>
+                )}
+                {item.linkedKeywordsCount === 0
+                  && !item.linkedToOtherClassification
+                  && !item.alreadyLinkedToCurrentClassification
+                  && !existingNormalized.has(item.normalizedValue) && (
                   <Badge variant="outline">غير مرتبطة</Badge>
                 )}
               </label>
@@ -732,43 +935,19 @@ export function ClassificationsManager() {
   const fetchData = useCallback(async (signal?: AbortSignal) => {
     const requestId = fetchRequestRef.current + 1;
     fetchRequestRef.current = requestId;
-    const canUpdate = () => !signal?.aborted && fetchRequestRef.current === requestId;
+    const isLatest = () => !signal?.aborted && fetchRequestRef.current === requestId;
     setLoading(true);
     let aborted = false;
     try {
-      const [classRes, dashRes] = await Promise.all([
-        fetch("/api/classifications", { signal }),
-        fetch("/api/dashboard", { signal }),
-      ]);
-      if (!classRes.ok) throw new Error("فشل تحميل التصنيفات");
-      const classData: Classification[] = await classRes.json();
-      const withTypes = classData.map((node) => ({
-        ...node,
-        nodeType: node.nodeType ?? "CATEGORY" as NodeType,
-        children: (node.children ?? []).map((child) => ({
-          ...child,
-          nodeType: child.nodeType ?? "CLASSIFICATION" as NodeType,
-        })),
-      }));
-
-      if (dashRes.ok) {
-        const dashData: DashboardData = await dashRes.json();
-        const map = new Map<string, number>();
-        for (const item of dashData.distributions?.byClassification ?? []) {
-          map.set(item.name, item.count);
-        }
-        if (canUpdate()) {
-          setClassifications(withTypes);
-          setDistributionMap(map);
-        }
-      } else if (canUpdate()) {
-        setClassifications(withTypes);
+      const { tree, distribution } = await loadClassificationManagerData(signal);
+      if (!isLatest()) return;
+      setClassifications(tree);
+      if (distribution) {
+        setDistributionMap(distribution);
       }
     } catch (err) {
       aborted = isAbortError(err);
-      if (aborted) {
-        return;
-      }
+      if (aborted) return;
       const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
       toast({
         title: "خطأ",
@@ -776,7 +955,7 @@ export function ClassificationsManager() {
         variant: "destructive",
       });
     } finally {
-      if (!aborted && canUpdate()) {
+      if (!aborted && isLatest()) {
         setLoading(false);
       }
     }
@@ -849,6 +1028,7 @@ export function ClassificationsManager() {
   };
 
   const editingIsCategory = editing ? isCategoryNode(editing) : creatingCategory;
+  const dialogPresentation = getClassificationDialogPresentation(editing, creatingCategory);
 
   const handleSubmit = async () => {
     if (!formName.trim()) {
@@ -861,53 +1041,20 @@ export function ClassificationsManager() {
     }
     setSubmitting(true);
     try {
-      let res: Response;
-      if (editing && isCategoryNode(editing)) {
-        res = await fetch(`/api/categories/${editing.id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: formName.trim(),
-            description: formDescription.trim() || null,
-          }),
-        });
-      } else if (editing && isClassificationNode(editing)) {
-        res = await fetch(`/api/classifications/${editing.id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: formName.trim(),
-            description: formDescription.trim() || null,
-            color: formColor,
-            keywords: formKeywords,
-            categoryId: formParentId || editing.parentId,
-          }),
-        });
-      } else if (creatingCategory) {
-        res = await fetch("/api/categories", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: formName.trim(),
-            description: formDescription.trim() || null,
-          }),
-        });
-      } else {
-        if (!formParentId) {
-          throw new Error("اختر فئة أب للتصنيف الفرعي");
-        }
-        res = await fetch("/api/classifications", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            categoryId: formParentId,
-            name: formName.trim(),
-            description: formDescription.trim() || null,
-            color: formColor,
-            keywords: formKeywords,
-          }),
-        });
-      }
+      const mutation = buildClassificationMutationRequest({
+        editing,
+        creatingCategory,
+        formName,
+        formDescription,
+        formColor,
+        formKeywords,
+        formParentId,
+      });
+      const res = await fetch(mutation.url, {
+        method: mutation.method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(mutation.body),
+      });
 
       const errBody = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -1111,31 +1258,15 @@ export function ClassificationsManager() {
         <DialogContent className="sm:max-w-[560px] max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              {editing ? (
-                <>
-                  <Edit className="h-5 w-5 text-primary" />
-                  {isCategoryNode(editing) ? "تعديل الفئة الرئيسية" : "تعديل التصنيف"}
-                </>
-              ) : creatingCategory ? (
-                <>
-                  <Plus className="h-5 w-5 text-primary" />
-                  إضافة فئة رئيسية
-                </>
+              {dialogPresentation.icon === "edit" ? (
+                <Edit className="h-5 w-5 text-primary" />
               ) : (
-                <>
-                  <Plus className="h-5 w-5 text-primary" />
-                  إضافة تصنيف فرعي
-                </>
+                <Plus className="h-5 w-5 text-primary" />
               )}
+              {dialogPresentation.title}
             </DialogTitle>
             <DialogDescription>
-              {editing
-                ? isCategoryNode(editing)
-                  ? "عدّل اسم ووصف الفئة الرئيسية فقط"
-                  : "عدّل بيانات التصنيف والكلمات المفتاحية. الحفظ يتم بزر حفظ التغييرات فقط."
-                : creatingCategory
-                  ? "أنشئ فئة رئيسية جديدة بدون كلمات مفتاحية"
-                  : "أدخل بيانات التصنيف الفرعي والكلمات المفتاحية (مسودة حتى الحفظ)"}
+              {dialogPresentation.description}
             </DialogDescription>
           </DialogHeader>
 
@@ -1232,19 +1363,7 @@ export function ClassificationsManager() {
                           classificationId={editing.id}
                           existingKeywords={formKeywords}
                           onSelect={(values) => {
-                            setFormKeywords((prev) => {
-                              const seen = new Set(
-                                prev.map(normalizeDraftKeyword).filter(Boolean)
-                              );
-                              const next = [...prev];
-                              for (const v of values) {
-                                const n = normalizeDraftKeyword(v);
-                                if (!n || seen.has(n)) continue;
-                                seen.add(n);
-                                next.push(v);
-                              }
-                              return next;
-                            });
+                            setFormKeywords((prev) => mergeKeywordsIntoDraft(prev, values));
                           }}
                         />
                       ) : (

@@ -12,10 +12,10 @@ export async function GET(req: NextRequest) {
   try {
     await requireAdminApiSession(req);
     const categories = await db.category.findMany({
-      where: { isDeleted: false },
+      where: { isDeleted: false, isActive: true },
       include: {
         classifications: {
-          where: { isDeleted: false },
+          where: { isDeleted: false, isActive: true },
           orderBy: [{ displayOrder: "asc" }, { nameAr: "asc" }],
         },
       },

@@ -66,6 +66,16 @@ describe("/api/classifications", () => {
     const response = await GET(new NextRequest("http://localhost/api/classifications"));
     const payload = await response.json();
     expect(response.status).toBe(200);
+    expect(mocks.categoryFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { isDeleted: false, isActive: true },
+        include: expect.objectContaining({
+          classifications: expect.objectContaining({
+            where: { isDeleted: false, isActive: true },
+          }),
+        }),
+      })
+    );
     expect(payload[0]).toMatchObject({
       id: "cat_1",
       nodeType: "CATEGORY",

@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -9,7 +9,9 @@ vi.mock("@/hooks/use-toast", () => ({
 }));
 
 import {
+  buildClassificationMutationRequest,
   ClassificationsManager,
+  getClassificationDialogPresentation,
   ImportedDetailPicker,
 } from "./classifications-manager";
 
@@ -53,11 +55,19 @@ const listPayload = {
       linkedToOtherClassification: true,
       linkedClassificationName: "تصنيف آخر",
     },
+    {
+      normalizedValue: "مسوده",
+      displayValue: "مسودة",
+      occurrences: 2,
+      linkedKeywordsCount: 0,
+      alreadyLinkedToCurrentClassification: false,
+      linkedToOtherClassification: false,
+    },
   ],
   page: 1,
   pageSize: 20,
-  total: 2,
-  availableTotal: 2,
+  total: 3,
+  availableTotal: 3,
 };
 
 function jsonResponse(data: unknown, ok = true, status = 200) {
@@ -67,6 +77,47 @@ function jsonResponse(data: unknown, ok = true, status = 200) {
     json: async () => data,
   };
 }
+
+describe("pure dialog helpers", () => {
+  it("builds create/update requests and rejects unknown nodeType", () => {
+    const unknown = {
+      id: "x",
+      nodeType: "UNKNOWN" as never,
+      name: "؟",
+      parentId: null,
+    };
+    expect(() =>
+      buildClassificationMutationRequest({
+        editing: unknown,
+        creatingCategory: false,
+        formName: "أ",
+        formDescription: "",
+        formColor: "#000",
+        formKeywords: [],
+        formParentId: "",
+      })
+    ).toThrow("نوع عقدة التصنيف غير مدعوم");
+
+    expect(
+      buildClassificationMutationRequest({
+        editing: { id: "cat_1", nodeType: "CATEGORY", name: "ف", parentId: null },
+        creatingCategory: false,
+        formName: "ف",
+        formDescription: "د",
+        formColor: "#000",
+        formKeywords: ["x"],
+        formParentId: "",
+      })
+    ).toEqual({
+      url: "/api/categories/cat_1",
+      method: "PATCH",
+      body: { name: "ف", description: "د" },
+    });
+
+    expect(getClassificationDialogPresentation(null, true).mode).toBe("CREATE_CATEGORY");
+    expect(getClassificationDialogPresentation(null, false).mode).toBe("CREATE_CLASSIFICATION");
+  });
+});
 
 describe("ImportedDetailPicker draft mode", () => {
   afterEach(() => {
@@ -101,6 +152,22 @@ describe("ImportedDetailPicker draft mode", () => {
         && (init as RequestInit | undefined)?.method === "POST"
       )
     ).toBe(false);
+  });
+
+  it("shows draft badge for values already in formKeywords", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(listPayload)));
+    render(
+      <ImportedDetailPicker
+        classificationId="cls_1"
+        existingKeywords={["مسودة"]}
+        onSelect={vi.fn()}
+      />
+    );
+    expect(await screen.findByText("مضافة إلى المسودة")).toBeInTheDocument();
+    const disabledDraft = screen.getAllByRole("checkbox").find((box) =>
+      box.closest("label")?.textContent?.includes("مسودة")
+    );
+    expect(disabledDraft).toBeDisabled();
   });
 
   it("keeps selections when paging", async () => {
@@ -187,9 +254,7 @@ describe("ClassificationsManager", () => {
   }
 
   async function renderManager() {
-    await act(async () => {
-      render(<ClassificationsManager />);
-    });
+    render(<ClassificationsManager />);
     expect(await screen.findByText("تصنيف فرعي")).toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "فئة رئيسية" })).toBeInTheDocument();
   }
@@ -213,16 +278,20 @@ describe("ClassificationsManager", () => {
   });
 
   it("classification dialog shows keywords and saves via PATCH", async () => {
+    let capturedMutation:
+      | { url: string; method?: string; body: unknown }
+      | undefined;
     const fetchMock = mockTreeFetch({
       onMutate: (url, init) => {
-        expect(url).toContain("/api/classifications/cls_1");
-        expect(init?.method).toBe("PATCH");
-        const body = JSON.parse(String(init?.body));
-        expect(body.keywords).toEqual(expect.arrayContaining(["قديمة", "يدوية"]));
+        capturedMutation = {
+          url,
+          method: init?.method,
+          body: JSON.parse(String(init?.body)),
+        };
         return jsonResponse({
           id: "cls_1",
           nodeType: "CLASSIFICATION",
-          keywords: body.keywords,
+          keywords: (capturedMutation.body as { keywords: string[] }).keywords,
         });
       },
     });
@@ -238,14 +307,55 @@ describe("ClassificationsManager", () => {
     await user.click(screen.getByRole("button", { name: "حفظ التغييرات" }));
 
     await waitFor(() => {
-      expect(
-        fetchMock.mock.calls.some(
-          ([url, init]) =>
-            String(url).includes("/api/classifications/cls_1")
-            && (init as RequestInit | undefined)?.method === "PATCH"
-        )
-      ).toBe(true);
+      expect(capturedMutation).toBeDefined();
     });
+    expect(capturedMutation?.url).toContain("/api/classifications/cls_1");
+    expect(capturedMutation?.method).toBe("PATCH");
+    expect(capturedMutation?.body).toEqual(
+      expect.objectContaining({
+        keywords: expect.arrayContaining(["قديمة", "يدوية"]),
+      })
+    );
+    expect(
+      fetchMock.mock.calls.some(
+        ([url, init]) =>
+          String(url).includes("/api/classifications/cls_1")
+          && (init as RequestInit | undefined)?.method === "PATCH"
+      )
+    ).toBe(true);
+  });
+
+  it("rejects unknown nodeType without mutation fetch", async () => {
+    const fetchMock = mockTreeFetch({
+      tree: [
+        {
+          id: "bad",
+          nodeType: "UNKNOWN",
+          name: "عقدة غريبة",
+          parentId: null,
+          children: [],
+        },
+      ],
+    });
+    render(<ClassificationsManager />);
+    expect(await screen.findByRole("heading", { name: "عقدة غريبة" })).toBeInTheDocument();
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("edit-node-bad"));
+    await user.click(screen.getByRole("button", { name: "حفظ التغييرات" }));
+
+    await waitFor(() => {
+      expect(toastSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: "خطأ في الحفظ",
+          description: "نوع عقدة التصنيف غير مدعوم",
+        })
+      );
+    });
+    const mutations = fetchMock.mock.calls.filter(([, init]) => {
+      const method = (init as RequestInit | undefined)?.method;
+      return method && method !== "GET";
+    });
+    expect(mutations).toHaveLength(0);
   });
 
   it("adds imported values to draft without POST import", async () => {

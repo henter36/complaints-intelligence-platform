@@ -1,4 +1,4 @@
-import { normalizeArabic } from "@/server/imports/arabic-normalize";
+import { normalizeClassificationKeyword } from "@/lib/classifications/classification-keyword-normalizer";
 import { parseClassificationKeywords } from "./classification-keywords";
 
 export type SourceDetailClassificationCandidate = {
@@ -55,9 +55,7 @@ export class ClassificationKeywordsError extends Error {
 }
 
 export function normalizeSourceDetailClassificationValue(value: string): string {
-  return normalizeArabic(value)
-    .replaceAll(/\s+/g, " ")
-    .toLocaleLowerCase("ar-SA");
+  return normalizeClassificationKeyword(value);
 }
 
 function isCandidateActive(candidate: SourceDetailClassificationCandidate): boolean {
