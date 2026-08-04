@@ -6,7 +6,7 @@ import {
   ImportRowAction,
   type Complaint,
   type ImportBatchRow,
-  type Prisma,
+  Prisma,
 } from "@prisma/client";
 import { db } from "@/lib/db";
 import { writeAuditLog, AUDIT_ACTOR_SINGLE_ADMIN } from "@/server/audit/audit-log-service";
@@ -15,6 +15,19 @@ import { calculateRowCounters } from "./import-batch-service";
 import { deriveSubject } from "./subject-derive";
 import { startTextRiskScan } from "@/server/analytics/text-risk/text-risk-analysis-service";
 import { normalizeComplainantIdentifier } from "@/server/complaints/repeated-complaint-identifier";
+
+/** Shared Prisma transaction wait/timeouts for large import confirmation/rollback. */
+export const IMPORT_TRANSACTION_MAX_WAIT_MS = 30_000;
+export const IMPORT_CONFIRMATION_TIMEOUT_MS = 600_000;
+export const IMPORT_ROLLBACK_TIMEOUT_MS = 600_000;
+
+export const IMPORT_EXTERNAL_ID_CONFLICT = "IMPORT_EXTERNAL_ID_CONFLICT";
+export const IMPORT_EXTERNAL_ID_TOMBSTONE_CONFLICT = "IMPORT_EXTERNAL_ID_TOMBSTONE_CONFLICT";
+
+const ACTIVE_EXTERNAL_ID_CONFLICT_MESSAGE =
+  "يتعذر تأكيد الدفعة لأن رقم شكوى واحدًا أو أكثر مستخدم في سجلات نشطة. أعد معالجة المعاينة قبل التأكيد.";
+const TOMBSTONE_EXTERNAL_ID_CONFLICT_MESSAGE =
+  "يتعذر تأكيد الدفعة لأن رقم شكوى واحدًا أو أكثر مرتبط بسجل محذوف يحتاج مراجعة قبل إعادة الاستيراد.";
 
 const CONFIRMABLE_ACTIONS = new Set<ImportRowAction>([
   ImportRowAction.NEW,
@@ -282,6 +295,194 @@ function snapshotComplaint(complaint: Complaint): Record<SnapshotField, unknown>
   ) as Record<SnapshotField, unknown>;
 }
 
+function extractSnapshotExternalId(afterData: Prisma.JsonValue): string | null {
+  if (!afterData || typeof afterData !== "object" || Array.isArray(afterData)) {
+    return null;
+  }
+  const value = (afterData as Record<string, unknown>).externalId;
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function isPrismaExternalIdUniqueViolation(error: unknown): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") {
+    return false;
+  }
+  const target = error.meta?.target;
+  if (Array.isArray(target)) {
+    return target.some((item) => String(item).includes("externalId"));
+  }
+  if (typeof target === "string") {
+    return target.includes("externalId");
+  }
+  return false;
+}
+
+function throwActiveExternalIdConflict(): never {
+  throw new ImportConfirmationError(
+    IMPORT_EXTERNAL_ID_CONFLICT,
+    ACTIVE_EXTERNAL_ID_CONFLICT_MESSAGE,
+    409
+  );
+}
+
+function throwTombstoneExternalIdConflict(): never {
+  throw new ImportConfirmationError(
+    IMPORT_EXTERNAL_ID_TOMBSTONE_CONFLICT,
+    TOMBSTONE_EXTERNAL_ID_CONFLICT_MESSAGE,
+    409
+  );
+}
+
+function collectNewRowExternalIds(rows: ConfirmationRow[]): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+
+  for (const row of rows) {
+    if (row.action !== ImportRowAction.NEW) continue;
+    const externalId =
+      typeof row.externalId === "string" && row.externalId.trim()
+        ? row.externalId.trim()
+        : parseText(
+            row.normalizedData && typeof row.normalizedData === "object" && !Array.isArray(row.normalizedData)
+              ? (row.normalizedData as Record<string, unknown>).externalId
+              : undefined
+          )?.trim() ?? null;
+
+    if (!externalId) continue;
+    if (seen.has(externalId)) {
+      throwActiveExternalIdConflict();
+    }
+    seen.add(externalId);
+    ids.push(externalId);
+  }
+
+  return ids;
+}
+
+/**
+ * Free soft-deleted CREATE tombstones that are proven products of ROLLED_BACK imports,
+ * or reject confirmation when an active/ineligible conflict occupies the externalId.
+ * Must run inside the confirmation transaction before creates.
+ */
+async function resolveIncomingExternalIdConflicts(
+  tx: Prisma.TransactionClient,
+  batchId: string,
+  actor: string,
+  rows: ConfirmationRow[]
+): Promise<void> {
+  const externalIds = collectNewRowExternalIds(rows);
+  if (externalIds.length === 0) return;
+
+  const existing = await tx.complaint.findMany({
+    where: { externalId: { in: externalIds } },
+    select: {
+      id: true,
+      externalId: true,
+      isDeleted: true,
+      importBatchId: true,
+    },
+  });
+  if (existing.length === 0) return;
+
+  const active = existing.filter((complaint) => !complaint.isDeleted);
+  if (active.length > 0) {
+    throwActiveExternalIdConflict();
+  }
+
+  const tombstones = existing.filter((complaint) => complaint.isDeleted);
+  const tombstoneIds = tombstones.map((complaint) => complaint.id);
+  const originBatchIds = [
+    ...new Set(
+      tombstones
+        .map((complaint) => complaint.importBatchId)
+        .filter((id): id is string => Boolean(id))
+    ),
+  ];
+
+  const [originBatches, createSnapshots] = await Promise.all([
+    originBatchIds.length
+      ? tx.importBatch.findMany({
+          where: { id: { in: originBatchIds } },
+          select: { id: true, status: true },
+        })
+      : Promise.resolve([] as Array<{ id: string; status: ImportBatchStatus }>),
+    tx.importChangeSnapshot.findMany({
+      where: {
+        complaintId: { in: tombstoneIds },
+        changeType: ImportChangeType.CREATE,
+      },
+      select: {
+        complaintId: true,
+        importBatchId: true,
+        afterData: true,
+        changeType: true,
+      },
+    }),
+  ]);
+
+  const batchStatusById = new Map(originBatches.map((batch) => [batch.id, batch.status]));
+  const createSnapshotsByComplaintId = new Map<string, typeof createSnapshots>();
+  for (const snapshot of createSnapshots) {
+    const list = createSnapshotsByComplaintId.get(snapshot.complaintId) ?? [];
+    list.push(snapshot);
+    createSnapshotsByComplaintId.set(snapshot.complaintId, list);
+  }
+
+  const releasableIds: string[] = [];
+  for (const tombstone of tombstones) {
+    const expectedExternalId = tombstone.externalId?.trim() ?? "";
+    if (!expectedExternalId) continue;
+
+    const originBatchId = tombstone.importBatchId;
+    const originStatus = originBatchId ? batchStatusById.get(originBatchId) : undefined;
+    const snapshotsForComplaint = createSnapshotsByComplaintId.get(tombstone.id) ?? [];
+    const createSnapshot =
+      snapshotsForComplaint.find((snapshot) => snapshot.importBatchId === originBatchId)
+      ?? snapshotsForComplaint[0];
+    const historicalExternalId = createSnapshot
+      ? extractSnapshotExternalId(createSnapshot.afterData)
+      : null;
+
+    const eligible = Boolean(
+      originBatchId
+      && originStatus === ImportBatchStatus.ROLLED_BACK
+      && createSnapshot
+      && createSnapshot.complaintId === tombstone.id
+      && createSnapshot.changeType === ImportChangeType.CREATE
+      && historicalExternalId
+      && historicalExternalId === expectedExternalId
+    );
+
+    if (!eligible) {
+      throwTombstoneExternalIdConflict();
+    }
+
+    releasableIds.push(tombstone.id);
+  }
+
+  if (releasableIds.length === 0) return;
+
+  await tx.complaint.updateMany({
+    where: {
+      id: { in: releasableIds },
+      isDeleted: true,
+      externalId: { not: null },
+    },
+    data: {
+      externalId: null,
+      version: { increment: 1 },
+    },
+  });
+
+  await writeAuditLog(tx, {
+    action: "IMPORT_LEGACY_TOMBSTONE_EXTERNAL_IDS_RELEASED",
+    entityType: "ImportBatch",
+    entityId: batchId,
+    actor,
+    metadata: { releasedComplaintCount: releasableIds.length },
+  });
+}
+
 function assertBatchRowsAreConfirmable(rows: ConfirmationRow[]): void {
   const counters = calculateRowCounters(rows);
 
@@ -379,46 +580,54 @@ async function applyNewRow(
 
   const complainantIdentifier = normalizeComplainantIdentifier(normalized.complainantIdentifier) ?? null;
 
-  const complaint = await tx.complaint.create({
-    data: {
-      externalId: normalized.externalId ?? null,
-      sourceReference: normalized.sourceReference ?? null,
-      complaintDate: normalized.complaintDate ?? normalized.receivedAt ?? null,
-      receivedAt: normalized.receivedAt ?? normalized.complaintDate ?? appliedAt,
-      dueDate: normalized.dueDate ?? null,
-      closedAt,
-      status,
-      subject:
-        normalized.subject?.trim() ||
-        normalized.sourceDetail?.trim() ||
-        (normalized.description ? deriveSubject(normalized.description) : "بدون موضوع"),
-      description: normalized.description ?? null,
-      complainantName: normalized.complainantName ?? null,
-      complainantIdentifier,
-      complainantPhone: normalized.complainantPhone ?? null,
-      region: normalized.region ?? null,
-      facility: normalized.facility ?? null,
-      department: normalized.department ?? null,
-      categoryId: taxonomy.categoryId ?? null,
-      classificationId: taxonomy.classificationId ?? null,
-      priority: normalized.priority ?? ComplaintPriority.MEDIUM,
-      severity: normalized.priority ?? ComplaintPriority.MEDIUM,
-      channel: normalized.channel ?? null,
-      resolution: normalized.resolution ?? null,
-      actionTaken: normalized.actionTaken ?? null,
-      actionDescription: normalized.actionDescription ?? null,
-      sourceOrigin: normalized.sourceOrigin ?? null,
-      sourceClosedBy: normalized.sourceClosedBy ?? null,
-      wingCode: normalized.wingCode ?? null,
-      sourceUpdatedAt: normalized.sourceUpdatedAt ?? null,
-      sourceModifiedAt: normalized.sourceModifiedAt ?? null,
-      sourceUpdatedBy: normalized.sourceUpdatedBy ?? null,
-      sourceStatus: normalized.sourceStatus ?? null,
-      sourceDetail: normalized.sourceDetail ?? null,
-      sourceActionStatus: normalized.sourceActionStatus ?? null,
-      importBatchId: batchId,
-    },
-  });
+  let complaint: Complaint;
+  try {
+    complaint = await tx.complaint.create({
+      data: {
+        externalId: normalized.externalId ?? null,
+        sourceReference: normalized.sourceReference ?? null,
+        complaintDate: normalized.complaintDate ?? normalized.receivedAt ?? null,
+        receivedAt: normalized.receivedAt ?? normalized.complaintDate ?? appliedAt,
+        dueDate: normalized.dueDate ?? null,
+        closedAt,
+        status,
+        subject:
+          normalized.subject?.trim() ||
+          normalized.sourceDetail?.trim() ||
+          (normalized.description ? deriveSubject(normalized.description) : "بدون موضوع"),
+        description: normalized.description ?? null,
+        complainantName: normalized.complainantName ?? null,
+        complainantIdentifier,
+        complainantPhone: normalized.complainantPhone ?? null,
+        region: normalized.region ?? null,
+        facility: normalized.facility ?? null,
+        department: normalized.department ?? null,
+        categoryId: taxonomy.categoryId ?? null,
+        classificationId: taxonomy.classificationId ?? null,
+        priority: normalized.priority ?? ComplaintPriority.MEDIUM,
+        severity: normalized.priority ?? ComplaintPriority.MEDIUM,
+        channel: normalized.channel ?? null,
+        resolution: normalized.resolution ?? null,
+        actionTaken: normalized.actionTaken ?? null,
+        actionDescription: normalized.actionDescription ?? null,
+        sourceOrigin: normalized.sourceOrigin ?? null,
+        sourceClosedBy: normalized.sourceClosedBy ?? null,
+        wingCode: normalized.wingCode ?? null,
+        sourceUpdatedAt: normalized.sourceUpdatedAt ?? null,
+        sourceModifiedAt: normalized.sourceModifiedAt ?? null,
+        sourceUpdatedBy: normalized.sourceUpdatedBy ?? null,
+        sourceStatus: normalized.sourceStatus ?? null,
+        sourceDetail: normalized.sourceDetail ?? null,
+        sourceActionStatus: normalized.sourceActionStatus ?? null,
+        importBatchId: batchId,
+      },
+    });
+  } catch (error) {
+    if (isPrismaExternalIdUniqueViolation(error)) {
+      throwActiveExternalIdConflict();
+    }
+    throw error;
+  }
 
   await tx.complaintStatusHistory.create({
     data: {
@@ -665,6 +874,7 @@ export async function confirmReadyImportBatch(
       orderBy: { rowNumber: "asc" },
     }) as ConfirmationRow[];
     assertBatchRowsAreConfirmable(rows);
+    await resolveIncomingExternalIdConflicts(tx, batchId, actor, rows);
 
     const touchedIdentifiers = new Set<string | null>();
     for (const row of rows) {
@@ -708,7 +918,7 @@ export async function confirmReadyImportBatch(
       unchanged: counters.noChangeRows,
       duplicates: counters.duplicateRows,
     };
-  }, { maxWait: 30_000, timeout: 600_000 }).then((result) => {
+  }, { maxWait: IMPORT_TRANSACTION_MAX_WAIT_MS, timeout: IMPORT_CONFIRMATION_TIMEOUT_MS }).then((result) => {
     // Trigger text-risk scan after the transaction commits.
     // Failure here must not propagate — the import is already confirmed.
     startTextRiskScan({ importBatchId: batchId, actor }).catch((scanError: unknown) => {
@@ -878,7 +1088,14 @@ async function reverseCreatedComplaint(
   const { snapshot, current, batchId, rolledBackAt, actor } = input;
   const result = await tx.complaint.updateMany({
     where: { id: current.id, version: snapshot.versionAfter, importBatchId: batchId, isDeleted: false },
-    data: { isDeleted: true, deletedAt: rolledBackAt, version: { increment: 1 } },
+    data: {
+      isDeleted: true,
+      deletedAt: rolledBackAt,
+      // Release unique externalId so the same file can be re-imported after rollback.
+      // Historical value remains in ImportChangeSnapshot.afterData and batch row data.
+      externalId: null,
+      version: { increment: 1 },
+    },
   });
   if (result.count !== 1) {
     throw new ImportConfirmationError(
@@ -899,7 +1116,11 @@ async function reverseCreatedComplaint(
     entityType: "Complaint",
     entityId: current.id,
     actor,
-    metadata: { batchId, rowId: snapshot.importBatchRowId },
+    metadata: {
+      batchId,
+      rowId: snapshot.importBatchRowId,
+      externalIdReleased: Boolean(current.externalId),
+    },
   });
   return current.complainantIdentifier;
 }
@@ -1061,5 +1282,5 @@ export async function rollbackConfirmedImportBatch(
       revertedCreates: counters.revertedCreates,
       revertedUpdates: counters.revertedUpdates,
     };
-  }, { maxWait: 10_000, timeout: 60_000 });
+  }, { maxWait: IMPORT_TRANSACTION_MAX_WAIT_MS, timeout: IMPORT_ROLLBACK_TIMEOUT_MS });
 }
