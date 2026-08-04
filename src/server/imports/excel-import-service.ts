@@ -42,6 +42,12 @@ import { maskIdentifier } from "./privacy";
 import { validateNormalizedComplaintRow } from "./row-validation";
 import { parseXlsxWorkbook } from "./xlsx-parser";
 import { resolveImportRowReference } from "./error-report";
+import {
+  QUALITY_OBSERVATION_DISPLAY_LIMIT,
+  buildQualityObservationsSummary,
+  orderQualityObservationsForDisplay,
+  resolvePreviewValue,
+} from "./import-preview-presentation";
 import { resolveSourceDetailClassification } from "@/server/classifications/source-detail-classification-resolver";
 
 const WRITE_CHUNK_SIZE = 500;
@@ -82,7 +88,7 @@ export type ProcessedImportRow = {
   matchedComplaintVersion: number | null;
 };
 
-type ComplaintIndexEntry =
+export type ComplaintIndexEntry =
   | { kind: "match"; complaint: Complaint }
   | { kind: "ambiguous"; complaintIds: string[] };
 
@@ -104,10 +110,23 @@ export type ImportUploadResult = {
   unmappedColumns: string[];
   mappingAnalysis: ColumnMappingAnalysis;
   columnCount: number;
-  errors: Array<{ row: number; errors: RowMessage[]; warnings: RowMessage[] }>;
+  errors: Array<{
+    row: number;
+    errors: RowMessage[];
+    warnings: RowMessage[];
+    complaintNumber?: string | null;
+    validationStatus?: ImportRowValidationStatus;
+    imported?: ImportRowOutcome;
+    observationKind?: "blocking" | "warning";
+  }>;
   preview: Array<Record<string, unknown>>;
   previewTotal: number;
   qualityIssueRowsTotal: number;
+  blockingRowCount: number;
+  warningRowCount: number;
+  displayedObservationCount: number;
+  qualityDisplayLimit: number;
+  qualityObservationsSummary: string;
   previewTruncated: boolean;
   qualityIssuesTruncated: boolean;
   batchWarnings: RowMessage[];
@@ -191,22 +210,62 @@ export function complaintCandidateIdentityKeys(complaint: Pick<Complaint, "exter
   ]);
 }
 
-export function normalizedCandidateIdentityKeys(row: NormalizedComplaintRow): string[] {
-  const complaintDate = row.complaintDate ?? row.receivedAt;
+/**
+ * Exclusive incoming identity: pick exactly one match key by strength.
+ * Existing complaints may still be indexed under multiple keys for lookup performance.
+ */
+export type IncomingIdentity =
+  | { kind: "EXTERNAL_ID"; key: string }
+  | { kind: "SOURCE_REFERENCE_DATE"; key: string }
+  | { kind: "FINGERPRINT"; key: string }
+  | { kind: "NONE" };
 
-  return uniqueIdentityKeys([
-    row.externalId ? safeIdentityKey({ externalId: row.externalId }) : null,
-    row.sourceReference && complaintDate
-      ? safeIdentityKey({ sourceReference: row.sourceReference, complaintDate })
-      : null,
-    fingerprintIdentityKey({
+export function resolveIncomingIdentity(row: NormalizedComplaintRow): IncomingIdentity {
+  const complaintDate = row.complaintDate ?? row.receivedAt;
+  const externalId = row.externalId?.trim();
+  if (externalId) {
+    return { kind: "EXTERNAL_ID", key: safeIdentityKey({ externalId }) };
+  }
+
+  const sourceReference = row.sourceReference?.trim();
+  if (sourceReference && complaintDate) {
+    return {
+      kind: "SOURCE_REFERENCE_DATE",
+      key: safeIdentityKey({ sourceReference, complaintDate }),
+    };
+  }
+
+  const hasFingerprintSignal = Boolean(
+    complaintDate || row.region || row.facility || row.department || row.subject
+  );
+  if (!hasFingerprintSignal) {
+    return { kind: "NONE" };
+  }
+
+  return {
+    kind: "FINGERPRINT",
+    key: fingerprintIdentityKey({
       complaintDate,
       region: row.region,
       facility: row.facility,
       department: row.department,
       subject: row.subject,
     }),
-  ]);
+  };
+}
+
+/** Exclusive single-key list for in-file duplicate tracking and existing-record lookup. */
+export function normalizedCandidateIdentityKeys(row: NormalizedComplaintRow): string[] {
+  const identity = resolveIncomingIdentity(row);
+  return identity.kind === "NONE" ? [] : [identity.key];
+}
+
+export function findExistingComplaintByIdentity(
+  identity: IncomingIdentity,
+  indexes: Map<string, ComplaintIndexEntry>
+): ComplaintIndexEntry | undefined {
+  if (identity.kind === "NONE") return undefined;
+  return indexes.get(identity.key);
 }
 
 export function hasMeaningfulChange(row: NormalizedComplaintRow, complaint: Complaint): boolean {
@@ -398,9 +457,10 @@ function findExistingComplaintEntry(
   normalized: NormalizedComplaintRow,
   existingByIdentity: Map<string, ComplaintIndexEntry>
 ): ComplaintIndexEntry | undefined {
-  return normalizedCandidateIdentityKeys(normalized)
-    .map((key) => existingByIdentity.get(key))
-    .find(Boolean);
+  return findExistingComplaintByIdentity(
+    resolveIncomingIdentity(normalized),
+    existingByIdentity
+  );
 }
 
 function classifyMatchedComplaint(
@@ -433,9 +493,19 @@ function classifyValidImportRow(
   context: RowClassificationContext,
   errors: RowMessage[]
 ): RowClassification {
-  const identity = normalizedCandidateIdentityKeys(normalized)[0];
-  if (isDuplicateImportIdentity(identity, rowNumber, context, errors, normalized.externalId)) {
-    return { action: ImportRowAction.DUPLICATE, matchedComplaintId: null, matchedComplaintVersion: null };
+  const incomingIdentity = resolveIncomingIdentity(normalized);
+  if (incomingIdentity.kind !== "NONE") {
+    if (
+      isDuplicateImportIdentity(
+        incomingIdentity.key,
+        rowNumber,
+        context,
+        errors,
+        normalized.externalId
+      )
+    ) {
+      return { action: ImportRowAction.DUPLICATE, matchedComplaintId: null, matchedComplaintVersion: null };
+    }
   }
 
   const existing = findExistingComplaintEntry(normalized, context.existingByIdentity);
@@ -449,6 +519,30 @@ function classifyValidImportRow(
   }
 
   return classifyMatchedComplaint(existing.complaint, normalized, rowNumber, context, errors);
+}
+
+/**
+ * Pure classification helper for unit tests — mirrors production path without DB.
+ */
+export function classifyNormalizedImportRows(
+  rows: NormalizedComplaintRow[],
+  existingByIdentity: Map<string, ComplaintIndexEntry>
+): Array<{ action: ImportRowAction; matchedComplaintId: string | null; errors: RowMessage[] }> {
+  const context: RowClassificationContext = {
+    seenImportIdentities: new Map(),
+    seenMatchedComplaints: new Map(),
+    existingByIdentity,
+  };
+
+  return rows.map((normalized, index) => {
+    const errors: RowMessage[] = [];
+    const classification = classifyValidImportRow(normalized, index + 2, context, errors);
+    return {
+      action: classification.action,
+      matchedComplaintId: classification.matchedComplaintId,
+      errors,
+    };
+  });
 }
 
 function buildProcessedImportRow(input: {
@@ -778,17 +872,107 @@ async function finalizeReadyImportBatch(input: {
   }, { maxWait: 10_000, timeout: 60_000 });
 }
 
+function mapProcessedRowToQualityObservation(
+  row: ProcessedImportRow,
+  observationKind: "blocking" | "warning"
+) {
+  return {
+    row: row.rowNumber,
+    complaintNumber: resolveImportRowReference({
+      externalId: row.externalId,
+      rawData: row.rawData,
+      normalizedData: row.normalizedData,
+    }),
+    errors: (row.validationErrors as unknown as RowMessage[]) ?? [],
+    warnings: (row.validationWarnings as unknown as RowMessage[]) ?? [],
+    validationStatus: row.validationStatus,
+    imported: getImportRowOutcome(row.validationStatus),
+    observationKind,
+  };
+}
+
+function buildPreviewRow(
+  row: ProcessedImportRow,
+  columnMapping: ColumnMapping
+): Record<string, unknown> {
+  const normalized = row.normalizedData as Record<string, unknown> | null;
+  const rawData = row.rawData as Record<string, unknown> | null;
+
+  const previewField = (key: string, aliases: readonly string[] = []) =>
+    resolvePreviewValue(normalized, rawData, key, columnMapping, aliases);
+
+  const externalId =
+    row.externalId
+    ?? (previewField("externalId") as string | null | undefined)
+    ?? null;
+  const statusValue = previewField("status");
+  const identifier = previewField("complainantIdentifier");
+
+  return {
+    row: row.rowNumber,
+    action: row.action,
+    validationStatus: row.validationStatus,
+    complaintNumber: externalId,
+    externalId,
+    receivedDate:
+      previewField("receivedAt")
+      ?? previewField("complaintDate")
+      ?? null,
+    sourceOrigin: previewField("sourceOrigin") ?? null,
+    description: previewField("description") ?? null,
+    actionTaken: previewField("actionTaken") ?? null,
+    actionDescription: previewField("actionDescription") ?? null,
+    sourceClosedBy: previewField("sourceClosedBy") ?? null,
+    wingCode: previewField("wingCode") ?? null,
+    sourceUpdatedAt: previewField("sourceUpdatedAt") ?? null,
+    sourceModifiedAt: previewField("sourceModifiedAt") ?? null,
+    sourceUpdatedBy: previewField("sourceUpdatedBy") ?? null,
+    subject: previewField("subject") ?? null,
+    sourceDetail: previewField("sourceDetail") ?? null,
+    sourceStatus: previewField("sourceStatus") ?? null,
+    sourceActionStatus: previewField("sourceActionStatus") ?? null,
+    status: statusValue ?? null,
+    statusDisplay: typeof statusValue === "string"
+      ? getImportedStatusDisplay(statusValue as ComplaintStatus)
+      : null,
+    priority: previewField("priority") ?? null,
+    region: previewField("region") ?? null,
+    department: previewField("department") ?? null,
+    facility: previewField("facility") ?? null,
+    complainantIdentifierMasked:
+      typeof identifier === "string" ? maskIdentifier(identifier) : null,
+  };
+}
+
 function toImportUploadResult(
   batchId: string,
   fileName: string,
   processed: ProcessedWorkbook,
   status: ImportBatchStatus = ImportBatchStatus.READY_FOR_CONFIRMATION
 ): ImportUploadResult {
-  const qualityIssueRows = processed.processedRows.filter(
-    (row) => row.validationStatus !== ImportRowValidationStatus.VALID
-  );
   const PREVIEW_LIMIT = 50;
-  const QUALITY_LIMIT = 100;
+  const QUALITY_LIMIT = QUALITY_OBSERVATION_DISPLAY_LIMIT;
+
+  // Blocking = INVALID (errors, rejects, true duplicates). Warning = soft quality notes only.
+  // Rows with both are stored as INVALID once (errors win), so no double listing.
+  const blockingRows = processed.processedRows.filter(
+    (row) => row.validationStatus === ImportRowValidationStatus.INVALID
+  );
+  const warningRows = processed.processedRows.filter(
+    (row) => row.validationStatus === ImportRowValidationStatus.WARNING
+  );
+  const displayedQualityRows = orderQualityObservationsForDisplay(
+    blockingRows,
+    warningRows,
+    QUALITY_LIMIT
+  );
+  const qualityIssueRowsTotal = blockingRows.length + warningRows.length;
+  const observationCounts = {
+    blockingRowCount: blockingRows.length,
+    warningRowCount: warningRows.length,
+    displayedObservationCount: displayedQualityRows.length,
+    qualityDisplayLimit: QUALITY_LIMIT,
+  };
 
   return {
     batchId,
@@ -809,59 +993,22 @@ function toImportUploadResult(
     mappingAnalysis: processed.mappingAnalysis,
     columnCount: processed.columnCount,
     batchWarnings: processed.batchWarnings,
-    errors: qualityIssueRows
-      .slice(0, QUALITY_LIMIT)
-      .map((row) => ({
-        row: row.rowNumber,
-        complaintNumber: resolveImportRowReference({
-          externalId: row.externalId,
-          rawData: row.rawData,
-          normalizedData: row.normalizedData,
-        }),
-        errors: (row.validationErrors as unknown as RowMessage[]) ?? [],
-        warnings: (row.validationWarnings as unknown as RowMessage[]) ?? [],
-        validationStatus: row.validationStatus,
-        imported: getImportRowOutcome(row.validationStatus),
-      })),
-    qualityIssueRowsTotal: qualityIssueRows.length,
-    qualityIssuesTruncated: qualityIssueRows.length > QUALITY_LIMIT,
-    preview: processed.processedRows.slice(0, PREVIEW_LIMIT).map((row) => {
-      const normalized = row.normalizedData as Record<string, unknown> | null;
-      const identifier =
-        typeof normalized?.complainantIdentifier === "string"
-          ? normalized.complainantIdentifier
-          : null;
-      return {
-        row: row.rowNumber,
-        action: row.action,
-        validationStatus: row.validationStatus,
-        complaintNumber: row.externalId,
-        externalId: row.externalId,
-        receivedDate: normalized?.receivedAt ?? normalized?.complaintDate ?? null,
-        sourceOrigin: normalized?.sourceOrigin ?? null,
-        description: normalized?.description ?? null,
-        actionTaken: normalized?.actionTaken ?? null,
-        actionDescription: normalized?.actionDescription ?? null,
-        sourceClosedBy: normalized?.sourceClosedBy ?? null,
-        wingCode: normalized?.wingCode ?? null,
-        sourceUpdatedAt: normalized?.sourceUpdatedAt ?? null,
-        sourceModifiedAt: normalized?.sourceModifiedAt ?? null,
-        sourceUpdatedBy: normalized?.sourceUpdatedBy ?? null,
-        subject: normalized?.subject ?? null,
-        sourceDetail: normalized?.sourceDetail ?? null,
-        sourceStatus: normalized?.sourceStatus ?? null,
-        sourceActionStatus: normalized?.sourceActionStatus ?? null,
-        status: normalized?.status ?? null,
-        statusDisplay: typeof normalized?.status === "string"
-          ? getImportedStatusDisplay(normalized.status as ComplaintStatus)
-          : null,
-        priority: normalized?.priority ?? null,
-        region: normalized?.region ?? null,
-        department: normalized?.department ?? null,
-        facility: normalized?.facility ?? null,
-        complainantIdentifierMasked: identifier ? maskIdentifier(identifier) : null,
-      };
-    }),
+    errors: displayedQualityRows.map((row) =>
+      mapProcessedRowToQualityObservation(
+        row,
+        row.validationStatus === ImportRowValidationStatus.INVALID ? "blocking" : "warning"
+      )
+    ),
+    qualityIssueRowsTotal,
+    blockingRowCount: observationCounts.blockingRowCount,
+    warningRowCount: observationCounts.warningRowCount,
+    displayedObservationCount: observationCounts.displayedObservationCount,
+    qualityDisplayLimit: QUALITY_LIMIT,
+    qualityObservationsSummary: buildQualityObservationsSummary(observationCounts),
+    qualityIssuesTruncated: qualityIssueRowsTotal > QUALITY_LIMIT,
+    preview: processed.processedRows
+      .slice(0, PREVIEW_LIMIT)
+      .map((row) => buildPreviewRow(row, processed.columnMapping)),
     previewTotal: processed.counters.totalRows,
     previewTruncated: processed.counters.totalRows > PREVIEW_LIMIT,
     canApprove:

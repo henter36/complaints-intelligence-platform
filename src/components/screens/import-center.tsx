@@ -56,6 +56,10 @@ import {
   ClipboardX,
 } from "lucide-react";
 import { formatNumber, formatDate } from "@/lib/ar-utils";
+import {
+  QUALITY_OBSERVATION_DISPLAY_LIMIT,
+  buildQualityObservationsSummary,
+} from "@/server/imports/import-preview-presentation";
 
 // ===== Types =====
 
@@ -143,6 +147,13 @@ interface UploadResult {
   failureNotes?: string | null;
   confirmedAt?: string;
   confirmationStatus?: string;
+  qualityIssueRowsTotal?: number;
+  blockingRowCount?: number;
+  warningRowCount?: number;
+  displayedObservationCount?: number;
+  qualityDisplayLimit?: number;
+  qualityObservationsSummary?: string;
+  qualityIssuesTruncated?: boolean;
 }
 
 interface ExistingImportBatch {
@@ -218,6 +229,131 @@ export function normalizeUploadResultPayload(json: UploadResult): UploadResult {
   };
 }
 
+/** Presentation fallback when the API left a cell empty but the UI needs a marker. */
+export function displayPreviewCell(value: unknown): string {
+  return formatPreviewValue(value);
+}
+
+/**
+ * Safe preview formatter — avoids default object stringification (`[object Object]`).
+ * Sensitive / bulky fields must be filtered via {@link getVisiblePreviewEntries} before display.
+ */
+export function formatPreviewValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "—";
+  }
+
+  if (typeof value === "string") {
+    return value.trim() || "—";
+  }
+
+  if (
+    typeof value === "number"
+    || typeof value === "boolean"
+    || typeof value === "bigint"
+  ) {
+    return String(value);
+  }
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? "—" : formatDate(value);
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => formatPreviewValue(item))
+      .filter((item) => item !== "—")
+      .join("، ") || "—";
+  }
+
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return "قيمة غير قابلة للعرض";
+    }
+  }
+
+  return "—";
+}
+
+/**
+ * Prefer a non-blank complaint number; blank/whitespace falls through to externalId.
+ * Empty strings must not win over a real externalId (unlike `??`).
+ */
+export function resolvePreviewComplaintNumber(
+  row: Pick<ImportPreviewRow, "complaintNumber" | "externalId">
+): string | undefined {
+  const complaintNumber =
+    typeof row.complaintNumber === "string" ? row.complaintNumber.trim() : "";
+  if (complaintNumber) {
+    return complaintNumber;
+  }
+
+  const externalId =
+    typeof row.externalId === "string" ? row.externalId.trim() : "";
+  return externalId || undefined;
+}
+
+/** Safe preview date display — never call formatDate with untrusted invalid strings. */
+export function formatPreviewDate(
+  value: string | Date | null | undefined
+): string {
+  if (value == null || value === "") {
+    return "—";
+  }
+
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "—";
+  }
+
+  return formatDate(parsed);
+}
+
+/** Never surface as free-form preview columns (sensitive or oversized). */
+export const HIDDEN_PREVIEW_FIELDS = new Set([
+  "rawData",
+  "complainantIdentifier",
+  "complainantPhone",
+  "complainantIdentifierMasked",
+]);
+
+export function getVisiblePreviewEntries(
+  row: Record<string, unknown>
+): Array<[string, unknown]> {
+  return Object.entries(row).filter(([key]) => !HIDDEN_PREVIEW_FIELDS.has(key));
+}
+
+export function resolveBlockingRowCount(result: UploadResult): number {
+  if (typeof result.blockingRowCount === "number") {
+    return result.blockingRowCount;
+  }
+  return result.incompleteRecords;
+}
+
+export function resolveWarningRowCount(result: UploadResult): number {
+  if (typeof result.warningRowCount === "number") {
+    return result.warningRowCount;
+  }
+  return result.warningRecords;
+}
+
+export function buildImportQualitySummary(result: UploadResult): string {
+  if (result.qualityObservationsSummary) {
+    return result.qualityObservationsSummary;
+  }
+
+  return buildQualityObservationsSummary({
+    blockingRowCount: resolveBlockingRowCount(result),
+    warningRowCount: resolveWarningRowCount(result),
+    displayedObservationCount:
+      result.displayedObservationCount ?? result.errors.length,
+    qualityDisplayLimit:
+      result.qualityDisplayLimit ?? QUALITY_OBSERVATION_DISPLAY_LIMIT,
+  });
+}
+
 function confirmationTitle(result: UploadResult): string {
   return result.confirmationStatus === "CONFIRMED"
     ? "تم تأكيد الدفعة"
@@ -237,13 +373,28 @@ function confirmationDescription(result: UploadResult): string {
 }
 
 function ImportReadyAlert({ result }: Readonly<{ result: UploadResult }>) {
-  if (result.errors.length > 0) {
+  const blockingRowCount = resolveBlockingRowCount(result);
+  const warningRowCount = resolveWarningRowCount(result);
+
+  if (blockingRowCount > 0) {
+    return (
+      <Alert variant="destructive">
+        <AlertTriangle className="h-4 w-4" />
+        <AlertTitle>توجد أخطاء تحتاج معالجة</AlertTitle>
+        <AlertDescription>
+          {buildImportQualitySummary(result)} لم يتم إنشاء أو تحديث أي شكوى حتى تُعالج الأخطاء المانعة.
+        </AlertDescription>
+      </Alert>
+    );
+  }
+
+  if (warningRowCount > 0) {
     return (
       <Alert className="border-amber-200 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-900/50 text-amber-900 dark:text-amber-200">
         <AlertTriangle className="h-4 w-4 text-amber-600" />
-        <AlertTitle>توجد أخطاء تحتاج معالجة</AlertTitle>
+        <AlertTitle>ملاحظات جودة غير مانعة</AlertTitle>
         <AlertDescription className="text-amber-800 dark:text-amber-300">
-          يوجد {formatNumber(result.errors.length)} صفًا يحتوي أخطاء أو تحذيرات. لم يتم إنشاء أو تحديث أي شكوى.
+          {buildImportQualitySummary(result)}
         </AlertDescription>
       </Alert>
     );
@@ -1245,13 +1396,16 @@ export function ImportCenter({ batchId }: Readonly<{ batchId?: string | null }>)
                           التحقق والجودة
                           <Badge
                             variant={
-                              result.rejectedRecords > 0 || result.incompleteRecords > 0
+                              resolveBlockingRowCount(result) > 0
                                 ? "destructive"
                                 : "secondary"
                             }
                             className="mr-1 h-5 px-1.5 text-[10px]"
                           >
-                            {formatNumber(result.errors.length)}
+                            {formatNumber(
+                              result.qualityIssueRowsTotal
+                              ?? result.errors.length
+                            )}
                           </Badge>
                         </TabsTrigger>
                       </TabsList>
@@ -1389,30 +1543,28 @@ export function ImportCenter({ batchId }: Readonly<{ batchId?: string | null }>)
                                       {row.row}
                                     </TableCell>
                                     <TableCell className="font-mono text-xs">
-                                      {row.complaintNumber || "-"}
+                                      {formatPreviewValue(resolvePreviewComplaintNumber(row))}
                                     </TableCell>
                                     <TableCell className="text-xs">
-                                      {row.receivedDate
-                                        ? formatDate(row.receivedDate)
-                                        : "-"}
+                                      {formatPreviewDate(row.receivedDate)}
                                     </TableCell>
                                     <TableCell className="text-xs">
-                                      {row.sourceOrigin || "-"}
+                                      {formatPreviewValue(row.sourceOrigin)}
                                     </TableCell>
                                     <TableCell className="text-xs max-w-[200px] truncate">
-                                      {row.subject || "-"}
+                                      {formatPreviewValue(row.subject)}
                                     </TableCell>
                                     <TableCell className="text-xs">
-                                      {row.sourceDetail || "-"}
+                                      {formatPreviewValue(row.sourceDetail)}
                                     </TableCell>
                                     <TableCell className="text-xs">
-                                      {row.sourceStatus || "-"}
+                                      {formatPreviewValue(row.sourceStatus)}
                                     </TableCell>
                                     <TableCell className="text-xs">
-                                      {row.statusDisplay || row.status || "-"}
+                                      {formatPreviewValue(row.statusDisplay || row.status)}
                                     </TableCell>
                                     <TableCell className="text-xs">
-                                      {row.sourceActionStatus || "-"}
+                                      {formatPreviewValue(row.sourceActionStatus)}
                                     </TableCell>
                                   </TableRow>
                                 ))}
@@ -1432,10 +1584,14 @@ export function ImportCenter({ batchId }: Readonly<{ batchId?: string | null }>)
                           <div className="flex flex-col items-center py-10 text-center">
                             <CheckCircle2 className="h-12 w-12 text-emerald-500 mb-3" />
                             <p className="text-sm font-medium">
-                              لا توجد أخطاء مانعة أو تحذيرات — جميع السجلات صالحة
+                              لا توجد أخطاء مانعة أو ملاحظات جودة — جميع السجلات صالحة
                             </p>
                           </div>
                         ) : (
+                          <>
+                            <p className="text-sm text-muted-foreground mb-3">
+                              {buildImportQualitySummary(result)}
+                            </p>
                           <div className="rounded-lg border overflow-hidden max-h-[460px] overflow-y-auto">
                             <Table>
                               <TableHeader className="sticky top-0 z-10 bg-card">
@@ -1494,11 +1650,14 @@ export function ImportCenter({ batchId }: Readonly<{ batchId?: string | null }>)
                               </TableBody>
                             </Table>
                           </div>
+                          </>
                         )}
-                        {result.errors.length >= 50 && (
+                        {(result.qualityIssuesTruncated
+                          || (result.qualityIssueRowsTotal ?? 0) > (result.qualityDisplayLimit ?? 100)
+                          || result.errors.length >= 100) && (
                           <p className="text-xs text-amber-600 dark:text-amber-400 mt-2 text-center">
-                            يتم عرض أول السجلات — نزّل التقرير الكامل للاطلاع على
-                            الأخطاء المانعة وتحذيرات جودة البيانات
+                            حد العرض {formatNumber(result.qualityDisplayLimit ?? 100)} ملاحظة — نزّل التقرير الكامل
+                            للاطلاع على كل الأخطاء المانعة وتحذيرات جودة البيانات
                           </p>
                         )}
                       </TabsContent>
