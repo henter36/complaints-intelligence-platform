@@ -98,7 +98,9 @@ export function buildComplaintSlaTiming(
   ].includes(state);
   const isCompliant = state === "OPEN_WITHIN_SLA" || wasClosedWithinSla;
   const closedWithoutTrustedDate = state === "CLOSED_WITHOUT_TRUSTED_DATE";
-  const lateReference = isValidDate(complaint.closedAt) ? complaint.closedAt : measuredAt;
+  const lateReference = wasClosedLate && isValidDate(complaint.closedAt)
+    ? complaint.closedAt
+    : measuredAt;
   const latenessDays = deadline && (isCurrentlyLate || wasClosedLate)
     ? ceilDays(lateReference.getTime() - deadline.getTime())
     : null;
@@ -109,9 +111,10 @@ export function buildComplaintSlaTiming(
   const resolutionDurationDays = trustedClosure
     ? (complaint.closedAt.getTime() - createdAt.getTime()) / DAY_MS
     : null;
-  const openAgeDays = createdAt && isOpenComplaintStatus(complaint.status)
-    ? ceilDays(measuredAt.getTime() - createdAt.getTime())
-    : null;
+  const openAgeDays =
+    createdAt && isValidDate(measuredAt) && isOpenComplaintStatus(complaint.status)
+      ? ceilDays(measuredAt.getTime() - createdAt.getTime())
+      : null;
 
   return {
     state,
