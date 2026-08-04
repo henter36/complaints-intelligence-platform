@@ -8,7 +8,10 @@ import {
   buildExecutiveBriefData,
   buildFullAnalyticalData,
   computeThirteenMonthWindow,
+  computeMonthlyHistoryWindow,
   groupComplaintsByMonth,
+  aggregateMonthlyComplaintTrend,
+  resolveTrustedClosedAt,
   MONTHLY_WINDOW_SIZE,
   ARABIC_MONTH_NAMES,
 } from "./report-executive-brief-data-service";
@@ -1441,5 +1444,180 @@ describe("buildFullAnalyticalData — continuity rows", () => {
     const data = await buildFullAnalyticalData(BASE_FILTERS, result, comparison);
     const row = data.continuityRows.find((r) => r.departmentName === "التعليم");
     expect(row?.recurrenceType).toBe("new");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: computeMonthlyHistoryWindow (backward-looking)
+// ---------------------------------------------------------------------------
+
+describe("computeMonthlyHistoryWindow", () => {
+  it("returns Aug 2025–Aug 2026 = 13 months when data is older than the window", () => {
+    const buckets = computeMonthlyHistoryWindow({
+      reportEnd: new Date("2026-08-04T12:00:00.000Z"),
+      earliestAvailableDate: new Date("2024-01-01T00:00:00.000Z"),
+      maxMonths: 13,
+    });
+    expect(buckets).toHaveLength(13);
+    expect(buckets[0].key).toBe("2025-08");
+    expect(buckets[12].key).toBe("2026-08");
+  });
+
+  it("starts at November 2025 when earliest data is Nov 2025", () => {
+    const buckets = computeMonthlyHistoryWindow({
+      reportEnd: new Date("2026-08-04T12:00:00.000Z"),
+      earliestAvailableDate: new Date("2025-11-28T00:00:00.000Z"),
+      maxMonths: 13,
+    });
+    expect(buckets[0].key).toBe("2025-11");
+    expect(buckets[buckets.length - 1].key).toBe("2026-08");
+    expect(buckets.length).toBe(10);
+  });
+
+  it("never creates a month after report end month", () => {
+    const buckets = computeMonthlyHistoryWindow({
+      reportEnd: new Date("2026-08-04T12:00:00.000Z"),
+      earliestAvailableDate: new Date("2026-07-05T00:00:00.000Z"),
+      maxMonths: 13,
+    });
+    expect(buckets.map((b) => b.key)).toEqual(["2026-07", "2026-08"]);
+    for (const b of buckets) {
+      expect(b.key <= "2026-08").toBe(true);
+    }
+  });
+
+  it("uses toExclusive − 1ms semantics for reportEndMonth", () => {
+    // Period ends exclusive on Sep 1 → last included day is Aug 31
+    const buckets = computeMonthlyHistoryWindow({
+      reportEnd: new Date(new Date("2026-09-01T00:00:00.000Z").getTime() - 1),
+      earliestAvailableDate: new Date("2025-01-01T00:00:00.000Z"),
+      maxMonths: 13,
+    });
+    expect(buckets[buckets.length - 1].key).toBe("2026-08");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: aggregateMonthlyComplaintTrend series definitions
+// ---------------------------------------------------------------------------
+
+describe("aggregateMonthlyComplaintTrend", () => {
+  const buckets = computeMonthlyHistoryWindow({
+    reportEnd: new Date("2026-08-15T00:00:00.000Z"),
+    earliestAvailableDate: new Date("2026-07-01T00:00:00.000Z"),
+    maxMonths: 13,
+  });
+
+  it("receivedCount uses complaintDate ?? receivedAt", () => {
+    const points = aggregateMonthlyComplaintTrend(
+      [
+        {
+          complaintDate: new Date("2026-07-10T00:00:00.000Z"),
+          receivedAt: new Date("2026-01-01T00:00:00.000Z"),
+          closedAt: null,
+        },
+        {
+          complaintDate: null,
+          receivedAt: new Date("2026-08-02T00:00:00.000Z"),
+          closedAt: null,
+        },
+      ],
+      buckets
+    );
+    expect(points.find((p) => p.monthKey === "2026-07")?.receivedCount).toBe(1);
+    expect(points.find((p) => p.monthKey === "2026-08")?.receivedCount).toBe(1);
+  });
+
+  it("closedDuringMonthCount requires a trusted closedAt", () => {
+    const created = new Date("2026-07-01T00:00:00.000Z");
+    const points = aggregateMonthlyComplaintTrend(
+      [
+        // trusted close in July
+        {
+          complaintDate: created,
+          receivedAt: created,
+          closedAt: new Date("2026-07-05T00:00:00.000Z"),
+        },
+        // closedAt before creation → not trusted
+        {
+          complaintDate: created,
+          receivedAt: created,
+          closedAt: new Date("2026-06-01T00:00:00.000Z"),
+        },
+        // missing closedAt
+        { complaintDate: created, receivedAt: created, closedAt: null },
+      ],
+      buckets
+    );
+    expect(points.find((p) => p.monthKey === "2026-07")?.closedDuringMonthCount).toBe(1);
+  });
+
+  it("openAtMonthEndCount rebuilds historic balance", () => {
+    const created = new Date("2026-07-01T00:00:00.000Z");
+    const points = aggregateMonthlyComplaintTrend(
+      [
+        // Open through Jul; closed in Aug → open at Jul end, not Aug end
+        {
+          complaintDate: created,
+          receivedAt: created,
+          closedAt: new Date("2026-08-10T00:00:00.000Z"),
+        },
+      ],
+      buckets
+    );
+    expect(points.find((p) => p.monthKey === "2026-07")?.openAtMonthEndCount).toBe(1);
+    expect(points.find((p) => p.monthKey === "2026-08")?.openAtMonthEndCount).toBe(0);
+  });
+
+  it("lateAtMonthEndCount uses a 7-day deadline; exact boundary is not late", () => {
+    // Created Jul 1 00:00 — deadline Jul 8 00:00
+    // Month end Aug 1 00:00 exclusive for July → endMs = Aug 1
+    // For July: Aug 1 > Jul 8 → late
+    const created = new Date("2026-07-01T00:00:00.000Z");
+    // Created 6 days before Aug month start so at Jul end may not be late
+    // At exact 7 days: deadline = created + 7d; late when endMs > deadline
+    // Create at Jul 25: deadline Aug 1. endMs for July = Aug 1. endMs > deadline is false.
+    const exact7 = new Date("2026-07-25T00:00:00.000Z");
+    const lateOne = new Date("2026-07-20T00:00:00.000Z"); // deadline Jul 27, end Aug 1 → late
+
+    const points = aggregateMonthlyComplaintTrend(
+      [
+        { complaintDate: exact7, receivedAt: exact7, closedAt: null },
+        { complaintDate: lateOne, receivedAt: lateOne, closedAt: null },
+        { complaintDate: created, receivedAt: created, closedAt: null },
+      ],
+      buckets
+    );
+    const july = points.find((p) => p.monthKey === "2026-07")!;
+    expect(july.openAtMonthEndCount).toBe(3);
+    // exact7 not late; lateOne late; created late
+    expect(july.lateAtMonthEndCount).toBe(2);
+  });
+
+  it("keeps zero months inside the window", () => {
+    const points = aggregateMonthlyComplaintTrend(
+      [
+        {
+          complaintDate: new Date("2026-07-05T00:00:00.000Z"),
+          receivedAt: new Date("2026-07-05T00:00:00.000Z"),
+          closedAt: null,
+        },
+      ],
+      buckets
+    );
+    // August present with zero received
+    const aug = points.find((p) => p.monthKey === "2026-08");
+    expect(aug).toBeDefined();
+    expect(aug!.receivedCount).toBe(0);
+  });
+
+  it("resolveTrustedClosedAt rejects dates before creation", () => {
+    expect(
+      resolveTrustedClosedAt({
+        complaintDate: new Date("2026-07-10T00:00:00.000Z"),
+        receivedAt: new Date("2026-07-10T00:00:00.000Z"),
+        closedAt: new Date("2026-07-01T00:00:00.000Z"),
+      })
+    ).toBeNull();
   });
 });

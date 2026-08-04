@@ -243,11 +243,13 @@ function drawDirectionArrow(doc: PDFKit.PDFDocument, direction: ExecutiveDirecti
 
 // ── KPI formatting ─────────────────────────────────────────────────────────────
 
+const REPORT_UNAVAILABLE = "غير متاح";
+
 function formatKpiValue(card: ExecutiveBriefKpiCard): string {
-  if (card.value === null) return "غير متاح";
-  if (card.format === "percent") return formatReportNumber(card.value, { percent: true });
+  if (card.value === null) return REPORT_UNAVAILABLE;
+  if (card.format === "percent") return formatReportNumber(card.value, { percent: true, maximumFractionDigits: 1 });
   if (card.format === "days") return `${formatReportNumber(card.value)} يوم`;
-  return formatReportNumber(card.value);
+  return formatReportNumber(card.value, { maximumFractionDigits: 0 });
 }
 
 function formatKpiDelta(card: ExecutiveBriefKpiCard): string {
@@ -255,6 +257,89 @@ function formatKpiDelta(card: ExecutiveBriefKpiCard): string {
   const diff = formatReportNumber(card.difference, { sign: true });
   if (card.changeRate === null) return diff;
   return `${diff}  (${formatReportNumber(card.changeRate, { sign: true, percent: true })})`;
+}
+
+/** Measure prepared Arabic (or mixed) text width for the active font/size. */
+export function measurePreparedArabicText(
+  doc: PDFKit.PDFDocument,
+  text: string,
+  fontSize: number,
+  fontName: "Body" | "Bold" = "Body"
+): number {
+  doc.font(fontName).fontSize(fontSize);
+  return doc.widthOfString(preparePdfText(text), { wordSpacing: WORD_SPACING });
+}
+
+/**
+ * Reduce font size until the (single-line) text fits within maxWidth,
+ * stopping at minFontSize. Returns the chosen size.
+ */
+export function fitTextToBox(
+  doc: PDFKit.PDFDocument,
+  text: string,
+  maxWidth: number,
+  maxFontSize: number,
+  minFontSize: number,
+  fontName: "Body" | "Bold" = "Bold"
+): number {
+  let size = maxFontSize;
+  while (size > minFontSize) {
+    if (measurePreparedArabicText(doc, text, size, fontName) <= maxWidth) {
+      return size;
+    }
+    size -= 0.5;
+  }
+  return minFontSize;
+}
+
+/** Draw a KPI primary value centered in a fixed box with auto-fit size. */
+export function drawKpiValue(
+  doc: PDFKit.PDFDocument,
+  valueText: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  options: { maxFontSize?: number; minFontSize?: number; isUnavailable?: boolean } = {}
+): { fontSize: number; usedHeight: number } {
+  const isUnavailable = options.isUnavailable ?? valueText === REPORT_UNAVAILABLE;
+  const maxFont = options.maxFontSize ?? (isUnavailable ? 14 : 22);
+  const minFont = options.minFontSize ?? (isUnavailable ? 10 : 11);
+  const fontSize = fitTextToBox(doc, valueText, width - 8, maxFont, minFont, "Bold");
+  doc.font("Bold").fontSize(fontSize).fillColor(COLORS.primary);
+  const textH = Math.min(height, fontSize + 4);
+  doc.text(preparePdfText(valueText), x + 4, y + Math.max(0, (height - textH) / 2), {
+    width: width - 8,
+    height: textH,
+    align: "center",
+    wordSpacing: WORD_SPACING,
+    lineBreak: false,
+    ellipsis: true,
+  });
+  return { fontSize, usedHeight: textH };
+}
+
+/** Draw secondary/comparison meta under a KPI value without colliding with it. */
+export function drawKpiMeta(
+  doc: PDFKit.PDFDocument,
+  text: string,
+  x: number,
+  y: number,
+  width: number,
+  options: { fontSize?: number; color?: string; height?: number } = {}
+): number {
+  const fontSize = options.fontSize ?? 8.5;
+  const height = options.height ?? 12;
+  doc.font("Body").fontSize(fontSize).fillColor(options.color ?? COLORS.neutral);
+  doc.text(preparePdfText(text), x + 4, y, {
+    width: width - 8,
+    height,
+    align: "center",
+    wordSpacing: WORD_SPACING,
+    lineBreak: false,
+    ellipsis: true,
+  });
+  return y + height;
 }
 
 // ── Page banner (pages 2-4) ───────────────────────────────────────────────────
@@ -615,6 +700,11 @@ function kpiSpecialSubText(card: ExecutiveBriefKpiCard): string | null {
   return null;
 }
 
+/**
+ * Fixed-zone KPI card:
+ * 1) icon  2) title  3) primary value  4) optional subtitle  5) comparison/trend
+ * Never places value and subtitle on the same baseline.
+ */
 function drawIconKpiCard(
   doc: PDFKit.PDFDocument,
   card: ExecutiveBriefKpiCard,
@@ -624,47 +714,74 @@ function drawIconKpiCard(
   cardH: number
 ): void {
   const r = REPORT_DESIGN_TOKENS.card.radius;
-  const circR = 24;
+  const pad = 6;
+  const innerW = cardW - pad * 2;
   doc.roundedRect(x, y, cardW, cardH, r).fillAndStroke(COLORS.background, COLORS.border);
 
+  // 1. Icon zone (compact to free vertical room for value/subtitle)
+  const circR = 16;
   const circX = x + cardW / 2;
-  const circY = y + circR + 10;
+  const circY = y + circR + 6;
   doc.circle(circX, circY, circR).lineWidth(1.5).strokeColor(COLORS.gold).stroke();
   doc.lineWidth(1);
   const iconType = ICON_KEY_MAP[card.key] ?? "clipboard";
   drawIcon(doc, iconType, circX, circY, circR);
 
-  doc.font("Body").fontSize(10).fillColor(COLORS.neutral).text(
-    preparePdfText(card.label), x + 4, circY + circR + 6,
-    { width: cardW - 8, align: "center", wordSpacing: WORD_SPACING, height: 14, ellipsis: true }
+  // 2. Title zone
+  const titleY = circY + circR + 3;
+  const titleH = 16;
+  doc.font("Body").fontSize(8.5).fillColor(COLORS.neutral).text(
+    preparePdfText(card.label), x + pad, titleY,
+    { width: innerW, height: titleH, align: "center", wordSpacing: WORD_SPACING, ellipsis: true }
   );
+
+  // 3. Value zone + 4. Subtitle zone OR 5. Comparison zone (fixed bands from bottom)
+  const specialSub = kpiSpecialSubText(card);
+  const hasComparison = card.difference !== null && !specialSub;
+  const comparisonH = hasComparison ? (card.previousValue !== null ? 24 : 14) : 0;
+  const subtitleH = specialSub ? 16 : 0;
+  const bottomReserve = comparisonH + subtitleH + 6;
+  const valueTop = titleY + titleH + 1;
+  const valueBottom = y + cardH - bottomReserve;
+  const valueH = Math.max(18, valueBottom - valueTop);
 
   const valueText = formatKpiValue(card);
-  doc.font("Bold").fontSize(card.key === "complianceRate" ? 20 : 24).fillColor(COLORS.primary).text(
-    preparePdfText(valueText), x + 4, circY + circR + 24,
-    { width: cardW - 8, align: "center", wordSpacing: WORD_SPACING, height: 28, ellipsis: true }
-  );
+  const isUnavailable = card.value === null;
+  const longNumber = !isUnavailable
+    && card.format === "number"
+    && Math.abs(card.value ?? 0) >= 1000;
+  drawKpiValue(doc, valueText, x + pad, valueTop, innerW, valueH, {
+    isUnavailable,
+    maxFontSize: isUnavailable ? 12 : longNumber ? 16 : card.format === "percent" ? 18 : 20,
+    minFontSize: isUnavailable ? 9 : 10,
+  });
 
-  const specialSub = kpiSpecialSubText(card);
+  // Subtitle / comparison are mutually exclusive zones so they never share
+  // a baseline with the main value (compliance needs subtitle; other metrics need delta).
+  let metaY = valueBottom + 2;
   if (specialSub) {
-    doc.font("Body").fontSize(9).fillColor(COLORS.neutral).text(
-      preparePdfText(specialSub), x + 4, y + cardH - 26,
-      { width: cardW - 8, align: "center", lineBreak: false, ellipsis: true, wordSpacing: WORD_SPACING }
-    );
-  } else if (card.difference !== null) {
+    drawKpiMeta(doc, specialSub, x + pad, metaY, innerW, {
+      fontSize: 7,
+      height: subtitleH - 1,
+    });
+  } else if (hasComparison) {
     const dir = directionFromAssessment(card.assessment);
-    const deltaY = y + cardH - 26;
-    drawDirectionArrow(doc, dir, x + 4, deltaY - 2, 12);
-    doc.font("Body").fontSize(9).fillColor(directionColor(dir)).text(
-      preparePdfText(formatKpiDelta(card)), x + 18, deltaY,
-      { width: cardW - 22, align: "right", lineBreak: false, ellipsis: true, wordSpacing: WORD_SPACING }
+    const deltaText = formatKpiDelta(card);
+    // Arrow + delta on one measured row (only two elements)
+    const arrowSize = 10;
+    const deltaSize = fitTextToBox(doc, deltaText, innerW - arrowSize - 6, 8.5, 7, "Body");
+    const deltaW = measurePreparedArabicText(doc, deltaText, deltaSize, "Body");
+    const rowW = arrowSize + 4 + deltaW;
+    const rowStart = x + (cardW - rowW) / 2;
+    drawDirectionArrow(doc, dir, rowStart, metaY, arrowSize);
+    doc.font("Body").fontSize(deltaSize).fillColor(directionColor(dir)).text(
+      preparePdfText(deltaText), rowStart + arrowSize + 4, metaY,
+      { width: deltaW + 2, height: 11, align: "left", lineBreak: false, wordSpacing: WORD_SPACING }
     );
+    metaY += 11;
     if (card.previousValue !== null) {
-      doc.font("Body").fontSize(8.5).fillColor(COLORS.neutral).text(
-        preparePdfText(`السابق ${formatReportNumber(card.previousValue ?? 0)}`),
-        x + 4, deltaY + 14,
-        { width: cardW - 8, align: "center", lineBreak: false, ellipsis: true, wordSpacing: WORD_SPACING }
-      );
+      const prev = `السابق ${formatReportNumber(card.previousValue, { maximumFractionDigits: card.format === "number" ? 0 : 1 })}`;
+      drawKpiMeta(doc, prev, x + pad, metaY, innerW, { fontSize: 7.5, height: 11 });
     }
   }
   resetInk(doc);
@@ -688,7 +805,7 @@ async function renderPage2(ctx: V2Context): Promise<void> {
   const cols = 4;
   const gap = 10;
   const cardW = (contentWidth - gap * (cols - 1)) / cols;
-  const cardH = 122;
+  const cardH = 136;
   const cards = brief.briefKpis.slice(0, 8).map((card) => {
     if (card.key === "netChange") {
       return {
@@ -699,7 +816,15 @@ async function renderPage2(ctx: V2Context): Promise<void> {
         difference: null,
         changeRate: null,
         previousValue: null,
+        format: "number" as const,
       };
+    }
+    // Keep presentation labels explicit for compliance card
+    if (card.key === "complianceRate") {
+      return { ...card, label: "الالتزام ضمن المهلة" };
+    }
+    if (card.key === "averageResolutionDays") {
+      return { ...card, label: "متوسط الإغلاق" };
     }
     return card;
   });
@@ -716,7 +841,13 @@ async function renderPage2(ctx: V2Context): Promise<void> {
   y = drawSectionTitle(doc, "الاتجاه الزمني للشكاوى", margin, y, contentWidth);
 
   const flow = brief.monthlyStockFlow;
-  const hasFlow = flow.some((p) => p.inflow > 0 || p.closed > 0);
+  const hasFlow = flow.some(
+    (p) =>
+      p.receivedCount > 0
+      || p.closedDuringMonthCount > 0
+      || p.openAtMonthEndCount > 0
+      || p.lateAtMonthEndCount > 0
+  );
 
   const notesH = 120;
   const chartHeight = Math.min(
@@ -726,11 +857,30 @@ async function renderPage2(ctx: V2Context): Promise<void> {
 
   if (hasFlow) {
     try {
+      // Single Y-axis combo chart — system total is intentionally excluded.
       const monthlyChartSeries = [
-        { name: "واردة خلال الفترة", points: flow.map((p) => ({ x: p.monthLabel, y: p.inflow })) },
-        { name: "مغلقة خلال الفترة", points: flow.map((p) => ({ x: p.monthLabel, y: p.closed })) },
-        { name: "مفتوحة نهاية الفترة", points: flow.map((p) => ({ x: p.monthLabel, y: p.openAtEnd })), axis: "right" as const },
-        { name: "متأخرة نهاية الفترة", points: flow.map((p) => ({ x: p.monthLabel, y: p.lateAtEnd })), axis: "right" as const },
+        {
+          name: "واردة",
+          renderAs: "bar" as const,
+          points: flow.map((p) => ({ x: p.monthLabel, y: p.receivedCount })),
+        },
+        {
+          name: "مغلقة",
+          renderAs: "bar" as const,
+          points: flow.map((p) => ({ x: p.monthLabel, y: p.closedDuringMonthCount })),
+        },
+        {
+          name: "مفتوحة نهاية الشهر",
+          renderAs: "line" as const,
+          dash: "0",
+          points: flow.map((p) => ({ x: p.monthLabel, y: p.openAtMonthEndCount })),
+        },
+        {
+          name: "متأخرة نهاية الشهر",
+          renderAs: "line" as const,
+          dash: "6,4",
+          points: flow.map((p) => ({ x: p.monthLabel, y: p.lateAtMonthEndCount })),
+        },
       ];
       const png = await renderLineChartPng({
         id: "v2-monthly-flow",
@@ -747,8 +897,9 @@ async function renderPage2(ctx: V2Context): Promise<void> {
   }
   y += chartHeight + 8;
 
-  // Info methodology box
-  const infoText = "تعتمد شكاوى الفترة على تاريخ إنشاء الشكوى، بينما تمثل المفتوحة والمتأخرة نهاية الفترة مؤشرات الرصيد القائم حتى نهاية الفترة ولو أنشئت الشكوى قبل بداية الفترة.";
+  // Info methodology box — full available history, not limited to report period start
+  const infoText =
+    "يعرض الاتجاه الشهري كامل البيانات المتاحة حتى نهاية التقرير، بحد أقصى 13 شهرًا. تمثل الأعمدة الشكاوى الواردة والمغلقة خلال كل شهر، وتمثل الخطوط رصيد الشكاوى المفتوحة والمتأخرة في نهاية الشهر.";
   y = drawInfoBox(doc, infoText, margin, y, contentWidth) + 8;
 
   // Notes

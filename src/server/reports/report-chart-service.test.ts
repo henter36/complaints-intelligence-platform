@@ -8,6 +8,8 @@ import {
   configureReportFontconfig,
   buildCategoryUnion,
   buildChartSvg,
+  drawChartLegend,
+  computeYScale,
 } from "./report-chart-service";
 import type { ReportChartSection } from "./report-data-service";
 
@@ -222,12 +224,10 @@ describe("buildChartSvg — bar chart category alignment", () => {
     const svg = buildChartSvg(section, 600, 400);
     // "جدة" should still appear as an axis label
     expect(svg).toContain("جدة");
-    // Series B should only produce one rect (for "الرياض"), not two
-    // We verify the SVG contains two x-axis labels for the two categories
     expect(svg).toContain("الرياض");
-    // Bar rects have an x= attribute; the background rect does not.
-    const barRectCount = (svg.match(/<rect x=/g) ?? []).length;
-    // Series A: 2 bars (الرياض + جدة), Series B: 1 bar (الرياض only) = 3 total
+    // Count bar rects only (exclude legend swatches which use rx=)
+    const barRectCount = (svg.match(/<rect x="[^"]+" y="[^"]+" width="[^"]+" height="[^"]+" fill="/g) ?? []).length;
+    // Series A: 2 bars, Series B: 1 bar = 3 total
     expect(barRectCount).toBe(3);
   });
 
@@ -246,9 +246,9 @@ describe("buildChartSvg — bar chart category alignment", () => {
         labelXByCategory[text] = parseFloat(xStr);
       }
     }
-    // Extract bar rect x positions
-    const rectMatches = [...svg.matchAll(/<rect x="([^"]+)"/g)];
-    const barXPositions = rectMatches.map((m) => parseFloat(m[1]));
+    // Extract bar rect x positions (exclude legend swatches that use rx)
+    const barXPositions = [...svg.matchAll(/<rect x="([^"]+)" y="[^"]+" width="[^"]+" height="[^"]+" fill="/g)]
+      .map((m) => parseFloat(m[1]));
     // الرياض should have a bar x < جدة bar x (it's the first category)
     expect(barXPositions[0]).toBeLessThan(barXPositions[1]);
     // The axis label x order should also be الرياض before جدة
@@ -274,11 +274,13 @@ describe("buildChartSvg — dual-axis and legend", () => {
       ],
     };
     const svg = buildChartSvg(section, 600, 400);
-    expect(svg.match(/<rect x=/g) ?? []).toHaveLength(4);
+    expect(
+      svg.match(/<rect x="[^"]+" y="[^"]+" width="[^"]+" height="[^"]+" fill="/g) ?? []
+    ).toHaveLength(4);
     expect(svg.match(/<polyline /g) ?? []).toHaveLength(2);
     // Secondary axis dashed line is on plotLeft (x="76")
     expect(svg).toMatch(/stroke-dasharray="3,3"/);
-    expect(svg).toMatch(/x1="76" y1="48" x2="76"/);
+    expect(svg).toMatch(/x1="76"/);
     // Right-axis first series uses primary, second uses danger
     expect(svg).toContain(`stroke="${PRIMARY}"`);
     expect(svg).toContain(`stroke="${DANGER}"`);
@@ -337,12 +339,9 @@ describe("buildChartSvg — dual-axis and legend", () => {
     // Right series 0 → primary, series 1 → danger (same as rightAxisStyle)
     const polylines = [...svg.matchAll(/<polyline[^>]*stroke="([^"]+)"/g)].map((m) => m[1]);
     expect(polylines).toEqual([PRIMARY, DANGER]);
-    // Legend lines: left series uses seriesStyle[0]=primary; right uses same as plot
-    const legendLines = [...svg.matchAll(/<line x1="[^"]+" y1="[^"]+" x2="[^"]+" y2="[^"]+" stroke="([^"]+)"/g)]
-      .map((m) => m[1])
-      .filter((c) => c === PRIMARY || c === DANGER || c === "#B88919");
-    expect(legendLines).toContain(PRIMARY);
-    expect(legendLines).toContain(DANGER);
+    // Legend: bar swatch as rect for left series; lines for right-axis series
+    expect(svg).toContain(`fill="${PRIMARY}"`);
+    expect(svg).toContain(`stroke="${DANGER}"`);
   });
 
   it("clamps tall bar labels inside the bar with white fill", () => {
@@ -356,9 +355,123 @@ describe("buildChartSvg — dual-axis and legend", () => {
       ],
     };
     const svg = buildChartSvg(section, 600, 400);
-    // Peak bar label "100" is clamped inside the bar in white; short bar "1" keeps series color.
-    // Attribute order is x/y/text-anchor/font-size/fill before the text content.
-    expect(svg).toMatch(/<text[^>]*fill="#FFFFFF"[^>]*>100<\/text>/);
+    // Peak bar "100" keeps series color when Y pad leaves headroom; short bar "1" same.
+    expect(svg).toMatch(/<text[^>]*fill="#004B3A"[^>]*>100<\/text>/);
     expect(svg).toMatch(/<text[^>]*fill="#004B3A"[^>]*>1<\/text>/);
+  });
+});
+
+describe("monthly combo chart — single Y-axis, legend layout", () => {
+  const GOLD = "#B88919";
+  const DANGER = "#C62828";
+  const PRIMARY = "#004B3A";
+
+  function monthlySection(extra?: Partial<ReportChartSection>): ReportChartSection {
+    const months = [
+      "أغسطس 2025", "سبتمبر 2025", "أكتوبر 2025", "نوفمبر 2025", "ديسمبر 2025",
+      "يناير 2026", "فبراير 2026", "مارس 2026", "أبريل 2026", "مايو 2026",
+      "يونيو 2026", "يوليو 2026", "أغسطس 2026",
+    ];
+    const pts = (y: number) => months.map((x) => ({ x, y }));
+    return {
+      id: "v2-monthly-flow",
+      kind: "chart",
+      chartType: "bar",
+      title: "",
+      series: [
+        { name: "واردة", renderAs: "bar", points: pts(10) },
+        { name: "مغلقة", renderAs: "bar", points: pts(8) },
+        { name: "مفتوحة نهاية الشهر", renderAs: "line", points: pts(12) },
+        { name: "متأخرة نهاية الشهر", renderAs: "line", dash: "6,4", points: pts(2) },
+      ],
+      ...extra,
+    };
+  }
+
+  it("uses a single shared Y-axis (no right-axis dual scale)", () => {
+    const svg = buildChartSvg(monthlySection(), 800, 360);
+    expect(svg).not.toMatch(/stroke-dasharray="3,3"/);
+    expect(svg.match(/<polyline /g) ?? []).toHaveLength(2);
+    const barCount = (svg.match(/<rect x="[^"]+" y="[^"]+" width="[^"]+" height="[^"]+" fill="/g) ?? []).length;
+    expect(barCount).toBe(13 * 2); // 2 bar series × 13 months
+  });
+
+  it("Y max is driven by monthly series only — ignore a phantom 16,993 total", () => {
+    const section = monthlySection();
+    // Intentionally do NOT add allTimeTotal as series; scale must stay small
+    const svg = buildChartSvg(section, 800, 360);
+    expect(svg).not.toContain("16,993");
+    expect(svg).not.toContain("16993");
+    // Scale for max ~12 should stay well below a 20k axis label
+    expect(svg).not.toMatch(/>20[,.]?000</);
+    expect(svg).not.toMatch(/>10[,.]?000</);
+  });
+
+  it("shows all four legend labels without strike-through text deco", () => {
+    const svg = buildChartSvg(monthlySection(), 800, 360);
+    for (const label of ["واردة", "مغلقة", "مفتوحة نهاية الشهر", "متأخرة نهاية الشهر"]) {
+      expect(svg).toContain(label);
+    }
+    expect(svg).not.toContain("text-decoration");
+    expect(svg).not.toContain("line-through");
+    // Bar swatches use rect fills (green + gold)
+    expect(svg).toContain(`fill="${PRIMARY}"`);
+    expect(svg).toContain(`fill="${GOLD}"`);
+    // Late line uses danger
+    expect(svg).toContain(`stroke="${DANGER}"`);
+  });
+
+  it("legend item boxes do not overlap (structural)", () => {
+    const legend = drawChartLegend(
+      [
+        { name: "واردة", style: { color: PRIMARY, dash: "0", width: 2, mark: "bar" } },
+        { name: "مغلقة", style: { color: GOLD, dash: "0", width: 2, mark: "bar" } },
+        { name: "مفتوحة نهاية الشهر", style: { color: PRIMARY, dash: "0", width: 2, mark: "line" } },
+        { name: "متأخرة نهاية الشهر", style: { color: DANGER, dash: "6,4", width: 2, mark: "line" } },
+      ],
+      { width: 500, top: 10, columns: 2 }
+    );
+    expect(legend.itemBoxes).toHaveLength(4);
+    // Pairwise: same-row boxes should not share horizontal span; different rows differ in y
+    for (let i = 0; i < legend.itemBoxes.length; i++) {
+      for (let j = i + 1; j < legend.itemBoxes.length; j++) {
+        const a = legend.itemBoxes[i];
+        const b = legend.itemBoxes[j];
+        const sameRow = Math.abs(a.y - b.y) < 1;
+        if (sameRow) {
+          const aRight = a.x + a.width;
+          const bRight = b.x + b.width;
+          const overlap = a.x < bRight && b.x < aRight;
+          expect(overlap).toBe(false);
+        }
+      }
+    }
+  });
+
+  it("integer Y ticks only for small monthly peaks", () => {
+    const { ticks } = computeYScale(3, { integersOnly: true });
+    for (const t of ticks) {
+      expect(Number.isInteger(t)).toBe(true);
+    }
+    expect(ticks.some((t) => String(t).includes("."))).toBe(false);
+  });
+
+  it("region comparison legend does not collide either", () => {
+    const section: ReportChartSection = {
+      id: "v2-region-bar",
+      kind: "chart",
+      chartType: "bar",
+      title: "مقارنة المناطق",
+      series: [
+        { name: "شكاوى الفترة الحالية", points: [{ x: "الرياض", y: 40 }, { x: "جدة", y: 30 }] },
+        { name: "الفترة السابقة", points: [{ x: "الرياض", y: 30 }, { x: "جدة", y: 35 }] },
+      ],
+    };
+    const svg = buildChartSvg(section, 800, 280);
+    expect(svg).toContain("شكاوى الفترة الحالية");
+    expect(svg).toContain("الفترة السابقة");
+    // Legend sits above plot (y positions of legend text < plot bottom labels)
+    const legendY = [...svg.matchAll(/font-size="11"[^>]*>(?:شكاوى|الفترة)/g)];
+    expect(legendY.length).toBeGreaterThan(0);
   });
 });

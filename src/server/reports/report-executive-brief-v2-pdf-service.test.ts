@@ -1,10 +1,17 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs";
+import path from "node:path";
 import PDFDocument from "pdfkit";
 import type { ReportType } from "@prisma/client";
 import type { ExecutiveBriefV2Data, ReportData } from "./report-data-service";
 import { isExecutiveBriefV2Data } from "./report-data-service";
-import { renderExecutiveBriefV2Pdf, formatTableValue } from "./report-executive-brief-v2-pdf-service";
+import {
+  renderExecutiveBriefV2Pdf,
+  formatTableValue,
+  fitTextToBox,
+  measurePreparedArabicText,
+} from "./report-executive-brief-v2-pdf-service";
 import { REPORT_DESIGN_TOKENS } from "@/lib/reports/design-tokens";
 
 const DANGER = REPORT_DESIGN_TOKENS.colors.danger;
@@ -47,8 +54,8 @@ function makeV2Brief(overrides: Partial<ExecutiveBriefV2Data> = {}): ExecutiveBr
     notes: ["ملاحظة جودة بيانات تجريبية."],
     allTimeTotal: 18560,
     monthlyStockFlow: [
-      { monthLabel: "نوفمبر 2025", inflow: 100, closed: 90, openAtEnd: 40, lateAtEnd: 5 },
-      { monthLabel: "ديسمبر 2025", inflow: 120, closed: 110, openAtEnd: 45, lateAtEnd: 6 },
+      { monthKey: "2025-11", monthLabel: "نوفمبر 2025", receivedCount: 100, closedDuringMonthCount: 90, openAtMonthEndCount: 40, lateAtMonthEndCount: 5 },
+      { monthKey: "2025-12", monthLabel: "ديسمبر 2025", receivedCount: 120, closedDuringMonthCount: 110, openAtMonthEndCount: 45, lateAtMonthEndCount: 6 },
     ],
     classificationOpenLate: {
       c1: { openAtEnd: 12, lateAtEnd: 3 },
@@ -326,5 +333,119 @@ describe("formatTableValue", () => {
     expect(formatTableValue({ nested: true })).toBe("—");
     expect(formatTableValue([1, 2])).toBe("—");
     expect(formatTableValue({ nested: true })).not.toContain("object Object");
+  });
+});
+
+describe("V2 monthly chart contract + KPI packing", () => {
+  it("does not put allTimeTotal into monthly chart series", async () => {
+    const pngSpy = vi.spyOn(await import("./report-chart-service"), "renderLineChartPng");
+    pngSpy.mockResolvedValue(Buffer.from(
+      // minimal 1x1 PNG
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      "base64"
+    ));
+    try {
+      await renderExecutiveBriefV2Pdf(
+        makeV2Report({
+          briefData: makeV2Brief({
+            allTimeTotal: 16993,
+            monthlyStockFlow: Array.from({ length: 13 }, (_, i) => {
+              const d = new Date(Date.UTC(2025, 7 + i, 1));
+              const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+              return {
+                monthKey: key,
+                monthLabel: `شهر ${i + 1}`,
+                receivedCount: 5 + (i % 3),
+                closedDuringMonthCount: 4,
+                openAtMonthEndCount: 3,
+                lateAtMonthEndCount: 1,
+              };
+            }),
+          }),
+        })
+      );
+      const call = pngSpy.mock.calls.find((c) => (c[0] as { id?: string }).id === "v2-monthly-flow");
+      expect(call).toBeTruthy();
+      const section = call![0] as {
+        series: Array<{ name: string; points: Array<{ y: number }>; axis?: string }>;
+      };
+      expect(section.series).toHaveLength(4);
+      expect(section.series.every((s) => s.axis !== "right")).toBe(true);
+      const allY = section.series.flatMap((s) => s.points.map((p) => p.y));
+      expect(allY.every((y) => y < 100)).toBe(true);
+      expect(allY).not.toContain(16993);
+      const names = section.series.map((s) => s.name);
+      expect(names).toEqual([
+        "واردة",
+        "مغلقة",
+        "مفتوحة نهاية الشهر",
+        "متأخرة نهاية الشهر",
+      ]);
+    } finally {
+      pngSpy.mockRestore();
+    }
+  });
+
+  it("fits stress KPI values without throwing (0%, unavailable, large numbers)", async () => {
+    const result = await renderExecutiveBriefV2Pdf(
+      makeV2Report({
+        briefData: makeV2Brief({
+          allTimeTotal: 999999,
+          briefKpis: [
+            { key: "total", label: "إجمالي الشكاوى", value: 0, previousValue: 0, difference: 0, changeRate: 0, format: "number", assessment: "neutral" },
+            { key: "open", label: "المفتوحة", value: 2, previousValue: 1, difference: 1, changeRate: 100, format: "number", assessment: "negative" },
+            { key: "closed", label: "المغلقة", value: 100, previousValue: 50, difference: 50, changeRate: 100, format: "number", assessment: "positive" },
+            { key: "currentlyLate", label: "المتأخرة", value: 0, previousValue: 10, difference: -10, changeRate: -100, format: "number", assessment: "positive" },
+            { key: "closedLate", label: "المغلقة بعد المهلة", value: 2, previousValue: 3, difference: -1, changeRate: -33.3, format: "number", assessment: "positive" },
+            { key: "complianceRate", label: "الالتزام ضمن المهلة", value: 0, previousValue: 50, difference: -50, changeRate: -100, format: "percent", assessment: "negative" },
+            { key: "averageResolutionDays", label: "متوسط الإغلاق", value: null, previousValue: null, difference: null, changeRate: null, format: "days", assessment: "neutral" },
+            { key: "netChange", label: "صافي التغير", value: 20, previousValue: null, difference: null, changeRate: null, format: "number", assessment: "neutral" },
+          ],
+        }),
+      })
+    );
+    expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
+    expect(countPageObjects(result.buffer)).toBe(4);
+  });
+
+  it("does not emit months after report.to in monthly labels on page 2 text", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(
+        makeV2Report({
+          period: { from: "2026-08-01", to: "2026-08-04" },
+          briefData: makeV2Brief({
+            monthlyStockFlow: [
+              { monthKey: "2026-07", monthLabel: "يوليو 2026", receivedCount: 3, closedDuringMonthCount: 1, openAtMonthEndCount: 2, lateAtMonthEndCount: 0 },
+              { monthKey: "2026-08", monthLabel: "أغسطس 2026", receivedCount: 5, closedDuringMonthCount: 2, openAtMonthEndCount: 3, lateAtMonthEndCount: 1 },
+            ],
+          }),
+        })
+      );
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      // Future months must not appear as explicit labels in text layer
+      expect(joined).not.toContain("يوليو 2027");
+      expect(joined).not.toContain("أغسطس 2027");
+      // Caption describes full history
+      expect(joined).toContain("13");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("fitTextToBox shrinks long numbers and unavailable label", () => {
+    const doc = new PDFDocument({ size: [200, 200], margin: 0 });
+    const assets = path.join(process.cwd(), "src/server/reports/assets/fonts");
+    doc.registerFont("Body", fs.readFileSync(path.join(assets, "Amiri-Regular.ttf")));
+    doc.registerFont("Bold", fs.readFileSync(path.join(assets, "Amiri-Bold.ttf")));
+    const narrow = 48;
+    const size16k = fitTextToBox(doc, "16,993", narrow, 22, 10, "Bold");
+    const size999 = fitTextToBox(doc, "999,999", narrow, 22, 10, "Bold");
+    const sizeNA = fitTextToBox(doc, "غير متاح", narrow, 14, 9, "Bold");
+    expect(size16k).toBeLessThanOrEqual(22);
+    expect(size999).toBeLessThanOrEqual(size16k);
+    expect(measurePreparedArabicText(doc, "16,993", size16k, "Bold")).toBeLessThanOrEqual(narrow + 1);
+    expect(measurePreparedArabicText(doc, "غير متاح", sizeNA, "Bold")).toBeLessThanOrEqual(narrow + 2);
+    doc.end();
   });
 });

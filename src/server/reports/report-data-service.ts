@@ -93,8 +93,15 @@ export type ChartSeries = {
   name: string;
   points: { x: string; y: number }[];
   isOther?: boolean;
-  /** When "right", render against a secondary Y-axis (dual-axis bar+line charts). */
+  /** When "right", render against a secondary Y-axis (legacy dual-axis charts only). */
   axis?: "left" | "right";
+  /**
+   * Explicit mark type within a chart. Defaults to the section chartType.
+   * Use bar+line combo on a single shared Y-axis (e.g. monthly stock/flow).
+   */
+  renderAs?: "bar" | "line";
+  /** Optional stroke dash pattern for line marks (e.g. "6,4"). */
+  dash?: string;
 };
 
 type ReportSectionPreviewMetadata = {

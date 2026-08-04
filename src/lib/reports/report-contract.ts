@@ -203,19 +203,25 @@ export type ComparativeTimelineData = {
 };
 
 // ---------------------------------------------------------------------------
-// V2 monthly stock-and-flow timeline
+// V2 monthly complaint trend (backward-looking history window)
 // ---------------------------------------------------------------------------
 
-/** One calendar-month bucket for the V2 executive brief timeline chart.
- *  Inflow and closed are flow metrics (events during the month).
- *  openAtEnd and lateAtEnd are stock metrics (snapshot at end of month). */
-export type MonthlyStockFlowPoint = {
+/**
+ * One calendar-month point on the V2 executive brief timeline chart.
+ * received/closed are flow metrics (events during the month).
+ * open/late at month-end are stock metrics (snapshot at month boundary).
+ */
+export type MonthlyComplaintTrendPoint = {
+  monthKey: string;
   monthLabel: string;
-  inflow: number;
-  closed: number;
-  openAtEnd: number;
-  lateAtEnd: number;
+  receivedCount: number;
+  closedDuringMonthCount: number;
+  openAtMonthEndCount: number;
+  lateAtMonthEndCount: number;
 };
+
+/** @deprecated Prefer MonthlyComplaintTrendPoint; kept as a compat alias. */
+export type MonthlyStockFlowPoint = MonthlyComplaintTrendPoint;
 
 // ---------------------------------------------------------------------------
 // Concentration analysis

@@ -32,7 +32,7 @@ import type {
   ComparativeTimelineData,
   ComparativeTimelinePoint,
   ConcentrationBand,
-  MonthlyStockFlowPoint,
+  MonthlyComplaintTrendPoint,
   NetBacklogFlow,
   PerfVolumeRow,
   ContinuityRow,
@@ -391,22 +391,7 @@ function buildTopClassifications(
 }
 
 // ---------------------------------------------------------------------------
-// Monthly timeline — 13-month fixed window
-//
-// Contract:
-//   monthKey  = "YYYY-MM"          (canonical, zero-padded)
-//   monthLabel = "يناير 2026"       (Arabic display name)
-//   currentCount  = complaints with effective date in that calendar month
-//   previousCount = complaints in the CORRESPONDING month of the previous period
-//
-// Both current and previous series share the SAME 13 labels so the bar chart
-// renders them as side-by-side columns under each month name.
-//
-// Why 13 months? A 12-month period spans from the first day of month M through
-// the last day of month M+11 (inclusive). Month M may be partially inside the
-// period (e.g. Aug 3 → Aug 31) and month M+12 may appear if the period ends
-// on or after the 1st of that month. We always show exactly 13 buckets so the
-// full period is covered without gaps.
+// Monthly timeline buckets (UTC calendar months)
 // ---------------------------------------------------------------------------
 
 export const ARABIC_MONTH_NAMES: readonly string[] = [
@@ -416,7 +401,7 @@ export const ARABIC_MONTH_NAMES: readonly string[] = [
 
 export const MONTHLY_WINDOW_SIZE = 13;
 
-/** One bucket in the 13-month window. */
+/** One bucket in a monthly window. */
 export type MonthlyTrendPoint = {
   monthKey: string;
   monthLabel: string;
@@ -424,26 +409,84 @@ export type MonthlyTrendPoint = {
   previousCount: number | null;
 };
 
-type MonthBucket = { key: string; label: string; from: Date; toExclusive: Date };
+export type MonthBucket = { key: string; label: string; from: Date; toExclusive: Date };
 
-/** Returns 13 consecutive calendar months starting from the month that contains
- *  `period.from`. Month indices follow UTC calendar months. */
+function utcMonthBucket(year: number, monthIndex: number): MonthBucket {
+  const key = `${year}-${String(monthIndex + 1).padStart(2, "0")}`;
+  return {
+    key,
+    label: `${ARABIC_MONTH_NAMES[monthIndex]} ${year}`,
+    from: new Date(Date.UTC(year, monthIndex, 1)),
+    toExclusive: new Date(Date.UTC(year, monthIndex + 1, 1)),
+  };
+}
+
+function startOfUtcMonth(date: Date): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+}
+
+function addUtcMonths(date: Date, delta: number): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + delta, 1));
+}
+
+/**
+ * Legacy forward-looking window used by the comparative current/previous timeline.
+ * Starts at the month of `period.from` and walks exactly 13 months forward.
+ * Prefer {@link computeMonthlyHistoryWindow} for V2 historical trend charts.
+ */
 export function computeThirteenMonthWindow(period: PeriodRange): MonthBucket[] {
   const startYear = period.from.getUTCFullYear();
-  const startMonthIdx = period.from.getUTCMonth(); // 0-based
+  const startMonthIdx = period.from.getUTCMonth();
   const buckets: MonthBucket[] = [];
   for (let i = 0; i < MONTHLY_WINDOW_SIZE; i++) {
     const totalMonths = startMonthIdx + i;
     const year = startYear + Math.floor(totalMonths / 12);
     const month = totalMonths % 12;
-    const key = `${year}-${String(month + 1).padStart(2, "0")}`;
-    const label = `${ARABIC_MONTH_NAMES[month]} ${year}`;
-    buckets.push({
-      key,
-      label,
-      from: new Date(Date.UTC(year, month, 1)),
-      toExclusive: new Date(Date.UTC(year, month + 1, 1)),
-    });
+    buckets.push(utcMonthBucket(year, month));
+  }
+  return buckets;
+}
+
+/**
+ * Backward-looking monthly history window for the V2 executive brief chart.
+ *
+ * Rules (UTC):
+ * 1. reportEndMonth = first day of the month containing reportEnd
+ *    (callers pass currentPeriod.toExclusive − 1 ms, or any inclusive end instant).
+ * 2. earliestAllowedMonth = reportEndMonth − (maxMonths − 1) months (default 12 → 13 months max).
+ * 3. actualStartMonth = later of (earliest available data month, earliestAllowedMonth).
+ * 4. Months inclusive from actualStartMonth through reportEndMonth.
+ * 5. Count is always between 1 and maxMonths (default 13).
+ * 6. Never creates a month after reportEndMonth.
+ */
+export function computeMonthlyHistoryWindow(options: {
+  reportEnd: Date;
+  earliestAvailableDate: Date | null;
+  maxMonths?: number;
+}): MonthBucket[] {
+  const maxMonths = options.maxMonths ?? MONTHLY_WINDOW_SIZE;
+  if (maxMonths < 1) return [];
+
+  const reportEndMonth = startOfUtcMonth(options.reportEnd);
+  const earliestAllowedMonth = addUtcMonths(reportEndMonth, -(maxMonths - 1));
+
+  let actualStartMonth = earliestAllowedMonth;
+  if (options.earliestAvailableDate) {
+    const dataMonth = startOfUtcMonth(options.earliestAvailableDate);
+    if (dataMonth.getTime() > actualStartMonth.getTime()) {
+      actualStartMonth = dataMonth;
+    }
+  }
+  // Never start after the report end month (empty data set collapses to report month).
+  if (actualStartMonth.getTime() > reportEndMonth.getTime()) {
+    actualStartMonth = reportEndMonth;
+  }
+
+  const buckets: MonthBucket[] = [];
+  let cursor = actualStartMonth;
+  while (cursor.getTime() <= reportEndMonth.getTime() && buckets.length < maxMonths) {
+    buckets.push(utcMonthBucket(cursor.getUTCFullYear(), cursor.getUTCMonth()));
+    cursor = addUtcMonths(cursor, 1);
   }
   return buckets;
 }
@@ -763,83 +806,194 @@ export async function buildFullAnalyticalData(
 }
 
 // ---------------------------------------------------------------------------
-// V2: monthly stock-and-flow timeline
+// V2: monthly complaint trend (backward-looking, single-axis series)
 // ---------------------------------------------------------------------------
 
-type StockFlowComplaint = {
+type TrendComplaint = {
   complaintDate: Date | null;
   receivedAt: Date;
   closedAt: Date | null;
 };
 
-/** Count inflow (created) and closed counts within [startMs, endMs). */
-function countInflowAndClosed(
-  complaints: readonly StockFlowComplaint[],
-  startMs: number,
-  endMs: number
-): { inflow: number; closed: number } {
-  let inflow = 0;
-  let closed = 0;
-  for (const c of complaints) {
-    const effectiveMs = (c.complaintDate ?? c.receivedAt).getTime();
-    if (effectiveMs >= startMs && effectiveMs < endMs) inflow++;
-    if (c.closedAt) {
-      const closedMs = c.closedAt.getTime();
-      if (closedMs >= startMs && closedMs < endMs) closed++;
-    }
-  }
-  return { inflow, closed };
+function isValidTrendDate(value: Date | null | undefined): value is Date {
+  return value instanceof Date && Number.isFinite(value.getTime());
+}
+
+function resolveTrendCreatedAt(complaint: Pick<TrendComplaint, "complaintDate" | "receivedAt">): Date | null {
+  if (isValidTrendDate(complaint.complaintDate)) return complaint.complaintDate;
+  return isValidTrendDate(complaint.receivedAt) ? complaint.receivedAt : null;
 }
 
 /**
- * Open and late stock at the exclusive period end (`endMs`).
- * A complaint is open at end when it was created before end and not closed before end.
- * Late when additionally the seven-day SLA deadline (createdAt + 7 days) is before endMs.
+ * Trusted closure timestamp for month assignment.
+ * Status alone is never enough — closedAt must be present and not before creation.
  */
-function countOpenAndLateAtEnd(
-  complaints: readonly StockFlowComplaint[],
-  endMs: number
-): { openAtEnd: number; lateAtEnd: number } {
-  let openAtEnd = 0;
-  let lateAtEnd = 0;
-  for (const c of complaints) {
-    const effectiveMs = (c.complaintDate ?? c.receivedAt).getTime();
-    if (effectiveMs >= endMs) continue;
-    const closedBeforeEnd = c.closedAt && c.closedAt.getTime() < endMs;
-    if (closedBeforeEnd) continue;
-    openAtEnd++;
-    const slaDeadlineMs = effectiveMs + COMPLAINT_SLA_DURATION_MS;
-    if (slaDeadlineMs < endMs) lateAtEnd++;
-  }
-  return { openAtEnd, lateAtEnd };
+export function resolveTrustedClosedAt(
+  complaint: Pick<TrendComplaint, "complaintDate" | "receivedAt" | "closedAt">
+): Date | null {
+  const createdAt = resolveTrendCreatedAt(complaint);
+  if (!createdAt || !isValidTrendDate(complaint.closedAt)) return null;
+  if (complaint.closedAt.getTime() < createdAt.getTime()) return null;
+  return complaint.closedAt;
+}
+
+function nonDateComplaintWhere(filters: ReportFilters, now: Date): Prisma.ComplaintWhereInput {
+  const params = buildComplaintQueryParams(filters);
+  params.delete("from");
+  params.delete("to");
+  const query = parseComplaintQuery(params);
+  return {
+    ...buildComplaintWhere(query, now),
+    isDeleted: false,
+  };
+}
+
+/**
+ * Aggregates four monthly series for the V2 chart over a pre-built history window.
+ * Exportable pure function for unit tests.
+ */
+export function aggregateMonthlyComplaintTrend(
+  complaints: readonly TrendComplaint[],
+  buckets: readonly MonthBucket[]
+): MonthlyComplaintTrendPoint[] {
+  return buckets.map((bucket) => {
+    const startMs = bucket.from.getTime();
+    const endMs = bucket.toExclusive.getTime(); // exclusive month end (= next month 00:00 UTC)
+    let receivedCount = 0;
+    let closedDuringMonthCount = 0;
+    let openAtMonthEndCount = 0;
+    let lateAtMonthEndCount = 0;
+
+    for (const c of complaints) {
+      const createdAt = resolveTrendCreatedAt(c);
+      if (!createdAt) continue;
+      const createdMs = createdAt.getTime();
+      const trustedClosedAt = resolveTrustedClosedAt(c);
+
+      // receivedCount: actual creation date inside the month
+      if (createdMs >= startMs && createdMs < endMs) {
+        receivedCount++;
+      }
+
+      // closedDuringMonthCount: trusted closedAt inside the month
+      if (trustedClosedAt) {
+        const closedMs = trustedClosedAt.getTime();
+        if (closedMs >= startMs && closedMs < endMs) {
+          closedDuringMonthCount++;
+        }
+      }
+
+      // openAtMonthEnd: created on or before month end, not closed at or before month end
+      if (createdMs >= endMs) continue;
+      const closedByMonthEnd = trustedClosedAt !== null && trustedClosedAt.getTime() < endMs;
+      if (closedByMonthEnd) continue;
+
+      openAtMonthEndCount++;
+      // late when monthEnd > createdAt + 7 days (exact 7-day boundary is not late)
+      const deadlineMs = createdMs + COMPLAINT_SLA_DURATION_MS;
+      if (endMs > deadlineMs) {
+        lateAtMonthEndCount++;
+      }
+    }
+
+    return {
+      monthKey: bucket.key,
+      monthLabel: bucket.label,
+      receivedCount,
+      closedDuringMonthCount,
+      openAtMonthEndCount,
+      lateAtMonthEndCount,
+    };
+  });
+}
+
+async function fetchEarliestAvailableComplaintDate(
+  filters: ReportFilters,
+  now: Date,
+  reportToExclusive: Date
+): Promise<Date | null> {
+  const baseWhere = nonDateComplaintWhere(filters, now);
+  // Bound lookback for performance: never consider complaints created after report end.
+  const where: Prisma.ComplaintWhereInput = {
+    ...baseWhere,
+    OR: [
+      { complaintDate: { lt: reportToExclusive } },
+      { complaintDate: null, receivedAt: { lt: reportToExclusive } },
+    ],
+  };
+
+  // Two ordered probes cover COALESCE(complaintDate, receivedAt) without loading all rows.
+  const [byComplaintDate, byReceivedAt] = await Promise.all([
+    db.complaint.findFirst({
+      where: { ...where, complaintDate: { not: null, lt: reportToExclusive } },
+      orderBy: { complaintDate: "asc" },
+      select: { complaintDate: true, receivedAt: true },
+    }),
+    db.complaint.findFirst({
+      where: { ...where, complaintDate: null, receivedAt: { lt: reportToExclusive } },
+      orderBy: { receivedAt: "asc" },
+      select: { complaintDate: true, receivedAt: true },
+    }),
+  ]);
+
+  const candidates = [byComplaintDate, byReceivedAt]
+    .filter((row): row is NonNullable<typeof row> => row !== null)
+    .map((row) => resolveTrendCreatedAt(row))
+    .filter((d): d is Date => d !== null);
+
+  if (candidates.length === 0) return null;
+  return candidates.reduce((min, d) => (d.getTime() < min.getTime() ? d : min));
 }
 
 async function buildMonthlyStockFlow(
   filters: ReportFilters,
   comparison: ComparisonResult,
   now: Date
-): Promise<MonthlyStockFlowPoint[]> {
-  const params = buildComplaintQueryParams(filters);
-  params.delete("from");
-  params.delete("to");
-  const query = parseComplaintQuery(params);
-  const baseWhere = buildComplaintWhere(query, now);
+): Promise<MonthlyComplaintTrendPoint[]> {
+  const reportToExclusive = comparison.currentPeriod.toExclusive;
+  // Inclusive report end instant used to identify reportEndMonth.
+  const reportEnd = new Date(reportToExclusive.getTime() - 1);
 
-  const buckets = computeThirteenMonthWindow(comparison.currentPeriod);
+  const earliestAvailableDate = await fetchEarliestAvailableComplaintDate(
+    filters,
+    now,
+    reportToExclusive
+  );
 
-  // One query covers all needed dates; JS bucketing avoids N separate round-trips.
+  const buckets = computeMonthlyHistoryWindow({
+    reportEnd,
+    earliestAvailableDate,
+    maxMonths: MONTHLY_WINDOW_SIZE,
+  });
+  if (buckets.length === 0) return [];
+
+  // toExclusive of last month = first day of the month after report end month
+  const windowToExclusive = buckets[buckets.length - 1].toExclusive;
+
+  const baseWhere = nonDateComplaintWhere(filters, now);
+
+  // Trend is NOT limited by filters.from: inject the history window manually.
+  // Include every complaint created before windowToExclusive so month-end stock
+  // reconstructs correctly even for issues opened before the first chart month.
   const complaints = await db.complaint.findMany({
-    where: { ...baseWhere, isDeleted: false },
+    where: {
+      ...baseWhere,
+      OR: [
+        { complaintDate: { lt: windowToExclusive } },
+        { complaintDate: null, receivedAt: { lt: windowToExclusive } },
+      ],
+    },
     select: { complaintDate: true, receivedAt: true, closedAt: true },
   });
 
-  return buckets.map((bucket) => {
-    const startMs = bucket.from.getTime();
-    const endMs = bucket.toExclusive.getTime();
-    const { inflow, closed } = countInflowAndClosed(complaints, startMs, endMs);
-    const { openAtEnd, lateAtEnd } = countOpenAndLateAtEnd(complaints, endMs);
-    return { monthLabel: bucket.label, inflow, closed, openAtEnd, lateAtEnd };
+  // Defensive: never count anything with creation after the report window end,
+  // even if the DB bound was widened unexpectedly.
+  const bounded = complaints.filter((c) => {
+    const created = resolveTrendCreatedAt(c);
+    return created !== null && created.getTime() < windowToExclusive.getTime();
   });
+
+  return aggregateMonthlyComplaintTrend(bounded, buckets);
 }
 
 // ---------------------------------------------------------------------------
