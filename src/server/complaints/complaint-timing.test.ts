@@ -92,6 +92,19 @@ describe("buildComplaintSlaTiming — fixed seven-day SLA", () => {
     expect(result.resolutionDurationDays).toBe(0.5);
   });
 
+  it("ignores a stale closedAt value while the complaint remains open", () => {
+    const result = buildComplaintSlaTiming(
+      complaint({
+        status: ComplaintStatus.OPEN,
+        closedAt: new Date(createdAt.getTime() + DAY_MS),
+      }),
+      new Date(createdAt.getTime() + 2 * DAY_MS)
+    );
+
+    expect(result.state).toBe("OPEN_WITHIN_SLA");
+    expect(result.resolutionDurationDays).toBeNull();
+  });
+
   it("does not trust a closure date before the complaint creation date", () => {
     const result = buildComplaintSlaTiming(
       complaint({
