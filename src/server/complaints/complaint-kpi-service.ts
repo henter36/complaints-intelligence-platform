@@ -1,7 +1,11 @@
 import { ComplaintPriority, ComplaintStatus, type Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { roundToTenth } from "@/lib/complaint-metrics";
-import { buildComplaintTiming } from "./complaint-timing";
+import {
+  buildComplaintSlaMetrics,
+  type ComplaintSlaMetrics,
+} from "./complaint-sla-metrics";
+import { buildComplaintSlaTiming } from "./complaint-sla-timing";
 import { normalizeRegionName } from "@/lib/reports/region-normalization";
 import { previousInclusivePeriod } from "@/lib/reports/period-range";
 import type { ComparisonMode } from "@/lib/reports/report-contract";
@@ -76,16 +80,25 @@ export type ComplaintKpiSummary = {
   cancelledComplaints: KpiValue;
   currentlyLateComplaints: KpiValue;
   closedLateComplaints: KpiValue;
-  closedWithinDueDate: KpiValue;
-  withoutDueDate: KpiValue;
+  // Canonical SLA KPI fields
+  slaComplianceRate: KpiValue;
+  closedWithinSlaCount: KpiValue;
+  closedWithoutTrustedDateCount: KpiValue;
   unclassifiedComplaints: KpiValue;
   highPriorityOpenComplaints: KpiValue;
   averageResolutionDays: KpiValue;
   medianResolutionDays: KpiValue;
   averageOpenAgeDays: KpiValue;
-  dueDateComplianceRate: KpiValue;
   closureRate: KpiValue;
   reopenCount: KpiValue;
+  // Backward-compatibility aliases — mirrors of the canonical SLA fields above.
+  // Kept at the output boundary only; not used in internal calculations.
+  /** @deprecated use slaComplianceRate */
+  dueDateComplianceRate: KpiValue;
+  /** @deprecated use closedWithinSlaCount */
+  closedWithinDueDate: KpiValue;
+  /** @deprecated use closedWithoutTrustedDateCount */
+  withoutDueDate: KpiValue;
 };
 
 export type ComplaintGroupMetrics = {
@@ -100,6 +113,9 @@ export type ComplaintGroupMetrics = {
   withinDueDate: number;
   complianceRate: number | null;
   averageResolutionDays: number;
+  averageResolutionEligibleCount: number;
+  slaEligibleCount: number;
+  closedWithoutTrustedDateCount: number;
   highPriorityOpen: number;
   unclassified: number;
 };
@@ -148,19 +164,29 @@ export type ComplaintKpiResult = {
   performance: {
     closureRate: number;
     onTimeRate: number | null;
+    /** @deprecated alias — use slaEligibleCount */
     onTimeEligibleClosed: number;
     lateRate: number;
     avgFirstResponseHours: number;
     avgProcessingHours: number;
     avgOpenAgeHours: number;
-    averageResolutionDays: number;
-    medianResolutionDays: number;
+    averageResolutionDays: number | null;
+    medianResolutionDays: number | null;
     overdueNoAction: number;
     overdueNoActionRate: number;
     reopenRate: number;
     validityRate: number;
     avgSatisfaction: number;
     satisfactionRate: number;
+    // Seven-day SLA metrics
+    slaEligibleCount: number;
+    slaCompliantCount: number;
+    slaNonCompliantCount: number;
+    openWithinSlaCount: number;
+    closedWithinSlaCount: number;
+    closedLateCount: number;
+    closedWithoutTrustedDateCount: number;
+    averageResolutionEligibleCount: number;
   };
   trend: {
     previousTotal: number | null;
@@ -196,17 +222,26 @@ type RawMetrics = {
   cancelledComplaints: number;
   currentlyLateComplaints: number;
   closedLateComplaints: number;
-  closedWithinDueDate: number;
-  withoutDueDate: number;
+  // Canonical SLA fields — used in KPI_METRIC_KEYS and all internal calculations
+  slaComplianceRate: number;
+  closedWithinSlaCount: number;
+  closedWithoutTrustedDateCount: number;
   unclassifiedComplaints: number;
   highPriorityOpenComplaints: number;
   averageResolutionDays: number;
   medianResolutionDays: number;
   averageOpenAgeDays: number;
-  dueDateComplianceRate: number;
-  dueDateEligibleClosed: number;
   closureRate: number;
   reopenCount: number;
+  // SLA fields used internally but not surfaced as individual KpiValue entries
+  slaEligibleCount: number;
+  slaCompliantCount: number;
+  slaNonCompliantCount: number;
+  openWithinSlaCount: number;
+  closedLateCount: number;
+  averageResolutionEligibleCount: number;
+  averageResolutionDaysNullable: number | null;
+  medianResolutionDaysNullable: number | null;
 };
 
 const KPI_METRIC_KEYS = [
@@ -216,17 +251,17 @@ const KPI_METRIC_KEYS = [
   "cancelledComplaints",
   "currentlyLateComplaints",
   "closedLateComplaints",
-  "closedWithinDueDate",
-  "withoutDueDate",
+  "slaComplianceRate",
+  "closedWithinSlaCount",
+  "closedWithoutTrustedDateCount",
   "unclassifiedComplaints",
   "highPriorityOpenComplaints",
   "averageResolutionDays",
   "medianResolutionDays",
   "averageOpenAgeDays",
-  "dueDateComplianceRate",
   "closureRate",
   "reopenCount",
-] as const satisfies readonly (keyof ComplaintKpiSummary)[];
+] as const satisfies readonly (keyof RawMetrics & keyof ComplaintKpiSummary)[];
 
 type ComplaintKpiOptions = {
   comparisonMode?: ComparisonMode;
@@ -278,8 +313,11 @@ function buildKpiResult(
 ): ComplaintKpiResult {
   const currentRaw = calculateRawMetrics(current, now);
   const previousRaw = previous ? calculateRawMetrics(previous, now) : null;
-  const kpis = buildKpiValues(currentRaw, previousRaw);
-  kpis.dueDateComplianceRate.available = currentRaw.dueDateEligibleClosed > 0;
+  const canonical = buildKpiValues(currentRaw, previousRaw);
+  canonical.slaComplianceRate.available = currentRaw.slaEligibleCount > 0;
+  canonical.averageResolutionDays.available = currentRaw.averageResolutionEligibleCount > 0;
+  canonical.medianResolutionDays.available = currentRaw.averageResolutionEligibleCount > 0;
+  const kpis = addLegacyKpiAliases(canonical);
   const firstResponses = current
     .filter((complaint) => complaint.firstActionAt)
     .map((complaint) => hoursBetween(complaint.complaintDate ?? complaint.receivedAt, complaint.firstActionAt!));
@@ -289,6 +327,9 @@ function buildKpiResult(
   const satisfaction = current.flatMap((complaint) =>
     complaint.beneficiarySatisfaction === null ? [] : [complaint.beneficiarySatisfaction]
   );
+  const overdueNoActionCount = current.filter((complaint) =>
+    buildComplaintSlaTiming(complaint, now).isCurrentlyLate && !complaint.firstActionAt
+  ).length;
 
   return {
     kpis,
@@ -309,25 +350,28 @@ function buildKpiResult(
     },
     performance: {
       closureRate: currentRaw.closureRate,
-      onTimeRate: currentRaw.dueDateEligibleClosed > 0
-        ? currentRaw.dueDateComplianceRate
-        : null,
-      onTimeEligibleClosed: currentRaw.dueDateEligibleClosed,
+      onTimeRate: currentRaw.slaEligibleCount > 0 ? currentRaw.slaComplianceRate : null,
+      onTimeEligibleClosed: currentRaw.slaEligibleCount,
       lateRate: rate(currentRaw.currentlyLateComplaints, currentRaw.totalComplaints),
-      avgFirstResponseHours: roundToTenth(average(firstResponses)),
-      avgProcessingHours: roundToTenth(average(processingHours)),
+      avgFirstResponseHours: roundToTenth(averageNumbers(firstResponses)),
+      avgProcessingHours: roundToTenth(averageNumbers(processingHours)),
       avgOpenAgeHours: roundToTenth(currentRaw.averageOpenAgeDays * 24),
-      averageResolutionDays: currentRaw.averageResolutionDays,
-      medianResolutionDays: currentRaw.medianResolutionDays,
-      overdueNoAction: current.filter((complaint) => buildComplaintTiming(complaint, now).isCurrentlyLate && !complaint.firstActionAt).length,
-      overdueNoActionRate: rate(
-        current.filter((complaint) => buildComplaintTiming(complaint, now).isCurrentlyLate && !complaint.firstActionAt).length,
-        currentRaw.totalComplaints
-      ),
+      averageResolutionDays: currentRaw.averageResolutionDaysNullable,
+      medianResolutionDays: currentRaw.medianResolutionDaysNullable,
+      overdueNoAction: overdueNoActionCount,
+      overdueNoActionRate: rate(overdueNoActionCount, currentRaw.totalComplaints),
       reopenRate: rate(currentRaw.reopenCount, currentRaw.closedComplaints + currentRaw.reopenCount),
       validityRate: rate(current.filter((complaint) => complaint.isValidated).length, currentRaw.totalComplaints),
-      avgSatisfaction: roundToTenth(average(satisfaction)),
+      avgSatisfaction: roundToTenth(averageNumbers(satisfaction)),
       satisfactionRate: rate(satisfaction.filter((value) => value >= 4).length, satisfaction.length),
+      slaEligibleCount: currentRaw.slaEligibleCount,
+      slaCompliantCount: currentRaw.slaCompliantCount,
+      slaNonCompliantCount: currentRaw.slaNonCompliantCount,
+      openWithinSlaCount: currentRaw.openWithinSlaCount,
+      closedWithinSlaCount: currentRaw.closedWithinSlaCount,
+      closedLateCount: currentRaw.closedLateCount,
+      closedWithoutTrustedDateCount: currentRaw.closedWithoutTrustedDateCount,
+      averageResolutionEligibleCount: currentRaw.averageResolutionEligibleCount,
     },
     trend: {
       previousTotal: previousRaw?.totalComplaints ?? null,
@@ -342,7 +386,7 @@ function buildKpiResult(
         complaint.priority === ComplaintPriority.CRITICAL || complaint.severity === ComplaintPriority.CRITICAL
       ).length,
       lateCritical: current.filter((complaint) =>
-        buildComplaintTiming(complaint, now).isCurrentlyLate
+        buildComplaintSlaTiming(complaint, now).isCurrentlyLate
         && (complaint.priority === ComplaintPriority.CRITICAL || complaint.severity === ComplaintPriority.CRITICAL)
       ).length,
       missingFields: current.filter((complaint) => !complaint.region || !complaint.department || !complaint.classificationId).length,
@@ -354,35 +398,53 @@ function buildKpiResult(
   };
 }
 
+function toSlaSnapshot(c: KpiComplaint) {
+  return {
+    status: c.status,
+    complaintDate: c.complaintDate,
+    receivedAt: c.receivedAt,
+    closedAt: c.closedAt,
+  };
+}
+
 function calculateRawMetrics(complaints: KpiComplaint[], now: Date): RawMetrics {
-  const timing = complaints.map((complaint) => buildComplaintTiming(complaint, now));
-  const resolutionDays = timing.flatMap((item) => item.resolutionDays === null ? [] : [item.resolutionDays]);
-  const openAgeDays = timing.flatMap((item) => item.openAgeDays === null ? [] : [item.openAgeDays]);
-  const dueClosedDenominator = complaints.filter((complaint) =>
-    isClosedComplaintStatus(complaint.status) && complaint.dueDate && complaint.closedAt
-  ).length;
+  const sla: ComplaintSlaMetrics = buildComplaintSlaMetrics(complaints.map(toSlaSnapshot), now);
+  const openAgeDays = complaints.flatMap((c) => {
+    const timing = buildComplaintSlaTiming(toSlaSnapshot(c), now);
+    return timing.openAgeDays === null ? [] : [timing.openAgeDays];
+  });
 
   return {
     totalComplaints: complaints.length,
-    openComplaints: complaints.filter((complaint) => isOpenComplaintStatus(complaint.status)).length,
-    closedComplaints: complaints.filter((complaint) => isClosedComplaintStatus(complaint.status)).length,
-    cancelledComplaints: complaints.filter((complaint) => complaint.status === ComplaintStatus.CANCELLED).length,
-    currentlyLateComplaints: timing.filter((item) => item.isCurrentlyLate).length,
-    closedLateComplaints: timing.filter((item) => item.wasClosedLate).length,
-    closedWithinDueDate: timing.filter((item) => item.isClosedWithinDueDate).length,
-    withoutDueDate: complaints.filter((complaint) => !complaint.dueDate).length,
-    unclassifiedComplaints: complaints.filter((complaint) => !complaint.classificationId).length,
-    highPriorityOpenComplaints: complaints.filter((complaint) =>
-      isOpenComplaintStatus(complaint.status)
-      && (complaint.priority === ComplaintPriority.HIGH || complaint.priority === ComplaintPriority.CRITICAL)
+    openComplaints: complaints.filter((c) => isOpenComplaintStatus(c.status)).length,
+    closedComplaints: complaints.filter((c) => isClosedComplaintStatus(c.status)).length,
+    cancelledComplaints: complaints.filter((c) => c.status === ComplaintStatus.CANCELLED).length,
+    // SLA-derived timing fields (canonical names only)
+    currentlyLateComplaints: sla.openLateCount,
+    closedLateComplaints: sla.closedLateCount,
+    slaComplianceRate: sla.complianceRate ?? 0,
+    closedWithinSlaCount: sla.closedWithinSlaCount,
+    closedWithoutTrustedDateCount: sla.closedWithoutTrustedDateCount,
+    unclassifiedComplaints: complaints.filter((c) => !c.classificationId).length,
+    highPriorityOpenComplaints: complaints.filter((c) =>
+      isOpenComplaintStatus(c.status)
+      && (c.priority === ComplaintPriority.HIGH || c.priority === ComplaintPriority.CRITICAL)
     ).length,
-    averageResolutionDays: roundToTenth(average(resolutionDays)),
-    medianResolutionDays: roundToTenth(median(resolutionDays)),
-    averageOpenAgeDays: roundToTenth(average(openAgeDays)),
-    dueDateComplianceRate: rate(timing.filter((item) => item.isClosedWithinDueDate).length, dueClosedDenominator),
-    dueDateEligibleClosed: dueClosedDenominator,
-    closureRate: rate(complaints.filter((complaint) => isClosedComplaintStatus(complaint.status)).length, complaints.length),
+    // averageResolutionDays/medianResolutionDays: 0 for KpiValue compat (see *Nullable variants)
+    averageResolutionDays: sla.averageResolutionDays ?? 0,
+    medianResolutionDays: sla.medianResolutionDays ?? 0,
+    averageOpenAgeDays: roundToTenth(averageNumbers(openAgeDays)),
+    closureRate: rate(complaints.filter((c) => isClosedComplaintStatus(c.status)).length, complaints.length),
     reopenCount: countReopenTransitions(complaints),
+    // SLA fields used internally but not surfaced as individual KpiValue entries
+    slaEligibleCount: sla.eligibleCount,
+    slaCompliantCount: sla.compliantCount,
+    slaNonCompliantCount: sla.nonCompliantCount,
+    openWithinSlaCount: sla.openWithinSlaCount,
+    closedLateCount: sla.closedLateCount,
+    averageResolutionEligibleCount: sla.averageResolutionEligibleCount,
+    averageResolutionDaysNullable: sla.averageResolutionDays,
+    medianResolutionDaysNullable: sla.medianResolutionDays,
   };
 }
 
@@ -395,13 +457,24 @@ function countReopenTransitions(complaints: KpiComplaint[]): number {
   }, 0);
 }
 
-function buildKpiValues(current: RawMetrics, previous: RawMetrics | null): ComplaintKpiSummary {
+type CanonicalKpiSummary = Omit<ComplaintKpiSummary, "dueDateComplianceRate" | "closedWithinDueDate" | "withoutDueDate">;
+
+function buildKpiValues(current: RawMetrics, previous: RawMetrics | null): CanonicalKpiSummary {
   return Object.fromEntries(
     KPI_METRIC_KEYS.map((key) => [
       key,
       compareMetric(current[key], previous?.[key] ?? null, negativeWhenHigher(key)),
     ])
-  ) as ComplaintKpiSummary;
+  ) as CanonicalKpiSummary;
+}
+
+function addLegacyKpiAliases(canonical: CanonicalKpiSummary): ComplaintKpiSummary {
+  return {
+    ...canonical,
+    dueDateComplianceRate: canonical.slaComplianceRate,
+    closedWithinDueDate: canonical.closedWithinSlaCount,
+    withoutDueDate: canonical.closedWithoutTrustedDateCount,
+  };
 }
 
 function compareMetric(current: number, previous: number | null, higherIsNegative: boolean): KpiValue {
@@ -435,11 +508,11 @@ function resolvePercentageChange(current: number, previous: number | null): numb
   return percentageChange(current, previous);
 }
 
-function negativeWhenHigher(key: keyof RawMetrics): boolean {
+function negativeWhenHigher(key: string): boolean {
   return [
     "currentlyLateComplaints",
     "closedLateComplaints",
-    "withoutDueDate",
+    "closedWithoutTrustedDateCount",
     "unclassifiedComplaints",
     "averageResolutionDays",
     "medianResolutionDays",
@@ -515,9 +588,12 @@ function groupMetrics(
         closed: raw.closedComplaints,
         currentlyLate: raw.currentlyLateComplaints,
         closedLate: raw.closedLateComplaints,
-        withinDueDate: raw.closedWithinDueDate,
-        complianceRate: raw.dueDateEligibleClosed > 0 ? raw.dueDateComplianceRate : null,
+        withinDueDate: raw.closedWithinSlaCount,
+        complianceRate: raw.slaEligibleCount > 0 ? raw.slaComplianceRate : null,
         averageResolutionDays: raw.averageResolutionDays,
+        averageResolutionEligibleCount: raw.averageResolutionEligibleCount,
+        slaEligibleCount: raw.slaEligibleCount,
+        closedWithoutTrustedDateCount: raw.closedWithoutTrustedDateCount,
         highPriorityOpen: raw.highPriorityOpenComplaints,
         unclassified: raw.unclassifiedComplaints,
       };
@@ -604,16 +680,9 @@ function hoursBetween(start: Date, end: Date): number {
   return (end.getTime() - start.getTime()) / (1000 * 60 * 60);
 }
 
-function average(values: number[]): number {
+function averageNumbers(values: number[]): number {
   if (values.length === 0) return 0;
   return values.reduce((sum, value) => sum + value, 0) / values.length;
-}
-
-function median(values: number[]): number {
-  if (values.length === 0) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
 }
 
 function rate(numerator: number, denominator: number): number {

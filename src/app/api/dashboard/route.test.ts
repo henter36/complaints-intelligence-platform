@@ -36,9 +36,10 @@ describe("GET /api/dashboard", () => {
           status: "OPEN",
           priority: "HIGH",
           severity: "MEDIUM",
-          complaintDate: new Date(now.getTime() - 60 * 60 * 1000),
-          receivedAt: new Date(now.getTime() - 60 * 60 * 1000),
-          dueDate: new Date(now.getTime() - 60 * 1000),
+          // Created 8 days ago so the 7-day SLA deadline (createdAt + 7d) is 1 day in the past → OPEN_LATE
+          complaintDate: new Date(now.getTime() - 8 * 24 * 60 * 60 * 1000),
+          receivedAt: new Date(now.getTime() - 8 * 24 * 60 * 60 * 1000),
+          dueDate: null,
           closedAt: null,
           firstActionAt: null,
           processingStartedAt: null,

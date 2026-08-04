@@ -89,16 +89,21 @@ function makeKpiResult(overrides: Partial<ComplaintKpiResult> = {}): ComplaintKp
       cancelledComplaints: kpi(5, 5),
       currentlyLateComplaints: kpi(8, 10),
       closedLateComplaints: kpi(3, 5),
-      closedWithinDueDate: kpi(62, 45),
-      withoutDueDate: kpi(2, 3),
+      // Canonical SLA KPI fields
+      slaComplianceRate: kpi(95.0, 90.0),
+      closedWithinSlaCount: kpi(62, 45),
+      closedWithoutTrustedDateCount: kpi(2, 3),
       unclassifiedComplaints: kpi(4, 6),
       highPriorityOpenComplaints: kpi(5, 8),
       averageResolutionDays: kpi(3.5, 4.0),
       medianResolutionDays: kpi(2.0, 2.5),
       averageOpenAgeDays: kpi(5.0, 6.0),
-      dueDateComplianceRate: kpi(95.0, 90.0),
       closureRate: kpi(65.0, 62.5),
       reopenCount: kpi(2, 1),
+      // Deprecated aliases (backward-compat boundary only)
+      dueDateComplianceRate: kpi(95.0, 90.0),
+      closedWithinDueDate: kpi(62, 45),
+      withoutDueDate: kpi(2, 3),
     },
     volume: {
       total: 100,
@@ -128,6 +133,16 @@ function makeKpiResult(overrides: Partial<ComplaintKpiResult> = {}): ComplaintKp
       validityRate: 90.0,
       avgSatisfaction: 4.2,
       satisfactionRate: 84.0,
+      // Seven-day SLA fields
+      slaEligibleCount: 62,
+      slaCompliantCount: 59,
+      slaNonCompliantCount: 3,
+      openWithinSlaCount: 22,
+      closedWithinSlaCount: 37,
+      closedLateCount: 3,
+      closedWithoutTrustedDateCount: 2,
+      averageResolutionEligibleCount: 40,
+      onTimeEligibleClosed: 62, // alias for slaEligibleCount
     },
     trend: {
       previousTotal: 80,
@@ -136,23 +151,23 @@ function makeKpiResult(overrides: Partial<ComplaintKpiResult> = {}): ComplaintKp
     },
     distributions: {
       byRegion: [
-        { name: "الرياض", id: null, count: 40, total: 40, open: 10, closed: 28, currentlyLate: 3, closedLate: 1, withinDueDate: 27, complianceRate: 96.4, averageResolutionDays: 3.2, highPriorityOpen: 2, unclassified: 1 },
-        { name: "جدة", id: null, count: 30, total: 30, open: 8, closed: 20, currentlyLate: 2, closedLate: 1, withinDueDate: 19, complianceRate: 95.0, averageResolutionDays: 3.5, highPriorityOpen: 1, unclassified: 0 },
-        { name: "مكة", id: null, count: 20, total: 20, open: 7, closed: 12, currentlyLate: 2, closedLate: 1, withinDueDate: 11, complianceRate: 91.7, averageResolutionDays: 4.1, highPriorityOpen: 2, unclassified: 2 },
-        { name: "المدينة", id: null, count: 10, total: 10, open: 5, closed: 5, currentlyLate: 1, closedLate: 0, withinDueDate: 5, complianceRate: 100.0, averageResolutionDays: 2.8, highPriorityOpen: 0, unclassified: 1 },
+        { name: "الرياض", id: null, count: 40, total: 40, open: 10, closed: 28, currentlyLate: 3, closedLate: 1, withinDueDate: 27, complianceRate: 96.4, averageResolutionDays: 3.2, highPriorityOpen: 2, unclassified: 1, averageResolutionEligibleCount: 28, slaEligibleCount: 28, closedWithoutTrustedDateCount: 0 },
+        { name: "جدة", id: null, count: 30, total: 30, open: 8, closed: 20, currentlyLate: 2, closedLate: 1, withinDueDate: 19, complianceRate: 95.0, averageResolutionDays: 3.5, highPriorityOpen: 1, unclassified: 0, averageResolutionEligibleCount: 19, slaEligibleCount: 19, closedWithoutTrustedDateCount: 0 },
+        { name: "مكة", id: null, count: 20, total: 20, open: 7, closed: 12, currentlyLate: 2, closedLate: 1, withinDueDate: 11, complianceRate: 91.7, averageResolutionDays: 4.1, highPriorityOpen: 2, unclassified: 2, averageResolutionEligibleCount: 11, slaEligibleCount: 11, closedWithoutTrustedDateCount: 0 },
+        { name: "المدينة", id: null, count: 10, total: 10, open: 5, closed: 5, currentlyLate: 1, closedLate: 0, withinDueDate: 5, complianceRate: 100.0, averageResolutionDays: 2.8, highPriorityOpen: 0, unclassified: 1, averageResolutionEligibleCount: 5, slaEligibleCount: 5, closedWithoutTrustedDateCount: 0 },
       ],
       byFacility: [],
       byDepartment: [
-        { name: "الصحة", id: "dept-health", count: 45, total: 45, open: 12, closed: 31, currentlyLate: 4, closedLate: 2, withinDueDate: 29, complianceRate: 93.5, averageResolutionDays: 3.8, highPriorityOpen: 3, unclassified: 2 },
-        { name: "التعليم", id: "dept-edu", count: 35, total: 35, open: 10, closed: 24, currentlyLate: 2, closedLate: 1, withinDueDate: 23, complianceRate: 95.8, averageResolutionDays: 3.2, highPriorityOpen: 1, unclassified: 1 },
-        { name: "الخدمات", id: "dept-svc", count: 20, total: 20, open: 8, closed: 10, currentlyLate: 2, closedLate: 0, withinDueDate: 10, complianceRate: 100.0, averageResolutionDays: 2.9, highPriorityOpen: 1, unclassified: 1 },
+        { name: "الصحة", id: "dept-health", count: 45, total: 45, open: 12, closed: 31, currentlyLate: 4, closedLate: 2, withinDueDate: 29, complianceRate: 93.5, averageResolutionDays: 3.8, highPriorityOpen: 3, unclassified: 2, averageResolutionEligibleCount: 29, slaEligibleCount: 29, closedWithoutTrustedDateCount: 0 },
+        { name: "التعليم", id: "dept-edu", count: 35, total: 35, open: 10, closed: 24, currentlyLate: 2, closedLate: 1, withinDueDate: 23, complianceRate: 95.8, averageResolutionDays: 3.2, highPriorityOpen: 1, unclassified: 1, averageResolutionEligibleCount: 23, slaEligibleCount: 23, closedWithoutTrustedDateCount: 0 },
+        { name: "الخدمات", id: "dept-svc", count: 20, total: 20, open: 8, closed: 10, currentlyLate: 2, closedLate: 0, withinDueDate: 10, complianceRate: 100.0, averageResolutionDays: 2.9, highPriorityOpen: 1, unclassified: 1, averageResolutionEligibleCount: 10, slaEligibleCount: 10, closedWithoutTrustedDateCount: 0 },
       ],
       byClassification: [
-        { name: "ضوضاء", id: "class-01", count: 30, total: 30, open: 8, closed: 20, currentlyLate: 3, closedLate: 1, withinDueDate: 19, complianceRate: 95.0, averageResolutionDays: 3.2, highPriorityOpen: 1, unclassified: 0 },
-        { name: "بنية تحتية", id: "class-02", count: 25, total: 25, open: 7, closed: 17, currentlyLate: 2, closedLate: 1, withinDueDate: 16, complianceRate: 94.1, averageResolutionDays: 3.8, highPriorityOpen: 2, unclassified: 1 },
-        { name: "مخلفات", id: "class-03", count: 20, total: 20, open: 5, closed: 13, currentlyLate: 1, closedLate: 0, withinDueDate: 13, complianceRate: 100.0, averageResolutionDays: 2.8, highPriorityOpen: 0, unclassified: 0 },
-        { name: "مياه", id: "class-04", count: 15, total: 15, open: 6, closed: 8, currentlyLate: 1, closedLate: 1, withinDueDate: 7, complianceRate: 87.5, averageResolutionDays: 4.5, highPriorityOpen: 2, unclassified: 1 },
-        { name: "إضاءة", id: "class-05", count: 10, total: 10, open: 4, closed: 7, currentlyLate: 1, closedLate: 0, withinDueDate: 7, complianceRate: 100.0, averageResolutionDays: 2.5, highPriorityOpen: 0, unclassified: 0 },
+        { name: "ضوضاء", id: "class-01", count: 30, total: 30, open: 8, closed: 20, currentlyLate: 3, closedLate: 1, withinDueDate: 19, complianceRate: 95.0, averageResolutionDays: 3.2, highPriorityOpen: 1, unclassified: 0, averageResolutionEligibleCount: 19, slaEligibleCount: 19, closedWithoutTrustedDateCount: 0 },
+        { name: "بنية تحتية", id: "class-02", count: 25, total: 25, open: 7, closed: 17, currentlyLate: 2, closedLate: 1, withinDueDate: 16, complianceRate: 94.1, averageResolutionDays: 3.8, highPriorityOpen: 2, unclassified: 1, averageResolutionEligibleCount: 16, slaEligibleCount: 16, closedWithoutTrustedDateCount: 0 },
+        { name: "مخلفات", id: "class-03", count: 20, total: 20, open: 5, closed: 13, currentlyLate: 1, closedLate: 0, withinDueDate: 13, complianceRate: 100.0, averageResolutionDays: 2.8, highPriorityOpen: 0, unclassified: 0, averageResolutionEligibleCount: 13, slaEligibleCount: 13, closedWithoutTrustedDateCount: 0 },
+        { name: "مياه", id: "class-04", count: 15, total: 15, open: 6, closed: 8, currentlyLate: 1, closedLate: 1, withinDueDate: 7, complianceRate: 87.5, averageResolutionDays: 4.5, highPriorityOpen: 2, unclassified: 1, averageResolutionEligibleCount: 7, slaEligibleCount: 7, closedWithoutTrustedDateCount: 0 },
+        { name: "إضاءة", id: "class-05", count: 10, total: 10, open: 4, closed: 7, currentlyLate: 1, closedLate: 0, withinDueDate: 7, complianceRate: 100.0, averageResolutionDays: 2.5, highPriorityOpen: 0, unclassified: 0, averageResolutionEligibleCount: 7, slaEligibleCount: 7, closedWithoutTrustedDateCount: 0 },
       ],
       byCategory: [],
       byChannel: [],
@@ -315,10 +330,13 @@ describe("buildExecutiveBriefData — KPI cards", () => {
     ]);
   });
 
-  it("keeps compliance unavailable when no closed complaint has a valid due date", async () => {
+  it("keeps compliance unavailable when slaEligibleCount is 0 (all complaints closed without trusted closedAt)", async () => {
     const result = makeKpiResult();
     result.performance.onTimeRate = null;
-    result.kpis.dueDateComplianceRate.available = false;
+    result.performance.slaEligibleCount = 0;
+    result.performance.slaCompliantCount = 0;
+    result.performance.slaNonCompliantCount = 0;
+    result.performance.closedWithoutTrustedDateCount = 65;
     const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
     expect(data.briefKpis.find((kpi) => kpi.key === "complianceRate")?.value).toBeNull();
   });
@@ -1272,6 +1290,125 @@ describe("buildExecutiveBriefData — conclusions/notes with zero previous data"
     const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(false), undefined, NOW);
     const hasNote = (data.notes ?? []).some((n) => n.includes("لا تتوفر فترة سابقة"));
     expect(hasNote).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: seven-day SLA integration with buildExecutiveBriefData
+// ---------------------------------------------------------------------------
+
+describe("buildExecutiveBriefData — seven-day SLA notes and KPIs", () => {
+  it("SLA note is always the first note regardless of other conditions", async () => {
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
+    expect((data.notes ?? []).length).toBeGreaterThan(0);
+    expect((data.notes ?? [])[0]).toContain("7 أيام");
+  });
+
+  it("CWTTD note appears when closedWithoutTrustedDateCount > 0", async () => {
+    const result = makeKpiResult();
+    result.performance.closedWithoutTrustedDateCount = 10;
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
+    const notes = data.notes ?? [];
+    const hasCwttdNote = notes.some((n) => n.includes("بلا تاريخ إغلاق") || n.includes("موثوق"));
+    expect(hasCwttdNote).toBe(true);
+  });
+
+  it("CWTTD note is absent when closedWithoutTrustedDateCount is 0", async () => {
+    const result = makeKpiResult();
+    result.performance.closedWithoutTrustedDateCount = 0;
+    result.performance.onTimeRate = 95.0;
+    result.performance.slaEligibleCount = 62;
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
+    const notes = data.notes ?? [];
+    const hasCwttdNote = notes.some((n) => n.includes("بلا تاريخ إغلاق") || n.includes("موثوق"));
+    expect(hasCwttdNote).toBe(false);
+  });
+
+  it("insufficient-data note appears when onTimeRate is null and closedWithoutTrustedDateCount is 0", async () => {
+    const result = makeKpiResult();
+    result.performance.onTimeRate = null;
+    result.performance.slaEligibleCount = 0;
+    result.performance.closedWithoutTrustedDateCount = 0;
+    result.performance.closedWithinSlaCount = 0;
+    result.performance.closedLateCount = 0;
+    result.performance.openWithinSlaCount = 0;
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
+    const notes = data.notes ?? [];
+    const hasInsufficientNote = notes.some((n) => n.includes("بيانات") || n.includes("قياس"));
+    expect(hasInsufficientNote).toBe(true);
+  });
+
+  it("averageResolutionDays KPI value is null when averageResolutionEligibleCount is 0", async () => {
+    const result = makeKpiResult();
+    result.performance.averageResolutionEligibleCount = 0;
+    result.performance.averageResolutionDays = null as unknown as number;
+    result.kpis.averageResolutionDays.available = false;
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
+    expect(data.briefKpis.find((k) => k.key === "averageResolutionDays")?.value).toBeNull();
+  });
+
+  it("averageResolutionDays KPI value is 0 when same-day closure (averageResolutionEligibleCount > 0)", async () => {
+    const result = makeKpiResult();
+    result.performance.averageResolutionDays = 0;
+    result.performance.averageResolutionEligibleCount = 5;
+    result.kpis.averageResolutionDays.currentValue = 0;
+    result.kpis.averageResolutionDays.available = true;
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
+    expect(data.briefKpis.find((k) => k.key === "averageResolutionDays")?.value).toBe(0);
+  });
+
+  it("allRegions table averageResolutionDays shows null for groups where averageResolutionEligibleCount is 0", async () => {
+    const result = makeKpiResult();
+    // Override byRegion distributions to have a group with no eligible count
+    (result.distributions as { byRegion: unknown[] }).byRegion = [
+      {
+        name: "الرياض", id: null, count: 5, total: 5,
+        open: 3, closed: 2, currentlyLate: 0, closedLate: 0,
+        withinDueDate: 0, complianceRate: null, averageResolutionDays: 0,
+        highPriorityOpen: 0, unclassified: 0,
+        averageResolutionEligibleCount: 0, // no eligible → should show null
+      },
+    ];
+    dbMocks.complaintGroupBy.mockResolvedValue([{ region: "الرياض" }]);
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
+    // The allRegions table row for الرياض should not show an average when eligibleCount = 0
+    const row = data.allRegions.find((r) => r.regionName.includes("الرياض"));
+    expect(row).toBeDefined();
+    // averageResolutionDays in the allRegions row should be null (no eligible)
+    expect(row!.averageResolutionDays).toBeNull();
+  });
+
+  it("previousComplianceRate uses slaEligibleCount from previous result to gate availability", async () => {
+    // Previous result has slaEligibleCount = 0 → previous complianceRate previousValue must be null
+    const result = makeKpiResult();
+    const previousResult = makeKpiResult();
+    previousResult.performance.slaEligibleCount = 0;
+    previousResult.performance.onTimeRate = null;
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), previousResult, NOW);
+    const complianceCard = data.briefKpis.find((k) => k.key === "complianceRate");
+    expect(complianceCard?.previousValue).toBeNull();
+  });
+
+  it("notes array has at most 4 entries", async () => {
+    const result = makeKpiResult();
+    result.performance.closedWithoutTrustedDateCount = 10;
+    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
+    expect((data.notes ?? []).length).toBeLessThanOrEqual(4);
+  });
+
+  it("closed KPI label uses updated Arabic text (current period)", async () => {
+    const data = await buildExecutiveBriefData(
+      BASE_FILTERS,
+      makeKpiResult(),
+      makeComparison(),
+      undefined,
+      NOW
+    );
+    const closedCard = data.briefKpis.find((k) => k.key === "closed");
+
+    expect(closedCard?.label).toBe(
+      "المغلقة حالياً من شكاوى الفترة"
+    );
   });
 });
 
