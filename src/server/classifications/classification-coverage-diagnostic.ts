@@ -46,6 +46,13 @@ export type CurrentResolverCoverageDiagnostic = {
 const MATCHED_CODE = "CLASSIFICATION_RESOLVED_FROM_SOURCE_DETAIL";
 const AMBIGUOUS_CODE = "SOURCE_DETAIL_CLASSIFICATION_AMBIGUOUS";
 
+type HistoricalCoverageSignals = {
+  classificationText: string | null;
+  sourceDetail: string | null;
+  matched: boolean;
+  ambiguous: boolean;
+};
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -85,6 +92,49 @@ function percentage(numerator: number, denominator: number): number {
     : 0;
 }
 
+function buildHistoricalCoverageSignals(
+  complaint: ClassificationDiagnosticComplaint,
+  row: ClassificationDiagnosticImportRow | undefined
+): HistoricalCoverageSignals {
+  const normalized = asRecord(row?.normalizedData);
+  const codes = warningCodes(row?.validationWarnings);
+  return {
+    classificationText: nonEmptyString(normalized?.classification),
+    sourceDetail: nonEmptyString(complaint.sourceDetail)
+      ?? nonEmptyString(normalized?.sourceDetail),
+    matched: codes.has(MATCHED_CODE),
+    ambiguous: codes.has(AMBIGUOUS_CODE),
+  };
+}
+
+function countHistoricalSignals(
+  result: ClassificationCoverageDiagnostic,
+  signals: HistoricalCoverageSignals
+): void {
+  if (signals.sourceDetail) result.withSourceDetail += 1;
+  if (signals.matched) result.resolvedMatched += 1;
+  if (signals.ambiguous) result.resolvedAmbiguous += 1;
+}
+
+function countUnclassifiedReason(
+  result: ClassificationCoverageDiagnostic,
+  signals: HistoricalCoverageSignals
+): void {
+  result.unclassifiedTotal += 1;
+  if (signals.classificationText) result.classificationTextOnly += 1;
+
+  if (signals.matched) {
+    result.resolvedMatchedButUnlinked += 1;
+    return;
+  }
+  if (signals.ambiguous) return;
+  if (signals.classificationText || signals.sourceDetail) {
+    result.unresolved += 1;
+    return;
+  }
+  result.missingClassificationInput += 1;
+}
+
 export function analyzeClassificationCoverage(
   complaints: readonly ClassificationDiagnosticComplaint[],
   rows: readonly ClassificationDiagnosticImportRow[]
@@ -105,33 +155,16 @@ export function analyzeClassificationCoverage(
   };
 
   for (const complaint of complaints) {
-    const row = latestRows.get(complaint.id);
-    const normalized = asRecord(row?.normalizedData);
-    const classificationText = nonEmptyString(normalized?.classification);
-    const sourceDetail = nonEmptyString(complaint.sourceDetail)
-      ?? nonEmptyString(normalized?.sourceDetail);
-    const codes = warningCodes(row?.validationWarnings);
-    const matched = codes.has(MATCHED_CODE);
-    const ambiguous = codes.has(AMBIGUOUS_CODE);
-
-    if (sourceDetail) result.withSourceDetail += 1;
-    if (matched) result.resolvedMatched += 1;
-    if (ambiguous) result.resolvedAmbiguous += 1;
+    const signals = buildHistoricalCoverageSignals(
+      complaint,
+      latestRows.get(complaint.id)
+    );
+    countHistoricalSignals(result, signals);
 
     if (complaint.classificationId) {
       result.classifiedById += 1;
-      continue;
-    }
-
-    result.unclassifiedTotal += 1;
-    if (classificationText) result.classificationTextOnly += 1;
-
-    if (matched) {
-      result.resolvedMatchedButUnlinked += 1;
-    } else if (!ambiguous && (classificationText || sourceDetail)) {
-      result.unresolved += 1;
-    } else if (!ambiguous) {
-      result.missingClassificationInput += 1;
+    } else {
+      countUnclassifiedReason(result, signals);
     }
   }
 
