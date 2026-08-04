@@ -130,18 +130,44 @@ function seriesStyle(
   return { color, dash, width: mark === "bar" ? 2 : base.width, mark };
 }
 
-function monthlyTrendStyle(index: number, series: ChartSeries, sectionChartType: ReportChartSection["chartType"]): SeriesStyle {
+/** Bars always solid; lines use series/preset dash (late = index 3 kept on preset). */
+function resolveMonthlyTrendDash(
+  index: number,
+  mark: "bar" | "line",
+  series: ChartSeries,
+  preset: SeriesStyle
+): string {
+  if (mark === "bar") return "0";
+  if (series.dash) return series.dash;
+  return preset.dash;
+}
+
+/** Late end-of-month line (index 3) force danger; otherwise keep preset color. */
+function resolveMonthlyTrendColor(
+  index: number,
+  mark: "bar" | "line",
+  preset: SeriesStyle
+): string {
+  if (mark === "line" && index === 3) return COLORS.danger;
+  return preset.color;
+}
+
+function monthlyTrendStyle(
+  index: number,
+  series: ChartSeries,
+  sectionChartType: ReportChartSection["chartType"]
+): SeriesStyle {
   const mark = resolveSeriesMark(series, sectionChartType);
   const preset = MONTHLY_TREND_STYLES[index];
-  if (preset) {
-    return {
-      ...preset,
-      mark,
-      dash: series.dash ?? (mark === "line" && index === 3 ? preset.dash : mark === "line" ? preset.dash : "0"),
-      color: mark === "line" && index === 3 ? COLORS.danger : preset.color,
-    };
+  if (!preset) {
+    return seriesStyle(index, series.isOther === true, mark, series);
   }
-  return seriesStyle(index, series.isOther === true, mark, series);
+  return {
+    ...preset,
+    mark,
+    dash: resolveMonthlyTrendDash(index, mark, series, preset),
+    color: resolveMonthlyTrendColor(index, mark, preset),
+  };
 }
 
 function rightAxisStyle(index: number): SeriesStyle {
@@ -193,7 +219,8 @@ export function computeYScale(
   }
   // Deduplicate when rounding collapses ticks
   const unique = [...new Set(ticks)];
-  if (unique[unique.length - 1] !== max) unique.push(max);
+  const lastTick = unique.at(-1);
+  if (lastTick !== max) unique.push(max);
   return { max, ticks: unique };
 }
 
@@ -544,81 +571,246 @@ function buildLegendItems(
   return [...leftItems, ...rightItems];
 }
 
-/** Exported for snapshot tests; not part of the public rendering API. */
-export function buildChartSvg(section: ReportChartSection, width: number, height: number): string {
-  // Dual-axis only when both left and right series exist; all-right is single-axis.
+export type AxisSeriesResolution = {
+  leftSeries: ChartSeries[];
+  rightSeries: ChartSeries[];
+  hasDualAxis: boolean;
+};
+
+export function resolveAxisSeries(section: ReportChartSection): AxisSeriesResolution {
   const leftCandidates = section.series.filter((s) => s.axis !== "right");
   const hasDualAxis = leftCandidates.length > 0 && section.series.some((s) => s.axis === "right");
-  const leftSeries = hasDualAxis ? leftCandidates : section.series;
-  const rightSeries = hasDualAxis ? section.series.filter((s) => s.axis === "right") : [];
+  if (!hasDualAxis) {
+    return { leftSeries: section.series, rightSeries: [], hasDualAxis: false };
+  }
+  return {
+    leftSeries: leftCandidates,
+    rightSeries: section.series.filter((s) => s.axis === "right"),
+    hasDualAxis: true,
+  };
+}
 
-  const primarySeries = leftSeries;
-  const categories = section.chartType === "bar" || isMonthlyComboSection(section)
-    ? buildCategoryUnion({ ...section, series: primarySeries })
-    : (primarySeries[0]?.points.map((p) => p.x) ?? []);
+function resolveChartCategories(
+  section: ReportChartSection,
+  primarySeries: ChartSeries[]
+): string[] {
+  if (section.chartType === "bar" || isMonthlyComboSection(section)) {
+    return buildCategoryUnion({ ...section, series: primarySeries });
+  }
+  return primarySeries[0]?.points.map((p) => p.x) ?? [];
+}
 
-  const leftMaxValue = leftSeries.reduce(
-    (max, s) => s.points.reduce((m, p) => Math.max(m, p.y), max), 0
+function seriesMaxY(seriesList: ChartSeries[]): number {
+  return seriesList.reduce(
+    (max, s) => s.points.reduce((m, p) => Math.max(m, p.y), max),
+    0
   );
-  const rightMaxValue = rightSeries.reduce(
-    (max, s) => s.points.reduce((m, p) => Math.max(m, p.y), max), 0
-  );
-  const { max: yMax, ticks } = computeYScale(
-    hasDualAxis ? leftMaxValue : Math.max(leftMaxValue, rightMaxValue),
-    { integersOnly: true, paddingRatio: 0.12 }
-  );
-  const { max: yMaxRight, ticks: ticksRight } = hasDualAxis
-    ? computeYScale(rightMaxValue, { integersOnly: true })
-    : { max: yMax, ticks };
+}
 
+type ChartAxisScales = {
+  yMax: number;
+  ticks: number[];
+  yMaxRight: number;
+  ticksRight: number[] | null;
+};
+
+function computeChartAxisScales(
+  leftSeries: ChartSeries[],
+  rightSeries: ChartSeries[],
+  hasDualAxis: boolean
+): ChartAxisScales {
+  const leftMaxValue = seriesMaxY(leftSeries);
+  const rightMaxValue = seriesMaxY(rightSeries);
+  const primaryScaleInput = hasDualAxis
+    ? leftMaxValue
+    : Math.max(leftMaxValue, rightMaxValue);
+  const { max: yMax, ticks } = computeYScale(primaryScaleInput, {
+    integersOnly: true,
+    paddingRatio: 0.12,
+  });
+  if (!hasDualAxis) {
+    return { yMax, ticks, yMaxRight: yMax, ticksRight: null };
+  }
+  const rightScale = computeYScale(rightMaxValue, { integersOnly: true });
+  return {
+    yMax,
+    ticks,
+    yMaxRight: rightScale.max,
+    ticksRight: rightScale.ticks,
+  };
+}
+
+/** 4 series → 2×2 grid; otherwise pack up to 3 per row without nesting ternaries. */
+export function resolveLegendColumnCount(count: number): number {
+  if (count === 4) return 2;
+  if (count <= 3) return Math.max(1, count);
+  return 2;
+}
+
+function resolveChartGeometry(options: {
+  width: number;
+  height: number;
+  hasDualAxis: boolean;
+  plotTop: number;
+  xCount: number;
+}): ChartGeometry {
+  return {
+    plotLeft: options.hasDualAxis ? 76 : 54,
+    plotRight: options.width - 76,
+    plotTop: options.plotTop,
+    plotBottom: options.height - 36,
+    xCount: options.xCount,
+  };
+}
+
+type StyledSeries = { series: ChartSeries; style: SeriesStyle };
+
+function splitRenderableSeries(
+  section: ReportChartSection,
+  leftSeries: ChartSeries[]
+): { bars: StyledSeries[]; lines: StyledSeries[] } {
+  const barSeries = leftSeries
+    .map((series, index) => ({
+      series,
+      style: styleForSectionSeries(section, series, index),
+      index,
+    }))
+    .filter((entry) => resolveSeriesMark(entry.series, section.chartType) === "bar");
+  const lineSeries = leftSeries
+    .map((series, index) => ({
+      series,
+      style: styleForSectionSeries(section, series, index),
+      index,
+    }))
+    .filter((entry) => resolveSeriesMark(entry.series, section.chartType) === "line");
+
+  // Default mark when no renderAs: section chartType drives all series as bars.
+  const defaultBar =
+    section.chartType === "bar" && barSeries.length === 0 && lineSeries.length === 0;
+  if (defaultBar) {
+    return {
+      bars: leftSeries.map((series, index) => ({
+        series,
+        style: styleForSectionSeries(section, series, index),
+      })),
+      lines: [],
+    };
+  }
+  return {
+    bars: barSeries.map(({ series, style }) => ({ series, style })),
+    lines: lineSeries.map(({ series, style }) => ({ series, style })),
+  };
+}
+
+function resolveAxisChartType(
+  sectionChartType: ReportChartSection["chartType"],
+  barCount: number
+): ReportChartSection["chartType"] {
+  if (sectionChartType === "line" && barCount === 0) return "line";
+  return "bar";
+}
+
+function resolveLineRenderChartType(
+  sectionChartType: ReportChartSection["chartType"],
+  barCount: number
+): ReportChartSection["chartType"] {
+  if (barCount > 0) return "bar";
+  return sectionChartType;
+}
+
+function buildChartSvgBody(options: {
+  section: ReportChartSection;
+  width: number;
+  height: number;
+  geo: ChartGeometry;
+  categories: string[];
+  ticks: number[];
+  yMax: number;
+  ticksRight: number[] | null;
+  yMaxRight: number;
+  hasDualAxis: boolean;
+  bars: StyledSeries[];
+  lines: StyledSeries[];
+  legendSvg: string;
+  rightSeries: ChartSeries[];
+}): string {
+  const {
+    section,
+    width,
+    height,
+    geo,
+    categories,
+    ticks,
+    yMax,
+    ticksRight,
+    yMaxRight,
+    hasDualAxis,
+    bars,
+    lines,
+    legendSvg,
+    rightSeries,
+  } = options;
+  const title = escapeXml(section.title);
+  const axisChartType = resolveAxisChartType(section.chartType, bars.length);
+  const lineRenderType = resolveLineRenderChartType(section.chartType, bars.length);
+  const titleSvg = section.title
+    ? `<text x="${width / 2}" y="24" text-anchor="middle" font-size="15" fill="${COLORS.primary}" direction="rtl" unicode-bidi="plaintext">${title}</text>`
+    : "";
+  const barsSvg = bars.length > 0 ? renderBarSeries(geo, bars, yMax, categories) : "";
+  const linesSvg = lines.length > 0
+    ? renderLineSeries(geo, lines, yMax, categories, lineRenderType)
+    : "";
+  const dualSvg = hasDualAxis
+    ? renderRightAxisLines(geo, rightSeries, yMaxRight, categories, section.chartType)
+    : "";
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+    ${fontStyleBlock()}
+    <rect width="${width}" height="${height}" fill="${COLORS.white}" stroke="${COLORS.border}"/>
+    ${titleSvg}
+    ${legendSvg}
+    ${renderAxesWithOptionalSecondary(geo, ticks, yMax, categories, axisChartType, ticksRight, hasDualAxis ? yMaxRight : null)}
+    ${barsSvg}
+    ${linesSvg}
+    ${dualSvg}
+  </svg>`;
+}
+
+/** Exported for snapshot tests; not part of the public rendering API. */
+export function buildChartSvg(section: ReportChartSection, width: number, height: number): string {
+  const { leftSeries, rightSeries, hasDualAxis } = resolveAxisSeries(section);
+  const categories = resolveChartCategories(section, leftSeries);
+  const scales = computeChartAxisScales(leftSeries, rightSeries, hasDualAxis);
   const legendItems = buildLegendItems(leftSeries, rightSeries, hasDualAxis, section);
-  // Legend above the plot in a reserved band (not over X-axis labels).
   const legendTop = section.title ? 40 : 14;
   const legend = drawChartLegend(legendItems, {
     width,
     top: legendTop,
-    // Prefer a 2×2 grid for 4 series so long Arabic labels never collide in one row.
-    columns: legendItems.length === 4 ? 2 : legendItems.length <= 3 ? legendItems.length : 2,
+    columns: resolveLegendColumnCount(legendItems.length),
   });
-  const plotTop = legendTop + legend.height + 6;
-  const geo: ChartGeometry = {
-    plotLeft: hasDualAxis ? 76 : 54,
-    plotRight: width - 76,
-    plotTop,
-    plotBottom: height - 36,
+  const geo = resolveChartGeometry({
+    width,
+    height,
+    hasDualAxis,
+    plotTop: legendTop + legend.height + 6,
     xCount: categories.length,
-  };
-
-  const barSeries = leftSeries
-    .map((series, index) => ({ series, style: styleForSectionSeries(section, series, index), index }))
-    .filter((entry) => resolveSeriesMark(entry.series, section.chartType) === "bar");
-  const lineSeries = leftSeries
-    .map((series, index) => ({ series, style: styleForSectionSeries(section, series, index), index }))
-    .filter((entry) => resolveSeriesMark(entry.series, section.chartType) === "line");
-
-  // Default mark when no renderAs: section chartType
-  const defaultBar = section.chartType === "bar" && barSeries.length === 0 && lineSeries.length === 0;
-  const bars = defaultBar
-    ? leftSeries.map((series, index) => ({
-      series,
-      style: styleForSectionSeries(section, series, index),
-    }))
-    : barSeries.map(({ series, style }) => ({ series, style }));
-  const lines = defaultBar
-    ? []
-    : lineSeries.map(({ series, style }) => ({ series, style }));
-
-  const title = escapeXml(section.title);
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-    ${fontStyleBlock()}
-    <rect width="${width}" height="${height}" fill="${COLORS.white}" stroke="${COLORS.border}"/>
-    ${section.title ? `<text x="${width / 2}" y="24" text-anchor="middle" font-size="15" fill="${COLORS.primary}" direction="rtl" unicode-bidi="plaintext">${title}</text>` : ""}
-    ${legend.svg}
-    ${renderAxesWithOptionalSecondary(geo, ticks, yMax, categories, section.chartType === "line" && bars.length === 0 ? "line" : "bar", hasDualAxis ? ticksRight : null, hasDualAxis ? yMaxRight : null)}
-    ${bars.length > 0 ? renderBarSeries(geo, bars, yMax, categories) : ""}
-    ${lines.length > 0 ? renderLineSeries(geo, lines, yMax, categories, bars.length > 0 ? "bar" : section.chartType) : ""}
-    ${hasDualAxis ? renderRightAxisLines(geo, rightSeries, yMaxRight, categories, section.chartType) : ""}
-  </svg>`;
+  });
+  const { bars, lines } = splitRenderableSeries(section, leftSeries);
+  return buildChartSvgBody({
+    section,
+    width,
+    height,
+    geo,
+    categories,
+    ticks: scales.ticks,
+    yMax: scales.yMax,
+    ticksRight: scales.ticksRight,
+    yMaxRight: scales.yMaxRight,
+    hasDualAxis,
+    bars,
+    lines,
+    legendSvg: legend.svg,
+    rightSeries,
+  });
 }
 
 function emptyChartSvg(section: ReportChartSection, width: number, height: number): string {

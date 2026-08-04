@@ -10,10 +10,15 @@ import {
   buildChartSvg,
   drawChartLegend,
   computeYScale,
+  resolveLegendColumnCount,
 } from "./report-chart-service";
 import type { ReportChartSection } from "./report-data-service";
+import { REPORT_DESIGN_TOKENS } from "@/lib/reports/design-tokens";
 
 const ASSETS_DIR = path.join(process.cwd(), "src/server/reports/assets");
+const DANGER = REPORT_DESIGN_TOKENS.colors.danger;
+const PRIMARY = REPORT_DESIGN_TOKENS.colors.primary;
+const GOLD = REPORT_DESIGN_TOKENS.colors.gold;
 
 describe("escapeXml", () => {
   it("escapes all five XML/SVG special characters", () => {
@@ -362,10 +367,6 @@ describe("buildChartSvg — dual-axis and legend", () => {
 });
 
 describe("monthly combo chart — single Y-axis, legend layout", () => {
-  const GOLD = "#B88919";
-  const DANGER = "#C62828";
-  const PRIMARY = "#004B3A";
-
   function monthlySection(extra?: Partial<ReportChartSection>): ReportChartSection {
     const months = [
       "أغسطس 2025", "سبتمبر 2025", "أكتوبر 2025", "نوفمبر 2025", "ديسمبر 2025",
@@ -387,6 +388,30 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
       ...extra,
     };
   }
+
+  it("resolveLegendColumnCount packs 1–5 items as expected", () => {
+    expect(resolveLegendColumnCount(1)).toBe(1);
+    expect(resolveLegendColumnCount(2)).toBe(2);
+    expect(resolveLegendColumnCount(3)).toBe(3);
+    expect(resolveLegendColumnCount(4)).toBe(2);
+    expect(resolveLegendColumnCount(5)).toBe(2);
+  });
+
+  it("bar series use solid dash and late line uses danger + dashed stroke", () => {
+    const svg = buildChartSvg(monthlySection(), 800, 360);
+    // Four series present
+    expect(svg).toContain("واردة");
+    expect(svg).toContain("مغلقة");
+    expect(svg).toContain("مفتوحة نهاية الشهر");
+    expect(svg).toContain("متأخرة نهاية الشهر");
+    // Two polylines (open + late); late dashed
+    expect(svg.match(/<polyline /g) ?? []).toHaveLength(2);
+    expect(svg).toMatch(/stroke-dasharray="6,4"/);
+    expect(svg).toContain(`stroke="${DANGER}"`);
+    // Bar swatches are solid gold/primary, not dashed via line
+    expect(svg).toContain(`fill="${PRIMARY}"`);
+    expect(svg).toContain(`fill="${GOLD}"`);
+  });
 
   it("uses a single shared Y-axis (no right-axis dual scale)", () => {
     const svg = buildChartSvg(monthlySection(), 800, 360);
@@ -445,6 +470,19 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
           expect(overlap).toBe(false);
         }
       }
+    }
+  });
+
+  it("legend reserved band sits above the plot floor", () => {
+    const svg = buildChartSvg(monthlySection(), 800, 360);
+    // Legend text y should be small; plot bottom axis y near height - 36
+    const legendTextYs = [...svg.matchAll(/font-size="11"[^>]*y="([^"]+)"/g)]
+      .map((m) => parseFloat(m[1]))
+      .filter((y) => Number.isFinite(y));
+    const axisBottomMatches = [...svg.matchAll(/y2="(\d+(?:\.\d+)?)" stroke="#D8BE7A"/g)]
+      .map((m) => parseFloat(m[1]));
+    if (legendTextYs.length > 0 && axisBottomMatches.length > 0) {
+      expect(Math.max(...legendTextYs.slice(0, 4))).toBeLessThan(Math.min(...axisBottomMatches));
     }
   });
 

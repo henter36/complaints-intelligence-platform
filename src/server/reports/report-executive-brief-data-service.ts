@@ -852,59 +852,111 @@ function nonDateComplaintWhere(filters: ReportFilters, now: Date): Prisma.Compla
  * Aggregates four monthly series for the V2 chart over a pre-built history window.
  * Exportable pure function for unit tests.
  */
+type MonthlyTrendAccumulator = {
+  receivedCount: number;
+  closedDuringMonthCount: number;
+  openAtMonthEndCount: number;
+  lateAtMonthEndCount: number;
+};
+
+function createMonthlyTrendAccumulator(): MonthlyTrendAccumulator {
+  return {
+    receivedCount: 0,
+    closedDuringMonthCount: 0,
+    openAtMonthEndCount: 0,
+    lateAtMonthEndCount: 0,
+  };
+}
+
+function wasReceivedDuringMonth(
+  createdMs: number,
+  monthStartMs: number,
+  monthEndExclusiveMs: number
+): boolean {
+  return createdMs >= monthStartMs && createdMs < monthEndExclusiveMs;
+}
+
+function wasClosedDuringMonth(
+  trustedClosedAt: Date | null,
+  monthStartMs: number,
+  monthEndExclusiveMs: number
+): boolean {
+  if (!trustedClosedAt) return false;
+  const closedMs = trustedClosedAt.getTime();
+  return closedMs >= monthStartMs && closedMs < monthEndExclusiveMs;
+}
+
+function wasOpenAtMonthEnd(
+  createdMs: number,
+  trustedClosedAt: Date | null,
+  monthEndExclusiveMs: number
+): boolean {
+  if (createdMs >= monthEndExclusiveMs) return false;
+  if (trustedClosedAt !== null && trustedClosedAt.getTime() < monthEndExclusiveMs) {
+    return false;
+  }
+  return true;
+}
+
+/** Late when exclusive month end is strictly after createdAt + 7 days. */
+function wasLateAtMonthEnd(createdMs: number, monthEndExclusiveMs: number): boolean {
+  const deadlineMs = createdMs + COMPLAINT_SLA_DURATION_MS;
+  return monthEndExclusiveMs > deadlineMs;
+}
+
+function accumulateComplaintForMonth(
+  accumulator: MonthlyTrendAccumulator,
+  complaint: TrendComplaint,
+  monthStartMs: number,
+  monthEndExclusiveMs: number
+): void {
+  const createdAt = resolveTrendCreatedAt(complaint);
+  if (!createdAt) return;
+  const createdMs = createdAt.getTime();
+  const trustedClosedAt = resolveTrustedClosedAt(complaint);
+
+  if (wasReceivedDuringMonth(createdMs, monthStartMs, monthEndExclusiveMs)) {
+    accumulator.receivedCount += 1;
+  }
+  if (wasClosedDuringMonth(trustedClosedAt, monthStartMs, monthEndExclusiveMs)) {
+    accumulator.closedDuringMonthCount += 1;
+  }
+  if (!wasOpenAtMonthEnd(createdMs, trustedClosedAt, monthEndExclusiveMs)) {
+    return;
+  }
+  accumulator.openAtMonthEndCount += 1;
+  if (wasLateAtMonthEnd(createdMs, monthEndExclusiveMs)) {
+    accumulator.lateAtMonthEndCount += 1;
+  }
+}
+
 export function aggregateMonthlyComplaintTrend(
   complaints: readonly TrendComplaint[],
   buckets: readonly MonthBucket[]
 ): MonthlyComplaintTrendPoint[] {
   return buckets.map((bucket) => {
-    const startMs = bucket.from.getTime();
-    const endMs = bucket.toExclusive.getTime(); // exclusive month end (= next month 00:00 UTC)
-    let receivedCount = 0;
-    let closedDuringMonthCount = 0;
-    let openAtMonthEndCount = 0;
-    let lateAtMonthEndCount = 0;
-
-    for (const c of complaints) {
-      const createdAt = resolveTrendCreatedAt(c);
-      if (!createdAt) continue;
-      const createdMs = createdAt.getTime();
-      const trustedClosedAt = resolveTrustedClosedAt(c);
-
-      // receivedCount: actual creation date inside the month
-      if (createdMs >= startMs && createdMs < endMs) {
-        receivedCount++;
-      }
-
-      // closedDuringMonthCount: trusted closedAt inside the month
-      if (trustedClosedAt) {
-        const closedMs = trustedClosedAt.getTime();
-        if (closedMs >= startMs && closedMs < endMs) {
-          closedDuringMonthCount++;
-        }
-      }
-
-      // openAtMonthEnd: created on or before month end, not closed at or before month end
-      if (createdMs >= endMs) continue;
-      const closedByMonthEnd = trustedClosedAt !== null && trustedClosedAt.getTime() < endMs;
-      if (closedByMonthEnd) continue;
-
-      openAtMonthEndCount++;
-      // late when monthEnd > createdAt + 7 days (exact 7-day boundary is not late)
-      const deadlineMs = createdMs + COMPLAINT_SLA_DURATION_MS;
-      if (endMs > deadlineMs) {
-        lateAtMonthEndCount++;
-      }
+    const monthStartMs = bucket.from.getTime();
+    const monthEndExclusiveMs = bucket.toExclusive.getTime();
+    const accumulator = createMonthlyTrendAccumulator();
+    for (const complaint of complaints) {
+      accumulateComplaintForMonth(accumulator, complaint, monthStartMs, monthEndExclusiveMs);
     }
-
     return {
       monthKey: bucket.key,
       monthLabel: bucket.label,
-      receivedCount,
-      closedDuringMonthCount,
-      openAtMonthEndCount,
-      lateAtMonthEndCount,
+      ...accumulator,
     };
   });
+}
+
+function findEarliestDate(candidates: readonly Date[]): Date | null {
+  const firstCandidate = candidates[0];
+  if (!firstCandidate) return null;
+  return candidates.slice(1).reduce(
+    (earliest, candidate) =>
+      candidate.getTime() < earliest.getTime() ? candidate : earliest,
+    firstCandidate
+  );
 }
 
 async function fetchEarliestAvailableComplaintDate(
@@ -941,8 +993,7 @@ async function fetchEarliestAvailableComplaintDate(
     .map((row) => resolveTrendCreatedAt(row))
     .filter((d): d is Date => d !== null);
 
-  if (candidates.length === 0) return null;
-  return candidates.reduce((min, d) => (d.getTime() < min.getTime() ? d : min));
+  return findEarliestDate(candidates);
 }
 
 async function buildMonthlyStockFlow(
@@ -967,8 +1018,10 @@ async function buildMonthlyStockFlow(
   });
   if (buckets.length === 0) return [];
 
+  const lastBucket = buckets.at(-1);
+  if (!lastBucket) return [];
   // toExclusive of last month = first day of the month after report end month
-  const windowToExclusive = buckets[buckets.length - 1].toExclusive;
+  const windowToExclusive = lastBucket.toExclusive;
 
   const baseWhere = nonDateComplaintWhere(filters, now);
 

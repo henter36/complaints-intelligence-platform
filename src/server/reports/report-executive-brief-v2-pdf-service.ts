@@ -700,6 +700,200 @@ function kpiSpecialSubText(card: ExecutiveBriefKpiCard): string | null {
   return null;
 }
 
+type KpiCardLayout = {
+  pad: number;
+  innerX: number;
+  innerWidth: number;
+  iconCenterX: number;
+  iconCenterY: number;
+  iconRadius: number;
+  titleY: number;
+  titleHeight: number;
+  valueTop: number;
+  valueHeight: number;
+  metaY: number;
+  subtitleHeight: number;
+  hasComparison: boolean;
+  specialSub: string | null;
+};
+
+function resolveKpiMaxFontSize(
+  card: ExecutiveBriefKpiCard,
+  isUnavailable: boolean,
+  longNumber: boolean
+): number {
+  if (isUnavailable) return 12;
+  if (longNumber) return 16;
+  if (card.format === "percent") return 18;
+  return 20;
+}
+
+function resolveKpiMinFontSize(isUnavailable: boolean): number {
+  if (isUnavailable) return 9;
+  return 10;
+}
+
+function resolveKpiPreviousFractionDigits(
+  format: ExecutiveBriefKpiCard["format"]
+): number {
+  if (format === "number") return 0;
+  return 1;
+}
+
+function computeKpiCardLayout(
+  card: ExecutiveBriefKpiCard,
+  x: number,
+  y: number,
+  cardW: number,
+  cardH: number
+): KpiCardLayout {
+  const pad = 6;
+  const iconRadius = 16;
+  const iconCenterX = x + cardW / 2;
+  const iconCenterY = y + iconRadius + 6;
+  const titleY = iconCenterY + iconRadius + 3;
+  const titleHeight = 16;
+  const specialSub = kpiSpecialSubText(card);
+  const hasComparison = card.difference !== null && specialSub === null;
+  let comparisonReserve = 0;
+  if (hasComparison && card.previousValue !== null) {
+    comparisonReserve = 24;
+  } else if (hasComparison) {
+    comparisonReserve = 14;
+  }
+  const subtitleHeight = specialSub ? 16 : 0;
+  const bottomReserve = comparisonReserve + subtitleHeight + 6;
+  const valueTop = titleY + titleHeight + 1;
+  const valueBottom = y + cardH - bottomReserve;
+  return {
+    pad,
+    innerX: x + pad,
+    innerWidth: cardW - pad * 2,
+    iconCenterX,
+    iconCenterY,
+    iconRadius,
+    titleY,
+    titleHeight,
+    valueTop,
+    valueHeight: Math.max(18, valueBottom - valueTop),
+    metaY: valueBottom + 2,
+    subtitleHeight,
+    hasComparison,
+    specialSub,
+  };
+}
+
+function drawKpiCardFrameAndIcon(
+  doc: PDFKit.PDFDocument,
+  card: ExecutiveBriefKpiCard,
+  x: number,
+  y: number,
+  cardW: number,
+  cardH: number,
+  layout: KpiCardLayout
+): void {
+  const r = REPORT_DESIGN_TOKENS.card.radius;
+  doc.roundedRect(x, y, cardW, cardH, r).fillAndStroke(COLORS.background, COLORS.border);
+  doc.circle(layout.iconCenterX, layout.iconCenterY, layout.iconRadius)
+    .lineWidth(1.5)
+    .strokeColor(COLORS.gold)
+    .stroke();
+  doc.lineWidth(1);
+  const iconType = ICON_KEY_MAP[card.key] ?? "clipboard";
+  drawIcon(doc, iconType, layout.iconCenterX, layout.iconCenterY, layout.iconRadius);
+}
+
+function drawKpiCardTitle(
+  doc: PDFKit.PDFDocument,
+  card: ExecutiveBriefKpiCard,
+  layout: KpiCardLayout
+): void {
+  doc.font("Body").fontSize(8.5).fillColor(COLORS.neutral).text(
+    preparePdfText(card.label),
+    layout.innerX,
+    layout.titleY,
+    {
+      width: layout.innerWidth,
+      height: layout.titleHeight,
+      align: "center",
+      wordSpacing: WORD_SPACING,
+      ellipsis: true,
+    }
+  );
+}
+
+function drawKpiCardPrimaryValue(
+  doc: PDFKit.PDFDocument,
+  card: ExecutiveBriefKpiCard,
+  layout: KpiCardLayout
+): void {
+  const valueText = formatKpiValue(card);
+  const isUnavailable = card.value === null;
+  const longNumber =
+    !isUnavailable && card.format === "number" && Math.abs(card.value ?? 0) >= 1000;
+  drawKpiValue(doc, valueText, layout.innerX, layout.valueTop, layout.innerWidth, layout.valueHeight, {
+    isUnavailable,
+    maxFontSize: resolveKpiMaxFontSize(card, isUnavailable, longNumber),
+    minFontSize: resolveKpiMinFontSize(isUnavailable),
+  });
+}
+
+function drawKpiCardSpecialSubtitle(
+  doc: PDFKit.PDFDocument,
+  specialSub: string,
+  layout: KpiCardLayout
+): void {
+  drawKpiMeta(doc, specialSub, layout.innerX, layout.metaY, layout.innerWidth, {
+    fontSize: 7,
+    height: layout.subtitleHeight - 1,
+  });
+}
+
+function drawKpiCardComparison(
+  doc: PDFKit.PDFDocument,
+  card: ExecutiveBriefKpiCard,
+  layout: KpiCardLayout,
+  cardW: number
+): void {
+  const dir = directionFromAssessment(card.assessment);
+  const deltaText = formatKpiDelta(card);
+  const arrowSize = 10;
+  const deltaSize = fitTextToBox(
+    doc,
+    deltaText,
+    layout.innerWidth - arrowSize - 6,
+    8.5,
+    7,
+    "Body"
+  );
+  const deltaW = measurePreparedArabicText(doc, deltaText, deltaSize, "Body");
+  const rowW = arrowSize + 4 + deltaW;
+  const cardLeft = layout.innerX - layout.pad;
+  const centeredStart = cardLeft + (cardW - rowW) / 2;
+  drawDirectionArrow(doc, dir, centeredStart, layout.metaY, arrowSize);
+  doc.font("Body").fontSize(deltaSize).fillColor(directionColor(dir)).text(
+    preparePdfText(deltaText),
+    centeredStart + arrowSize + 4,
+    layout.metaY,
+    {
+      width: deltaW + 2,
+      height: 11,
+      align: "left",
+      lineBreak: false,
+      wordSpacing: WORD_SPACING,
+    }
+  );
+  if (card.previousValue === null) return;
+  const previousFractionDigits = resolveKpiPreviousFractionDigits(card.format);
+  const prev = `السابق ${formatReportNumber(card.previousValue, {
+    maximumFractionDigits: previousFractionDigits,
+  })}`;
+  drawKpiMeta(doc, prev, layout.innerX, layout.metaY + 11, layout.innerWidth, {
+    fontSize: 7.5,
+    height: 11,
+  });
+}
+
 /**
  * Fixed-zone KPI card:
  * 1) icon  2) title  3) primary value  4) optional subtitle  5) comparison/trend
@@ -713,76 +907,14 @@ function drawIconKpiCard(
   cardW: number,
   cardH: number
 ): void {
-  const r = REPORT_DESIGN_TOKENS.card.radius;
-  const pad = 6;
-  const innerW = cardW - pad * 2;
-  doc.roundedRect(x, y, cardW, cardH, r).fillAndStroke(COLORS.background, COLORS.border);
-
-  // 1. Icon zone (compact to free vertical room for value/subtitle)
-  const circR = 16;
-  const circX = x + cardW / 2;
-  const circY = y + circR + 6;
-  doc.circle(circX, circY, circR).lineWidth(1.5).strokeColor(COLORS.gold).stroke();
-  doc.lineWidth(1);
-  const iconType = ICON_KEY_MAP[card.key] ?? "clipboard";
-  drawIcon(doc, iconType, circX, circY, circR);
-
-  // 2. Title zone
-  const titleY = circY + circR + 3;
-  const titleH = 16;
-  doc.font("Body").fontSize(8.5).fillColor(COLORS.neutral).text(
-    preparePdfText(card.label), x + pad, titleY,
-    { width: innerW, height: titleH, align: "center", wordSpacing: WORD_SPACING, ellipsis: true }
-  );
-
-  // 3. Value zone + 4. Subtitle zone OR 5. Comparison zone (fixed bands from bottom)
-  const specialSub = kpiSpecialSubText(card);
-  const hasComparison = card.difference !== null && !specialSub;
-  const comparisonH = hasComparison ? (card.previousValue !== null ? 24 : 14) : 0;
-  const subtitleH = specialSub ? 16 : 0;
-  const bottomReserve = comparisonH + subtitleH + 6;
-  const valueTop = titleY + titleH + 1;
-  const valueBottom = y + cardH - bottomReserve;
-  const valueH = Math.max(18, valueBottom - valueTop);
-
-  const valueText = formatKpiValue(card);
-  const isUnavailable = card.value === null;
-  const longNumber = !isUnavailable
-    && card.format === "number"
-    && Math.abs(card.value ?? 0) >= 1000;
-  drawKpiValue(doc, valueText, x + pad, valueTop, innerW, valueH, {
-    isUnavailable,
-    maxFontSize: isUnavailable ? 12 : longNumber ? 16 : card.format === "percent" ? 18 : 20,
-    minFontSize: isUnavailable ? 9 : 10,
-  });
-
-  // Subtitle / comparison are mutually exclusive zones so they never share
-  // a baseline with the main value (compliance needs subtitle; other metrics need delta).
-  let metaY = valueBottom + 2;
-  if (specialSub) {
-    drawKpiMeta(doc, specialSub, x + pad, metaY, innerW, {
-      fontSize: 7,
-      height: subtitleH - 1,
-    });
-  } else if (hasComparison) {
-    const dir = directionFromAssessment(card.assessment);
-    const deltaText = formatKpiDelta(card);
-    // Arrow + delta on one measured row (only two elements)
-    const arrowSize = 10;
-    const deltaSize = fitTextToBox(doc, deltaText, innerW - arrowSize - 6, 8.5, 7, "Body");
-    const deltaW = measurePreparedArabicText(doc, deltaText, deltaSize, "Body");
-    const rowW = arrowSize + 4 + deltaW;
-    const rowStart = x + (cardW - rowW) / 2;
-    drawDirectionArrow(doc, dir, rowStart, metaY, arrowSize);
-    doc.font("Body").fontSize(deltaSize).fillColor(directionColor(dir)).text(
-      preparePdfText(deltaText), rowStart + arrowSize + 4, metaY,
-      { width: deltaW + 2, height: 11, align: "left", lineBreak: false, wordSpacing: WORD_SPACING }
-    );
-    metaY += 11;
-    if (card.previousValue !== null) {
-      const prev = `السابق ${formatReportNumber(card.previousValue, { maximumFractionDigits: card.format === "number" ? 0 : 1 })}`;
-      drawKpiMeta(doc, prev, x + pad, metaY, innerW, { fontSize: 7.5, height: 11 });
-    }
+  const layout = computeKpiCardLayout(card, x, y, cardW, cardH);
+  drawKpiCardFrameAndIcon(doc, card, x, y, cardW, cardH, layout);
+  drawKpiCardTitle(doc, card, layout);
+  drawKpiCardPrimaryValue(doc, card, layout);
+  if (layout.specialSub) {
+    drawKpiCardSpecialSubtitle(doc, layout.specialSub, layout);
+  } else if (layout.hasComparison) {
+    drawKpiCardComparison(doc, card, layout, cardW);
   }
   resetInk(doc);
 }

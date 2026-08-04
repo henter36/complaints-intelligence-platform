@@ -220,9 +220,6 @@ export type MonthlyComplaintTrendPoint = {
   lateAtMonthEndCount: number;
 };
 
-/** @deprecated Prefer MonthlyComplaintTrendPoint; kept as a compat alias. */
-export type MonthlyStockFlowPoint = MonthlyComplaintTrendPoint;
-
 // ---------------------------------------------------------------------------
 // Concentration analysis
 // ---------------------------------------------------------------------------

@@ -3,6 +3,8 @@
 // Unit tests for the executive brief data builder.
 // All DB calls are mocked — no real SQLite instance required in CI.
 
+import fs from "node:fs";
+import path from "node:path";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   buildExecutiveBriefData,
@@ -1470,8 +1472,8 @@ describe("computeMonthlyHistoryWindow", () => {
       maxMonths: 13,
     });
     expect(buckets[0].key).toBe("2025-11");
-    expect(buckets[buckets.length - 1].key).toBe("2026-08");
-    expect(buckets.length).toBe(10);
+    expect(buckets.at(-1)?.key).toBe("2026-08");
+    expect(buckets).toHaveLength(10);
   });
 
   it("never creates a month after report end month", () => {
@@ -1493,7 +1495,7 @@ describe("computeMonthlyHistoryWindow", () => {
       earliestAvailableDate: new Date("2025-01-01T00:00:00.000Z"),
       maxMonths: 13,
     });
-    expect(buckets[buckets.length - 1].key).toBe("2026-08");
+    expect(buckets.at(-1)?.key).toBe("2026-08");
   });
 });
 
@@ -1619,5 +1621,26 @@ describe("aggregateMonthlyComplaintTrend", () => {
         closedAt: new Date("2026-07-01T00:00:00.000Z"),
       })
     ).toBeNull();
+  });
+
+  it("empty month buckets yield empty trend", () => {
+    expect(aggregateMonthlyComplaintTrend([], [])).toEqual([]);
+  });
+});
+
+describe("MonthlyComplaintTrendPoint contract (no MonthlyStockFlowPoint alias)", () => {
+  it("alias MonthlyStockFlowPoint is gone from source surface", () => {
+    const contract = fs.readFileSync(
+      path.join(process.cwd(), "src/lib/reports/report-contract.ts"),
+      "utf8"
+    );
+    const dataService = fs.readFileSync(
+      path.join(process.cwd(), "src/server/reports/report-data-service.ts"),
+      "utf8"
+    );
+    expect(contract).not.toMatch(/MonthlyStockFlowPoint/);
+    expect(dataService).not.toMatch(/MonthlyStockFlowPoint/);
+    expect(contract).toContain("MonthlyComplaintTrendPoint");
+    expect(dataService).toContain("monthlyStockFlow: MonthlyComplaintTrendPoint[]");
   });
 });
