@@ -6,6 +6,7 @@ import {
   ComplaintPriority,
   ComplaintStatus,
   ImportBatchStatus,
+  ImportChangeType,
   ImportRowAction,
   ImportRowValidationStatus,
   PeriodType,
@@ -15,9 +16,14 @@ import {
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   confirmReadyImportBatch,
+  IMPORT_EXTERNAL_ID_CONFLICT,
+  IMPORT_EXTERNAL_ID_TOMBSTONE_CONFLICT,
   ImportConfirmationError,
+  resolveImportedSubject,
   rollbackConfirmedImportBatch,
+  toImportConfirmationErrorResponse,
 } from "./import-confirmation-service";
+import { deriveSubject } from "./subject-derive";
 
 // Mock startTextRiskScan to keep integration tests isolated from the analysis service.
 // The scan is fire-and-forget, so mocking it has no effect on confirmation assertions.
@@ -261,13 +267,38 @@ describe("transactional import confirmation", () => {
     });
 
     expect(rollback).toMatchObject({ status: "ROLLED_BACK", revertedCreates: 1, revertedUpdates: 1 });
-    await expect(prisma.complaint.findUniqueOrThrow({ where: { id: createdRow.createdComplaintId! } })).resolves.toMatchObject({
-      isDeleted: true,
+    const rolledCreated = await prisma.complaint.findUniqueOrThrow({
+      where: { id: createdRow.createdComplaintId! },
     });
+    expect(rolledCreated).toMatchObject({
+      isDeleted: true,
+      externalId: null,
+    });
+    expect(rolledCreated.deletedAt).toBeInstanceOf(Date);
+    expect(rolledCreated.version).toBeGreaterThan(1);
+
+    const createSnapshot = await prisma.importChangeSnapshot.findFirstOrThrow({
+      where: { complaintId: createdRow.createdComplaintId!, changeType: ImportChangeType.CREATE },
+    });
+    expect(createSnapshot.afterData).toMatchObject({
+      externalId: createdRow.externalId,
+    });
+    expect(createdRow.normalizedData).toMatchObject({
+      externalId: createdRow.externalId,
+    });
+
     await expect(prisma.complaint.findUniqueOrThrow({ where: { id: existing.id } })).resolves.toMatchObject({
       subject: "قبل التراجع",
       status: ComplaintStatus.OPEN,
+      externalId: existing.externalId,
+      isDeleted: false,
     });
+    await expect(prisma.auditLog.count({
+      where: {
+        entityId: createdRow.createdComplaintId!,
+        action: "IMPORT_COMPLAINT_CREATION_REVERSED",
+      },
+    })).resolves.toBe(1);
     await expect(rollbackConfirmedImportBatch(batch.id, { reason: "مرة ثانية", client: prisma })).rejects.toMatchObject({
       code: "IMPORT_BATCH_STATE_CONFLICT",
     });
@@ -791,5 +822,331 @@ describe("scan trigger on import confirmation", () => {
     expect(startTextRiskScanMock).toHaveBeenCalledWith(
       expect.objectContaining({ importBatchId: batch.id })
     );
+  });
+});
+
+describe("reimport after rollback and externalId conflicts (Issue #42)", () => {
+  async function confirmNewWithExternalId(externalId: string, subject = "شكوى") {
+    const batch = await createReadyBatch();
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 1,
+      action: ImportRowAction.NEW,
+      normalizedData: {
+        externalId,
+        complaintDate: "2026-07-02T00:00:00.000Z",
+        receivedAt: "2026-07-02T00:00:00.000Z",
+        subject,
+        status: ComplaintStatus.OPEN,
+        priority: ComplaintPriority.MEDIUM,
+      },
+    });
+    await prisma.importBatch.update({
+      where: { id: batch.id },
+      data: { totalRows: 1, validRows: 1, newRows: 1 },
+    });
+    await confirmReadyImportBatch(batch.id, { client: prisma, actor: "single-admin" });
+    return batch;
+  }
+
+  it("releases externalId on CREATE rollback and allows confirm→rollback→reimport→confirm twice", async () => {
+    const externalId = `EXT-REIMPORT-${crypto.randomUUID()}`;
+
+    for (let cycle = 0; cycle < 2; cycle += 1) {
+      const batch = await confirmNewWithExternalId(externalId, `دورة ${cycle + 1}`);
+      const created = await prisma.complaint.findFirstOrThrow({
+        where: { externalId, isDeleted: false },
+      });
+
+      await rollbackConfirmedImportBatch(batch.id, {
+        reason: `تراجع دورة ${cycle + 1}`,
+        client: prisma,
+      });
+
+      const tombstone = await prisma.complaint.findUniqueOrThrow({ where: { id: created.id } });
+      expect(tombstone).toMatchObject({
+        isDeleted: true,
+        externalId: null,
+      });
+      expect(tombstone.deletedAt).toBeInstanceOf(Date);
+
+      const snapshot = await prisma.importChangeSnapshot.findFirstOrThrow({
+        where: { complaintId: created.id, changeType: ImportChangeType.CREATE },
+      });
+      expect(snapshot.afterData).toMatchObject({ externalId });
+
+      const reimportBatch = await confirmNewWithExternalId(externalId, `إعادة ${cycle + 1}`);
+      const active = await prisma.complaint.findMany({
+        where: { externalId, isDeleted: false },
+      });
+      expect(active).toHaveLength(1);
+      expect(active[0]!.id).not.toBe(created.id);
+
+      await expect(prisma.importBatch.findUniqueOrThrow({ where: { id: reimportBatch.id } })).resolves.toMatchObject({
+        status: ImportBatchStatus.CONFIRMED,
+        appliedCreatedRows: 1,
+      });
+
+      await rollbackConfirmedImportBatch(reimportBatch.id, {
+        reason: `تنظيف دورة ${cycle + 1}`,
+        client: prisma,
+      });
+    }
+  });
+
+  it("preserves externalId when rolling back an UPDATE", async () => {
+    const externalId = `EXT-UPD-RB-${crypto.randomUUID()}`;
+    const existing = await createComplaint(externalId, "قبل التحديث");
+    const batch = await createReadyBatch();
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 1,
+      action: ImportRowAction.UPDATE,
+      matchedComplaintId: existing.id,
+      matchedComplaintVersion: existing.version,
+      normalizedData: {
+        externalId,
+        complaintDate: existing.complaintDate?.toISOString(),
+        receivedAt: existing.receivedAt.toISOString(),
+        subject: "بعد التحديث",
+        status: ComplaintStatus.IN_PROGRESS,
+        priority: ComplaintPriority.HIGH,
+      },
+    });
+
+    await confirmReadyImportBatch(batch.id, { client: prisma });
+    await rollbackConfirmedImportBatch(batch.id, { reason: "استعادة تحديث", client: prisma });
+
+    await expect(prisma.complaint.findUniqueOrThrow({ where: { id: existing.id } })).resolves.toMatchObject({
+      externalId,
+      subject: "قبل التحديث",
+      isDeleted: false,
+      status: ComplaintStatus.OPEN,
+    });
+  });
+
+  it("releases eligible legacy tombstones inside confirmation and creates the new complaint", async () => {
+    const externalId = `EXT-LEGACY-${crypto.randomUUID()}`;
+    const originBatch = await createReadyBatch();
+    await prisma.importBatch.update({
+      where: { id: originBatch.id },
+      data: { status: ImportBatchStatus.ROLLED_BACK, rolledBackAt: new Date() },
+    });
+
+    const tombstone = await prisma.complaint.create({
+      data: {
+        externalId,
+        complaintDate: new Date("2026-06-01T00:00:00Z"),
+        receivedAt: new Date("2026-06-01T00:00:00Z"),
+        subject: "tombstone legacy",
+        status: ComplaintStatus.OPEN,
+        priority: ComplaintPriority.MEDIUM,
+        isDeleted: true,
+        deletedAt: new Date("2026-06-02T00:00:00Z"),
+        importBatchId: originBatch.id,
+        version: 2,
+      },
+    });
+    const originRow = await addRow({
+      batchId: originBatch.id,
+      rowNumber: 1,
+      action: ImportRowAction.NEW,
+      normalizedData: { externalId, subject: "tombstone legacy" },
+    });
+    await prisma.importChangeSnapshot.create({
+      data: {
+        importBatchId: originBatch.id,
+        importBatchRowId: originRow.id,
+        complaintId: tombstone.id,
+        changeType: ImportChangeType.CREATE,
+        afterData: {
+          externalId,
+          subject: "tombstone legacy",
+          status: ComplaintStatus.OPEN,
+          priority: ComplaintPriority.MEDIUM,
+          severity: ComplaintPriority.MEDIUM,
+          receivedAt: "2026-06-01T00:00:00.000Z",
+        },
+        versionAfter: 1,
+      },
+    });
+
+    await confirmNewWithExternalId(externalId, "جديد بعد legacy");
+
+    await expect(prisma.complaint.findUniqueOrThrow({ where: { id: tombstone.id } })).resolves.toMatchObject({
+      isDeleted: true,
+      externalId: null,
+    });
+    await expect(prisma.complaint.findFirstOrThrow({
+      where: { externalId, isDeleted: false },
+    })).resolves.toMatchObject({
+      subject: "جديد بعد legacy",
+    });
+  });
+
+  it("rejects confirmation when an active complaint already owns the externalId", async () => {
+    const externalId = `EXT-ACTIVE-${crypto.randomUUID()}`;
+    await createComplaint(externalId, "قائمة");
+
+    const batch = await createReadyBatch();
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 1,
+      action: ImportRowAction.NEW,
+      normalizedData: {
+        externalId,
+        complaintDate: "2026-07-02T00:00:00.000Z",
+        subject: "محاولة تكرار نشط",
+      },
+    });
+
+    const error = await confirmReadyImportBatch(batch.id, { client: prisma }).catch((err) => err);
+    expect(error).toBeInstanceOf(ImportConfirmationError);
+    expect(error).toMatchObject({
+      code: IMPORT_EXTERNAL_ID_CONFLICT,
+      status: 409,
+    });
+    const response = toImportConfirmationErrorResponse(error);
+    expect(response).toMatchObject({
+      status: 409,
+      body: { error: { code: IMPORT_EXTERNAL_ID_CONFLICT } },
+    });
+
+    await expect(prisma.importBatch.findUniqueOrThrow({ where: { id: batch.id } })).resolves.toMatchObject({
+      status: ImportBatchStatus.READY_FOR_CONFIRMATION,
+      appliedCreatedRows: 0,
+    });
+    await expect(prisma.complaint.count({ where: { externalId, isDeleted: false } })).resolves.toBe(1);
+  });
+
+  it("rejects ineligible deleted tombstones without a CREATE snapshot", async () => {
+    const externalId = `EXT-INELIGIBLE-${crypto.randomUUID()}`;
+    await prisma.complaint.create({
+      data: {
+        externalId,
+        complaintDate: new Date("2026-06-01T00:00:00Z"),
+        receivedAt: new Date("2026-06-01T00:00:00Z"),
+        subject: "حذف يدوي",
+        status: ComplaintStatus.OPEN,
+        priority: ComplaintPriority.MEDIUM,
+        isDeleted: true,
+        deletedAt: new Date(),
+      },
+    });
+
+    const batch = await createReadyBatch();
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 1,
+      action: ImportRowAction.NEW,
+      normalizedData: {
+        externalId,
+        complaintDate: "2026-07-02T00:00:00.000Z",
+        subject: "محاولة",
+      },
+    });
+
+    await expect(confirmReadyImportBatch(batch.id, { client: prisma })).rejects.toMatchObject({
+      code: IMPORT_EXTERNAL_ID_TOMBSTONE_CONFLICT,
+      status: 409,
+    });
+    await expect(prisma.importBatch.findUniqueOrThrow({ where: { id: batch.id } })).resolves.toMatchObject({
+      status: ImportBatchStatus.READY_FOR_CONFIRMATION,
+      appliedCreatedRows: 0,
+    });
+    await expect(prisma.complaint.findFirst({ where: { externalId } })).resolves.toMatchObject({
+      externalId,
+      isDeleted: true,
+    });
+  });
+
+  it("keeps confirmation atomic when a later NEW row conflicts with an active externalId", async () => {
+    const okId = `EXT-ATOMIC-OK-${crypto.randomUUID()}`;
+    const conflictId = `EXT-ATOMIC-BAD-${crypto.randomUUID()}`;
+    await createComplaint(conflictId, "نشطة");
+
+    const batch = await createReadyBatch();
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 1,
+      action: ImportRowAction.NEW,
+      normalizedData: {
+        externalId: okId,
+        complaintDate: "2026-07-02T00:00:00.000Z",
+        subject: "صالح",
+      },
+    });
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 2,
+      action: ImportRowAction.NEW,
+      normalizedData: {
+        externalId: conflictId,
+        complaintDate: "2026-07-02T00:00:00.000Z",
+        subject: "متعارض",
+      },
+    });
+
+    await expect(confirmReadyImportBatch(batch.id, { client: prisma })).rejects.toMatchObject({
+      code: IMPORT_EXTERNAL_ID_CONFLICT,
+    });
+
+    await expect(prisma.complaint.count({ where: { externalId: okId } })).resolves.toBe(0);
+    await expect(prisma.importBatch.findUniqueOrThrow({ where: { id: batch.id } })).resolves.toMatchObject({
+      status: ImportBatchStatus.READY_FOR_CONFIRMATION,
+      appliedCreatedRows: 0,
+    });
+  });
+});
+
+describe("resolveImportedSubject", () => {
+  it("trims and prefers an explicit subject", () => {
+    expect(
+      resolveImportedSubject({
+        subject: "  موضوع صريح  ",
+        sourceDetail: "تفصيل",
+        description: "وصف",
+      })
+    ).toBe("موضوع صريح");
+  });
+
+  it("uses sourceDetail when subject is blank whitespace", () => {
+    expect(
+      resolveImportedSubject({
+        subject: "   ",
+        sourceDetail: "  تفصيل مصدري  ",
+        description: "وصف",
+      })
+    ).toBe("تفصيل مصدري");
+  });
+
+  it("derives from description when subject and sourceDetail are absent", () => {
+    expect(
+      resolveImportedSubject({
+        subject: undefined,
+        sourceDetail: undefined,
+        description: "وصف الشكوى",
+      })
+    ).toBe(deriveSubject("وصف الشكوى"));
+  });
+
+  it("falls back to the default label when no subject sources exist", () => {
+    expect(
+      resolveImportedSubject({
+        subject: undefined,
+        sourceDetail: undefined,
+        description: undefined,
+      })
+    ).toBe("بدون موضوع");
+  });
+
+  it("does not use sourceDetail or description when an explicit subject is present", () => {
+    expect(
+      resolveImportedSubject({
+        subject: "الأولوية للموضوع",
+        sourceDetail: "لا يجب استخدامه",
+        description: "ولا هذا",
+      })
+    ).toBe("الأولوية للموضوع");
   });
 });
