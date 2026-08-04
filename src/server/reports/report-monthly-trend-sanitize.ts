@@ -6,7 +6,7 @@ const MONTH_KEY_RE = /^(\d{4})-(\d{2})$/;
 export function monthKeyFromReportEndDate(reportEndDate: string): string | null {
   const trimmed = reportEndDate.trim();
   // Accept full ISO or plain YYYY-MM-DD; use the date portion only.
-  const datePart = trimmed.includes("T") ? trimmed.slice(0, 10) : trimmed.slice(0, 10);
+  const datePart = trimmed.slice(0, 10);
   const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(datePart);
   if (!match) return null;
   const year = Number(match[1]);
@@ -56,7 +56,7 @@ export function sanitizeMonthlyTrendForReport(
   }
 
   const sorted = [...byKey.values()].sort((a, b) =>
-    a.monthKey < b.monthKey ? -1 : a.monthKey > b.monthKey ? 1 : 0
+    a.monthKey.localeCompare(b.monthKey)
   );
   if (sorted.length <= maxMonths) return sorted;
   return sorted.slice(sorted.length - maxMonths);

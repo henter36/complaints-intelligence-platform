@@ -351,8 +351,6 @@ export type ChartLegendLabelBox = {
 export type ChartLegendLayout = {
   svg: string;
   height: number;
-  /** @deprecated Prefer labelBoxes for text-bounds assertions. */
-  itemBoxes: Array<{ x: number; y: number; width: number; height: number; name: string }>;
   labelBoxes: ChartLegendLabelBox[];
 };
 
@@ -388,7 +386,6 @@ export function drawChartLegend(
   const colW = usable / columns;
 
   const parts: string[] = [];
-  const itemBoxes: ChartLegendLayout["itemBoxes"] = [];
   const labelBoxes: ChartLegendLabelBox[] = [];
 
   items.forEach((item, index) => {
@@ -430,14 +427,6 @@ export function drawChartLegend(
       `<text x="${textX.toFixed(1)}" y="${(cy + fitted.fontSize * 0.35).toFixed(1)}" text-anchor="end" font-size="${fitted.fontSize}" fill="${COLORS.primary}" direction="rtl" unicode-bidi="plaintext">${escapeXml(fitted.text)}</text>`
     );
 
-    itemBoxes.push({
-      x: cellLeft,
-      y: cy - rowH / 2,
-      width: cellRight - cellLeft,
-      height: rowH,
-      name: item.name,
-    });
-
     const labelRight = textX;
     const labelLeft = textX - fitted.measuredWidth;
     labelBoxes.push({
@@ -457,7 +446,6 @@ export function drawChartLegend(
   return {
     svg: parts.join("\n"),
     height: 12 + rows * rowH,
-    itemBoxes,
     labelBoxes,
   };
 }
@@ -754,12 +742,16 @@ export function resolveChartGeometry(options: {
   plotTop: number;
   xCount: number;
 }): ChartGeometry {
-  const safePlotBottom = Math.max(1, options.height - 36);
+  const requestedPlotBottom = options.height - 36;
+  const safePlotBottom = Number.isFinite(requestedPlotBottom)
+    ? Math.max(1, requestedPlotBottom)
+    : 1;
   const availableHeight = Math.max(1, safePlotBottom);
   const effectiveMinimumHeight = Math.min(MIN_PLOT_HEIGHT, availableHeight);
   const maximumPlotTop = safePlotBottom - effectiveMinimumHeight;
   let safePlotTop = Math.max(0, Math.min(options.plotTop, maximumPlotTop));
-  if (!(safePlotTop < safePlotBottom) || !Number.isFinite(safePlotTop) || !Number.isFinite(safePlotBottom)) {
+
+  if (!Number.isFinite(safePlotTop) || safePlotTop >= safePlotBottom) {
     safePlotTop = Math.max(0, safePlotBottom - 1);
   }
   return {
