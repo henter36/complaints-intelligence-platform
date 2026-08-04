@@ -33,8 +33,8 @@ import {
   importDetailValuesAsKeywords,
   extractSourceDetail,
   listImportedDetailValues,
-  normalizeImportedDetailValue,
 } from "./imported-detail-values-service";
+import { normalizeClassificationKeyword } from "@/lib/classifications/classification-keyword-normalizer";
 
 describe("imported detail values", () => {
   beforeEach(() => {
@@ -71,8 +71,8 @@ describe("imported detail values", () => {
     ["وكـالة", "وَكَالَة"],
     ["طلب   نقل", "  طلب نقل  "],
   ])("uses the central Arabic normalization policy for %s and %s", (left, right) => {
-    expect(normalizeImportedDetailValue(left)).toBe(normalizeImportedDetailValue(right));
-    expect(normalizeImportedDetailValue(left)).not.toBe("");
+    expect(normalizeClassificationKeyword(left)).toBe(normalizeClassificationKeyword(right));
+    expect(normalizeClassificationKeyword(left)).not.toBe("");
   });
 
   it("reads applied rows from confirmed batches only and groups Arabic variants", async () => {
@@ -124,7 +124,7 @@ describe("imported detail values", () => {
     });
     expect(result.items).toEqual([
       expect.objectContaining({
-        normalizedValue: normalizeImportedDetailValue("وكالة"),
+        normalizedValue: normalizeClassificationKeyword("وكالة"),
         displayValue: "وكالة",
         occurrences: 3,
         linkedKeywordsCount: 1,

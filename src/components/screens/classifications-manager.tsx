@@ -111,7 +111,8 @@ export type ClassificationDialogMode =
   | "EDIT_CATEGORY"
   | "EDIT_CLASSIFICATION"
   | "CREATE_CATEGORY"
-  | "CREATE_CLASSIFICATION";
+  | "CREATE_CLASSIFICATION"
+  | "UNSUPPORTED";
 
 export type ClassificationDialogPresentation = {
   mode: ClassificationDialogMode;
@@ -143,8 +144,8 @@ export function getClassificationDialogPresentation(
       };
     }
     return {
-      mode: "EDIT_CLASSIFICATION",
-      title: "تعديل التصنيف",
+      mode: "UNSUPPORTED",
+      title: "تعذر تعديل العنصر",
       description: "نوع عقدة التصنيف غير مدعوم",
       icon: "edit",
     };
@@ -274,13 +275,18 @@ async function loadClassificationTree(signal?: AbortSignal): Promise<Classificat
   return normalizeClassificationTree(classData);
 }
 
-async function loadDashboardDistribution(
+export async function loadDashboardDistribution(
   signal?: AbortSignal
 ): Promise<Map<string, number> | null> {
-  const dashRes = await fetch("/api/dashboard", { signal });
-  if (!dashRes.ok) return null;
-  const dashData: DashboardData = await dashRes.json();
-  return buildDistributionMap(dashData);
+  try {
+    const dashRes = await fetch("/api/dashboard", { signal });
+    if (!dashRes.ok) return null;
+    const dashData: DashboardData = await dashRes.json();
+    return buildDistributionMap(dashData);
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    return null;
+  }
 }
 
 export async function loadClassificationManagerData(signal?: AbortSignal): Promise<{
@@ -1029,8 +1035,20 @@ export function ClassificationsManager() {
 
   const editingIsCategory = editing ? isCategoryNode(editing) : creatingCategory;
   const dialogPresentation = getClassificationDialogPresentation(editing, creatingCategory);
+  const isUnsupportedEdit = dialogPresentation.mode === "UNSUPPORTED";
+  const showClassificationFields =
+    dialogPresentation.mode === "EDIT_CLASSIFICATION"
+    || dialogPresentation.mode === "CREATE_CLASSIFICATION";
 
   const handleSubmit = async () => {
+    if (dialogPresentation.mode === "UNSUPPORTED") {
+      toast({
+        title: "خطأ في الحفظ",
+        description: "نوع عقدة التصنيف غير مدعوم",
+        variant: "destructive",
+      });
+      return;
+    }
     if (!formName.trim()) {
       toast({
         title: "تحقق من البيانات",
@@ -1271,6 +1289,15 @@ export function ClassificationsManager() {
           </DialogHeader>
 
           <div className="space-y-4 py-2">
+            {isUnsupportedEdit ? (
+              <div
+                className="rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive"
+                role="alert"
+              >
+                {dialogPresentation.description}
+              </div>
+            ) : (
+              <>
             <div className="space-y-1.5">
               <Label htmlFor="cls-name">
                 الاسم <span className="text-destructive">*</span>
@@ -1298,7 +1325,7 @@ export function ClassificationsManager() {
               />
             </div>
 
-            {!editingIsCategory && (
+            {showClassificationFields && (
               <>
                 <div className="space-y-1.5">
                   <Label>الفئة</Label>
@@ -1376,13 +1403,18 @@ export function ClassificationsManager() {
                 </div>
               </>
             )}
+              </>
+            )}
           </div>
 
           <DialogFooter>
             <DialogClose asChild>
               <Button variant="outline">إلغاء</Button>
             </DialogClose>
-            <Button onClick={() => void handleSubmit()} disabled={submitting}>
+            <Button
+              onClick={() => void handleSubmit()}
+              disabled={submitting || isUnsupportedEdit}
+            >
               {submitting ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (

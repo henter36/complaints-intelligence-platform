@@ -147,22 +147,26 @@ function keywordCounts(previous: string[], next: string[]) {
 
 function isRetryableTransactionError(error: unknown): boolean {
   if (error instanceof ClassificationManagementError) return false;
-  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) {
-    const message = error instanceof Error ? error.message.toLowerCase() : "";
+
+  if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    // Transient write/serialization conflict only — never retry request timeouts.
+    return error.code === "P2034";
+  }
+
+  if (error instanceof Prisma.PrismaClientUnknownRequestError) {
+    const message = error.message;
     return (
-      message.includes("serialization")
-      || message.includes("could not serialize")
+      message.includes("SQLITE_BUSY")
       || message.includes("database is locked")
-      || message.includes("sqlite_busy")
-      || message.includes("deadlock")
     );
   }
-  return (
-    error.code === "P2034"
-    || error.code === "P1008"
-    || error.code === "P2028"
-    || /busy|locked|serialization|deadlock/i.test(error.message)
-  );
+
+  return false;
+}
+
+/** Exported for unit coverage of the concurrent keyword retry policy. */
+export function isRetryableClassificationTransactionError(error: unknown): boolean {
+  return isRetryableTransactionError(error);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -188,8 +192,8 @@ export async function runSerializableClassificationMutation<T>(
         async (tx) => operation(tx as TransactionClient),
         {
           isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
-          maxWait: 5_000,
-          timeout: 15_000,
+          maxWait: 2_000,
+          timeout: 5_000,
         }
       );
     } catch (error) {
@@ -487,7 +491,7 @@ function readStoredKeywordsTolerantly(
 
 function resolveNextKeywordList(
   previousKeywords: string[],
-  inputKeywords: unknown | undefined
+  inputKeywords: unknown
 ): NormalizedKeywordList {
   if (inputKeywords !== undefined) {
     return normalizeAndValidateKeywords(inputKeywords);

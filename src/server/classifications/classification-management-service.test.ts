@@ -4,8 +4,10 @@ import {
   ClassificationManagementError,
   createCategory,
   createClassification,
+  isRetryableClassificationTransactionError,
   normalizeAndValidateKeywords,
   normalizeStoredClassificationKeywords,
+  runSerializableClassificationMutation,
   updateCategory,
   updateClassification,
 } from "./classification-management-service";
@@ -410,5 +412,106 @@ describe("classification management service", () => {
       client as never
     );
     expect(updated.keywords).toEqual(["جديد"]);
+  });
+});
+
+describe("isRetryableClassificationTransactionError", () => {
+  it("retries P2034 only among known Prisma codes", () => {
+    expect(
+      isRetryableClassificationTransactionError(
+        new Prisma.PrismaClientKnownRequestError("conflict", {
+          code: "P2034",
+          clientVersion: "test",
+        })
+      )
+    ).toBe(true);
+    expect(
+      isRetryableClassificationTransactionError(
+        new Prisma.PrismaClientKnownRequestError("timeout", {
+          code: "P2028",
+          clientVersion: "test",
+        })
+      )
+    ).toBe(false);
+    expect(
+      isRetryableClassificationTransactionError(
+        new Prisma.PrismaClientKnownRequestError("ops timeout", {
+          code: "P1008",
+          clientVersion: "test",
+        })
+      )
+    ).toBe(false);
+  });
+
+  it("retries SQLite lock only on PrismaClientUnknownRequestError", () => {
+    expect(
+      isRetryableClassificationTransactionError(
+        new Prisma.PrismaClientUnknownRequestError("SQLITE_BUSY: database is locked", {
+          clientVersion: "test",
+        })
+      )
+    ).toBe(true);
+    expect(
+      isRetryableClassificationTransactionError(
+        new Prisma.PrismaClientUnknownRequestError("database is locked", {
+          clientVersion: "test",
+        })
+      )
+    ).toBe(true);
+    expect(
+      isRetryableClassificationTransactionError(new Error("deadlock between workers"))
+    ).toBe(false);
+  });
+
+  it("never retries domain errors", () => {
+    expect(
+      isRetryableClassificationTransactionError(
+        new ClassificationManagementError(
+          "KEYWORD_ALREADY_LINKED_TO_ANOTHER_CLASSIFICATION",
+          "x",
+          409
+        )
+      )
+    ).toBe(false);
+  });
+
+  it("does not exceed maxAttempts on repeated P2034", async () => {
+    let calls = 0;
+    const failingClient = {
+      $transaction: async () => {
+        calls += 1;
+        throw new Prisma.PrismaClientKnownRequestError("conflict", {
+          code: "P2034",
+          clientVersion: "test",
+        });
+      },
+      category: {},
+      classification: {},
+      auditLog: {},
+    };
+    await expect(
+      runSerializableClassificationMutation(failingClient as never, async () => "ok", 3)
+    ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+    expect(calls).toBe(3);
+  });
+
+  it("does not retry P2028", async () => {
+    let calls = 0;
+    const failingClient = {
+      $transaction: async () => {
+        calls += 1;
+        throw new Prisma.PrismaClientKnownRequestError("timeout", {
+          code: "P2028",
+          clientVersion: "test",
+        });
+      },
+      category: {},
+      classification: {},
+      auditLog: {},
+    };
+    await expect(
+      runSerializableClassificationMutation(failingClient as never, async () => "ok", 3)
+    ).rejects.toMatchObject({ code: "P2028" });
+    expect(calls).toBe(1);
   });
 });

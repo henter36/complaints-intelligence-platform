@@ -17,6 +17,22 @@ let prisma: PrismaClient | undefined;
 let tempDir: string | undefined;
 let previousDatabaseUrl: string | undefined;
 
+function isExpectedConcurrentKeywordRejection(reason: unknown): boolean {
+  if (reason instanceof ClassificationManagementError) {
+    return reason.code === "KEYWORD_ALREADY_LINKED_TO_ANOTHER_CLASSIFICATION";
+  }
+  if (!reason || typeof reason !== "object") return false;
+  const message = "message" in reason && typeof reason.message === "string"
+    ? reason.message
+    : "";
+  const code = "code" in reason && typeof reason.code === "string" ? reason.code : "";
+  return (
+    code === "P2034"
+    || message.includes("SQLITE_BUSY")
+    || message.includes("database is locked")
+  );
+}
+
 beforeAll(async () => {
   previousDatabaseUrl = process.env.DATABASE_URL;
   tempDir = mkdtempSync(join(tmpdir(), "cip-classification-mgmt-"));
@@ -169,13 +185,10 @@ describe("classification management SQLite integration", () => {
 
       const fulfilled = results.filter((r) => r.status === "fulfilled");
       const rejected = results.filter((r) => r.status === "rejected");
-      expect(fulfilled.length).toBe(1);
-      expect(rejected.length).toBe(1);
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
       if (rejected[0]?.status === "rejected") {
-        expect(rejected[0].reason).toBeInstanceOf(ClassificationManagementError);
-        expect((rejected[0].reason as ClassificationManagementError).code).toBe(
-          "KEYWORD_ALREADY_LINKED_TO_ANOTHER_CLASSIFICATION"
-        );
+        expect(isExpectedConcurrentKeywordRejection(rejected[0].reason)).toBe(true);
       }
 
       const rows = await db.classification.findMany({

@@ -168,7 +168,7 @@ function buildLinkedClassificationsByValue(
   const linkedByValue = new Map<string, Set<string>>();
   for (const classification of classifications) {
     for (const keyword of parseKeywords(classification.keywords)) {
-      const normalized = normalizeImportedDetailValue(keyword);
+      const normalized = normalizeClassificationKeyword(keyword);
       if (!normalized) continue;
       const linkedIds = linkedByValue.get(normalized) ?? new Set<string>();
       linkedIds.add(classification.id);
@@ -190,7 +190,7 @@ function appendDetailRows(
       rawFallbackById.get(row.id)
     );
     if (!displayValue) continue;
-    const normalizedValue = normalizeImportedDetailValue(displayValue);
+    const normalizedValue = normalizeClassificationKeyword(displayValue);
     if (!normalizedValue) continue;
     rowsWithSourceDetail += 1;
 
@@ -319,7 +319,7 @@ export async function listImportedDetailValues(input: {
 } = {}, client: ImportedDetailValuesClient = db): Promise<ImportedDetailValuesResult> {
   const page = positiveInteger(input.page, 1);
   const pageSize = Math.min(100, positiveInteger(input.pageSize, 50));
-  const search = normalizeImportedDetailValue(input.search ?? "");
+  const search = normalizeClassificationKeyword(input.search ?? "");
   const linkStatus = input.linkStatus ?? "ALL";
 
   const [confirmedBatchCount, classifications] = await Promise.all([
@@ -385,7 +385,7 @@ export async function importDetailValuesAsKeywords(input: {
   for (const value of input.values) {
     const displayValue = normalizeTextCell(value);
     if (!displayValue) continue;
-    const normalizedValue = normalizeImportedDetailValue(displayValue);
+    const normalizedValue = normalizeClassificationKeyword(displayValue);
     if (normalizedValue && !requested.has(normalizedValue)) requested.set(normalizedValue, displayValue);
   }
   if (requested.size === 0) {
@@ -406,7 +406,7 @@ export async function importDetailValuesAsKeywords(input: {
     for (const classification of classifications) {
       if (classification.id === current.id) continue;
       const normalizedKeywords = new Set(
-        parseKeywords(classification.keywords).map(normalizeImportedDetailValue)
+        parseKeywords(classification.keywords).map(normalizeClassificationKeyword)
       );
       for (const [normalizedValue, displayValue] of requested) {
         if (normalizedKeywords.has(normalizedValue)) conflictingValues.push(displayValue);
@@ -422,7 +422,7 @@ export async function importDetailValuesAsKeywords(input: {
     }
 
     const existing = parseKeywords(current.keywords);
-    const existingNormalized = new Set(existing.map(normalizeImportedDetailValue));
+    const existingNormalized = new Set(existing.map(normalizeClassificationKeyword));
     const additions = [...requested].filter(([normalizedValue]) => !existingNormalized.has(normalizedValue));
     const keywords = [...existing, ...additions.map(([, displayValue]) => displayValue)];
 

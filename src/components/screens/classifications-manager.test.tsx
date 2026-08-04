@@ -13,6 +13,8 @@ import {
   ClassificationsManager,
   getClassificationDialogPresentation,
   ImportedDetailPicker,
+  loadClassificationManagerData,
+  loadDashboardDistribution,
 } from "./classifications-manager";
 
 const treePayload = [
@@ -116,6 +118,17 @@ describe("pure dialog helpers", () => {
 
     expect(getClassificationDialogPresentation(null, true).mode).toBe("CREATE_CATEGORY");
     expect(getClassificationDialogPresentation(null, false).mode).toBe("CREATE_CLASSIFICATION");
+    expect(
+      getClassificationDialogPresentation(
+        { id: "x", nodeType: "UNKNOWN" as never, name: "؟", parentId: null },
+        false
+      )
+    ).toEqual(
+      expect.objectContaining({
+        mode: "UNSUPPORTED",
+        title: "تعذر تعديل العنصر",
+      })
+    );
   });
 });
 
@@ -341,21 +354,77 @@ describe("ClassificationsManager", () => {
     expect(await screen.findByRole("heading", { name: "عقدة غريبة" })).toBeInTheDocument();
     const user = userEvent.setup();
     await user.click(screen.getByTestId("edit-node-bad"));
-    await user.click(screen.getByRole("button", { name: "حفظ التغييرات" }));
 
-    await waitFor(() => {
-      expect(toastSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          title: "خطأ في الحفظ",
-          description: "نوع عقدة التصنيف غير مدعوم",
-        })
-      );
-    });
+    expect(await screen.findByRole("heading", { name: "تعذر تعديل العنصر" })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("نوع عقدة التصنيف غير مدعوم");
+    const saveButton = screen.getByRole("button", { name: "حفظ التغييرات" });
+    expect(saveButton).toBeDisabled();
+    expect(screen.queryByPlaceholderText(/اكتب كلمة مفتاحية/)).not.toBeInTheDocument();
+    expect(screen.queryByText("اللون المميز")).not.toBeInTheDocument();
+
+    // Disabled click should not produce mutation either
+    await user.click(saveButton);
+
     const mutations = fetchMock.mock.calls.filter(([, init]) => {
       const method = (init as RequestInit | undefined)?.method;
       return method && method !== "GET";
     });
     expect(mutations).toHaveLength(0);
+  });
+
+  it("keeps the classification tree when dashboard fails", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/dashboard")) {
+        return Promise.reject(new TypeError("network down"));
+      }
+      if (url.includes("/api/classifications")) {
+        return jsonResponse(treePayload);
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ClassificationsManager />);
+    expect(await screen.findByText("تصنيف فرعي")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "فئة رئيسية" })).toBeInTheDocument();
+  });
+
+  it("keeps the tree when dashboard returns invalid JSON", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/dashboard")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => {
+            throw new SyntaxError("bad json");
+          },
+        };
+      }
+      if (url.includes("/api/classifications")) {
+        return jsonResponse(treePayload);
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ClassificationsManager />);
+    expect(await screen.findByText("تصنيف فرعي")).toBeInTheDocument();
+  });
+
+  it("keeps the tree when dashboard is non-ok", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/dashboard")) {
+        return jsonResponse({ error: "nope" }, false, 500);
+      }
+      if (url.includes("/api/classifications")) {
+        return jsonResponse(treePayload);
+      }
+      return jsonResponse({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    render(<ClassificationsManager />);
+    expect(await screen.findByText("تصنيف فرعي")).toBeInTheDocument();
   });
 
   it("adds imported values to draft without POST import", async () => {
@@ -418,5 +487,36 @@ describe("ClassificationsManager", () => {
       );
     });
     expect(screen.getByRole("heading", { name: "تعديل الفئة الرئيسية" })).toBeInTheDocument();
+  });
+});
+
+describe("loadDashboardDistribution isolation", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("rethrows abort errors", async () => {
+    const abortError = new DOMException("Aborted", "AbortError");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockRejectedValue(abortError)
+    );
+    await expect(loadDashboardDistribution()).rejects.toBe(abortError);
+  });
+
+  it("returns null for network failures while loadClassificationManagerData still loads tree", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/dashboard")) {
+          throw new TypeError("network");
+        }
+        return jsonResponse(treePayload);
+      })
+    );
+    const data = await loadClassificationManagerData();
+    expect(data.tree).toHaveLength(1);
+    expect(data.distribution).toBeNull();
   });
 });
