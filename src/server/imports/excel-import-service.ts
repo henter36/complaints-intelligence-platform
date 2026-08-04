@@ -235,10 +235,11 @@ export function resolveIncomingIdentity(row: NormalizedComplaintRow): IncomingId
     };
   }
 
-  const hasFingerprintSignal = Boolean(
-    complaintDate || row.region || row.facility || row.department || row.subject
+  const hasDescriptiveFingerprintField = Boolean(
+    row.region || row.facility || row.department || row.subject
   );
-  if (!hasFingerprintSignal) {
+  // Fingerprint requires a date plus at least one descriptive field; date-only is not enough.
+  if (!complaintDate || !hasDescriptiveFingerprintField) {
     return { kind: "NONE" };
   }
 
