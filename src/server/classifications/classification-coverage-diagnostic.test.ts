@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { analyzeClassificationCoverage } from "./classification-coverage-diagnostic";
+import {
+  analyzeClassificationCoverage,
+  analyzeCurrentResolverCoverage,
+} from "./classification-coverage-diagnostic";
 
 function row(
   complaintId: string,
@@ -9,6 +12,40 @@ function row(
 ) {
   return { complaintId, normalizedData, validationWarnings, createdAt };
 }
+
+const category = {
+  id: "cat_1",
+  nameAr: "فئة",
+  isActive: true,
+  isDeleted: false,
+};
+
+const classifications = [
+  {
+    id: "cls_1",
+    nameAr: "تصنيف أول",
+    keywords: ["تفصيل مطابق", "تفصيل متكرر"],
+    isActive: true,
+    isDeleted: false,
+    category,
+  },
+  {
+    id: "cls_2",
+    nameAr: "تصنيف ثان",
+    keywords: ["تفصيل ملتبس"],
+    isActive: true,
+    isDeleted: false,
+    category,
+  },
+  {
+    id: "cls_3",
+    nameAr: "تصنيف ثالث",
+    keywords: ["تفصيل ملتبس"],
+    isActive: true,
+    isDeleted: false,
+    category,
+  },
+];
 
 describe("analyzeClassificationCoverage", () => {
   it("separates linked, text-only, matched-but-unlinked, ambiguous, unresolved, and missing cases", () => {
@@ -84,6 +121,51 @@ describe("analyzeClassificationCoverage", () => {
       unresolved: 0,
       missingClassificationInput: 0,
       classificationCoverageRate: 0,
+    });
+  });
+});
+
+describe("analyzeCurrentResolverCoverage", () => {
+  it("projects current matches without modifying complaints", () => {
+    const result = analyzeCurrentResolverCoverage(
+      [
+        { id: "linked", classificationId: "cls_existing", sourceDetail: "تفصيل مطابق" },
+        { id: "match-1", classificationId: null, sourceDetail: "تفصيل مطابق" },
+        { id: "match-2", classificationId: null, sourceDetail: "تفصيل متكرر" },
+        { id: "match-3", classificationId: null, sourceDetail: "تفصيل متكرر" },
+        { id: "ambiguous", classificationId: null, sourceDetail: "تفصيل ملتبس" },
+        { id: "unmatched", classificationId: null, sourceDetail: "قيمة غير معروفة" },
+        { id: "missing", classificationId: null, sourceDetail: null },
+      ],
+      classifications
+    );
+
+    expect(result).toEqual({
+      evaluatedUnclassifiedWithSourceDetail: 5,
+      currentMatchedComplaints: 3,
+      currentAmbiguousComplaints: 1,
+      currentUnmatchedComplaints: 1,
+      distinctSourceDetailValues: 4,
+      currentMatchedDistinctValues: 2,
+      currentAmbiguousDistinctValues: 1,
+      currentUnmatchedDistinctValues: 1,
+      projectedClassifiedById: 4,
+      projectedClassificationCoverageRate: 57.1,
+    });
+  });
+
+  it("returns an empty projection when there is no data", () => {
+    expect(analyzeCurrentResolverCoverage([], classifications)).toEqual({
+      evaluatedUnclassifiedWithSourceDetail: 0,
+      currentMatchedComplaints: 0,
+      currentAmbiguousComplaints: 0,
+      currentUnmatchedComplaints: 0,
+      distinctSourceDetailValues: 0,
+      currentMatchedDistinctValues: 0,
+      currentAmbiguousDistinctValues: 0,
+      currentUnmatchedDistinctValues: 0,
+      projectedClassifiedById: 0,
+      projectedClassificationCoverageRate: 0,
     });
   });
 });
