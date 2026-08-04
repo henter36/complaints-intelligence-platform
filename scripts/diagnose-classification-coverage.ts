@@ -1,6 +1,7 @@
 import { PrismaClient, type Prisma } from "@prisma/client";
 import {
   analyzeClassificationCoverage,
+  analyzeCurrentResolverCoverage,
   type ClassificationDiagnosticImportRow,
 } from "../src/server/classifications/classification-coverage-diagnostic";
 
@@ -86,23 +87,58 @@ async function main(): Promise<void> {
   if (from > to) throw new Error("يجب ألا يسبق --to تاريخ --from");
   const toExclusive = new Date(to.getTime() + DAY_MS);
 
-  const complaints = await prisma.complaint.findMany({
-    where: effectiveDateWhere(from, toExclusive),
-    select: {
-      id: true,
-      classificationId: true,
-      sourceDetail: true,
-    },
-  });
+  const [complaints, classifications] = await Promise.all([
+    prisma.complaint.findMany({
+      where: effectiveDateWhere(from, toExclusive),
+      select: {
+        id: true,
+        classificationId: true,
+        sourceDetail: true,
+      },
+    }),
+    prisma.classification.findMany({
+      where: {
+        isActive: true,
+        isDeleted: false,
+        category: { isActive: true, isDeleted: false },
+      },
+      select: {
+        id: true,
+        nameAr: true,
+        keywords: true,
+        isActive: true,
+        isDeleted: true,
+        category: {
+          select: {
+            id: true,
+            nameAr: true,
+            isActive: true,
+            isDeleted: true,
+          },
+        },
+      },
+    }),
+  ]);
   const rows = await fetchImportRows(complaints.map((complaint) => complaint.id));
-  const diagnostic = analyzeClassificationCoverage(complaints, rows);
+  const historicalCoverage = analyzeClassificationCoverage(complaints, rows);
+  const currentResolverCoverage = analyzeCurrentResolverCoverage(
+    complaints,
+    classifications
+  );
 
   console.log(JSON.stringify({
     period: {
       from: from.toISOString().slice(0, 10),
       to: to.toISOString().slice(0, 10),
     },
-    ...diagnostic,
+    historicalCoverage,
+    currentResolverCoverage,
+    taxonomy: {
+      activeClassifications: classifications.length,
+      classificationsWithKeywords: classifications.filter((item) => {
+        return Array.isArray(item.keywords) && item.keywords.length > 0;
+      }).length,
+    },
   }, null, 2));
 }
 
