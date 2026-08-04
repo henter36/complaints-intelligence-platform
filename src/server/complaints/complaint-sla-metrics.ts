@@ -39,6 +39,10 @@ function percentage(numerator: number, denominator: number): number | null {
     : null;
 }
 
+function roundNullable(value: number | null): number | null {
+  return value === null ? null : roundToTenth(value);
+}
+
 export function buildComplaintSlaMetrics(
   complaints: readonly ComplaintSlaSnapshot[],
   measuredAt = new Date()
@@ -52,6 +56,8 @@ export function buildComplaintSlaMetrics(
   const eligibleCount = timing.filter((item) => item.isEligible).length;
   const compliantCount = timing.filter((item) => item.isCompliant).length;
   const nonCompliantCount = eligibleCount - compliantCount;
+  const averageResolutionDays = average(resolutionDurations);
+  const medianResolutionDays = median(resolutionDurations);
 
   return {
     eligibleCount,
@@ -65,12 +71,8 @@ export function buildComplaintSlaMetrics(
       (item) => item.state === "CLOSED_WITHOUT_TRUSTED_DATE"
     ).length,
     complianceRate: percentage(compliantCount, eligibleCount),
-    averageResolutionDays: average(resolutionDurations) === null
-      ? null
-      : roundToTenth(average(resolutionDurations)!),
-    medianResolutionDays: median(resolutionDurations) === null
-      ? null
-      : roundToTenth(median(resolutionDurations)!),
+    averageResolutionDays: roundNullable(averageResolutionDays),
+    medianResolutionDays: roundNullable(medianResolutionDays),
     averageResolutionEligibleCount: resolutionDurations.length,
   };
 }
