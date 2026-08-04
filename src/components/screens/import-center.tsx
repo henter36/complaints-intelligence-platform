@@ -56,6 +56,10 @@ import {
   ClipboardX,
 } from "lucide-react";
 import { formatNumber, formatDate } from "@/lib/ar-utils";
+import {
+  QUALITY_OBSERVATION_DISPLAY_LIMIT,
+  buildQualityObservationsSummary,
+} from "@/server/imports/import-preview-presentation";
 
 // ===== Types =====
 
@@ -273,6 +277,40 @@ export function formatPreviewValue(value: unknown): string {
   return "—";
 }
 
+/**
+ * Prefer a non-blank complaint number; blank/whitespace falls through to externalId.
+ * Empty strings must not win over a real externalId (unlike `??`).
+ */
+export function resolvePreviewComplaintNumber(
+  row: Pick<ImportPreviewRow, "complaintNumber" | "externalId">
+): string | undefined {
+  const complaintNumber =
+    typeof row.complaintNumber === "string" ? row.complaintNumber.trim() : "";
+  if (complaintNumber) {
+    return complaintNumber;
+  }
+
+  const externalId =
+    typeof row.externalId === "string" ? row.externalId.trim() : "";
+  return externalId || undefined;
+}
+
+/** Safe preview date display — never call formatDate with untrusted invalid strings. */
+export function formatPreviewDate(
+  value: string | Date | null | undefined
+): string {
+  if (value == null || value === "") {
+    return "—";
+  }
+
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return "—";
+  }
+
+  return formatDate(parsed);
+}
+
 /** Never surface as free-form preview columns (sensitive or oversized). */
 export const HIDDEN_PREVIEW_FIELDS = new Set([
   "rawData",
@@ -306,20 +344,14 @@ export function buildImportQualitySummary(result: UploadResult): string {
     return result.qualityObservationsSummary;
   }
 
-  const blockingRowCount = resolveBlockingRowCount(result);
-  const warningRowCount = resolveWarningRowCount(result);
-  const qualityDisplayLimit = result.qualityDisplayLimit ?? 100;
-
-  if (blockingRowCount === 0 && warningRowCount === 0) {
-    return "لا توجد أخطاء مانعة أو ملاحظات جودة في الصفوف المعروضة.";
-  }
-  if (blockingRowCount > 0 && warningRowCount > 0) {
-    return `يوجد ${formatNumber(blockingRowCount)} صفوف مانعة و${formatNumber(warningRowCount)} صفوف تحتوي ملاحظات جودة. يعرض النظام أول ${formatNumber(qualityDisplayLimit)} ملاحظة، مع تقديم الصفوف المانعة أولًا.`;
-  }
-  if (blockingRowCount > 0) {
-    return `يوجد ${formatNumber(blockingRowCount)} صفوف مانعة. يعرض النظام الصفوف المانعة ضمن حد العرض البالغ ${formatNumber(qualityDisplayLimit)}.`;
-  }
-  return `يوجد ${formatNumber(warningRowCount)} صفوف تحتوي ملاحظات جودة غير مانعة. يعرض النظام أول ${formatNumber(qualityDisplayLimit)} ملاحظة.`;
+  return buildQualityObservationsSummary({
+    blockingRowCount: resolveBlockingRowCount(result),
+    warningRowCount: resolveWarningRowCount(result),
+    displayedObservationCount:
+      result.displayedObservationCount ?? result.errors.length,
+    qualityDisplayLimit:
+      result.qualityDisplayLimit ?? QUALITY_OBSERVATION_DISPLAY_LIMIT,
+  });
 }
 
 function confirmationTitle(result: UploadResult): string {
@@ -346,10 +378,10 @@ function ImportReadyAlert({ result }: Readonly<{ result: UploadResult }>) {
 
   if (blockingRowCount > 0) {
     return (
-      <Alert className="border-amber-200 bg-amber-50 dark:bg-amber-950/30 dark:border-amber-900/50 text-amber-900 dark:text-amber-200">
-        <AlertTriangle className="h-4 w-4 text-amber-600" />
+      <Alert variant="destructive">
+        <AlertTriangle className="h-4 w-4" />
         <AlertTitle>توجد أخطاء تحتاج معالجة</AlertTitle>
-        <AlertDescription className="text-amber-800 dark:text-amber-300">
+        <AlertDescription>
           {buildImportQualitySummary(result)} لم يتم إنشاء أو تحديث أي شكوى حتى تُعالج الأخطاء المانعة.
         </AlertDescription>
       </Alert>
@@ -1511,12 +1543,10 @@ export function ImportCenter({ batchId }: Readonly<{ batchId?: string | null }>)
                                       {row.row}
                                     </TableCell>
                                     <TableCell className="font-mono text-xs">
-                                      {formatPreviewValue(row.complaintNumber ?? row.externalId)}
+                                      {formatPreviewValue(resolvePreviewComplaintNumber(row))}
                                     </TableCell>
                                     <TableCell className="text-xs">
-                                      {row.receivedDate
-                                        ? formatDate(row.receivedDate)
-                                        : "—"}
+                                      {formatPreviewDate(row.receivedDate)}
                                     </TableCell>
                                     <TableCell className="text-xs">
                                       {formatPreviewValue(row.sourceOrigin)}

@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { formatDate } from "@/lib/ar-utils";
 import {
   buildImportMessageKey,
   buildImportQualitySummary,
   defaultPeriodRange,
   displayPreviewCell,
   formatLocalDate,
+  formatPreviewDate,
   formatPreviewValue,
   getImportResultLabel,
   getVisiblePreviewEntries,
@@ -12,6 +14,7 @@ import {
   mappingContainsComplaintNumber,
   normalizeUploadResultPayload,
   resolveBlockingRowCount,
+  resolvePreviewComplaintNumber,
   resolveWarningRowCount,
 } from "./import-center";
 
@@ -205,5 +208,80 @@ describe("formatPreviewValue", () => {
     expect(HIDDEN_PREVIEW_FIELDS.has("rawData")).toBe(true);
     expect(keys).not.toContain("rawData");
     expect(keys).not.toContain("complainantIdentifier");
+  });
+});
+
+describe("resolvePreviewComplaintNumber", () => {
+  it("falls back to externalId when complaintNumber is empty", () => {
+    expect(
+      resolvePreviewComplaintNumber({
+        complaintNumber: "",
+        externalId: "COMP/1",
+      })
+    ).toBe("COMP/1");
+  });
+
+  it("falls back to externalId when complaintNumber is whitespace-only", () => {
+    expect(
+      resolvePreviewComplaintNumber({
+        complaintNumber: "   ",
+        externalId: "COMP/2",
+      })
+    ).toBe("COMP/2");
+  });
+
+  it("prefers a trimmer non-blank complaintNumber over externalId", () => {
+    expect(
+      resolvePreviewComplaintNumber({
+        complaintNumber: " COMP/3 ",
+        externalId: "COMP/4",
+      })
+    ).toBe("COMP/3");
+  });
+
+  it("returns undefined when both identifiers are blank", () => {
+    expect(
+      resolvePreviewComplaintNumber({
+        complaintNumber: "  ",
+        externalId: "",
+      })
+    ).toBeUndefined();
+    expect(formatPreviewValue(resolvePreviewComplaintNumber({}))).toBe("—");
+  });
+});
+
+describe("formatPreviewDate", () => {
+  it("returns the empty placeholder for blank and invalid values", () => {
+    expect(formatPreviewDate("not-a-date")).toBe("—");
+    expect(formatPreviewDate("")).toBe("—");
+    expect(formatPreviewDate(null)).toBe("—");
+    expect(formatPreviewDate(undefined)).toBe("—");
+  });
+
+  it("formats a valid ISO date using formatDate", () => {
+    const iso = "2026-04-14T00:00:00.000Z";
+    expect(formatPreviewDate(iso)).toBe(formatDate(new Date(iso)));
+  });
+
+  it("does not throw when preview rows carry an invalid receivedDate", () => {
+    const previewRow = {
+      row: 44,
+      complaintNumber: "",
+      externalId: "COMP/06271",
+      receivedDate: "invalid-date",
+    };
+
+    expect(() => {
+      const complaintNumber = formatPreviewValue(
+        resolvePreviewComplaintNumber(previewRow)
+      );
+      const receivedDate = formatPreviewDate(previewRow.receivedDate);
+      return { complaintNumber, receivedDate };
+    }).not.toThrow();
+
+    expect(formatPreviewValue(resolvePreviewComplaintNumber(previewRow))).toBe(
+      "COMP/06271"
+    );
+    expect(formatPreviewDate(previewRow.receivedDate)).toBe("—");
   });
 });
