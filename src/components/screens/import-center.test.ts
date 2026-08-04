@@ -5,7 +5,10 @@ import {
   defaultPeriodRange,
   displayPreviewCell,
   formatLocalDate,
+  formatPreviewValue,
   getImportResultLabel,
+  getVisiblePreviewEntries,
+  HIDDEN_PREVIEW_FIELDS,
   mappingContainsComplaintNumber,
   normalizeUploadResultPayload,
   resolveBlockingRowCount,
@@ -156,5 +159,51 @@ describe("import result display helpers", () => {
     expect(displayPreviewCell(null)).toBe("—");
     expect(displayPreviewCell("")).toBe("—");
     expect(displayPreviewCell("COMP/1")).toBe("COMP/1");
+  });
+});
+
+describe("formatPreviewValue", () => {
+  it("formats primitive values", () => {
+    expect(formatPreviewValue("test")).toBe("test");
+    expect(formatPreviewValue(12)).toBe("12");
+    expect(formatPreviewValue(true)).toBe("true");
+  });
+
+  it("formats arrays without object default stringification", () => {
+    expect(formatPreviewValue(["أ", "ب"])).toBe("أ، ب");
+  });
+
+  it("serializes plain objects explicitly", () => {
+    expect(formatPreviewValue({ code: "X" })).toBe(
+      '{"code":"X"}',
+    );
+  });
+
+  it("does not return object default stringification", () => {
+    expect(formatPreviewValue({ value: 1 })).not.toBe(
+      "[object Object]",
+    );
+  });
+
+  it("handles nullish values", () => {
+    expect(formatPreviewValue(null)).toBe("—");
+    expect(formatPreviewValue(undefined)).toBe("—");
+  });
+
+  it("hides sensitive preview fields when building visible entries", () => {
+    const entries = getVisiblePreviewEntries({
+      subject: "موضوع",
+      rawData: { secret: true },
+      complainantIdentifier: "123",
+      complainantPhone: "050",
+      complainantIdentifierMasked: "***",
+      externalId: "COMP/1",
+    });
+
+    const keys = entries.map(([key]) => key);
+    expect(keys).toEqual(["subject", "externalId"]);
+    expect(HIDDEN_PREVIEW_FIELDS.has("rawData")).toBe(true);
+    expect(keys).not.toContain("rawData");
+    expect(keys).not.toContain("complainantIdentifier");
   });
 });

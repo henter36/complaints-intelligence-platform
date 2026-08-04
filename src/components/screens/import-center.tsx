@@ -227,9 +227,64 @@ export function normalizeUploadResultPayload(json: UploadResult): UploadResult {
 
 /** Presentation fallback when the API left a cell empty but the UI needs a marker. */
 export function displayPreviewCell(value: unknown): string {
-  if (value == null) return "—";
-  if (typeof value === "string" && value.trim() === "") return "—";
-  return String(value);
+  return formatPreviewValue(value);
+}
+
+/**
+ * Safe preview formatter — avoids default object stringification (`[object Object]`).
+ * Sensitive / bulky fields must be filtered via {@link getVisiblePreviewEntries} before display.
+ */
+export function formatPreviewValue(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "—";
+  }
+
+  if (typeof value === "string") {
+    return value.trim() || "—";
+  }
+
+  if (
+    typeof value === "number"
+    || typeof value === "boolean"
+    || typeof value === "bigint"
+  ) {
+    return String(value);
+  }
+
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? "—" : formatDate(value);
+  }
+
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => formatPreviewValue(item))
+      .filter((item) => item !== "—")
+      .join("، ") || "—";
+  }
+
+  if (typeof value === "object") {
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return "قيمة غير قابلة للعرض";
+    }
+  }
+
+  return "—";
+}
+
+/** Never surface as free-form preview columns (sensitive or oversized). */
+export const HIDDEN_PREVIEW_FIELDS = new Set([
+  "rawData",
+  "complainantIdentifier",
+  "complainantPhone",
+  "complainantIdentifierMasked",
+]);
+
+export function getVisiblePreviewEntries(
+  row: Record<string, unknown>
+): Array<[string, unknown]> {
+  return Object.entries(row).filter(([key]) => !HIDDEN_PREVIEW_FIELDS.has(key));
 }
 
 export function resolveBlockingRowCount(result: UploadResult): number {
@@ -1456,7 +1511,7 @@ export function ImportCenter({ batchId }: Readonly<{ batchId?: string | null }>)
                                       {row.row}
                                     </TableCell>
                                     <TableCell className="font-mono text-xs">
-                                      {displayPreviewCell(row.complaintNumber ?? row.externalId)}
+                                      {formatPreviewValue(row.complaintNumber ?? row.externalId)}
                                     </TableCell>
                                     <TableCell className="text-xs">
                                       {row.receivedDate
@@ -1464,22 +1519,22 @@ export function ImportCenter({ batchId }: Readonly<{ batchId?: string | null }>)
                                         : "—"}
                                     </TableCell>
                                     <TableCell className="text-xs">
-                                      {displayPreviewCell(row.sourceOrigin)}
+                                      {formatPreviewValue(row.sourceOrigin)}
                                     </TableCell>
                                     <TableCell className="text-xs max-w-[200px] truncate">
-                                      {displayPreviewCell(row.subject)}
+                                      {formatPreviewValue(row.subject)}
                                     </TableCell>
                                     <TableCell className="text-xs">
-                                      {displayPreviewCell(row.sourceDetail)}
+                                      {formatPreviewValue(row.sourceDetail)}
                                     </TableCell>
                                     <TableCell className="text-xs">
-                                      {displayPreviewCell(row.sourceStatus)}
+                                      {formatPreviewValue(row.sourceStatus)}
                                     </TableCell>
                                     <TableCell className="text-xs">
-                                      {displayPreviewCell(row.statusDisplay || row.status)}
+                                      {formatPreviewValue(row.statusDisplay || row.status)}
                                     </TableCell>
                                     <TableCell className="text-xs">
-                                      {displayPreviewCell(row.sourceActionStatus)}
+                                      {formatPreviewValue(row.sourceActionStatus)}
                                     </TableCell>
                                   </TableRow>
                                 ))}
