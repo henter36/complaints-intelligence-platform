@@ -21,6 +21,7 @@ export type ImportedDetailValue = {
   linkedKeywordsCount: number;
   alreadyLinkedToCurrentClassification: boolean;
   linkedToOtherClassification: boolean;
+  linkedClassificationName?: string | null;
 };
 
 export type ImportedDetailValuesResult = {
@@ -280,11 +281,13 @@ function warnWhenConfirmedRowsHaveNoDetails(
 function buildImportedDetailValues(
   aggregates: ReadonlyMap<string, DetailAggregate>,
   linkedByValue: ReadonlyMap<string, Set<string>>,
-  classificationId: string | undefined
+  classificationId: string | undefined,
+  classificationNameById: ReadonlyMap<string, string>
 ): ImportedDetailValue[] {
   return [...aggregates.entries()].map(([normalizedValue, aggregate]) => {
     const linkedIds = linkedByValue.get(normalizedValue) ?? new Set<string>();
     const linkedToCurrent = Boolean(classificationId && linkedIds.has(classificationId));
+    const otherId = [...linkedIds].find((id) => id !== classificationId);
     return {
       normalizedValue,
       displayValue: bestDisplayValue(aggregate.variants),
@@ -292,6 +295,7 @@ function buildImportedDetailValues(
       linkedKeywordsCount: linkedIds.size,
       alreadyLinkedToCurrentClassification: linkedToCurrent,
       linkedToOtherClassification: [...linkedIds].some((id) => id !== classificationId),
+      linkedClassificationName: otherId ? classificationNameById.get(otherId) ?? null : null,
     };
   });
 }
@@ -325,17 +329,21 @@ export async function listImportedDetailValues(input: {
     client.importBatch.count({ where: { status: ImportBatchStatus.CONFIRMED } }),
     client.classification.findMany({
       where: { isActive: true, isDeleted: false },
-      select: { id: true, keywords: true },
+      select: { id: true, nameAr: true, keywords: true },
     }),
   ]);
 
+  const classificationNameById = new Map(
+    classifications.map((item) => [item.id, item.nameAr] as const)
+  );
   const linkedByValue = buildLinkedClassificationsByValue(classifications);
   const { aggregates, rowsScanned, rowsWithSourceDetail } =
     await aggregateImportedDetails(client);
   const availableItems = buildImportedDetailValues(
     aggregates,
     linkedByValue,
-    input.classificationId
+    input.classificationId,
+    classificationNameById
   );
   const allItems = filterAndSortImportedDetailValues(availableItems, search, linkStatus);
 

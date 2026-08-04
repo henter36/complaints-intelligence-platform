@@ -1,15 +1,24 @@
 import { NextRequest } from "next/server";
 import { ImportBatchStatus } from "@prisma/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/server/auth/auth-guard", () => ({
+const authMocks = vi.hoisted(() => ({
   requireAdminApiSession: vi.fn().mockResolvedValue({ id: "session_test", username: "admin" }),
   mapAuthError: vi.fn().mockReturnValue(null),
 }));
 
+vi.mock("@/server/auth/auth-guard", () => ({
+  requireAdminApiSession: authMocks.requireAdminApiSession,
+  mapAuthError: authMocks.mapAuthError,
+}));
+
+beforeEach(() => {
+  authMocks.requireAdminApiSession.mockResolvedValue({ id: "session_test", username: "admin" });
+  authMocks.mapAuthError.mockReturnValue(null);
+});
+
 afterEach(() => {
   vi.resetModules();
-  vi.restoreAllMocks();
   vi.doUnmock("@/lib/db");
 });
 
@@ -587,31 +596,42 @@ describe("Phase 2 API routes", () => {
       id: "cls-1",
       categoryId: "cat-1",
       nameAr: "فرعي نشط",
+      nameEn: null,
       description: null,
       color: "#64748b",
-      keywords: null,
+      keywords: [],
     });
+    const classificationFindMany = vi.fn().mockResolvedValue([]);
+    const auditCreate = vi.fn().mockResolvedValue({});
+    const tx = {
+      category: { findFirst: categoryFindFirst, create: vi.fn() },
+      classification: {
+        findMany: classificationFindMany,
+        create: classificationCreate,
+        findFirst: vi.fn(),
+        update: vi.fn(),
+      },
+      auditLog: { create: auditCreate },
+    };
     vi.doMock("@/lib/db", () => ({
       db: {
-        category: {
-          findFirst: categoryFindFirst,
-          create: vi.fn(),
-        },
-        classification: { create: classificationCreate },
+        $transaction: async (fn: (client: typeof tx) => Promise<unknown>) => fn(tx),
+        ...tx,
       },
     }));
 
     const { POST } = await import("./classifications/route");
     const response = await POST(new NextRequest("http://localhost/api/classifications", {
       method: "POST",
-      body: JSON.stringify({ name: "فرعي نشط", parentId: " cat-1 " }),
+      body: JSON.stringify({ name: "فرعي نشط", categoryId: "cat-1" }),
     }));
     const body = await response.json();
 
     expect(response.status).toBe(201);
     expect(body.parentId).toBe("cat-1");
+    expect(body.nodeType).toBe("CLASSIFICATION");
     expect(categoryFindFirst).toHaveBeenCalledWith({
-      where: { id: "cat-1", isDeleted: false },
+      where: { id: "cat-1", isDeleted: false, isActive: true },
       select: { id: true },
     });
     expect(classificationCreate).toHaveBeenCalledWith(expect.objectContaining({
@@ -623,25 +643,33 @@ describe("Phase 2 API routes", () => {
     vi.resetModules();
     const classificationCreate = vi.fn();
     const categoryCreate = vi.fn();
+    const categoryFindFirst = vi.fn().mockResolvedValue(null);
+    const tx = {
+      category: { findFirst: categoryFindFirst, create: categoryCreate },
+      classification: {
+        findMany: vi.fn().mockResolvedValue([]),
+        create: classificationCreate,
+        findFirst: vi.fn(),
+        update: vi.fn(),
+      },
+      auditLog: { create: vi.fn() },
+    };
     vi.doMock("@/lib/db", () => ({
       db: {
-        category: {
-          findFirst: vi.fn().mockResolvedValue(null),
-          create: categoryCreate,
-        },
-        classification: { create: classificationCreate },
+        $transaction: async (fn: (client: typeof tx) => Promise<unknown>) => fn(tx),
+        ...tx,
       },
     }));
 
     const { POST } = await import("./classifications/route");
     const response = await POST(new NextRequest("http://localhost/api/classifications", {
       method: "POST",
-      body: JSON.stringify({ name: "فرعي مرفوض", parentId: "deleted-cat" }),
+      body: JSON.stringify({ name: "فرعي مرفوض", categoryId: "deleted-cat" }),
     }));
     const body = await response.json();
 
     expect(response.status).toBe(404);
-    expect(body.error).toBe("CATEGORY_NOT_FOUND");
+    expect(body.error.code).toBe("CATEGORY_NOT_FOUND");
     expect(classificationCreate).not.toHaveBeenCalled();
     expect(categoryCreate).not.toHaveBeenCalled();
   });
@@ -650,52 +678,73 @@ describe("Phase 2 API routes", () => {
     vi.resetModules();
     const categoryFindFirst = vi.fn().mockResolvedValue(null);
     const classificationCreate = vi.fn();
+    const tx = {
+      category: { findFirst: categoryFindFirst, create: vi.fn() },
+      classification: {
+        findMany: vi.fn().mockResolvedValue([]),
+        create: classificationCreate,
+        findFirst: vi.fn(),
+        update: vi.fn(),
+      },
+      auditLog: { create: vi.fn() },
+    };
     vi.doMock("@/lib/db", () => ({
       db: {
-        category: {
-          findFirst: categoryFindFirst,
-          create: vi.fn(),
-        },
-        classification: { create: classificationCreate },
+        $transaction: async (fn: (client: typeof tx) => Promise<unknown>) => fn(tx),
+        ...tx,
       },
     }));
 
     const { POST } = await import("./classifications/route");
     const response = await POST(new NextRequest("http://localhost/api/classifications", {
       method: "POST",
-      body: JSON.stringify({ name: "فرعي محذوف", parentId: "soft-deleted-cat" }),
+      body: JSON.stringify({ name: "فرعي محذوف", categoryId: "soft-deleted-cat" }),
     }));
 
     expect(response.status).toBe(404);
     expect(categoryFindFirst).toHaveBeenCalledWith({
-      where: { id: "soft-deleted-cat", isDeleted: false },
+      where: { id: "soft-deleted-cat", isDeleted: false, isActive: true },
       select: { id: true },
     });
     expect(classificationCreate).not.toHaveBeenCalled();
   });
 
-  it("still creates a category when parentId is absent", async () => {
+  it("creates a category via POST /api/categories (not classifications without categoryId)", async () => {
     vi.resetModules();
     const categoryCreate = vi.fn().mockResolvedValue({
       id: "cat-root",
       nameAr: "تصنيف رئيسي",
       description: "وصف",
       nameEn: null,
+      displayOrder: 0,
       createdAt: new Date(),
       updatedAt: new Date(),
     });
+    const tx = {
+      category: {
+        findFirst: vi.fn(),
+        create: categoryCreate,
+      },
+      classification: { create: vi.fn(), findMany: vi.fn(), findFirst: vi.fn() },
+      auditLog: { create: vi.fn().mockResolvedValue({}) },
+    };
     vi.doMock("@/lib/db", () => ({
       db: {
-        category: {
-          findFirst: vi.fn(),
-          create: categoryCreate,
-        },
-        classification: { create: vi.fn() },
+        $transaction: async (fn: (client: typeof tx) => Promise<unknown>) => fn(tx),
+        ...tx,
       },
     }));
 
-    const { POST } = await import("./classifications/route");
-    const response = await POST(new NextRequest("http://localhost/api/classifications", {
+    const missingCategoryId = await import("./classifications/route").then(({ POST }) =>
+      POST(new NextRequest("http://localhost/api/classifications", {
+        method: "POST",
+        body: JSON.stringify({ name: "تصنيف رئيسي", description: "وصف" }),
+      }))
+    );
+    expect(missingCategoryId.status).toBe(400);
+
+    const { POST: postCategory } = await import("./categories/route");
+    const response = await postCategory(new NextRequest("http://localhost/api/categories", {
       method: "POST",
       body: JSON.stringify({ name: "تصنيف رئيسي", description: "وصف" }),
     }));
@@ -703,6 +752,7 @@ describe("Phase 2 API routes", () => {
 
     expect(response.status).toBe(201);
     expect(body.parentId).toBeNull();
+    expect(body.nodeType).toBe("CATEGORY");
     expect(categoryCreate).toHaveBeenCalledOnce();
   });
 });
