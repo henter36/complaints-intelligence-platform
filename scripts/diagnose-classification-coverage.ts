@@ -18,11 +18,11 @@ function readArg(name: string): string | null {
 function parseDateArg(name: string): Date {
   const value = readArg(name);
   if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-    throw new Error(`استخدم --${name}=YYYY-MM-DD`);
+    throw new TypeError(`استخدم --${name}=YYYY-MM-DD`);
   }
   const date = new Date(`${value}T00:00:00.000Z`);
   if (!Number.isFinite(date.getTime())) {
-    throw new Error(`قيمة --${name} غير صالحة`);
+    throw new TypeError(`قيمة --${name} غير صالحة`);
   }
   return date;
 }
@@ -84,7 +84,7 @@ async function fetchImportRows(complaintIds: readonly string[]): Promise<Classif
 async function main(): Promise<void> {
   const from = parseDateArg("from");
   const to = parseDateArg("to");
-  if (from > to) throw new Error("يجب ألا يسبق --to تاريخ --from");
+  if (from > to) throw new TypeError("يجب ألا يسبق --to تاريخ --from");
   const toExclusive = new Date(to.getTime() + DAY_MS);
 
   const [complaints, classifications] = await Promise.all([
