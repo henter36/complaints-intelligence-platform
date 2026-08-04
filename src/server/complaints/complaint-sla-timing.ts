@@ -105,7 +105,10 @@ export function buildComplaintSlaTiming(
     ? ceilDays(lateReference.getTime() - deadline.getTime())
     : null;
   const trustedClosedAt =
-    createdAt && isValidDate(complaint.closedAt) && complaint.closedAt >= createdAt
+    createdAt &&
+    isClosedComplaintStatus(complaint.status) &&
+    isValidDate(complaint.closedAt) &&
+    complaint.closedAt >= createdAt
       ? complaint.closedAt
       : null;
   const resolutionDurationDays = createdAt && trustedClosedAt
