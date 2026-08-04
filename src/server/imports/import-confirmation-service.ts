@@ -565,6 +565,29 @@ async function resolveTaxonomy(
   };
 }
 
+/**
+ * Subject precedence for NEW rows: explicit subject → sourceDetail → derived description → default.
+ */
+export function resolveImportedSubject(
+  normalized: Pick<NormalizedConfirmationRow, "subject" | "sourceDetail" | "description">
+): string {
+  const explicitSubject = normalized.subject?.trim();
+  if (explicitSubject) {
+    return explicitSubject;
+  }
+
+  const sourceDetail = normalized.sourceDetail?.trim();
+  if (sourceDetail) {
+    return sourceDetail;
+  }
+
+  if (normalized.description) {
+    return deriveSubject(normalized.description);
+  }
+
+  return "بدون موضوع";
+}
+
 async function applyNewRow(
   tx: Prisma.TransactionClient,
   batchId: string,
@@ -591,10 +614,7 @@ async function applyNewRow(
         dueDate: normalized.dueDate ?? null,
         closedAt,
         status,
-        subject:
-          normalized.subject?.trim() ||
-          normalized.sourceDetail?.trim() ||
-          (normalized.description ? deriveSubject(normalized.description) : "بدون موضوع"),
+        subject: resolveImportedSubject(normalized),
         description: normalized.description ?? null,
         complainantName: normalized.complainantName ?? null,
         complainantIdentifier,

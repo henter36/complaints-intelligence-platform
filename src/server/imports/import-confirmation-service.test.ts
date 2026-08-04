@@ -19,9 +19,13 @@ import {
   IMPORT_EXTERNAL_ID_CONFLICT,
   IMPORT_EXTERNAL_ID_TOMBSTONE_CONFLICT,
   ImportConfirmationError,
+  resolveImportedSubject,
   rollbackConfirmedImportBatch,
   toImportConfirmationErrorResponse,
-} from "./import-confirmation-service";// Mock startTextRiskScan to keep integration tests isolated from the analysis service.
+} from "./import-confirmation-service";
+import { deriveSubject } from "./subject-derive";
+
+// Mock startTextRiskScan to keep integration tests isolated from the analysis service.
 // The scan is fire-and-forget, so mocking it has no effect on confirmation assertions.
 const startTextRiskScanMock = vi.hoisted(() =>
   vi.fn().mockResolvedValue({ runId: "scan-mock", status: "COMPLETE", processed: 0, matched: 0 })
@@ -1092,5 +1096,57 @@ describe("reimport after rollback and externalId conflicts (Issue #42)", () => {
       status: ImportBatchStatus.READY_FOR_CONFIRMATION,
       appliedCreatedRows: 0,
     });
+  });
+});
+
+describe("resolveImportedSubject", () => {
+  it("trims and prefers an explicit subject", () => {
+    expect(
+      resolveImportedSubject({
+        subject: "  موضوع صريح  ",
+        sourceDetail: "تفصيل",
+        description: "وصف",
+      })
+    ).toBe("موضوع صريح");
+  });
+
+  it("uses sourceDetail when subject is blank whitespace", () => {
+    expect(
+      resolveImportedSubject({
+        subject: "   ",
+        sourceDetail: "  تفصيل مصدري  ",
+        description: "وصف",
+      })
+    ).toBe("تفصيل مصدري");
+  });
+
+  it("derives from description when subject and sourceDetail are absent", () => {
+    expect(
+      resolveImportedSubject({
+        subject: undefined,
+        sourceDetail: undefined,
+        description: "وصف الشكوى",
+      })
+    ).toBe(deriveSubject("وصف الشكوى"));
+  });
+
+  it("falls back to the default label when no subject sources exist", () => {
+    expect(
+      resolveImportedSubject({
+        subject: undefined,
+        sourceDetail: undefined,
+        description: undefined,
+      })
+    ).toBe("بدون موضوع");
+  });
+
+  it("does not use sourceDetail or description when an explicit subject is present", () => {
+    expect(
+      resolveImportedSubject({
+        subject: "الأولوية للموضوع",
+        sourceDetail: "لا يجب استخدامه",
+        description: "ولا هذا",
+      })
+    ).toBe("الأولوية للموضوع");
   });
 });
