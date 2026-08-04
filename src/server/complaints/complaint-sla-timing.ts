@@ -104,12 +104,12 @@ export function buildComplaintSlaTiming(
   const latenessDays = deadline && (isCurrentlyLate || wasClosedLate)
     ? ceilDays(lateReference.getTime() - deadline.getTime())
     : null;
-  const trustedClosure =
-    createdAt !== null &&
-    isValidDate(complaint.closedAt) &&
-    complaint.closedAt >= createdAt;
-  const resolutionDurationDays = trustedClosure
-    ? (complaint.closedAt.getTime() - createdAt.getTime()) / DAY_MS
+  const trustedClosedAt =
+    createdAt && isValidDate(complaint.closedAt) && complaint.closedAt >= createdAt
+      ? complaint.closedAt
+      : null;
+  const resolutionDurationDays = createdAt && trustedClosedAt
+    ? (trustedClosedAt.getTime() - createdAt.getTime()) / DAY_MS
     : null;
   const openAgeDays =
     createdAt && isValidDate(measuredAt) && isOpenComplaintStatus(complaint.status)
