@@ -5,6 +5,7 @@ import type { ExecutiveBriefData, ExecutiveBriefV2Data, FullAnalyticalData, Repo
 import { renderExecutiveBriefPdf } from "@/server/reports/report-executive-brief-pdf-service";
 import { renderReportPdf } from "@/server/reports/report-pdf-service";
 import { renderExecutiveBriefV2Pdf } from "@/server/reports/report-executive-brief-v2-pdf-service";
+import { assertTrendEndsAtOrBeforeReportEnd } from "@/server/reports/report-monthly-trend-sanitize";
 
 const outputDir = path.join(process.cwd(), "output/pdf");
 
@@ -251,10 +252,24 @@ const ALL_SAUDI_REGIONS = [
 
 function v2BaseReport(): ReportData {
   const base = baseReport("PRINT_EXECUTIVE_BRIEF_V2");
-  base.briefData = v2BriefData;
-  base.period = { from: "2025-11-25", to: "2025-12-25" };
-  base.previousPeriod = { from: "2025-10-25", to: "2025-11-24" };
+  // Report window ends in August 2026 so the 13-month fixture (2025-08…2026-08) is valid.
+  base.period = { from: "2026-07-05", to: "2026-08-04" };
+  base.previousPeriod = { from: "2026-06-04", to: "2026-07-04" };
+  base.filters = { from: "2026-07-05", to: "2026-08-04" };
   base.comparisonMode = "PREVIOUS_EQUIVALENT_PERIOD";
+  base.comparisonData = {
+    ...base.comparisonData!,
+    currentPeriod: {
+      from: new Date("2026-07-05T00:00:00.000Z"),
+      toExclusive: new Date("2026-08-05T00:00:00.000Z"),
+    },
+    previousPeriod: {
+      from: new Date("2026-06-04T00:00:00.000Z"),
+      toExclusive: new Date("2026-07-05T00:00:00.000Z"),
+    },
+  };
+  base.briefData = v2BriefData;
+  assertTrendEndsAtOrBeforeReportEnd(v2BriefData.monthlyStockFlow, base.period.to);
   return base;
 }
 

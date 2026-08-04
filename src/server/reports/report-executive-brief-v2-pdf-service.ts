@@ -33,6 +33,17 @@ import { isExecutiveBriefV2Data } from "./report-data-service";
 import { renderLineChartPng } from "./report-chart-service";
 import { preparePdfText } from "./arabic-pdf-text";
 import { getComparisonModeDescription } from "@/lib/reports/comparison-mode-labels";
+import {
+  isValidMonthKey,
+  monthKeyFromReportEndDate,
+  sanitizeMonthlyTrendForReport,
+} from "./report-monthly-trend-sanitize";
+
+export {
+  sanitizeMonthlyTrendForReport,
+  monthKeyFromReportEndDate,
+  assertTrendEndsAtOrBeforeReportEnd,
+} from "./report-monthly-trend-sanitize";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -972,7 +983,17 @@ async function renderPage2(ctx: V2Context): Promise<void> {
   // Monthly chart section
   y = drawSectionTitle(doc, "الاتجاه الزمني للشكاوى", margin, y, contentWidth);
 
-  const flow = brief.monthlyStockFlow;
+  const reportEndDate = data.period.to;
+  const rawFlow = brief.monthlyStockFlow;
+  const flow = sanitizeMonthlyTrendForReport(rawFlow, reportEndDate, 13);
+  const reportEndMonthKey = monthKeyFromReportEndDate(reportEndDate);
+  const droppedFuture = reportEndMonthKey !== null
+    && rawFlow.some(
+      (point) => isValidMonthKey(point.monthKey) && point.monthKey > reportEndMonthKey
+    );
+  if (droppedFuture) {
+    warnings.push("تم تجاهل نقاط زمنية تتجاوز نهاية فترة التقرير.");
+  }
   const hasFlow = flow.some(
     (p) =>
       p.receivedCount > 0

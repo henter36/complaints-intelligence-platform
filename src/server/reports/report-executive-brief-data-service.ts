@@ -810,10 +810,81 @@ export async function buildFullAnalyticalData(
 // ---------------------------------------------------------------------------
 
 type TrendComplaint = {
+  id?: string;
   complaintDate: Date | null;
   receivedAt: Date;
   closedAt: Date | null;
 };
+
+const TREND_COMPLAINT_SELECT = {
+  id: true,
+  complaintDate: true,
+  receivedAt: true,
+  closedAt: true,
+} as const;
+
+/**
+ * Logical eligibility for monthly stock/flow chart points.
+ * trustedClosedAt is null when closedAt is missing or precedes creation.
+ */
+export function isComplaintAffectingMonthlyTrend(
+  complaint: Pick<TrendComplaint, "complaintDate" | "receivedAt" | "closedAt">,
+  windowFrom: Date,
+  windowToExclusive: Date
+): boolean {
+  const createdAt = resolveTrendCreatedAt(complaint);
+  if (!createdAt) return false;
+  const createdMs = createdAt.getTime();
+  if (createdMs >= windowToExclusive.getTime()) return false;
+  if (createdMs >= windowFrom.getTime()) return true;
+  const trustedClosedAt = resolveTrustedClosedAt(complaint);
+  if (trustedClosedAt === null) return true;
+  return trustedClosedAt.getTime() >= windowFrom.getTime();
+}
+
+export function dedupeTrendComplaintsById(
+  rows: readonly (TrendComplaint & { id: string })[]
+): Array<TrendComplaint & { id: string }> {
+  const byId = new Map<string, TrendComplaint & { id: string }>();
+  for (const row of rows) {
+    byId.set(row.id, row);
+  }
+  return [...byId.values()];
+}
+
+/**
+ * Prisma where for the main candidate set of the monthly trend chart.
+ * Intentionally broader than trustedClosedAt semantics: closedAt before creation
+ * (untrusted) may still need a secondary fetch.
+ */
+export function buildMonthlyTrendPrimaryWhere(
+  baseWhere: Prisma.ComplaintWhereInput,
+  windowFrom: Date,
+  windowToExclusive: Date
+): Prisma.ComplaintWhereInput {
+  return {
+    ...baseWhere,
+    AND: [
+      {
+        OR: [
+          { complaintDate: { lt: windowToExclusive } },
+          { complaintDate: null, receivedAt: { lt: windowToExclusive } },
+        ],
+      },
+      {
+        OR: [
+          // Created inside the history window → can contribute receivedCount.
+          { complaintDate: { gte: windowFrom } },
+          { complaintDate: null, receivedAt: { gte: windowFrom } },
+          // No closedAt → may be open stock carried into the window.
+          { closedAt: null },
+          // closedAt on/after window start → may close during a chart month.
+          { closedAt: { gte: windowFrom } },
+        ],
+      },
+    ],
+  };
+}
 
 function isValidTrendDate(value: Date | null | undefined): value is Date {
   return value instanceof Date && Number.isFinite(value.getTime());
@@ -996,6 +1067,70 @@ async function fetchEarliestAvailableComplaintDate(
   return findEarliestDate(candidates);
 }
 
+/**
+ * Secondary probe: complaints with closedAt before creation (untrusted),
+ * opened before windowFrom. Primary where cannot express closedAt < createdAt.
+ * Parameterized raw SQL keeps this set tiny vs loading entire closed history.
+ */
+async function fetchUntrustedClosedBeforeWindow(
+  baseWhere: Prisma.ComplaintWhereInput,
+  windowFrom: Date,
+  windowToExclusive: Date
+): Promise<Array<TrendComplaint & { id: string }>> {
+  type IdRow = { id: string };
+  // COALESCE(complaintDate, receivedAt) mirrors resolveTrendCreatedAt.
+  // Only untrusted closures (closedAt before effective creation) are selected.
+  const idRows = await db.$queryRaw<IdRow[]>`
+    SELECT id
+    FROM Complaint
+    WHERE isDeleted = false
+      AND closedAt IS NOT NULL
+      AND closedAt < COALESCE(complaintDate, receivedAt)
+      AND COALESCE(complaintDate, receivedAt) < ${windowFrom}
+      AND COALESCE(complaintDate, receivedAt) < ${windowToExclusive}
+  `;
+  if (idRows.length === 0) return [];
+
+  // Chunk IN lists; re-apply non-date filters via Prisma baseWhere.
+  const ids = idRows.map((row) => row.id);
+  const chunkSize = 400;
+  const collected: Array<TrendComplaint & { id: string }> = [];
+  for (let offset = 0; offset < ids.length; offset += chunkSize) {
+    const chunk = ids.slice(offset, offset + chunkSize);
+    const rows = await db.complaint.findMany({
+      where: {
+        ...baseWhere,
+        id: { in: chunk },
+      },
+      select: TREND_COMPLAINT_SELECT,
+    });
+    collected.push(...rows);
+  }
+  return collected;
+}
+
+async function fetchMonthlyTrendComplaints(
+  baseWhere: Prisma.ComplaintWhereInput,
+  windowFrom: Date,
+  windowToExclusive: Date
+): Promise<TrendComplaint[]> {
+  const primary = await db.complaint.findMany({
+    where: buildMonthlyTrendPrimaryWhere(baseWhere, windowFrom, windowToExclusive),
+    select: TREND_COMPLAINT_SELECT,
+  });
+
+  const untrusted = await fetchUntrustedClosedBeforeWindow(
+    baseWhere,
+    windowFrom,
+    windowToExclusive
+  );
+
+  const deduped = dedupeTrendComplaintsById([...primary, ...untrusted]);
+  return deduped.filter((row) =>
+    isComplaintAffectingMonthlyTrend(row, windowFrom, windowToExclusive)
+  );
+}
+
 async function buildMonthlyStockFlow(
   filters: ReportFilters,
   comparison: ComparisonResult,
@@ -1018,35 +1153,23 @@ async function buildMonthlyStockFlow(
   });
   if (buckets.length === 0) return [];
 
+  const firstBucket = buckets[0];
   const lastBucket = buckets.at(-1);
-  if (!lastBucket) return [];
-  // toExclusive of last month = first day of the month after report end month
-  const windowToExclusive = lastBucket.toExclusive;
+  if (!firstBucket || !lastBucket) return [];
 
+  const windowFrom = firstBucket.from;
+  const windowToExclusive = lastBucket.toExclusive;
   const baseWhere = nonDateComplaintWhere(filters, now);
 
-  // Trend is NOT limited by filters.from: inject the history window manually.
-  // Include every complaint created before windowToExclusive so month-end stock
-  // reconstructs correctly even for issues opened before the first chart month.
-  const complaints = await db.complaint.findMany({
-    where: {
-      ...baseWhere,
-      OR: [
-        { complaintDate: { lt: windowToExclusive } },
-        { complaintDate: null, receivedAt: { lt: windowToExclusive } },
-      ],
-    },
-    select: { complaintDate: true, receivedAt: true, closedAt: true },
-  });
+  // Trend is not limited by filters.from: history window drives the candidate set.
+  // Only complaints that can affect chart series are loaded (not all-time history).
+  const complaints = await fetchMonthlyTrendComplaints(
+    baseWhere,
+    windowFrom,
+    windowToExclusive
+  );
 
-  // Defensive: never count anything with creation after the report window end,
-  // even if the DB bound was widened unexpectedly.
-  const bounded = complaints.filter((c) => {
-    const created = resolveTrendCreatedAt(c);
-    return created !== null && created.getTime() < windowToExclusive.getTime();
-  });
-
-  return aggregateMonthlyComplaintTrend(bounded, buckets);
+  return aggregateMonthlyComplaintTrend(complaints, buckets);
 }
 
 // ---------------------------------------------------------------------------

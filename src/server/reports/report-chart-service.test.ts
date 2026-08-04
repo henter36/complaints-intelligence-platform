@@ -11,6 +11,9 @@ import {
   drawChartLegend,
   computeYScale,
   resolveLegendColumnCount,
+  resolveChartGeometry,
+  fitLegendLabel,
+  MIN_PLOT_HEIGHT,
 } from "./report-chart-service";
 import type { ReportChartSection } from "./report-data-service";
 import { REPORT_DESIGN_TOKENS } from "@/lib/reports/design-tokens";
@@ -446,30 +449,177 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
     expect(svg).toContain(`stroke="${DANGER}"`);
   });
 
-  it("legend item boxes do not overlap (structural)", () => {
-    const legend = drawChartLegend(
-      [
-        { name: "واردة", style: { color: PRIMARY, dash: "0", width: 2, mark: "bar" } },
-        { name: "مغلقة", style: { color: GOLD, dash: "0", width: 2, mark: "bar" } },
-        { name: "مفتوحة نهاية الشهر", style: { color: PRIMARY, dash: "0", width: 2, mark: "line" } },
-        { name: "متأخرة نهاية الشهر", style: { color: DANGER, dash: "6,4", width: 2, mark: "line" } },
-      ],
-      { width: 500, top: 10, columns: 2 }
-    );
-    expect(legend.itemBoxes).toHaveLength(4);
-    // Pairwise: same-row boxes should not share horizontal span; different rows differ in y
-    for (let i = 0; i < legend.itemBoxes.length; i++) {
-      for (let j = i + 1; j < legend.itemBoxes.length; j++) {
-        const a = legend.itemBoxes[i];
-        const b = legend.itemBoxes[j];
-        const sameRow = Math.abs(a.y - b.y) < 1;
-        if (sameRow) {
-          const aRight = a.x + a.width;
-          const bRight = b.x + b.width;
-          const overlap = a.x < bRight && b.x < aRight;
+  it("fits long legend labels into cells without overlapping neighbours", () => {
+    const longItems = [
+      {
+        name: "الشكاوى المغلقة خلال الشهر وفق تاريخ إغلاق موثوق",
+        style: { color: GOLD, dash: "0", width: 2, mark: "bar" as const },
+      },
+      {
+        name: "الشكاوى المفتوحة والمتأخرة في نهاية الشهر",
+        style: { color: PRIMARY, dash: "0", width: 2, mark: "line" as const },
+      },
+      {
+        name: "طلبات الرعاية الصحية والمواعيد الطبية المتأخرة",
+        style: { color: PRIMARY, dash: "0", width: 2, mark: "bar" as const },
+      },
+      {
+        name: "الملاحظات التشغيلية ذات الأولوية المرتفعة",
+        style: { color: DANGER, dash: "6,4", width: 2, mark: "line" as const },
+      },
+    ];
+
+    for (const width of [500, 320]) {
+      const legend = drawChartLegend(longItems, { width, top: 10, columns: 2, fontSize: 11 });
+      expect(legend.labelBoxes).toHaveLength(4);
+
+      for (const box of legend.labelBoxes) {
+        expect(box.measuredWidth).toBeLessThanOrEqual(box.availableWidth + 0.01);
+        expect(box.right - box.left).toBeCloseTo(box.measuredWidth, 5);
+        // text grows leftward from textX (= right)
+        expect(box.left).toBeLessThanOrEqual(box.right);
+      }
+
+      // Pairwise adjacent label boxes on same row must not intersect
+      for (let i = 0; i < legend.labelBoxes.length; i++) {
+        for (let j = i + 1; j < legend.labelBoxes.length; j++) {
+          const a = legend.labelBoxes[i];
+          const b = legend.labelBoxes[j];
+          const sameRow = Math.abs(a.top - b.top) < 1;
+          if (!sameRow) continue;
+          const overlap = a.left < b.right && b.left < a.right;
           expect(overlap).toBe(false);
         }
       }
+
+      // Long names are shrunk or truncated
+      for (const box of legend.labelBoxes) {
+        if (box.originalName.length > 20) {
+          expect(box.truncated || box.fontSize < 11).toBe(true);
+        }
+        if (box.truncated) {
+          expect(box.renderedName.endsWith("…")).toBe(true);
+        }
+      }
+
+      // Short label fits without truncation at preferred size on wide canvas
+      const shortLegend = drawChartLegend(
+        [{ name: "واردة", style: { color: PRIMARY, dash: "0", width: 2, mark: "bar" } }],
+        { width: 500, top: 10, columns: 1, fontSize: 11 }
+      );
+      expect(shortLegend.labelBoxes[0].truncated).toBe(false);
+      expect(shortLegend.labelBoxes[0].renderedName).toBe("واردة");
+      expect(shortLegend.labelBoxes[0].fontSize).toBe(11);
+    }
+  });
+
+  it("fitLegendLabel measures with estimateTextWidth and never exceeds available width", () => {
+    const fitted = fitLegendLabel(
+      "الشكاوى المغلقة خلال الشهر وفق تاريخ إغلاق موثوق",
+      60,
+      11,
+      8
+    );
+    expect(fitted.measuredWidth).toBeLessThanOrEqual(60);
+    expect(fitted.truncated).toBe(true);
+    expect(fitted.text.endsWith("…")).toBe(true);
+
+    const short = fitLegendLabel("واردة", 200, 11, 8);
+    expect(short.truncated).toBe(false);
+    expect(short.text).toBe("واردة");
+    expect(short.fontSize).toBe(11);
+  });
+
+  it("swatch lies to the right of the fitted label box", () => {
+    const legend = drawChartLegend(
+      [
+        {
+          name: "الشكاوى المفتوحة والمتأخرة في نهاية الشهر",
+          style: { color: PRIMARY, dash: "0", width: 2, mark: "line" },
+        },
+        {
+          name: "الملاحظات التشغيلية ذات الأولوية المرتفعة",
+          style: { color: DANGER, dash: "6,4", width: 2, mark: "line" },
+        },
+      ],
+      { width: 320, top: 10, columns: 2, fontSize: 11 }
+    );
+    // Parse swatch line or rect x positions and ensure they are >= label right
+    const swatchXs = [
+      ...legend.svg.matchAll(/<line x1="([^"]+)"/g),
+      ...legend.svg.matchAll(/<rect x="([^"]+)"/g),
+    ].map((m) => parseFloat(m[1]));
+    expect(swatchXs.length).toBeGreaterThan(0);
+    for (const box of legend.labelBoxes) {
+      for (const sx of swatchXs) {
+        // Not all swatches belong to this box; assert no swatch is strictly inside label
+        const inside = sx >= box.left && sx < box.right - 0.5;
+        // Only check that label right edge is left of typical swatch start for same row:
+        // use the global property: label.right should be <= min swatch for that item — checked via layout
+        void inside;
+      }
+      // Label right is textX; swatch starts at textX + gap
+      // so every label right should be strictly less than its corresponding swatch
+      // We verify no swatch x falls strictly inside the label interval:
+      const swatchInsideLabel = swatchXs.some((sx) => sx > box.left + 1 && sx < box.right - 1);
+      expect(swatchInsideLabel).toBe(false);
+    }
+  });
+
+  it("resolveChartGeometry keeps plotTop < plotBottom with min plot height", () => {
+    const geo = resolveChartGeometry({
+      width: 400,
+      height: 120,
+      hasDualAxis: false,
+      plotTop: 200, // deliberately too large
+      xCount: 4,
+    });
+    expect(geo.plotTop).toBeLessThan(geo.plotBottom);
+    expect(geo.plotBottom - geo.plotTop).toBeGreaterThanOrEqual(
+      Math.min(MIN_PLOT_HEIGHT, geo.plotBottom)
+    );
+    expect(Number.isFinite(geo.plotTop)).toBe(true);
+    expect(Number.isFinite(geo.plotBottom)).toBe(true);
+    expect(geo.plotTop).toBeGreaterThanOrEqual(0);
+  });
+
+  it("buildChartSvg with short height and many series keeps valid plot geometry", () => {
+    const series = Array.from({ length: 10 }, (_, i) => ({
+      name: `سلسلة رقم ${i + 1} بوصف تشغيلي طويل للتحقق من المفتاح`,
+      renderAs: (i % 2 === 0 ? "bar" : "line") as "bar" | "line",
+      points: [
+        { x: "يوليو 2026", y: i + 1 },
+        { x: "أغسطس 2026", y: i + 2 },
+      ],
+    }));
+    const section: ReportChartSection = {
+      id: "geometry-stress",
+      kind: "chart",
+      chartType: "bar",
+      title: "اختبار",
+      series,
+    };
+    const height = 140;
+    const svg = buildChartSvg(section, 400, height);
+    expect(svg).not.toMatch(/NaN|Infinity/);
+    // Parse plot-ish polyline y values
+    const polyYs = [...svg.matchAll(/points="([^"]+)"/g)].flatMap((m) => {
+      return m[1]
+        .trim()
+        .split(/\s+/)
+        .map((pair) => parseFloat(pair.split(",")[1] ?? "NaN"));
+    });
+    for (const y of polyYs) {
+      expect(Number.isFinite(y)).toBe(true);
+      expect(y).toBeGreaterThanOrEqual(-1);
+      expect(y).toBeLessThanOrEqual(height + 5);
+    }
+    // Y scale top of bars (rect y) within bounds
+    const rectYs = [...svg.matchAll(/<rect x="[^"]+" y="([^"]+)"/g)].map((m) => parseFloat(m[1]));
+    for (const y of rectYs) {
+      if (!Number.isFinite(y)) continue;
+      expect(y).toBeGreaterThanOrEqual(-1);
+      expect(y).toBeLessThanOrEqual(height + 5);
     }
   });
 

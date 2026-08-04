@@ -14,6 +14,9 @@ import {
   groupComplaintsByMonth,
   aggregateMonthlyComplaintTrend,
   resolveTrustedClosedAt,
+  isComplaintAffectingMonthlyTrend,
+  dedupeTrendComplaintsById,
+  buildMonthlyTrendPrimaryWhere,
   MONTHLY_WINDOW_SIZE,
   ARABIC_MONTH_NAMES,
 } from "./report-executive-brief-data-service";
@@ -28,9 +31,11 @@ import type { ComplaintKpiResult } from "@/server/complaints/complaint-kpi-servi
 const dbMocks = vi.hoisted(() => ({
   complaintGroupBy: vi.fn(),
   complaintFindMany: vi.fn(),
+  complaintFindFirst: vi.fn(),
   complaintCount: vi.fn(),
   statusHistoryGroupBy: vi.fn(),
   statusHistoryCount: vi.fn(),
+  queryRaw: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -38,12 +43,14 @@ vi.mock("@/lib/db", () => ({
     complaint: {
       groupBy: dbMocks.complaintGroupBy,
       findMany: dbMocks.complaintFindMany,
+      findFirst: dbMocks.complaintFindFirst,
       count: dbMocks.complaintCount,
     },
     complaintStatusHistory: {
       groupBy: dbMocks.statusHistoryGroupBy,
       count: dbMocks.statusHistoryCount,
     },
+    $queryRaw: dbMocks.queryRaw,
   },
 }));
 
@@ -52,9 +59,11 @@ beforeEach(() => {
   // Default: no regions in the all-time list, no complaints in the DB.
   dbMocks.complaintGroupBy.mockResolvedValue([]);
   dbMocks.complaintFindMany.mockResolvedValue([]);
+  dbMocks.complaintFindFirst.mockResolvedValue(null);
   dbMocks.complaintCount.mockResolvedValue(0);
   dbMocks.statusHistoryGroupBy.mockResolvedValue([]);
   dbMocks.statusHistoryCount.mockResolvedValue(0);
+  dbMocks.queryRaw.mockResolvedValue([]);
 });
 
 // ---------------------------------------------------------------------------
@@ -1625,6 +1634,176 @@ describe("aggregateMonthlyComplaintTrend", () => {
 
   it("empty month buckets yield empty trend", () => {
     expect(aggregateMonthlyComplaintTrend([], [])).toEqual([]);
+  });
+});
+
+describe("isComplaintAffectingMonthlyTrend — candidate filter", () => {
+  const windowFrom = new Date("2025-08-01T00:00:00.000Z");
+  const windowToExclusive = new Date("2026-09-01T00:00:00.000Z");
+
+  it("excludes created-and-closed fully before windowFrom", () => {
+    expect(
+      isComplaintAffectingMonthlyTrend(
+        {
+          complaintDate: new Date("2024-01-01T00:00:00.000Z"),
+          receivedAt: new Date("2024-01-01T00:00:00.000Z"),
+          closedAt: new Date("2024-02-01T00:00:00.000Z"),
+        },
+        windowFrom,
+        windowToExclusive
+      )
+    ).toBe(false);
+  });
+
+  it("includes open carry-in (created before window, closedAt null)", () => {
+    expect(
+      isComplaintAffectingMonthlyTrend(
+        {
+          complaintDate: new Date("2024-06-01T00:00:00.000Z"),
+          receivedAt: new Date("2024-06-01T00:00:00.000Z"),
+          closedAt: null,
+        },
+        windowFrom,
+        windowToExclusive
+      )
+    ).toBe(true);
+  });
+
+  it("includes closed inside the window with creation before window", () => {
+    expect(
+      isComplaintAffectingMonthlyTrend(
+        {
+          complaintDate: new Date("2024-06-01T00:00:00.000Z"),
+          receivedAt: new Date("2024-06-01T00:00:00.000Z"),
+          closedAt: new Date("2025-09-15T00:00:00.000Z"),
+        },
+        windowFrom,
+        windowToExclusive
+      )
+    ).toBe(true);
+  });
+
+  it("includes created inside the window", () => {
+    expect(
+      isComplaintAffectingMonthlyTrend(
+        {
+          complaintDate: new Date("2026-01-10T00:00:00.000Z"),
+          receivedAt: new Date("2026-01-10T00:00:00.000Z"),
+          closedAt: null,
+        },
+        windowFrom,
+        windowToExclusive
+      )
+    ).toBe(true);
+  });
+
+  it("excludes created at/after windowToExclusive", () => {
+    expect(
+      isComplaintAffectingMonthlyTrend(
+        {
+          complaintDate: new Date("2026-09-01T00:00:00.000Z"),
+          receivedAt: new Date("2026-09-01T00:00:00.000Z"),
+          closedAt: null,
+        },
+        windowFrom,
+        windowToExclusive
+      )
+    ).toBe(false);
+  });
+
+  it("keeps untrusted closedAt (closed before create) as affecting open stock", () => {
+    expect(
+      isComplaintAffectingMonthlyTrend(
+        {
+          complaintDate: new Date("2024-01-15T00:00:00.000Z"),
+          receivedAt: new Date("2024-01-15T00:00:00.000Z"),
+          closedAt: new Date("2023-12-01T00:00:00.000Z"),
+        },
+        windowFrom,
+        windowToExclusive
+      )
+    ).toBe(true);
+  });
+
+  it("does not grow kept set with old trusted-closed history", () => {
+    const pool = Array.from({ length: 500 }, (_, i) => ({
+      id: `old-${i}`,
+      complaintDate: new Date("2020-01-01T00:00:00.000Z"),
+      receivedAt: new Date("2020-01-01T00:00:00.000Z"),
+      closedAt: new Date("2020-02-01T00:00:00.000Z"),
+    }));
+    // one open carry-in + one in-window + one close-in-window
+    pool.push(
+      {
+        id: "open-carry",
+        complaintDate: new Date("2024-01-01T00:00:00.000Z"),
+        receivedAt: new Date("2024-01-01T00:00:00.000Z"),
+        closedAt: null as unknown as Date,
+      },
+      {
+        id: "in-window",
+        complaintDate: new Date("2026-01-05T00:00:00.000Z"),
+        receivedAt: new Date("2026-01-05T00:00:00.000Z"),
+        closedAt: null as unknown as Date,
+      },
+      {
+        id: "close-in-window",
+        complaintDate: new Date("2024-03-01T00:00:00.000Z"),
+        receivedAt: new Date("2024-03-01T00:00:00.000Z"),
+        closedAt: new Date("2025-10-01T00:00:00.000Z"),
+      }
+    );
+    const kept = pool.filter((c) =>
+      isComplaintAffectingMonthlyTrend(c, windowFrom, windowToExclusive)
+    );
+    // Unbounded historical load would keep 503; candidate filter should keep 3 only
+    expect(kept).toHaveLength(3);
+    expect(kept.map((c) => c.id).sort()).toEqual([
+      "close-in-window",
+      "in-window",
+      "open-carry",
+    ]);
+  });
+
+  it("dedupeTrendComplaintsById uses id uniquely", () => {
+    const rows = dedupeTrendComplaintsById([
+      {
+        id: "a",
+        complaintDate: null,
+        receivedAt: new Date("2026-01-01T00:00:00.000Z"),
+        closedAt: null,
+      },
+      {
+        id: "a",
+        complaintDate: new Date("2026-01-02T00:00:00.000Z"),
+        receivedAt: new Date("2026-01-01T00:00:00.000Z"),
+        closedAt: null,
+      },
+      {
+        id: "b",
+        complaintDate: null,
+        receivedAt: new Date("2026-01-03T00:00:00.000Z"),
+        closedAt: null,
+      },
+    ]);
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.id === "a")?.complaintDate?.toISOString()).toContain("2026-01-02");
+  });
+
+  it("primary where includes a lower time bound and non-date base filters", () => {
+    const where = buildMonthlyTrendPrimaryWhere(
+      { isDeleted: false, region: "منطقة الرياض" },
+      windowFrom,
+      windowToExclusive
+    );
+    expect(where).toMatchObject({
+      isDeleted: false,
+      region: "منطقة الرياض",
+    });
+    const serialized = JSON.stringify(where);
+    expect(serialized).toContain(windowFrom.toISOString());
+    expect(serialized).toContain(windowToExclusive.toISOString());
+    expect(serialized).toContain("closedAt");
   });
 });
 

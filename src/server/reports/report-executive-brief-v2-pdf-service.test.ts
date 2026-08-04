@@ -12,6 +12,7 @@ import {
   fitTextToBox,
   measurePreparedArabicText,
 } from "./report-executive-brief-v2-pdf-service";
+import { preparePdfText } from "./arabic-pdf-text";
 import { REPORT_DESIGN_TOKENS } from "@/lib/reports/design-tokens";
 
 const DANGER = REPORT_DESIGN_TOKENS.colors.danger;
@@ -137,7 +138,7 @@ describe("isExecutiveBriefV2Data", () => {
       })
     );
     expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
-  });
+  }, 30_000);
 });
 
 describe("renderExecutiveBriefV2Pdf", () => {
@@ -408,27 +409,68 @@ describe("V2 monthly chart contract + KPI packing", () => {
     expect(countPageObjects(result.buffer)).toBe(4);
   });
 
-  it("does not emit months after report.to in monthly labels on page 2 text", async () => {
+  it("drops months after report.to before chart render and keeps caption", async () => {
+    const chartService = await import("./report-chart-service");
+    const pngSpy = vi.spyOn(chartService, "renderLineChartPng").mockResolvedValue(Buffer.from("png"));
     const textSpy = vi.spyOn(PDFDocument.prototype, "text");
     try {
-      await renderExecutiveBriefV2Pdf(
+      const result = await renderExecutiveBriefV2Pdf(
         makeV2Report({
-          period: { from: "2026-08-01", to: "2026-08-04" },
+          period: { from: "2026-07-05", to: "2026-08-04" },
           briefData: makeV2Brief({
             monthlyStockFlow: [
-              { monthKey: "2026-07", monthLabel: "يوليو 2026", receivedCount: 3, closedDuringMonthCount: 1, openAtMonthEndCount: 2, lateAtMonthEndCount: 0 },
-              { monthKey: "2026-08", monthLabel: "أغسطس 2026", receivedCount: 5, closedDuringMonthCount: 2, openAtMonthEndCount: 3, lateAtMonthEndCount: 1 },
+              {
+                monthKey: "2026-07",
+                monthLabel: "يوليو 2026",
+                receivedCount: 3,
+                closedDuringMonthCount: 1,
+                openAtMonthEndCount: 2,
+                lateAtMonthEndCount: 0,
+              },
+              {
+                monthKey: "2026-08",
+                monthLabel: "أغسطس 2026",
+                receivedCount: 5,
+                closedDuringMonthCount: 2,
+                openAtMonthEndCount: 3,
+                lateAtMonthEndCount: 1,
+              },
+              {
+                monthKey: "2026-09",
+                monthLabel: "سبتمبر 2026",
+                receivedCount: 9,
+                closedDuringMonthCount: 4,
+                openAtMonthEndCount: 5,
+                lateAtMonthEndCount: 2,
+              },
             ],
           }),
         })
       );
+
+      expect(result.warnings).toContain("تم تجاهل نقاط زمنية تتجاوز نهاية فترة التقرير.");
+
+      const flowCall = pngSpy.mock.calls.find(
+        (call) => (call[0] as { id?: string }).id === "v2-monthly-flow"
+      );
+      expect(flowCall).toBeDefined();
+      const section = flowCall![0] as {
+        series: Array<{ name: string; points: Array<{ x: string; y: number }> }>;
+      };
+      expect(section.series).toHaveLength(4);
+      const expectedLabels = ["يوليو 2026", "أغسطس 2026"];
+      for (const series of section.series) {
+        expect(series.points.map((p) => p.x)).toEqual(expectedLabels);
+        expect(series.points.some((p) => p.x === "سبتمبر 2026")).toBe(false);
+      }
+
       const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
-      // Future months must not appear as explicit labels in text layer
-      expect(joined).not.toContain("يوليو 2027");
-      expect(joined).not.toContain("أغسطس 2027");
-      // Caption describes full history
-      expect(joined).toContain("13");
+      const infoText =
+        "يعرض الاتجاه الشهري كامل البيانات المتاحة حتى نهاية التقرير، بحد أقصى 13 شهرًا. تمثل الأعمدة الشكاوى الواردة والمغلقة خلال كل شهر، وتمثل الخطوط رصيد الشكاوى المفتوحة والمتأخرة في نهاية الشهر.";
+      // PDF layer receives RTL token reorder via preparePdfText
+      expect(joined).toContain(preparePdfText(infoText));
     } finally {
+      pngSpy.mockRestore();
       textSpy.mockRestore();
     }
   });

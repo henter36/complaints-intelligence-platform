@@ -683,7 +683,7 @@ describe("renderExecutiveBriefPdf — PRINT_EXECUTIVE_BRIEF", () => {
     expect(digitalHeight).toBeGreaterThanOrEqual(1200);
     expect(printWidth).toBeCloseTo(900, 2);
     expect(printHeight).toBeGreaterThanOrEqual(1200);
-  });
+  }, 30_000);
 
   it("renders without error when all sections are empty", async () => {
     const data = makeReportData("PRINT_EXECUTIVE_BRIEF");

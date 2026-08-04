@@ -262,14 +262,72 @@ function yForValue(geo: ChartGeometry, value: number, yMax: number): number {
 }
 
 function estimateTextWidth(text: string, fontSize: number): number {
-  // Generous estimate for Amiri Arabic so legend swatches do not collide with text.
+  // Slightly wide Amiri estimate so legend labels stay inside their cell.
   let units = 0;
   for (const ch of text) {
-    if (ch === " " || ch === "\u00A0") units += 0.4;
-    else if (/[0-9.,+\-−%]/.test(ch)) units += 0.6;
-    else units += 0.95;
+    if (ch === " " || ch === "\u00A0") units += 0.45;
+    else if (/[0-9.,+\-−%]/.test(ch)) units += 0.62;
+    else units += 1.05;
   }
   return units * fontSize;
+}
+
+export type FittedLegendLabel = {
+  text: string;
+  fontSize: number;
+  measuredWidth: number;
+  truncated: boolean;
+};
+
+/**
+ * Fit a legend label into availableWidth by shrinking font then ellipsizing.
+ * Final measuredWidth is always <= availableWidth when availableWidth > 0.
+ */
+export function fitLegendLabel(
+  label: string,
+  availableWidth: number,
+  preferredFontSize: number,
+  minFontSize: number
+): FittedLegendLabel {
+  const widthCap = Math.max(0, availableWidth);
+  if (widthCap === 0) {
+    return { text: "", fontSize: minFontSize, measuredWidth: 0, truncated: label.length > 0 };
+  }
+
+  let fontSize = preferredFontSize;
+  while (fontSize > minFontSize) {
+    const measured = estimateTextWidth(label, fontSize);
+    if (measured <= widthCap) {
+      return { text: label, fontSize, measuredWidth: measured, truncated: false };
+    }
+    fontSize -= 0.5;
+  }
+
+  // At min size: ellipsize one character at a time.
+  const ellipsis = "…";
+  let candidate = label;
+  while (candidate.length > 0) {
+    const text = candidate === label ? candidate : `${candidate}${ellipsis}`;
+    const measured = estimateTextWidth(text, minFontSize);
+    if (measured <= widthCap) {
+      return {
+        text,
+        fontSize: minFontSize,
+        measuredWidth: measured,
+        truncated: candidate !== label,
+      };
+    }
+    candidate = candidate.slice(0, -1);
+  }
+
+  // Fall back to bare ellipsis if even one char does not fit.
+  const bare = estimateTextWidth(ellipsis, minFontSize) <= widthCap ? ellipsis : "";
+  return {
+    text: bare,
+    fontSize: minFontSize,
+    measuredWidth: estimateTextWidth(bare, minFontSize),
+    truncated: label.length > 0,
+  };
 }
 
 type LegendItem = {
@@ -277,15 +335,31 @@ type LegendItem = {
   style: SeriesStyle;
 };
 
+export type ChartLegendLabelBox = {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+  availableWidth: number;
+  measuredWidth: number;
+  originalName: string;
+  renderedName: string;
+  fontSize: number;
+  truncated: boolean;
+};
+
 export type ChartLegendLayout = {
   svg: string;
   height: number;
+  /** @deprecated Prefer labelBoxes for text-bounds assertions. */
   itemBoxes: Array<{ x: number; y: number; width: number; height: number; name: string }>;
+  labelBoxes: ChartLegendLabelBox[];
 };
 
 /**
  * Shared legend renderer: reserved band outside the plot, 2×2 grid when narrow.
- * Layout uses LTR coordinates: [label ←·→][swatch] so the stroke never crosses text.
+ * Layout uses LTR coordinates: [label ···][swatch] so the stroke never crosses text.
+ * Labels are measured via estimateTextWidth and fitted/truncated to the cell.
  */
 export function drawChartLegend(
   items: readonly LegendItem[],
@@ -297,7 +371,8 @@ export function drawChartLegend(
     paddingX?: number;
   }
 ): ChartLegendLayout {
-  const fontSize = options.fontSize ?? 11;
+  const preferredFontSize = options.fontSize ?? 11;
+  const minFontSize = 8;
   const paddingX = options.paddingX ?? 16;
   const columns = Math.min(
     options.columns ?? (options.width < 560 ? 2 : Math.min(4, Math.max(2, items.length))),
@@ -314,6 +389,7 @@ export function drawChartLegend(
 
   const parts: string[] = [];
   const itemBoxes: ChartLegendLayout["itemBoxes"] = [];
+  const labelBoxes: ChartLegendLabelBox[] = [];
 
   items.forEach((item, index) => {
     const row = Math.floor(index / columns);
@@ -325,10 +401,16 @@ export function drawChartLegend(
     const cy = options.top + row * rowH + rowH / 2;
 
     // Swatch on the far right of the cell; Arabic label expands leftward from it.
-    // This matches RTL reading (label then mark) and avoids stroke-through-text.
     const swatchRight = cellRight - 2;
     const swatchLeft = swatchRight - swatchW;
     const textX = swatchLeft - gap; // trailing edge of label (text-anchor end)
+    const availableLabelWidth = Math.max(8, textX - cellLeft - 3);
+    const fitted = fitLegendLabel(
+      item.name,
+      availableLabelWidth,
+      preferredFontSize,
+      minFontSize
+    );
 
     if (item.style.mark === "bar") {
       parts.push(
@@ -345,7 +427,7 @@ export function drawChartLegend(
     }
 
     parts.push(
-      `<text x="${textX.toFixed(1)}" y="${(cy + fontSize * 0.35).toFixed(1)}" text-anchor="end" font-size="${fontSize}" fill="${COLORS.primary}">${escapeXml(item.name)}</text>`
+      `<text x="${textX.toFixed(1)}" y="${(cy + fitted.fontSize * 0.35).toFixed(1)}" text-anchor="end" font-size="${fitted.fontSize}" fill="${COLORS.primary}" direction="rtl" unicode-bidi="plaintext">${escapeXml(fitted.text)}</text>`
     );
 
     itemBoxes.push({
@@ -355,12 +437,28 @@ export function drawChartLegend(
       height: rowH,
       name: item.name,
     });
+
+    const labelRight = textX;
+    const labelLeft = textX - fitted.measuredWidth;
+    labelBoxes.push({
+      left: labelLeft,
+      right: labelRight,
+      top: cy - rowH / 2,
+      bottom: cy + rowH / 2,
+      availableWidth: availableLabelWidth,
+      measuredWidth: fitted.measuredWidth,
+      originalName: item.name,
+      renderedName: fitted.text,
+      fontSize: fitted.fontSize,
+      truncated: fitted.truncated,
+    });
   });
 
   return {
     svg: parts.join("\n"),
     height: 12 + rows * rowH,
     itemBoxes,
+    labelBoxes,
   };
 }
 
@@ -647,18 +745,28 @@ export function resolveLegendColumnCount(count: number): number {
   return 2;
 }
 
-function resolveChartGeometry(options: {
+export const MIN_PLOT_HEIGHT = 56;
+
+export function resolveChartGeometry(options: {
   width: number;
   height: number;
   hasDualAxis: boolean;
   plotTop: number;
   xCount: number;
 }): ChartGeometry {
+  const safePlotBottom = Math.max(1, options.height - 36);
+  const availableHeight = Math.max(1, safePlotBottom);
+  const effectiveMinimumHeight = Math.min(MIN_PLOT_HEIGHT, availableHeight);
+  const maximumPlotTop = safePlotBottom - effectiveMinimumHeight;
+  let safePlotTop = Math.max(0, Math.min(options.plotTop, maximumPlotTop));
+  if (!(safePlotTop < safePlotBottom) || !Number.isFinite(safePlotTop) || !Number.isFinite(safePlotBottom)) {
+    safePlotTop = Math.max(0, safePlotBottom - 1);
+  }
   return {
     plotLeft: options.hasDualAxis ? 76 : 54,
     plotRight: options.width - 76,
-    plotTop: options.plotTop,
-    plotBottom: options.height - 36,
+    plotTop: safePlotTop,
+    plotBottom: safePlotBottom,
     xCount: options.xCount,
   };
 }
