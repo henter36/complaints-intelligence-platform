@@ -5,9 +5,9 @@ import {
   type Prisma,
 } from "@prisma/client";
 import { db } from "@/lib/db";
+import { normalizeClassificationKeyword } from "@/lib/classifications/classification-keyword-normalizer";
 import { logger } from "@/server/logger";
 import { writeAuditLog, AUDIT_ACTOR_SINGLE_ADMIN } from "@/server/audit/audit-log-service";
-import { normalizeArabic } from "@/server/imports/arabic-normalize";
 import { normalizeColumnHeader } from "@/server/imports/complaint-column-schema";
 import { ImportValidationError } from "@/server/imports/import-errors";
 import { normalizeTextCell } from "@/server/imports/normalization";
@@ -21,6 +21,7 @@ export type ImportedDetailValue = {
   linkedKeywordsCount: number;
   alreadyLinkedToCurrentClassification: boolean;
   linkedToOtherClassification: boolean;
+  linkedClassificationName?: string | null;
 };
 
 export type ImportedDetailValuesResult = {
@@ -92,11 +93,10 @@ const NORMALIZED_DETAIL_HEADERS = new Set([
   normalizeColumnHeader("التفصيل"),
 ]);
 
-export function normalizeImportedDetailValue(value: string): string {
-  return normalizeArabic(value)
-    .replaceAll(/\s+/g, " ")
-    .toLocaleLowerCase("ar-SA");
-}
+/** @deprecated استخدم normalizeClassificationKeyword من الملف المشترك. */
+export {
+  normalizeClassificationKeyword as normalizeImportedDetailValue,
+} from "@/lib/classifications/classification-keyword-normalizer";
 
 function positiveInteger(value: number | undefined, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0
@@ -170,7 +170,7 @@ function buildLinkedClassificationsByValue(
   const linkedByValue = new Map<string, Set<string>>();
   for (const classification of classifications) {
     for (const keyword of parseKeywords(classification.keywords)) {
-      const normalized = normalizeImportedDetailValue(keyword);
+      const normalized = normalizeClassificationKeyword(keyword);
       if (!normalized) continue;
       const linkedIds = linkedByValue.get(normalized) ?? new Set<string>();
       linkedIds.add(classification.id);
@@ -192,7 +192,7 @@ function appendDetailRows(
       rawFallbackById.get(row.id)
     );
     if (!displayValue) continue;
-    const normalizedValue = normalizeImportedDetailValue(displayValue);
+    const normalizedValue = normalizeClassificationKeyword(displayValue);
     if (!normalizedValue) continue;
     rowsWithSourceDetail += 1;
 
@@ -280,11 +280,13 @@ function warnWhenConfirmedRowsHaveNoDetails(
 function buildImportedDetailValues(
   aggregates: ReadonlyMap<string, DetailAggregate>,
   linkedByValue: ReadonlyMap<string, Set<string>>,
-  classificationId: string | undefined
+  classificationId: string | undefined,
+  classificationNameById: ReadonlyMap<string, string>
 ): ImportedDetailValue[] {
   return [...aggregates.entries()].map(([normalizedValue, aggregate]) => {
     const linkedIds = linkedByValue.get(normalizedValue) ?? new Set<string>();
     const linkedToCurrent = Boolean(classificationId && linkedIds.has(classificationId));
+    const otherId = [...linkedIds].find((id) => id !== classificationId);
     return {
       normalizedValue,
       displayValue: bestDisplayValue(aggregate.variants),
@@ -292,6 +294,7 @@ function buildImportedDetailValues(
       linkedKeywordsCount: linkedIds.size,
       alreadyLinkedToCurrentClassification: linkedToCurrent,
       linkedToOtherClassification: [...linkedIds].some((id) => id !== classificationId),
+      linkedClassificationName: otherId ? classificationNameById.get(otherId) ?? null : null,
     };
   });
 }
@@ -318,24 +321,28 @@ export async function listImportedDetailValues(input: {
 } = {}, client: ImportedDetailValuesClient = db): Promise<ImportedDetailValuesResult> {
   const page = positiveInteger(input.page, 1);
   const pageSize = Math.min(100, positiveInteger(input.pageSize, 50));
-  const search = normalizeImportedDetailValue(input.search ?? "");
+  const search = normalizeClassificationKeyword(input.search ?? "");
   const linkStatus = input.linkStatus ?? "ALL";
 
   const [confirmedBatchCount, classifications] = await Promise.all([
     client.importBatch.count({ where: { status: ImportBatchStatus.CONFIRMED } }),
     client.classification.findMany({
       where: { isActive: true, isDeleted: false },
-      select: { id: true, keywords: true },
+      select: { id: true, nameAr: true, keywords: true },
     }),
   ]);
 
+  const classificationNameById = new Map(
+    classifications.map((item) => [item.id, item.nameAr] as const)
+  );
   const linkedByValue = buildLinkedClassificationsByValue(classifications);
   const { aggregates, rowsScanned, rowsWithSourceDetail } =
     await aggregateImportedDetails(client);
   const availableItems = buildImportedDetailValues(
     aggregates,
     linkedByValue,
-    input.classificationId
+    input.classificationId,
+    classificationNameById
   );
   const allItems = filterAndSortImportedDetailValues(availableItems, search, linkStatus);
 
@@ -380,7 +387,7 @@ export async function importDetailValuesAsKeywords(input: {
   for (const value of input.values) {
     const displayValue = normalizeTextCell(value);
     if (!displayValue) continue;
-    const normalizedValue = normalizeImportedDetailValue(displayValue);
+    const normalizedValue = normalizeClassificationKeyword(displayValue);
     if (normalizedValue && !requested.has(normalizedValue)) requested.set(normalizedValue, displayValue);
   }
   if (requested.size === 0) {
@@ -401,7 +408,7 @@ export async function importDetailValuesAsKeywords(input: {
     for (const classification of classifications) {
       if (classification.id === current.id) continue;
       const normalizedKeywords = new Set(
-        parseKeywords(classification.keywords).map(normalizeImportedDetailValue)
+        parseKeywords(classification.keywords).map(normalizeClassificationKeyword)
       );
       for (const [normalizedValue, displayValue] of requested) {
         if (normalizedKeywords.has(normalizedValue)) conflictingValues.push(displayValue);
@@ -417,7 +424,7 @@ export async function importDetailValuesAsKeywords(input: {
     }
 
     const existing = parseKeywords(current.keywords);
-    const existingNormalized = new Set(existing.map(normalizeImportedDetailValue));
+    const existingNormalized = new Set(existing.map(normalizeClassificationKeyword));
     const additions = [...requested].filter(([normalizedValue]) => !existingNormalized.has(normalizedValue));
     const keywords = [...existing, ...additions.map(([, displayValue]) => displayValue)];
 

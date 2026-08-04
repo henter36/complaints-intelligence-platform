@@ -5,6 +5,10 @@ import { importDetailValuesAsKeywords } from "@/server/classifications/imported-
 
 type RouteContext = { params: Promise<{ classificationId: string }> };
 
+/**
+ * @deprecated Prefer adding draft keywords in the UI and saving via
+ * PATCH /api/classifications/[classificationId]. Kept for temporary API compatibility.
+ */
 export async function POST(request: NextRequest, context: RouteContext) {
   try {
     const session = await requireAdminApiSession(request);

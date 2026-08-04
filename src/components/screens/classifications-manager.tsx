@@ -27,16 +27,6 @@ import {
   DialogClose,
 } from "@/components/ui/dialog";
 import {
-  AlertDialog,
-  AlertDialogContent,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogCancel,
-  AlertDialogAction,
-} from "@/components/ui/alert-dialog";
-import {
   Select,
   SelectContent,
   SelectItem,
@@ -58,7 +48,6 @@ import {
   Tags,
   Plus,
   Edit,
-  Merge,
   FolderTree,
   Palette,
   Folder,
@@ -69,17 +58,20 @@ import {
   X,
   Loader2,
   RefreshCw,
-  AlertCircle,
 } from "lucide-react";
 import { formatNumber } from "@/lib/ar-utils";
 import { isAbortError } from "@/lib/abort";
+import { normalizeClassificationKeyword } from "@/lib/classifications/classification-keyword-normalizer";
 
 // ---------- Types ----------
+type NodeType = "CATEGORY" | "CLASSIFICATION";
+
 interface Classification {
   id: string;
+  nodeType: NodeType;
   name: string;
   description?: string | null;
-  color: string;
+  color?: string;
   keywords?: unknown;
   parentId?: string | null;
   children?: Classification[];
@@ -95,6 +87,231 @@ interface DashboardData {
     byClassification?: DistributionItem[];
   };
 }
+
+function isCategoryNode(node: Classification): boolean {
+  return node.nodeType === "CATEGORY" || (!node.nodeType && !node.parentId);
+}
+
+function isClassificationNode(node: Classification): boolean {
+  return node.nodeType === "CLASSIFICATION" || (!node.nodeType && Boolean(node.parentId));
+}
+
+function readApiErrorMessage(payload: unknown, fallback: string): string {
+  if (!payload || typeof payload !== "object") return fallback;
+  const error = (payload as { error?: unknown }).error;
+  if (typeof error === "string" && error.trim()) return error;
+  if (error && typeof error === "object") {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim()) return message;
+  }
+  return fallback;
+}
+
+export type ClassificationDialogMode =
+  | "EDIT_CATEGORY"
+  | "EDIT_CLASSIFICATION"
+  | "CREATE_CATEGORY"
+  | "CREATE_CLASSIFICATION"
+  | "UNSUPPORTED";
+
+export type ClassificationDialogPresentation = {
+  mode: ClassificationDialogMode;
+  title: string;
+  description: string;
+  icon: "edit" | "plus";
+};
+
+export function getClassificationDialogPresentation(
+  editing: Classification | null,
+  creatingCategory: boolean
+): ClassificationDialogPresentation {
+  if (editing) {
+    if (isCategoryNode(editing)) {
+      return {
+        mode: "EDIT_CATEGORY",
+        title: "تعديل الفئة الرئيسية",
+        description: "عدّل اسم ووصف الفئة الرئيسية فقط",
+        icon: "edit",
+      };
+    }
+    if (isClassificationNode(editing)) {
+      return {
+        mode: "EDIT_CLASSIFICATION",
+        title: "تعديل التصنيف",
+        description:
+          "عدّل بيانات التصنيف والكلمات المفتاحية. الحفظ يتم بزر حفظ التغييرات فقط.",
+        icon: "edit",
+      };
+    }
+    return {
+      mode: "UNSUPPORTED",
+      title: "تعذر تعديل العنصر",
+      description: "نوع عقدة التصنيف غير مدعوم",
+      icon: "edit",
+    };
+  }
+  if (creatingCategory) {
+    return {
+      mode: "CREATE_CATEGORY",
+      title: "إضافة فئة رئيسية",
+      description: "أنشئ فئة رئيسية جديدة بدون كلمات مفتاحية",
+      icon: "plus",
+    };
+  }
+  return {
+    mode: "CREATE_CLASSIFICATION",
+    title: "إضافة تصنيف فرعي",
+    description:
+      "أدخل بيانات التصنيف الفرعي والكلمات المفتاحية (مسودة حتى الحفظ)",
+    icon: "plus",
+  };
+}
+
+export type ClassificationMutationRequest = {
+  url: string;
+  method: "POST" | "PATCH";
+  body: Record<string, unknown>;
+};
+
+export type ClassificationMutationState = {
+  editing: Classification | null;
+  creatingCategory: boolean;
+  formName: string;
+  formDescription: string;
+  formColor: string;
+  formKeywords: string[];
+  formParentId: string;
+};
+
+export function buildClassificationMutationRequest(
+  state: ClassificationMutationState
+): ClassificationMutationRequest {
+  const {
+    editing,
+    creatingCategory,
+    formName,
+    formDescription,
+    formColor,
+    formKeywords,
+    formParentId,
+  } = state;
+  const name = formName.trim();
+  const description = formDescription.trim() || null;
+
+  if (editing) {
+    switch (editing.nodeType) {
+      case "CATEGORY":
+        return {
+          url: `/api/categories/${editing.id}`,
+          method: "PATCH",
+          body: { name, description },
+        };
+      case "CLASSIFICATION":
+        return {
+          url: `/api/classifications/${editing.id}`,
+          method: "PATCH",
+          body: {
+            name,
+            description,
+            color: formColor,
+            keywords: formKeywords,
+            categoryId: formParentId || editing.parentId,
+          },
+        };
+      default:
+        throw new Error("نوع عقدة التصنيف غير مدعوم");
+    }
+  }
+
+  if (creatingCategory) {
+    return {
+      url: "/api/categories",
+      method: "POST",
+      body: { name, description },
+    };
+  }
+
+  if (!formParentId) {
+    throw new Error("اختر فئة أب للتصنيف الفرعي");
+  }
+  return {
+    url: "/api/classifications",
+    method: "POST",
+    body: {
+      categoryId: formParentId,
+      name,
+      description,
+      color: formColor,
+      keywords: formKeywords,
+    },
+  };
+}
+
+export function normalizeClassificationTree(
+  classData: Classification[]
+): Classification[] {
+  return classData.map((node) => ({
+    ...node,
+    nodeType: node.nodeType ?? ("CATEGORY" as NodeType),
+    children: (node.children ?? []).map((child) => ({
+      ...child,
+      nodeType: child.nodeType ?? ("CLASSIFICATION" as NodeType),
+    })),
+  }));
+}
+
+export function buildDistributionMap(dashData: DashboardData): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const item of dashData.distributions?.byClassification ?? []) {
+    map.set(item.name, item.count);
+  }
+  return map;
+}
+
+async function loadClassificationTree(signal?: AbortSignal): Promise<Classification[]> {
+  const classRes = await fetch("/api/classifications", { signal });
+  if (!classRes.ok) throw new Error("فشل تحميل التصنيفات");
+  const classData: Classification[] = await classRes.json();
+  return normalizeClassificationTree(classData);
+}
+
+export async function loadDashboardDistribution(
+  signal?: AbortSignal
+): Promise<Map<string, number> | null> {
+  try {
+    const dashRes = await fetch("/api/dashboard", { signal });
+    if (!dashRes.ok) return null;
+    const dashData: DashboardData = await dashRes.json();
+    return buildDistributionMap(dashData);
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    return null;
+  }
+}
+
+export async function loadClassificationManagerData(signal?: AbortSignal): Promise<{
+  tree: Classification[];
+  distribution: Map<string, number> | null;
+}> {
+  const [tree, distribution] = await Promise.all([
+    loadClassificationTree(signal),
+    loadDashboardDistribution(signal),
+  ]);
+  return { tree, distribution };
+}
+
+function mergeKeywordsIntoDraft(previous: string[], values: string[]): string[] {
+  const seen = new Set(previous.map(normalizeClassificationKeyword).filter(Boolean));
+  const next = [...previous];
+  for (const value of values) {
+    const normalized = normalizeClassificationKeyword(value);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    next.push(value);
+  }
+  return next;
+}
+
 
 // ---------- Preset colors (government-grade palette) ----------
 const PRESET_COLORS = [
@@ -132,20 +349,24 @@ type ImportedDetailItem = {
   linkedKeywordsCount: number;
   alreadyLinkedToCurrentClassification: boolean;
   linkedToOtherClassification: boolean;
+  linkedClassificationName?: string | null;
 };
 
 const IMPORTED_VALUES_LOAD_ERROR_MESSAGE = "تعذر تحميل القيم المستوردة.";
 
 export function ImportedDetailPicker({
   classificationId,
-  onImported,
+  existingKeywords,
+  onSelect,
 }: Readonly<{
   classificationId: string;
-  onImported: (keywords: string[]) => void;
+  existingKeywords: string[];
+  onSelect: (values: string[]) => void;
 }>) {
   const { toast } = useToast();
   const [items, setItems] = useState<ImportedDetailItem[]>([]);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  /** normalizedValue → displayValue — preserved across pagination/search */
+  const [selected, setSelected] = useState<Map<string, string>>(new Map());
   const [search, setSearch] = useState("");
   const [linkStatus, setLinkStatus] = useState("ALL");
   const [page, setPage] = useState(1);
@@ -153,11 +374,19 @@ export function ImportedDetailPicker({
   const [availableTotal, setAvailableTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [hasLoaded, setHasLoaded] = useState(false);
-  const [adding, setAdding] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const valuesRequestIdRef = useRef(0);
   const valuesAbortControllerRef = useRef<AbortController | null>(null);
   const pageSize = 20;
+
+  const existingNormalized = useMemo(() => {
+    const set = new Set<string>();
+    for (const keyword of existingKeywords) {
+      const normalized = normalizeClassificationKeyword(keyword);
+      if (normalized) set.add(normalized);
+    }
+    return set;
+  }, [existingKeywords]);
 
   const loadValues = useCallback(async () => {
     valuesAbortControllerRef.current?.abort();
@@ -206,48 +435,45 @@ export function ImportedDetailPicker({
     };
   }, [loadValues]);
 
-  const selectableItems = items.filter((item) => !item.alreadyLinkedToCurrentClassification);
-  const allSelected = selectableItems.length > 0 && selectableItems.every((item) => selected.has(item.normalizedValue));
+  const isDisabled = (item: ImportedDetailItem) =>
+    item.alreadyLinkedToCurrentClassification
+    || item.linkedToOtherClassification
+    || existingNormalized.has(item.normalizedValue);
 
-  const toggleValue = (value: string) => {
+  const selectableItems = items.filter((item) => !isDisabled(item));
+  const allSelected =
+    selectableItems.length > 0
+    && selectableItems.every((item) => selected.has(item.normalizedValue));
+
+  const toggleValue = (item: ImportedDetailItem) => {
+    if (isDisabled(item)) return;
     setSelected((current) => {
-      const next = new Set(current);
-      if (next.has(value)) next.delete(value);
-      else next.add(value);
+      const next = new Map(current);
+      if (next.has(item.normalizedValue)) next.delete(item.normalizedValue);
+      else next.set(item.normalizedValue, item.displayValue);
       return next;
     });
   };
 
-  const addSelected = async () => {
-    const values = items
-      .filter((item) => selected.has(item.normalizedValue))
-      .map((item) => item.displayValue);
-    if (values.length === 0) return;
-    setAdding(true);
-    try {
-      const response = await fetch(`/api/classifications/${classificationId}/keywords/import`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ values }),
-      });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error?.message || "تعذر إضافة الكلمات المحددة");
-      onImported(payload.keywords);
-      setSelected(new Set());
-      await loadValues();
+  const addSelectedToDraft = () => {
+    if (selected.size === 0) return;
+    const values = [...selected.values()].filter((value) => {
+      const n = normalizeClassificationKeyword(value);
+      return n && !existingNormalized.has(n);
+    });
+    if (values.length === 0) {
       toast({
-        title: "تمت إضافة الكلمات المفتاحية",
-        description: `أضيفت ${formatNumber(payload.added)} كلمة، وتجاوز النظام ${formatNumber(payload.alreadyExists)} كلمة موجودة.`,
+        title: "لا قيم جديدة",
+        description: "القيم المحددة موجودة بالفعل في المسودة.",
       });
-    } catch (error) {
-      toast({
-        variant: "destructive",
-        title: "تعذر إضافة الكلمات",
-        description: error instanceof Error ? error.message : "حدث خطأ غير متوقع",
-      });
-    } finally {
-      setAdding(false);
+      return;
     }
+    onSelect(values);
+    setSelected(new Map());
+    toast({
+      title: "أُضيفت إلى المسودة",
+      description: `أُضيفت ${formatNumber(values.length)} قيمة. لن تحفظ حتى الضغط على حفظ التغييرات.`,
+    });
   };
 
   return (
@@ -270,16 +496,19 @@ export function ImportedDetailPicker({
         </Select>
       </div>
       <div className="flex items-center justify-between text-xs text-muted-foreground">
-        <span>إجمالي القيم: {formatNumber(total)}</span>
+        <span>
+          إجمالي القيم: {formatNumber(total)}
+          {selected.size > 0 ? ` · تم اختيار ${formatNumber(selected.size)} قيمة` : ""}
+        </span>
         <label className="flex items-center gap-2">
           <Checkbox
             checked={allSelected}
             onCheckedChange={() => {
               setSelected((current) => {
-                const next = new Set(current);
+                const next = new Map(current);
                 for (const item of selectableItems) {
                   if (allSelected) next.delete(item.normalizedValue);
-                  else next.add(item.normalizedValue);
+                  else next.set(item.normalizedValue, item.displayValue);
                 }
                 return next;
               });
@@ -307,22 +536,40 @@ export function ImportedDetailPicker({
       )}
       {!loading && items.length > 0 && (
         <div className="max-h-64 space-y-1 overflow-y-auto rounded-md border p-2">
-          {items.map((item) => (
-            <label key={item.normalizedValue} className="flex items-center gap-3 rounded-md p-2 hover:bg-muted/50">
-              <Checkbox
-                checked={selected.has(item.normalizedValue)}
-                disabled={item.alreadyLinkedToCurrentClassification}
-                onCheckedChange={() => toggleValue(item.normalizedValue)}
-              />
-              <span className="min-w-0 flex-1 truncate text-sm">{item.displayValue}</span>
-              <span className="text-xs text-muted-foreground">{formatNumber(item.occurrences)} ظهور</span>
-              {item.alreadyLinkedToCurrentClassification && <Badge variant="secondary">مضافة مسبقًا</Badge>}
-              {!item.alreadyLinkedToCurrentClassification && item.linkedToOtherClassification && (
-                <Badge variant="destructive">مرتبطة بتصنيف آخر</Badge>
-              )}
-              {item.linkedKeywordsCount === 0 && <Badge variant="outline">غير مرتبطة</Badge>}
-            </label>
-          ))}
+          {items.map((item) => {
+            const disabled = isDisabled(item);
+            return (
+              <label key={item.normalizedValue} className="flex items-center gap-3 rounded-md p-2 hover:bg-muted/50">
+                <Checkbox
+                  checked={selected.has(item.normalizedValue)}
+                  disabled={disabled}
+                  onCheckedChange={() => toggleValue(item)}
+                />
+                <span className="min-w-0 flex-1 truncate text-sm">{item.displayValue}</span>
+                <span className="text-xs text-muted-foreground">{formatNumber(item.occurrences)} ظهور</span>
+                {item.alreadyLinkedToCurrentClassification && <Badge variant="secondary">مضافة مسبقًا</Badge>}
+                {!item.alreadyLinkedToCurrentClassification
+                  && item.linkedToOtherClassification && (
+                  <Badge variant="destructive">
+                    {item.linkedClassificationName
+                      ? `مرتبطة: ${item.linkedClassificationName}`
+                      : "مرتبطة بتصنيف آخر"}
+                  </Badge>
+                )}
+                {existingNormalized.has(item.normalizedValue)
+                  && !item.alreadyLinkedToCurrentClassification
+                  && !item.linkedToOtherClassification && (
+                  <Badge variant="outline">مضافة إلى المسودة</Badge>
+                )}
+                {item.linkedKeywordsCount === 0
+                  && !item.linkedToOtherClassification
+                  && !item.alreadyLinkedToCurrentClassification
+                  && !existingNormalized.has(item.normalizedValue) && (
+                  <Badge variant="outline">غير مرتبطة</Badge>
+                )}
+              </label>
+            );
+          })}
         </div>
       )}
       <div className="flex items-center justify-between gap-2">
@@ -330,12 +577,13 @@ export function ImportedDetailPicker({
           <Button type="button" variant="outline" size="sm" disabled={page === 1 || loading} onClick={() => setPage((value) => value - 1)}>السابق</Button>
           <Button type="button" variant="outline" size="sm" disabled={page * pageSize >= total || loading} onClick={() => setPage((value) => value + 1)}>التالي</Button>
         </div>
-        <Button type="button" size="sm" disabled={selected.size === 0 || adding} onClick={() => void addSelected()}>
-          {adding && <Loader2 className="h-4 w-4 animate-spin" />}
-          إضافة المحدد ككلمات مفتاحية
+        <Button type="button" size="sm" disabled={selected.size === 0} onClick={addSelectedToDraft}>
+          إضافة المحدد إلى المسودة
         </Button>
       </div>
-      <p className="text-xs text-muted-foreground">لن تؤدي الإضافة إلى إعادة تصنيف الشكاوى السابقة تلقائيًا.</p>
+      <p className="text-xs text-muted-foreground">
+        لن تحفظ الكلمات حتى الضغط على حفظ التغييرات.
+      </p>
     </div>
   );
 }
@@ -501,9 +749,6 @@ interface ClassificationCardProps {
   depth: number;
   onEdit: (c: Classification) => void;
   onAddChild: (parent: Classification) => void;
-  onToggleMerge: (c: Classification) => void;
-  isSelectedForMerge: boolean;
-  mergeMode: boolean;
 }
 
 function ClassificationCard({
@@ -512,38 +757,29 @@ function ClassificationCard({
   depth,
   onEdit,
   onAddChild,
-  onToggleMerge,
-  isSelectedForMerge,
-  mergeMode,
 }: ClassificationCardProps) {
   const hasChildren =
     classification.children && classification.children.length > 0;
   const [open, setOpen] = useState(true);
   const keywords = parseKeywords(classification.keywords);
+  const isCategory = isCategoryNode(classification);
+  const accentColor = classification.color || "#64748b";
 
   return (
     <div className="space-y-2" style={{ marginInlineStart: `${depth * 1.5}rem` }}>
-      <Card
-        className={`card-hover overflow-hidden transition-all ${
-          isSelectedForMerge
-            ? "ring-2 ring-primary border-primary/50"
-            : "border-border"
-        }`}
-      >
+      <Card className="card-hover overflow-hidden transition-all border-border">
         <CardContent className="p-4">
           <div className="flex items-start gap-3">
-            {/* Color indicator */}
             <div
               className="h-12 w-1.5 rounded-full shrink-0 self-stretch"
-              style={{ backgroundColor: classification.color }}
+              style={{ backgroundColor: isCategory ? "#94a3b8" : accentColor }}
               aria-hidden
             />
 
-            {/* Main info */}
             <div className="flex-1 min-w-0">
               <div className="flex items-start justify-between gap-2 flex-wrap">
                 <div className="flex items-center gap-2 min-w-0">
-                  {hasChildren ? (
+                  {hasChildren || isCategory ? (
                     <button
                       type="button"
                       onClick={() => setOpen((o) => !o)}
@@ -559,12 +795,15 @@ function ClassificationCard({
                   ) : (
                     <Tags
                       className="h-4 w-4 text-muted-foreground shrink-0"
-                      style={{ color: classification.color }}
+                      style={{ color: accentColor }}
                     />
                   )}
                   <h4 className="font-semibold text-base truncate">
                     {classification.name}
                   </h4>
+                  <Badge variant="outline" className="text-[10px]">
+                    {isCategory ? "فئة" : "تصنيف"}
+                  </Badge>
                   {hasChildren && (
                     <Badge variant="outline" className="text-[10px]">
                       {formatNumber(classification.children!.length)} تصنيف فرعي
@@ -572,28 +811,7 @@ function ClassificationCard({
                   )}
                 </div>
 
-                {/* Action buttons */}
                 <div className="flex items-center gap-1 shrink-0">
-                  {mergeMode && (
-                    <Button
-                      size="sm"
-                      variant={isSelectedForMerge ? "default" : "outline"}
-                      onClick={() => onToggleMerge(classification)}
-                      className="h-8"
-                    >
-                      {isSelectedForMerge ? (
-                        <>
-                          <CheckCircle2 className="h-3.5 w-3.5" />
-                          محدد
-                        </>
-                      ) : (
-                        <>
-                          <Merge className="h-3.5 w-3.5" />
-                          تحديد
-                        </>
-                      )}
-                    </Button>
-                  )}
                   <TooltipProvider>
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -601,15 +819,17 @@ function ClassificationCard({
                           size="icon"
                           variant="ghost"
                           className="h-8 w-8"
+                          data-testid={`edit-node-${classification.id}`}
+                          aria-label={`تعديل ${classification.name}`}
                           onClick={() => onEdit(classification)}
                         >
                           <Edit className="h-4 w-4" />
                         </Button>
                       </TooltipTrigger>
-                      <TooltipContent side="top">تعديل</TooltipContent>
+                      <TooltipContent>تعديل</TooltipContent>
                     </Tooltip>
                   </TooltipProvider>
-                  {!hasChildren && (
+                  {isCategory && (
                     <TooltipProvider>
                       <Tooltip>
                         <TooltipTrigger asChild>
@@ -622,7 +842,7 @@ function ClassificationCard({
                             <Plus className="h-4 w-4" />
                           </Button>
                         </TooltipTrigger>
-                        <TooltipContent side="top">إضافة تصنيف فرعي</TooltipContent>
+                        <TooltipContent>إضافة تصنيف فرعي</TooltipContent>
                       </Tooltip>
                     </TooltipProvider>
                   )}
@@ -630,42 +850,33 @@ function ClassificationCard({
               </div>
 
               {classification.description && (
-                <p className="text-sm text-muted-foreground mt-1.5 line-clamp-2">
+                <p className="text-sm text-muted-foreground mt-1 line-clamp-2">
                   {classification.description}
                 </p>
               )}
 
-              {/* Stats row */}
-              <div className="flex flex-wrap items-center gap-3 mt-3 text-xs">
-                <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-primary/10 text-primary">
+              <div className="flex flex-wrap items-center gap-3 mt-2 text-xs text-muted-foreground">
+                <span className="flex items-center gap-1">
                   <FileText className="h-3.5 w-3.5" />
-                  <span className="font-medium">
-                    {formatNumber(complaintCount)} شكوى
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-secondary text-secondary-foreground">
-                  <Tags className="h-3.5 w-3.5" />
-                  <span className="font-medium">
+                  {formatNumber(complaintCount)} شكوى
+                </span>
+                {isClassificationNode(classification) && (
+                  <span className="flex items-center gap-1">
+                    <Hash className="h-3.5 w-3.5" />
                     {formatNumber(keywords.length)} كلمة مفتاحية
                   </span>
-                </div>
+                )}
               </div>
 
-              {/* Keywords display */}
-              {keywords.length > 0 && (
-                <div className="flex flex-wrap gap-1 mt-3 pt-3 border-t border-dashed">
+              {isClassificationNode(classification) && keywords.length > 0 && (
+                <div className="flex flex-wrap gap-1 mt-2">
                   {keywords.slice(0, 8).map((kw) => (
-                    <Badge
-                      key={kw}
-                      variant="outline"
-                      className="text-[10px] font-normal py-0.5"
-                    >
-                      <Hash className="h-2.5 w-2.5 opacity-50" />
+                    <Badge key={kw} variant="secondary" className="text-[10px]">
                       {kw}
                     </Badge>
                   ))}
                   {keywords.length > 8 && (
-                    <Badge variant="outline" className="text-[10px] py-0.5">
+                    <Badge variant="outline" className="text-[10px]">
                       +{formatNumber(keywords.length - 8)}
                     </Badge>
                   )}
@@ -676,7 +887,6 @@ function ClassificationCard({
         </CardContent>
       </Card>
 
-      {/* Children */}
       {hasChildren && (
         <Collapsible open={open}>
           <CollapsibleContent>
@@ -692,14 +902,11 @@ function ClassificationCard({
               {classification.children!.map((child) => (
                 <ClassificationCard
                   key={child.id}
-                  classification={child}
+                  classification={{ ...child, nodeType: child.nodeType ?? "CLASSIFICATION" }}
                   complaintCount={0}
                   depth={0}
                   onEdit={onEdit}
                   onAddChild={onAddChild}
-                  onToggleMerge={onToggleMerge}
-                  isSelectedForMerge={isSelectedForMerge}
-                  mergeMode={mergeMode}
                 />
               ))}
             </div>
@@ -721,6 +928,7 @@ export function ClassificationsManager() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<Classification | null>(null);
   const [formParentId, setFormParentId] = useState<string>("");
+  const [creatingCategory, setCreatingCategory] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   // Form state
@@ -728,45 +936,24 @@ export function ClassificationsManager() {
   const [formDescription, setFormDescription] = useState("");
   const [formColor, setFormColor] = useState(PRESET_COLORS[0].value);
   const [formKeywords, setFormKeywords] = useState<string[]>([]);
-
-  // Merge state
-  const [mergeMode, setMergeMode] = useState(false);
-  const [mergeSelection, setMergeSelection] = useState<Classification[]>([]);
-  const [mergeDialogOpen, setMergeDialogOpen] = useState(false);
   const fetchRequestRef = useRef(0);
 
   const fetchData = useCallback(async (signal?: AbortSignal) => {
     const requestId = fetchRequestRef.current + 1;
     fetchRequestRef.current = requestId;
-    const canUpdate = () => !signal?.aborted && fetchRequestRef.current === requestId;
+    const isLatest = () => !signal?.aborted && fetchRequestRef.current === requestId;
     setLoading(true);
     let aborted = false;
     try {
-      const [classRes, dashRes] = await Promise.all([
-        fetch("/api/classifications", { signal }),
-        fetch("/api/dashboard", { signal }),
-      ]);
-      if (!classRes.ok) throw new Error("فشل تحميل التصنيفات");
-      const classData: Classification[] = await classRes.json();
-
-      if (dashRes.ok) {
-        const dashData: DashboardData = await dashRes.json();
-        const map = new Map<string, number>();
-        for (const item of dashData.distributions?.byClassification ?? []) {
-          map.set(item.name, item.count);
-        }
-        if (canUpdate()) {
-          setClassifications(classData);
-          setDistributionMap(map);
-        }
-      } else if (canUpdate()) {
-        setClassifications(classData);
+      const { tree, distribution } = await loadClassificationManagerData(signal);
+      if (!isLatest()) return;
+      setClassifications(tree);
+      if (distribution) {
+        setDistributionMap(distribution);
       }
     } catch (err) {
       aborted = isAbortError(err);
-      if (aborted) {
-        return;
-      }
+      if (aborted) return;
       const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
       toast({
         title: "خطأ",
@@ -774,7 +961,7 @@ export function ClassificationsManager() {
         variant: "destructive",
       });
     } finally {
-      if (!aborted && canUpdate()) {
+      if (!aborted && isLatest()) {
         setLoading(false);
       }
     }
@@ -792,13 +979,15 @@ export function ClassificationsManager() {
     };
   }, [fetchData]);
 
-  // Flat list for selectors
   const flatList = useMemo(() => flatten(classifications), [classifications]);
+  const categoryOptions = useMemo(
+    () => classifications.filter((node) => isCategoryNode(node)),
+    [classifications]
+  );
 
   const complaintCountFor = useCallback(
     (c: Classification): number => {
       const direct = distributionMap.get(c.name) ?? 0;
-      // Aggregate children counts for parent display
       let total = direct;
       if (c.children?.length) {
         for (const child of c.children) {
@@ -810,7 +999,6 @@ export function ClassificationsManager() {
     [distributionMap]
   );
 
-  // Reset form
   const resetForm = () => {
     setFormName("");
     setFormDescription("");
@@ -818,18 +1006,25 @@ export function ClassificationsManager() {
     setFormKeywords([]);
     setFormParentId("");
     setEditing(null);
+    setCreatingCategory(false);
   };
 
-  // Open add dialog (top-level or child)
-  const openAddDialog = (parent?: Classification) => {
+  const openAddCategoryDialog = () => {
     resetForm();
+    setCreatingCategory(true);
+    setDialogOpen(true);
+  };
+
+  const openAddClassificationDialog = (parent?: Classification) => {
+    resetForm();
+    setCreatingCategory(false);
     setFormParentId(parent?.id ?? "");
     setDialogOpen(true);
   };
 
-  // Open edit dialog
   const openEditDialog = (c: Classification) => {
     setEditing(c);
+    setCreatingCategory(false);
     setFormName(c.name);
     setFormDescription(c.description ?? "");
     setFormColor(c.color || PRESET_COLORS[0].value);
@@ -838,43 +1033,63 @@ export function ClassificationsManager() {
     setDialogOpen(true);
   };
 
+  const editingIsCategory = editing ? isCategoryNode(editing) : creatingCategory;
+  const dialogPresentation = getClassificationDialogPresentation(editing, creatingCategory);
+  const isUnsupportedEdit = dialogPresentation.mode === "UNSUPPORTED";
+  const showClassificationFields =
+    dialogPresentation.mode === "EDIT_CLASSIFICATION"
+    || dialogPresentation.mode === "CREATE_CLASSIFICATION";
+
   const handleSubmit = async () => {
+    if (dialogPresentation.mode === "UNSUPPORTED") {
+      toast({
+        title: "خطأ في الحفظ",
+        description: "نوع عقدة التصنيف غير مدعوم",
+        variant: "destructive",
+      });
+      return;
+    }
     if (!formName.trim()) {
       toast({
         title: "تحقق من البيانات",
-        description: "اسم التصنيف مطلوب",
+        description: "الاسم مطلوب",
         variant: "destructive",
       });
       return;
     }
     setSubmitting(true);
     try {
-      const payload = {
-        id: editing?.id,
-        name: formName.trim(),
-        description: formDescription.trim() || null,
-        color: formColor,
-        keywords: formKeywords,
-        parentId: formParentId || null,
-      };
-      const res = await fetch("/api/classifications", {
-        method: "POST",
+      const mutation = buildClassificationMutationRequest({
+        editing,
+        creatingCategory,
+        formName,
+        formDescription,
+        formColor,
+        formKeywords,
+        formParentId,
+      });
+      const res = await fetch(mutation.url, {
+        method: mutation.method,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(mutation.body),
       });
+
+      const errBody = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const errBody = await res.json().catch(() => ({}));
-        throw new Error(errBody.error || "فشل الحفظ");
+        throw new Error(readApiErrorMessage(errBody, "فشل الحفظ"));
       }
-      toast({
-        title: editing ? "تم التحديث" : "تمت الإضافة",
-        description: editing
-          ? `تم تحديث التصنيف "${formName}" بنجاح`
-          : `تمت إضافة التصنيف "${formName}" بنجاح`,
-      });
+
+      const savedName = formName.trim();
+      const wasEditing = Boolean(editing);
       setDialogOpen(false);
       resetForm();
       await fetchData();
+      toast({
+        title: wasEditing ? "تم التحديث" : "تمت الإضافة",
+        description: wasEditing
+          ? `تم تحديث "${savedName}" بنجاح`
+          : `تمت إضافة "${savedName}" بنجاح`,
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "خطأ غير متوقع";
       toast({
@@ -887,56 +1102,9 @@ export function ClassificationsManager() {
     }
   };
 
-  // Merge handlers
-  const toggleMergeSelection = (c: Classification) => {
-    setMergeSelection((prev) => {
-      const exists = prev.some((p) => p.id === c.id);
-      if (exists) return prev.filter((p) => p.id !== c.id);
-      if (prev.length >= 2) return [prev[1], c];
-      return [...prev, c];
-    });
-  };
-
-  const startMerge = () => {
-    setMergeMode(true);
-    setMergeSelection([]);
-    toast({
-      title: "وضع الدمج",
-      description: "اختر تصنيفين متشابهين للدمج",
-    });
-  };
-
-  const cancelMerge = () => {
-    setMergeMode(false);
-    setMergeSelection([]);
-  };
-
-  const confirmMerge = () => {
-    setMergeDialogOpen(true);
-  };
-
-  const executeMerge = async () => {
-    if (mergeSelection.length !== 2) return;
-    const [source, target] = mergeSelection;
-    toast({
-      title: "جارٍ الدمج",
-      description: `دمج "${source.name}" مع "${target.name}" (تجريبي)`,
-    });
-    setMergeDialogOpen(false);
-    cancelMerge();
-    // Stub action - would call /api/classifications/merge in real implementation
-    setTimeout(() => {
-      toast({
-        title: "تم الدمج بنجاح",
-        description: `تم دمج التصنيفات. سيتم تحديث الشكاوى المرتبطة.`,
-      });
-    }, 800);
-  };
-
-  // Stats summary
   const totalClassifications = flatList.length;
   const totalKeywords = flatList.reduce(
-    (sum, c) => sum + parseKeywords(c.keywords).length,
+    (sum, c) => sum + (isClassificationNode(c) ? parseKeywords(c.keywords).length : 0),
     0
   );
   const totalComplaints = Array.from(distributionMap.values()).reduce(
@@ -948,7 +1116,7 @@ export function ClassificationsManager() {
     <div className="space-y-6">
       <PageHeader
         title="إدارة التصنيفات"
-        description="إدارة شجرة التصنيفات والكلمات المفتاحية المرتبطة بها"
+        description="إدارة شجرة الفئات والتصنيفات والكلمات المفتاحية"
         icon={<FolderTree className="h-6 w-6" />}
         actions={
           <>
@@ -956,27 +1124,11 @@ export function ClassificationsManager() {
               <RefreshCw className="h-4 w-4" />
               تحديث
             </Button>
-            {mergeMode ? (
-              <>
-                <Button variant="ghost" onClick={cancelMerge} size="sm">
-                  إلغاء الدمج
-                </Button>
-                <Button
-                  onClick={confirmMerge}
-                  size="sm"
-                  disabled={mergeSelection.length !== 2}
-                >
-                  <Merge className="h-4 w-4" />
-                  دمج المحدد ({formatNumber(mergeSelection.length)}/2)
-                </Button>
-              </>
-            ) : (
-              <Button variant="outline" onClick={startMerge} size="sm">
-                <Merge className="h-4 w-4" />
-                دمج التصنيفات
-              </Button>
-            )}
-            <Button onClick={() => openAddDialog()} size="sm">
+            <Button variant="outline" onClick={openAddCategoryDialog} size="sm">
+              <Plus className="h-4 w-4" />
+              فئة رئيسية
+            </Button>
+            <Button onClick={() => openAddClassificationDialog()} size="sm">
               <Plus className="h-4 w-4" />
               تصنيف جديد
             </Button>
@@ -1064,22 +1216,6 @@ export function ClassificationsManager() {
         )}
       </div>
 
-      {/* Merge hint banner */}
-      {mergeMode && (
-        <Card className="border-primary/40 bg-primary/5">
-          <CardContent className="flex items-center gap-3 py-3">
-            <AlertCircle className="h-5 w-5 text-primary shrink-0" />
-            <p className="text-sm flex-1">
-              وضع الدمج مُفعّل. حدّد تصنيفين متشابهين لدمجهما في تصنيف واحد.
-              سيتم نقل الشكاوى والكلمات المفتاحية من المصدر إلى الهدف.
-            </p>
-            <Badge variant="secondary">
-              {formatNumber(mergeSelection.length)}/2 محدد
-            </Badge>
-          </CardContent>
-        </Card>
-      )}
-
       {/* Tree */}
       <Card>
         <CardHeader className="pb-3">
@@ -1105,11 +1241,11 @@ export function ClassificationsManager() {
               </div>
               <h3 className="font-semibold text-lg">لا توجد تصنيفات</h3>
               <p className="text-sm text-muted-foreground mt-1 mb-4">
-                ابدأ بإضافة أول تصنيف رئيسي للنظام
+                ابدأ بإضافة أول فئة رئيسية للنظام
               </p>
-              <Button onClick={() => openAddDialog()}>
+              <Button onClick={openAddCategoryDialog}>
                 <Plus className="h-4 w-4" />
-                إضافة تصنيف
+                إضافة فئة رئيسية
               </Button>
             </div>
           ) : (
@@ -1121,12 +1257,7 @@ export function ClassificationsManager() {
                   complaintCount={complaintCountFor(c)}
                   depth={0}
                   onEdit={openEditDialog}
-                  onAddChild={openAddDialog}
-                  onToggleMerge={toggleMergeSelection}
-                  isSelectedForMerge={mergeSelection.some(
-                    (m) => m.id === c.id
-                  )}
-                  mergeMode={mergeMode}
+                  onAddChild={openAddClassificationDialog}
                 />
               ))}
             </div>
@@ -1145,166 +1276,155 @@ export function ClassificationsManager() {
         <DialogContent className="sm:max-w-[560px] max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              {editing ? (
-                <>
-                  <Edit className="h-5 w-5 text-primary" />
-                  تعديل التصنيف
-                </>
+              {dialogPresentation.icon === "edit" ? (
+                <Edit className="h-5 w-5 text-primary" />
               ) : (
-                <>
-                  <Plus className="h-5 w-5 text-primary" />
-                  {formParentId ? "إضافة تصنيف فرعي" : "إضافة تصنيف رئيسي"}
-                </>
+                <Plus className="h-5 w-5 text-primary" />
               )}
+              {dialogPresentation.title}
             </DialogTitle>
             <DialogDescription>
-              {editing
-                ? "عدّل بيانات التصنيف والكلمات المفتاحية المرتبطة به"
-                : "أدخل بيانات التصنيف الجديد. الحقول بعلامة * مطلوبة."}
+              {dialogPresentation.description}
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-4 py-2">
-            {/* Name */}
+            {isUnsupportedEdit ? (
+              <div
+                className="rounded-md border border-destructive/30 bg-destructive/5 p-4 text-sm text-destructive"
+                role="alert"
+              >
+                {dialogPresentation.description}
+              </div>
+            ) : (
+              <>
             <div className="space-y-1.5">
               <Label htmlFor="cls-name">
-                اسم التصنيف <span className="text-destructive">*</span>
+                الاسم <span className="text-destructive">*</span>
               </Label>
               <Input
                 id="cls-name"
                 value={formName}
                 onChange={(e) => setFormName(e.target.value)}
-                placeholder="مثال: شكاوى الانتظار"
+                placeholder={
+                  editingIsCategory || creatingCategory
+                    ? "مثال: شكاوى الخدمات"
+                    : "مثال: شكاوى الانتظار"
+                }
               />
             </div>
 
-            {/* Description */}
             <div className="space-y-1.5">
               <Label htmlFor="cls-desc">الوصف</Label>
               <Textarea
                 id="cls-desc"
                 value={formDescription}
                 onChange={(e) => setFormDescription(e.target.value)}
-                placeholder="وصف موجز لنوع الشكاوى التي يشملها هذا التصنيف"
+                placeholder="وصف موجز"
                 rows={2}
               />
             </div>
 
-            {/* Parent selector */}
-            <div className="space-y-1.5">
-              <Label>التصنيف الأب</Label>
-              <Select
-                value={formParentId || "none"}
-                onValueChange={(v) => setFormParentId(v === "none" ? "" : v)}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="— تصنيف رئيسي —" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">— تصنيف رئيسي (بدون أب) —</SelectItem>
-                  {flatList
-                    .filter((c) => c.id !== editing?.id)
-                    .map((c) => (
-                      <SelectItem key={c.id} value={c.id}>
-                        {c.parentId ? "↳ " : ""}
-                        {c.name}
-                      </SelectItem>
-                    ))}
-                </SelectContent>
-              </Select>
-            </div>
+            {showClassificationFields && (
+              <>
+                <div className="space-y-1.5">
+                  <Label>الفئة</Label>
+                  <Select
+                    value={formParentId || "none"}
+                    onValueChange={(v) => setFormParentId(v === "none" ? "" : v)}
+                    disabled={Boolean(editing)}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="— اختر الفئة —" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {!editing && (
+                        <SelectItem value="none">— اختر الفئة —</SelectItem>
+                      )}
+                      {categoryOptions
+                        .filter((c) => c.id !== editing?.id)
+                        .map((c) => (
+                          <SelectItem key={c.id} value={c.id}>
+                            {c.name}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </div>
 
-            {/* Color */}
-            <div className="space-y-1.5">
-              <Label className="flex items-center gap-1.5">
-                <Palette className="h-3.5 w-3.5" />
-                اللون المميز
-              </Label>
-              <ColorPicker value={formColor} onChange={setFormColor} />
-            </div>
+                <div className="space-y-1.5">
+                  <Label className="flex items-center gap-1.5">
+                    <Palette className="h-3.5 w-3.5" />
+                    اللون المميز
+                  </Label>
+                  <ColorPicker value={formColor} onChange={setFormColor} />
+                </div>
 
-            {/* Keywords */}
-            <div className="space-y-1.5">
-              <Label className="flex items-center gap-1.5">
-                <Tags className="h-3.5 w-3.5" />
-                الكلمات المفتاحية
-              </Label>
-              <Tabs defaultValue="current" className="w-full">
-                <TabsList className="grid w-full grid-cols-2">
-                  <TabsTrigger value="current">الكلمات الحالية</TabsTrigger>
-                  <TabsTrigger value="imported" disabled={!editing?.parentId}>القيم المستوردة من «تفصيل»</TabsTrigger>
-                </TabsList>
-                <TabsContent value="current" className="mt-3">
-                  <KeywordInput keywords={formKeywords} onChange={setFormKeywords} />
-                </TabsContent>
-                <TabsContent value="imported" className="mt-3">
-                  {editing?.parentId ? (
-                    <ImportedDetailPicker classificationId={editing.id} onImported={setFormKeywords} />
-                  ) : (
-                    <p className="text-sm text-muted-foreground">احفظ التصنيف الفرعي أولًا لاختيار قيم تفصيل.</p>
-                  )}
-                </TabsContent>
-              </Tabs>
-            </div>
+                <div className="space-y-1.5">
+                  <Label className="flex items-center gap-1.5">
+                    <Tags className="h-3.5 w-3.5" />
+                    الكلمات المفتاحية
+                  </Label>
+                  <p className="text-xs text-muted-foreground">
+                    لن تُحفظ الكلمات حتى الضغط على «حفظ التغييرات». الإلغاء لا يكتب شيئاً.
+                  </p>
+                  <Tabs defaultValue="current" className="w-full">
+                    <TabsList className="grid w-full grid-cols-2">
+                      <TabsTrigger value="current">الكلمات الحالية</TabsTrigger>
+                      <TabsTrigger
+                        value="imported"
+                        disabled={!editing || !isClassificationNode(editing)}
+                      >
+                        القيم المستوردة من «تفصيل»
+                      </TabsTrigger>
+                    </TabsList>
+                    <TabsContent value="current" className="mt-3">
+                      <KeywordInput
+                        keywords={formKeywords}
+                        onChange={setFormKeywords}
+                      />
+                    </TabsContent>
+                    <TabsContent value="imported" className="mt-3">
+                      {editing && isClassificationNode(editing) ? (
+                        <ImportedDetailPicker
+                          classificationId={editing.id}
+                          existingKeywords={formKeywords}
+                          onSelect={(values) => {
+                            setFormKeywords((prev) => mergeKeywordsIntoDraft(prev, values));
+                          }}
+                        />
+                      ) : (
+                        <p className="text-sm text-muted-foreground">
+                          احفظ التصنيف الفرعي أولًا لاختيار قيم تفصيل.
+                        </p>
+                      )}
+                    </TabsContent>
+                  </Tabs>
+                </div>
+              </>
+            )}
+              </>
+            )}
           </div>
 
           <DialogFooter>
             <DialogClose asChild>
               <Button variant="outline">إلغاء</Button>
             </DialogClose>
-            <Button onClick={handleSubmit} disabled={submitting}>
+            <Button
+              onClick={() => void handleSubmit()}
+              disabled={submitting || isUnsupportedEdit}
+            >
               {submitting ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
                 <CheckCircle2 className="h-4 w-4" />
               )}
-              {editing ? "حفظ التغييرات" : "إضافة التصنيف"}
+              {editing ? "حفظ التغييرات" : "إضافة"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-
-      {/* Merge confirmation dialog */}
-      <AlertDialog
-        open={mergeDialogOpen}
-        onOpenChange={setMergeDialogOpen}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle className="flex items-center gap-2">
-              <Merge className="h-5 w-5 text-primary" />
-              تأكيد دمج التصنيفات
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              سيتم دمج التصنيفين التاليين في تصنيف واحد. جميع الشكاوى والكلمات
-              المفتاحية المرتبطة بالمصدر سيتم نقلها إلى الهدف.
-              <br />
-              <br />
-              <span className="font-medium text-foreground">
-                المصدر:{" "}
-              </span>
-              {mergeSelection[0]?.name ?? "—"}
-              <br />
-              <span className="font-medium text-foreground">
-                الهدف:{" "}
-              </span>
-              {mergeSelection[1]?.name ?? "—"}
-              <br />
-              <br />
-              <span className="text-destructive">
-                ملاحظة: لا يمكن التراجع عن هذه العملية.
-              </span>
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>إلغاء</AlertDialogCancel>
-            <AlertDialogAction onClick={executeMerge}>
-              <Merge className="h-4 w-4" />
-              تأكيد الدمج
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
     </div>
   );
 }
