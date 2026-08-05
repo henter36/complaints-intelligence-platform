@@ -132,8 +132,7 @@ export function stableStringify(value: unknown): string {
     );
   }
 
-  const serialized = JSON.stringify(value);
-  return serialized === undefined ? "null" : serialized;
+  return JSON.stringify(value) ?? "null";
 }
 
 export function sha256(text: string): string {
