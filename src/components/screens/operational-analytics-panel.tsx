@@ -124,7 +124,11 @@ export function OperationalAnalyticsPanel({ from, to, regionId, departmentId }: 
 
   useEffect(() => {
     const controller = new AbortController();
-    void load(controller.signal);
+    void Promise.resolve().then(() => {
+      if (!controller.signal.aborted) {
+        void load(controller.signal);
+      }
+    });
     return () => controller.abort();
   }, [load]);
 
