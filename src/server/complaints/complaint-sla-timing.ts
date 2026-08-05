@@ -13,6 +13,8 @@ export type ComplaintSlaSnapshot = {
   complaintDate: Date | null;
   receivedAt: Date;
   closedAt: Date | null;
+  /** Last update timestamp used as closedAt fallback for closed complaints. */
+  lastUpdatedAt: Date | null;
 };
 
 export type ComplaintSlaState =
@@ -53,11 +55,40 @@ export function resolveComplaintCreatedAt(
   return isValidDate(complaint.receivedAt) ? complaint.receivedAt : null;
 }
 
+/**
+ * Effective closure timestamp for SLA and trend calculations.
+ * Priority: trusted closedAt, then lastUpdatedAt for closed statuses only.
+ */
+export function resolveComplaintEffectiveClosedAt(
+  complaint: ComplaintSlaSnapshot
+): Date | null {
+  if (!isClosedComplaintStatus(complaint.status)) {
+    return null;
+  }
+
+  const createdAt = resolveComplaintCreatedAt(complaint);
+  if (!createdAt) return null;
+
+  if (isValidDate(complaint.closedAt) && complaint.closedAt.getTime() >= createdAt.getTime()) {
+    return complaint.closedAt;
+  }
+
+  if (
+    isValidDate(complaint.lastUpdatedAt)
+    && complaint.lastUpdatedAt.getTime() >= createdAt.getTime()
+  ) {
+    return complaint.lastUpdatedAt;
+  }
+
+  return null;
+}
+
 function resolveState(
   complaint: ComplaintSlaSnapshot,
   createdAt: Date | null,
   deadline: Date | null,
-  measuredAt: Date
+  measuredAt: Date,
+  effectiveClosedAt: Date | null
 ): ComplaintSlaState {
   if (!createdAt || !deadline || !isValidDate(measuredAt)) return "INELIGIBLE";
 
@@ -69,11 +100,12 @@ function resolveState(
     return "INELIGIBLE";
   }
 
-  if (!isValidDate(complaint.closedAt) || complaint.closedAt < createdAt) {
+  if (!effectiveClosedAt) {
     return "CLOSED_WITHOUT_TRUSTED_DATE";
   }
 
-  return complaint.closedAt > deadline
+  // Exact deadline equality is compliant (not late).
+  return effectiveClosedAt.getTime() > deadline.getTime()
     ? "CLOSED_LATE"
     : "CLOSED_WITHIN_SLA";
 }
@@ -86,7 +118,8 @@ export function buildComplaintSlaTiming(
   const deadline = createdAt
     ? new Date(createdAt.getTime() + COMPLAINT_SLA_DURATION_MS)
     : null;
-  const state = resolveState(complaint, createdAt, deadline, measuredAt);
+  const effectiveClosedAt = resolveComplaintEffectiveClosedAt(complaint);
+  const state = resolveState(complaint, createdAt, deadline, measuredAt, effectiveClosedAt);
   const isCurrentlyLate = state === "OPEN_LATE";
   const wasClosedLate = state === "CLOSED_LATE";
   const wasClosedWithinSla = state === "CLOSED_WITHIN_SLA";
@@ -98,21 +131,14 @@ export function buildComplaintSlaTiming(
   ].includes(state);
   const isCompliant = state === "OPEN_WITHIN_SLA" || wasClosedWithinSla;
   const closedWithoutTrustedDate = state === "CLOSED_WITHOUT_TRUSTED_DATE";
-  const lateReference = wasClosedLate && isValidDate(complaint.closedAt)
-    ? complaint.closedAt
+  const lateReference = wasClosedLate && effectiveClosedAt
+    ? effectiveClosedAt
     : measuredAt;
   const latenessDays = deadline && (isCurrentlyLate || wasClosedLate)
     ? ceilDays(lateReference.getTime() - deadline.getTime())
     : null;
-  const trustedClosedAt =
-    createdAt &&
-    isClosedComplaintStatus(complaint.status) &&
-    isValidDate(complaint.closedAt) &&
-    complaint.closedAt >= createdAt
-      ? complaint.closedAt
-      : null;
-  const resolutionDurationDays = createdAt && trustedClosedAt
-    ? (trustedClosedAt.getTime() - createdAt.getTime()) / DAY_MS
+  const resolutionDurationDays = createdAt && effectiveClosedAt
+    ? (effectiveClosedAt.getTime() - createdAt.getTime()) / DAY_MS
     : null;
   const openAgeDays =
     createdAt && isValidDate(measuredAt) && isOpenComplaintStatus(complaint.status)

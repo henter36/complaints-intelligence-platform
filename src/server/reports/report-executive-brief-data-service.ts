@@ -12,10 +12,12 @@
  *  - Two count/groupBy calls for net-backlog-flow (FULL_ANALYTICAL only).
  */
 
+import type { ComplaintGroupMetrics, ComplaintKpiResult } from "@/server/complaints/complaint-kpi-service";
+import { COMPLAINT_SLA_DURATION_MS, resolveComplaintEffectiveClosedAt } from "@/server/complaints/complaint-sla-timing";
+import type { ComplaintSlaSnapshot } from "@/server/complaints/complaint-sla-timing";
+import { ComplaintStatus } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
-import { COMPLAINT_SLA_DURATION_MS } from "@/server/complaints/complaint-sla-timing";
-import type { ComplaintGroupMetrics, ComplaintKpiResult } from "@/server/complaints/complaint-kpi-service";
 import { buildComplaintWhere, parseComplaintQuery } from "@/server/complaints/complaint-query-service";
 import type { DeptClassPeriodCount, ComparisonResult, PeriodRange } from "./report-comparison";
 import { buildComplaintQueryParams, type ReportFilters } from "./report-definition-service";
@@ -32,13 +34,21 @@ import type {
   ComparativeTimelineData,
   ComparativeTimelinePoint,
   ConcentrationBand,
-  MonthlyStockFlowPoint,
+  MonthlyComplaintTrendPoint,
   NetBacklogFlow,
   PerfVolumeRow,
   ContinuityRow,
   ExecutiveEntityRow,
 } from "@/lib/reports/report-contract";
-import { normalizeRegionName } from "@/lib/reports/region-normalization";
+import {
+  classificationKey,
+  UNCLASSIFIED_CLASSIFICATION_KEY,
+  UNCLASSIFIED_CLASSIFICATION_LABEL,
+} from "@/lib/reports/classification-keys";
+import {
+  displayRegionName,
+  normalizeRegionName,
+} from "@/lib/reports/region-normalization";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TOP_CLASSIFICATIONS_LIMIT = 8;
@@ -218,9 +228,11 @@ async function fetchAllTimeRegions(): Promise<string[]> {
     by: ["region"],
     where: { isDeleted: false },
   });
-  return groups
-    .map((g) => normalizeRegionName(g.region))
-    .filter((name, index, values) => values.indexOf(name) === index)
+  const keys = [
+    ...new Set(groups.map((g) => normalizeRegionName(g.region))),
+  ];
+  return keys
+    .map((key) => displayRegionName(key))
     .sort((a, b) => a.localeCompare(b, "ar"));
 }
 
@@ -232,41 +244,66 @@ function directionLabel(current: number, previous: number): string {
   return "= دون تغير";
 }
 
+/**
+ * Merge region-change rows by canonical key so alias variants never create
+ * duplicate buckets or double-count the same complaints.
+ */
+function accumulateCanonicalRegionChanges(
+  rows: ComparisonResult["regionChanges"]
+): Map<string, { currentCount: number; previousCount: number }> {
+  const map = new Map<string, { currentCount: number; previousCount: number }>();
+  for (const row of rows) {
+    const key = normalizeRegionName(row.regionName);
+    const existing = map.get(key) ?? { currentCount: 0, previousCount: 0 };
+    existing.currentCount += row.currentCount;
+    existing.previousCount += row.previousCount;
+    map.set(key, existing);
+  }
+  return map;
+}
+
 function buildAllRegionsTable(
   allTimeRegions: string[],
   comparison: ComparisonResult,
   currentDistributions: ComplaintGroupMetrics[]
 ): RegionReferenceRow[] {
-  const changeMap = new Map(
-    comparison.regionChanges.map((row) => [normalizeRegionName(row.regionName), row])
-  );
+  const changeMap = accumulateCanonicalRegionChanges(comparison.regionChanges);
   const metricsMap = new Map(
     currentDistributions.map((g) => [normalizeRegionName(g.name), g])
   );
 
-  return allTimeRegions.map((regionName) => {
-    const change = changeMap.get(regionName);
-    const metrics = metricsMap.get(regionName);
-    const currentCount = change?.currentCount ?? 0;
-    const previousCount = change?.previousCount ?? 0;
-    const difference = currentCount - previousCount;
-    return {
-      regionName,
-      currentCount,
-      previousCount,
-      difference,
-      changeRate: computeChangeRate(currentCount, previousCount),
-      complianceRate: metrics?.complianceRate ?? null,
-      averageResolutionDays:
-        (metrics?.averageResolutionEligibleCount ?? 0) > 0
-          ? roundRate(metrics!.averageResolutionDays)
-          : null,
-      openCount: metrics?.open ?? 0,
-      closedCount: metrics?.closed ?? 0,
-      currentlyLate: metrics?.currentlyLate ?? 0,
-      direction: directionLabel(currentCount, previousCount),
-    };
-  });
+  const regionKeys = new Set<string>([
+    ...allTimeRegions.map((name) => normalizeRegionName(name)),
+    ...changeMap.keys(),
+  ]);
+
+  const rows: RegionReferenceRow[] = [...regionKeys]
+    .map((key) => {
+      const change = changeMap.get(key);
+      const metrics = metricsMap.get(key);
+      const currentCount = change?.currentCount ?? 0;
+      const previousCount = change?.previousCount ?? 0;
+      const difference = currentCount - previousCount;
+      return {
+        regionName: displayRegionName(key),
+        currentCount,
+        previousCount,
+        difference,
+        changeRate: computeChangeRate(currentCount, previousCount),
+        complianceRate: metrics?.complianceRate ?? null,
+        averageResolutionDays:
+          (metrics?.averageResolutionEligibleCount ?? 0) > 0
+            ? roundRate(metrics!.averageResolutionDays)
+            : null,
+        openCount: metrics?.open ?? 0,
+        closedCount: metrics?.closed ?? 0,
+        currentlyLate: metrics?.currentlyLate ?? 0,
+        direction: directionLabel(currentCount, previousCount),
+      };
+    })
+    .sort((a, b) => a.regionName.localeCompare(b.regionName, "ar"));
+
+  return rows;
 }
 
 function buildEntityRows(
@@ -364,23 +401,37 @@ function buildNotes(result: ComplaintKpiResult, comparison: ComparisonResult): s
 // Top classifications
 // ---------------------------------------------------------------------------
 
-function buildTopClassifications(
+export function buildTopClassifications(
   currentDistributions: ComplaintGroupMetrics[],
   previousDistributions: ComplaintGroupMetrics[],
   currentTotal: number,
   limit: number = TOP_CLASSIFICATIONS_LIMIT
 ): ClassificationBriefRow[] {
+  const toRowKey = (group: ComplaintGroupMetrics): string => {
+    if (group.id) return group.id;
+    // Null id + unclassified display name → shared sentinel for open/late join.
+    if (group.name === UNCLASSIFIED_CLASSIFICATION_LABEL) {
+      return UNCLASSIFIED_CLASSIFICATION_KEY;
+    }
+    // Rare name-only groups (tests / legacy) keep a stable non-Arabic-sentinel key.
+    return group.name;
+  };
+
   const prevMap = new Map(
-    previousDistributions.map((g) => [g.id ?? g.name, g.total])
+    previousDistributions.map((g) => [toRowKey(g), g.total])
   );
 
   return currentDistributions.slice(0, limit).map((group) => {
     const currentCount = group.total;
-    const previousCount = prevMap.get(group.id ?? group.name) ?? 0;
+    const id = toRowKey(group);
+    const previousCount = prevMap.get(id) ?? 0;
     const difference = currentCount - previousCount;
     return {
-      classificationId: group.id ?? group.name,
-      classificationName: group.name,
+      classificationId: id,
+      classificationName:
+        id === UNCLASSIFIED_CLASSIFICATION_KEY
+          ? UNCLASSIFIED_CLASSIFICATION_LABEL
+          : group.name,
       currentCount,
       previousCount,
       difference,
@@ -391,22 +442,7 @@ function buildTopClassifications(
 }
 
 // ---------------------------------------------------------------------------
-// Monthly timeline — 13-month fixed window
-//
-// Contract:
-//   monthKey  = "YYYY-MM"          (canonical, zero-padded)
-//   monthLabel = "يناير 2026"       (Arabic display name)
-//   currentCount  = complaints with effective date in that calendar month
-//   previousCount = complaints in the CORRESPONDING month of the previous period
-//
-// Both current and previous series share the SAME 13 labels so the bar chart
-// renders them as side-by-side columns under each month name.
-//
-// Why 13 months? A 12-month period spans from the first day of month M through
-// the last day of month M+11 (inclusive). Month M may be partially inside the
-// period (e.g. Aug 3 → Aug 31) and month M+12 may appear if the period ends
-// on or after the 1st of that month. We always show exactly 13 buckets so the
-// full period is covered without gaps.
+// Monthly timeline buckets (UTC calendar months)
 // ---------------------------------------------------------------------------
 
 export const ARABIC_MONTH_NAMES: readonly string[] = [
@@ -416,7 +452,7 @@ export const ARABIC_MONTH_NAMES: readonly string[] = [
 
 export const MONTHLY_WINDOW_SIZE = 13;
 
-/** One bucket in the 13-month window. */
+/** One bucket in a monthly window. */
 export type MonthlyTrendPoint = {
   monthKey: string;
   monthLabel: string;
@@ -424,26 +460,84 @@ export type MonthlyTrendPoint = {
   previousCount: number | null;
 };
 
-type MonthBucket = { key: string; label: string; from: Date; toExclusive: Date };
+export type MonthBucket = { key: string; label: string; from: Date; toExclusive: Date };
 
-/** Returns 13 consecutive calendar months starting from the month that contains
- *  `period.from`. Month indices follow UTC calendar months. */
+function utcMonthBucket(year: number, monthIndex: number): MonthBucket {
+  const key = `${year}-${String(monthIndex + 1).padStart(2, "0")}`;
+  return {
+    key,
+    label: `${ARABIC_MONTH_NAMES[monthIndex]} ${year}`,
+    from: new Date(Date.UTC(year, monthIndex, 1)),
+    toExclusive: new Date(Date.UTC(year, monthIndex + 1, 1)),
+  };
+}
+
+function startOfUtcMonth(date: Date): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1));
+}
+
+function addUtcMonths(date: Date, delta: number): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + delta, 1));
+}
+
+/**
+ * Legacy forward-looking window used by the comparative current/previous timeline.
+ * Starts at the month of `period.from` and walks exactly 13 months forward.
+ * Prefer {@link computeMonthlyHistoryWindow} for V2 historical trend charts.
+ */
 export function computeThirteenMonthWindow(period: PeriodRange): MonthBucket[] {
   const startYear = period.from.getUTCFullYear();
-  const startMonthIdx = period.from.getUTCMonth(); // 0-based
+  const startMonthIdx = period.from.getUTCMonth();
   const buckets: MonthBucket[] = [];
   for (let i = 0; i < MONTHLY_WINDOW_SIZE; i++) {
     const totalMonths = startMonthIdx + i;
     const year = startYear + Math.floor(totalMonths / 12);
     const month = totalMonths % 12;
-    const key = `${year}-${String(month + 1).padStart(2, "0")}`;
-    const label = `${ARABIC_MONTH_NAMES[month]} ${year}`;
-    buckets.push({
-      key,
-      label,
-      from: new Date(Date.UTC(year, month, 1)),
-      toExclusive: new Date(Date.UTC(year, month + 1, 1)),
-    });
+    buckets.push(utcMonthBucket(year, month));
+  }
+  return buckets;
+}
+
+/**
+ * Backward-looking monthly history window for the V2 executive brief chart.
+ *
+ * Rules (UTC):
+ * 1. reportEndMonth = first day of the month containing reportEnd
+ *    (callers pass currentPeriod.toExclusive − 1 ms, or any inclusive end instant).
+ * 2. earliestAllowedMonth = reportEndMonth − (maxMonths − 1) months (default 12 → 13 months max).
+ * 3. actualStartMonth = later of (earliest available data month, earliestAllowedMonth).
+ * 4. Months inclusive from actualStartMonth through reportEndMonth.
+ * 5. Count is always between 1 and maxMonths (default 13).
+ * 6. Never creates a month after reportEndMonth.
+ */
+export function computeMonthlyHistoryWindow(options: {
+  reportEnd: Date;
+  earliestAvailableDate: Date | null;
+  maxMonths?: number;
+}): MonthBucket[] {
+  const maxMonths = options.maxMonths ?? MONTHLY_WINDOW_SIZE;
+  if (maxMonths < 1) return [];
+
+  const reportEndMonth = startOfUtcMonth(options.reportEnd);
+  const earliestAllowedMonth = addUtcMonths(reportEndMonth, -(maxMonths - 1));
+
+  let actualStartMonth = earliestAllowedMonth;
+  if (options.earliestAvailableDate) {
+    const dataMonth = startOfUtcMonth(options.earliestAvailableDate);
+    if (dataMonth.getTime() > actualStartMonth.getTime()) {
+      actualStartMonth = dataMonth;
+    }
+  }
+  // Never start after the report end month (empty data set collapses to report month).
+  if (actualStartMonth.getTime() > reportEndMonth.getTime()) {
+    actualStartMonth = reportEndMonth;
+  }
+
+  const buckets: MonthBucket[] = [];
+  let cursor = actualStartMonth;
+  while (cursor.getTime() <= reportEndMonth.getTime() && buckets.length < maxMonths) {
+    buckets.push(utcMonthBucket(cursor.getUTCFullYear(), cursor.getUTCMonth()));
+    cursor = addUtcMonths(cursor, 1);
   }
   return buckets;
 }
@@ -763,83 +857,412 @@ export async function buildFullAnalyticalData(
 }
 
 // ---------------------------------------------------------------------------
-// V2: monthly stock-and-flow timeline
+// V2: monthly complaint trend (backward-looking, single-axis series)
 // ---------------------------------------------------------------------------
 
-type StockFlowComplaint = {
+type TrendComplaint = {
+  id?: string;
+  status: ComplaintStatus;
   complaintDate: Date | null;
   receivedAt: Date;
   closedAt: Date | null;
+  /** Mapped from Complaint.sourceUpdatedAt — last-update closure fallback. */
+  lastUpdatedAt: Date | null;
 };
 
-/** Count inflow (created) and closed counts within [startMs, endMs). */
-function countInflowAndClosed(
-  complaints: readonly StockFlowComplaint[],
-  startMs: number,
-  endMs: number
-): { inflow: number; closed: number } {
-  let inflow = 0;
-  let closed = 0;
-  for (const c of complaints) {
-    const effectiveMs = (c.complaintDate ?? c.receivedAt).getTime();
-    if (effectiveMs >= startMs && effectiveMs < endMs) inflow++;
-    if (c.closedAt) {
-      const closedMs = c.closedAt.getTime();
-      if (closedMs >= startMs && closedMs < endMs) closed++;
-    }
-  }
-  return { inflow, closed };
+const TREND_COMPLAINT_SELECT = {
+  id: true,
+  status: true,
+  complaintDate: true,
+  receivedAt: true,
+  closedAt: true,
+  sourceUpdatedAt: true,
+} as const;
+
+function toTrendComplaint(row: {
+  id: string;
+  status: ComplaintStatus;
+  complaintDate: Date | null;
+  receivedAt: Date;
+  closedAt: Date | null;
+  sourceUpdatedAt: Date | null;
+}): TrendComplaint & { id: string } {
+  return {
+    id: row.id,
+    status: row.status,
+    complaintDate: row.complaintDate,
+    receivedAt: row.receivedAt,
+    closedAt: row.closedAt,
+    lastUpdatedAt: row.sourceUpdatedAt,
+  };
 }
 
 /**
- * Open and late stock at the exclusive period end (`endMs`).
- * A complaint is open at end when it was created before end and not closed before end.
- * Late when additionally the seven-day SLA deadline (createdAt + 7 days) is before endMs.
+ * Logical eligibility for monthly stock/flow chart points.
+ * Uses effective closed date (closedAt, else lastUpdatedAt for closed statuses).
  */
-function countOpenAndLateAtEnd(
-  complaints: readonly StockFlowComplaint[],
-  endMs: number
-): { openAtEnd: number; lateAtEnd: number } {
-  let openAtEnd = 0;
-  let lateAtEnd = 0;
-  for (const c of complaints) {
-    const effectiveMs = (c.complaintDate ?? c.receivedAt).getTime();
-    if (effectiveMs >= endMs) continue;
-    const closedBeforeEnd = c.closedAt && c.closedAt.getTime() < endMs;
-    if (closedBeforeEnd) continue;
-    openAtEnd++;
-    const slaDeadlineMs = effectiveMs + COMPLAINT_SLA_DURATION_MS;
-    if (slaDeadlineMs < endMs) lateAtEnd++;
+export function isComplaintAffectingMonthlyTrend(
+  complaint: TrendComplaint,
+  windowFrom: Date,
+  windowToExclusive: Date
+): boolean {
+  const createdAt = resolveTrendCreatedAt(complaint);
+  if (!createdAt) return false;
+  const createdMs = createdAt.getTime();
+  if (createdMs >= windowToExclusive.getTime()) return false;
+  if (createdMs >= windowFrom.getTime()) return true;
+  const effectiveClosedAt = resolveTrustedClosedAt(complaint);
+  if (effectiveClosedAt === null) return true;
+  return effectiveClosedAt.getTime() >= windowFrom.getTime();
+}
+
+export function dedupeTrendComplaintsById(
+  rows: readonly (TrendComplaint & { id: string })[]
+): Array<TrendComplaint & { id: string }> {
+  const byId = new Map<string, TrendComplaint & { id: string }>();
+  for (const row of rows) {
+    byId.set(row.id, row);
   }
-  return { openAtEnd, lateAtEnd };
+  return [...byId.values()];
+}
+
+/**
+ * Prisma where for the main candidate set of the monthly trend chart.
+ * Intentionally broader than trustedClosedAt semantics: closedAt before creation
+ * or lastUpdatedAt fallbacks may still need a secondary fetch / post-filter.
+ */
+function normalizeWhereAnd(
+  value: Prisma.ComplaintWhereInput["AND"]
+): Prisma.ComplaintWhereInput[] {
+  if (!value) return [];
+  return Array.isArray(value) ? [...value] : [value];
+}
+
+export function buildMonthlyTrendPrimaryWhere(
+  baseWhere: Prisma.ComplaintWhereInput,
+  windowFrom: Date,
+  windowToExclusive: Date
+): Prisma.ComplaintWhereInput {
+  const { AND: existingAnd, ...baseWithoutAnd } = baseWhere;
+  const creationUpperBoundPredicate: Prisma.ComplaintWhereInput = {
+    OR: [
+      { complaintDate: { lt: windowToExclusive } },
+      { complaintDate: null, receivedAt: { lt: windowToExclusive } },
+    ],
+  };
+  const affectingWindowPredicate: Prisma.ComplaintWhereInput = {
+    OR: [
+      // Created inside the history window → can contribute receivedCount.
+      { complaintDate: { gte: windowFrom } },
+      { complaintDate: null, receivedAt: { gte: windowFrom } },
+      // No closedAt → may be open stock or closed via lastUpdatedAt.
+      { closedAt: null },
+      // closedAt on/after window start → may close during a chart month.
+      { closedAt: { gte: windowFrom } },
+      // last-update fallback may close during the window when closedAt is absent/untrusted.
+      { sourceUpdatedAt: { gte: windowFrom } },
+    ],
+  };
+  return {
+    ...baseWithoutAnd,
+    AND: [
+      ...normalizeWhereAnd(existingAnd),
+      creationUpperBoundPredicate,
+      affectingWindowPredicate,
+    ],
+  };
+}
+
+function isValidTrendDate(value: Date | null | undefined): value is Date {
+  return value instanceof Date && Number.isFinite(value.getTime());
+}
+
+function resolveTrendCreatedAt(complaint: Pick<TrendComplaint, "complaintDate" | "receivedAt">): Date | null {
+  if (isValidTrendDate(complaint.complaintDate)) return complaint.complaintDate;
+  return isValidTrendDate(complaint.receivedAt) ? complaint.receivedAt : null;
+}
+
+/**
+ * Effective closure for month assignment via the central SLA resolver.
+ * Status alone never rebuilds historic stock — the effective date does.
+ */
+export function resolveTrustedClosedAt(
+  complaint: TrendComplaint
+): Date | null {
+  const snapshot: ComplaintSlaSnapshot = {
+    status: complaint.status,
+    complaintDate: complaint.complaintDate,
+    receivedAt: complaint.receivedAt,
+    closedAt: complaint.closedAt,
+    lastUpdatedAt: complaint.lastUpdatedAt,
+  };
+  return resolveComplaintEffectiveClosedAt(snapshot);
+}
+
+function nonDateComplaintWhere(filters: ReportFilters, now: Date): Prisma.ComplaintWhereInput {
+  const params = buildComplaintQueryParams(filters);
+  params.delete("from");
+  params.delete("to");
+  const query = parseComplaintQuery(params);
+  return {
+    ...buildComplaintWhere(query, now),
+    isDeleted: false,
+  };
+}
+
+/**
+ * Aggregates four monthly series for the V2 chart over a pre-built history window.
+ * Exportable pure function for unit tests.
+ */
+type MonthlyTrendAccumulator = {
+  receivedCount: number;
+  closedDuringMonthCount: number;
+  openAtMonthEndCount: number;
+  lateAtMonthEndCount: number;
+};
+
+function createMonthlyTrendAccumulator(): MonthlyTrendAccumulator {
+  return {
+    receivedCount: 0,
+    closedDuringMonthCount: 0,
+    openAtMonthEndCount: 0,
+    lateAtMonthEndCount: 0,
+  };
+}
+
+function wasReceivedDuringMonth(
+  createdMs: number,
+  monthStartMs: number,
+  monthEndExclusiveMs: number
+): boolean {
+  return createdMs >= monthStartMs && createdMs < monthEndExclusiveMs;
+}
+
+function wasClosedDuringMonth(
+  trustedClosedAt: Date | null,
+  monthStartMs: number,
+  monthEndExclusiveMs: number
+): boolean {
+  if (!trustedClosedAt) return false;
+  const closedMs = trustedClosedAt.getTime();
+  return closedMs >= monthStartMs && closedMs < monthEndExclusiveMs;
+}
+
+function wasOpenAtMonthEnd(
+  createdMs: number,
+  trustedClosedAt: Date | null,
+  monthEndExclusiveMs: number
+): boolean {
+  if (createdMs >= monthEndExclusiveMs) return false;
+  if (trustedClosedAt !== null && trustedClosedAt.getTime() < monthEndExclusiveMs) {
+    return false;
+  }
+  return true;
+}
+
+/** Late when exclusive month end is strictly after createdAt + 7 days. */
+function wasLateAtMonthEnd(createdMs: number, monthEndExclusiveMs: number): boolean {
+  const deadlineMs = createdMs + COMPLAINT_SLA_DURATION_MS;
+  return monthEndExclusiveMs > deadlineMs;
+}
+
+function accumulateComplaintForMonth(
+  accumulator: MonthlyTrendAccumulator,
+  complaint: TrendComplaint,
+  monthStartMs: number,
+  monthEndExclusiveMs: number
+): void {
+  const createdAt = resolveTrendCreatedAt(complaint);
+  if (!createdAt) return;
+  const createdMs = createdAt.getTime();
+  const trustedClosedAt = resolveTrustedClosedAt(complaint);
+
+  if (wasReceivedDuringMonth(createdMs, monthStartMs, monthEndExclusiveMs)) {
+    accumulator.receivedCount += 1;
+  }
+  if (wasClosedDuringMonth(trustedClosedAt, monthStartMs, monthEndExclusiveMs)) {
+    accumulator.closedDuringMonthCount += 1;
+  }
+  if (!wasOpenAtMonthEnd(createdMs, trustedClosedAt, monthEndExclusiveMs)) {
+    return;
+  }
+  accumulator.openAtMonthEndCount += 1;
+  if (wasLateAtMonthEnd(createdMs, monthEndExclusiveMs)) {
+    accumulator.lateAtMonthEndCount += 1;
+  }
+}
+
+export function aggregateMonthlyComplaintTrend(
+  complaints: readonly TrendComplaint[],
+  buckets: readonly MonthBucket[]
+): MonthlyComplaintTrendPoint[] {
+  return buckets.map((bucket) => {
+    const monthStartMs = bucket.from.getTime();
+    const monthEndExclusiveMs = bucket.toExclusive.getTime();
+    const accumulator = createMonthlyTrendAccumulator();
+    for (const complaint of complaints) {
+      accumulateComplaintForMonth(accumulator, complaint, monthStartMs, monthEndExclusiveMs);
+    }
+    return {
+      monthKey: bucket.key,
+      monthLabel: bucket.label,
+      ...accumulator,
+    };
+  });
+}
+
+function findEarliestDate(candidates: readonly Date[]): Date | null {
+  const firstCandidate = candidates[0];
+  if (!firstCandidate) return null;
+  return candidates.slice(1).reduce(
+    (earliest, candidate) =>
+      candidate.getTime() < earliest.getTime() ? candidate : earliest,
+    firstCandidate
+  );
+}
+
+async function fetchEarliestAvailableComplaintDate(
+  filters: ReportFilters,
+  now: Date,
+  reportToExclusive: Date
+): Promise<Date | null> {
+  const baseWhere = nonDateComplaintWhere(filters, now);
+  // Bound lookback for performance: never consider complaints created after report end.
+  const where: Prisma.ComplaintWhereInput = {
+    ...baseWhere,
+    OR: [
+      { complaintDate: { lt: reportToExclusive } },
+      { complaintDate: null, receivedAt: { lt: reportToExclusive } },
+    ],
+  };
+
+  // Two ordered probes cover COALESCE(complaintDate, receivedAt) without loading all rows.
+  const [byComplaintDate, byReceivedAt] = await Promise.all([
+    db.complaint.findFirst({
+      where: { ...where, complaintDate: { not: null, lt: reportToExclusive } },
+      orderBy: { complaintDate: "asc" },
+      select: { complaintDate: true, receivedAt: true },
+    }),
+    db.complaint.findFirst({
+      where: { ...where, complaintDate: null, receivedAt: { lt: reportToExclusive } },
+      orderBy: { receivedAt: "asc" },
+      select: { complaintDate: true, receivedAt: true },
+    }),
+  ]);
+
+  const candidates = [byComplaintDate, byReceivedAt]
+    .filter((row): row is NonNullable<typeof row> => row !== null)
+    .map((row) => resolveTrendCreatedAt(row))
+    .filter((d): d is Date => d !== null);
+
+  return findEarliestDate(candidates);
+}
+
+/**
+ * Secondary probe: complaints with closedAt before creation (untrusted closedAt),
+ * opened before windowFrom. Primary where cannot express closedAt < createdAt.
+ * Parameterized raw SQL keeps this set tiny vs loading entire closed history.
+ * lastUpdatedAt (sourceUpdatedAt) may still yield an effective close after mapping.
+ */
+async function fetchUntrustedClosedBeforeWindow(
+  baseWhere: Prisma.ComplaintWhereInput,
+  windowFrom: Date,
+  windowToExclusive: Date
+): Promise<Array<TrendComplaint & { id: string }>> {
+  type IdRow = { id: string };
+  // COALESCE(complaintDate, receivedAt) mirrors resolveTrendCreatedAt.
+  // Only untrusted closures (closedAt before effective creation) are selected.
+  const idRows = await db.$queryRaw<IdRow[]>`
+    SELECT id
+    FROM Complaint
+    WHERE isDeleted = false
+      AND closedAt IS NOT NULL
+      AND closedAt < COALESCE(complaintDate, receivedAt)
+      AND COALESCE(complaintDate, receivedAt) < ${windowFrom}
+      AND COALESCE(complaintDate, receivedAt) < ${windowToExclusive}
+  `;
+  if (idRows.length === 0) return [];
+
+  // Chunk IN lists; re-apply non-date filters via Prisma baseWhere.
+  const ids = idRows.map((row) => row.id);
+  const chunkSize = 400;
+  const collected: Array<TrendComplaint & { id: string }> = [];
+  for (let offset = 0; offset < ids.length; offset += chunkSize) {
+    const chunk = ids.slice(offset, offset + chunkSize);
+    const rows = await db.complaint.findMany({
+      where: {
+        ...baseWhere,
+        id: { in: chunk },
+      },
+      select: TREND_COMPLAINT_SELECT,
+    });
+    collected.push(...rows.map(toTrendComplaint));
+  }
+  return collected;
+}
+
+async function fetchMonthlyTrendComplaints(
+  baseWhere: Prisma.ComplaintWhereInput,
+  windowFrom: Date,
+  windowToExclusive: Date
+): Promise<TrendComplaint[]> {
+  const primaryRows = await db.complaint.findMany({
+    where: buildMonthlyTrendPrimaryWhere(baseWhere, windowFrom, windowToExclusive),
+    select: TREND_COMPLAINT_SELECT,
+  });
+  const primary = primaryRows.map(toTrendComplaint);
+
+  const untrusted = await fetchUntrustedClosedBeforeWindow(
+    baseWhere,
+    windowFrom,
+    windowToExclusive
+  );
+
+  const deduped = dedupeTrendComplaintsById([...primary, ...untrusted]);
+  return deduped.filter((row) =>
+    isComplaintAffectingMonthlyTrend(row, windowFrom, windowToExclusive)
+  );
 }
 
 async function buildMonthlyStockFlow(
   filters: ReportFilters,
   comparison: ComparisonResult,
   now: Date
-): Promise<MonthlyStockFlowPoint[]> {
-  const params = buildComplaintQueryParams(filters);
-  params.delete("from");
-  params.delete("to");
-  const query = parseComplaintQuery(params);
-  const baseWhere = buildComplaintWhere(query, now);
+): Promise<MonthlyComplaintTrendPoint[]> {
+  const reportToExclusive = comparison.currentPeriod.toExclusive;
+  // Inclusive report end instant used to identify reportEndMonth.
+  const reportEnd = new Date(reportToExclusive.getTime() - 1);
 
-  const buckets = computeThirteenMonthWindow(comparison.currentPeriod);
+  const earliestAvailableDate = await fetchEarliestAvailableComplaintDate(
+    filters,
+    now,
+    reportToExclusive
+  );
 
-  // One query covers all needed dates; JS bucketing avoids N separate round-trips.
-  const complaints = await db.complaint.findMany({
-    where: { ...baseWhere, isDeleted: false },
-    select: { complaintDate: true, receivedAt: true, closedAt: true },
+  const buckets = computeMonthlyHistoryWindow({
+    reportEnd,
+    earliestAvailableDate,
+    maxMonths: MONTHLY_WINDOW_SIZE,
   });
+  if (buckets.length === 0) return [];
 
-  return buckets.map((bucket) => {
-    const startMs = bucket.from.getTime();
-    const endMs = bucket.toExclusive.getTime();
-    const { inflow, closed } = countInflowAndClosed(complaints, startMs, endMs);
-    const { openAtEnd, lateAtEnd } = countOpenAndLateAtEnd(complaints, endMs);
-    return { monthLabel: bucket.label, inflow, closed, openAtEnd, lateAtEnd };
-  });
+  const firstBucket = buckets[0];
+  const lastBucket = buckets.at(-1);
+  if (!firstBucket || !lastBucket) return [];
+
+  const windowFrom = firstBucket.from;
+  const windowToExclusive = lastBucket.toExclusive;
+  const baseWhere = nonDateComplaintWhere(filters, now);
+
+  // Trend is not limited by filters.from: history window drives the candidate set.
+  // Only complaints that can affect chart series are loaded (not all-time history).
+  const complaints = await fetchMonthlyTrendComplaints(
+    baseWhere,
+    windowFrom,
+    windowToExclusive
+  );
+
+  return aggregateMonthlyComplaintTrend(complaints, buckets);
 }
 
 // ---------------------------------------------------------------------------
@@ -879,9 +1302,11 @@ async function fetchClassificationOpenLate(
     where: { ...baseWhere, isDeleted: false },
     select: {
       classificationId: true,
+      status: true,
       complaintDate: true,
       receivedAt: true,
       closedAt: true,
+      sourceUpdatedAt: true,
     },
   });
 
@@ -891,14 +1316,22 @@ async function fetchClassificationOpenLate(
     const effectiveMs = (c.complaintDate ?? c.receivedAt).getTime();
     if (effectiveMs >= periodEndMs) continue;
 
-    const closedBeforeEnd = c.closedAt && c.closedAt.getTime() < periodEndMs;
+    const effectiveClosedAt = resolveComplaintEffectiveClosedAt({
+      status: c.status,
+      complaintDate: c.complaintDate,
+      receivedAt: c.receivedAt,
+      closedAt: c.closedAt,
+      lastUpdatedAt: c.sourceUpdatedAt,
+    });
+    const closedBeforeEnd =
+      effectiveClosedAt !== null && effectiveClosedAt.getTime() < periodEndMs;
     if (closedBeforeEnd) continue;
 
-    const key = c.classificationId ?? "__unclassified__";
+    const key = classificationKey(c.classificationId);
     if (!result[key]) result[key] = { openAtEnd: 0, lateAtEnd: 0 };
     result[key].openAtEnd++;
     const slaDeadlineMs = effectiveMs + COMPLAINT_SLA_DURATION_MS;
-    if (slaDeadlineMs < periodEndMs) result[key].lateAtEnd++;
+    if (periodEndMs > slaDeadlineMs) result[key].lateAtEnd++;
   }
 
   return result;

@@ -38,7 +38,7 @@ import type {
   PerfVolumeRow,
   ContinuityRow,
   ExecutiveBriefPreviewPage,
-  MonthlyStockFlowPoint,
+  MonthlyComplaintTrendPoint,
 } from "@/lib/reports/report-contract";
 // Types that are only re-exported (not used locally) — direct re-export avoids a redundant import.
 export type { KpiAssessment, ComparativeTimelinePoint, ComparativeTimelineSeries } from "@/lib/reports/report-contract";
@@ -93,8 +93,15 @@ export type ChartSeries = {
   name: string;
   points: { x: string; y: number }[];
   isOther?: boolean;
-  /** When "right", render against a secondary Y-axis (dual-axis bar+line charts). */
+  /** When "right", render against a secondary Y-axis (legacy dual-axis charts only). */
   axis?: "left" | "right";
+  /**
+   * Explicit mark type within a chart. Defaults to the section chartType.
+   * Use bar+line combo on a single shared Y-axis (e.g. monthly stock/flow).
+   */
+  renderAs?: "bar" | "line";
+  /** Optional stroke dash pattern for line marks (e.g. "6,4"). */
+  dash?: string;
 };
 
 type ReportSectionPreviewMetadata = {
@@ -172,7 +179,7 @@ export type ExecutiveBriefData = {
 /** Extended payload for PRINT_EXECUTIVE_BRIEF_V2 (super-set of ExecutiveBriefData). */
 export type ExecutiveBriefV2Data = ExecutiveBriefData & {
   allTimeTotal: number;
-  monthlyStockFlow: MonthlyStockFlowPoint[];
+  monthlyStockFlow: MonthlyComplaintTrendPoint[];
   /** Per-classificationId open and late counts at current period end. */
   classificationOpenLate: Record<string, { openAtEnd: number; lateAtEnd: number }>;
 };

@@ -5,8 +5,12 @@ import {
   buildComplaintSlaMetrics,
   type ComplaintSlaMetrics,
 } from "./complaint-sla-metrics";
-import { buildComplaintSlaTiming } from "./complaint-sla-timing";
-import { normalizeRegionName } from "@/lib/reports/region-normalization";
+import { buildComplaintSlaTiming, resolveComplaintEffectiveClosedAt } from "./complaint-sla-timing";
+import {
+  classificationDisplayName,
+  UNCLASSIFIED_CLASSIFICATION_LABEL,
+} from "@/lib/reports/classification-keys";
+import { displayRegionName, normalizeRegionName } from "@/lib/reports/region-normalization";
 import { previousInclusivePeriod } from "@/lib/reports/period-range";
 import type { ComparisonMode } from "@/lib/reports/report-contract";
 import {
@@ -22,7 +26,6 @@ import {
 } from "./status";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const UNCLASSIFIED_LABEL = "غير مصنف";
 const UNSPECIFIED_LABEL = "غير محدد";
 
 const kpiSelect = {
@@ -34,6 +37,7 @@ const kpiSelect = {
   receivedAt: true,
   dueDate: true,
   closedAt: true,
+  sourceUpdatedAt: true,
   firstActionAt: true,
   processingStartedAt: true,
   delayReason: true,
@@ -322,13 +326,19 @@ function buildKpiResult(
     .filter((complaint) => complaint.firstActionAt)
     .map((complaint) => hoursBetween(complaint.complaintDate ?? complaint.receivedAt, complaint.firstActionAt!));
   const processingHours = current
-    .filter((complaint) => complaint.processingStartedAt && complaint.closedAt)
-    .map((complaint) => hoursBetween(complaint.processingStartedAt!, complaint.closedAt!));
+    .filter((complaint) => {
+      if (!complaint.processingStartedAt) return false;
+      return resolveComplaintEffectiveClosedAt(toSlaSnapshot(complaint)) !== null;
+    })
+    .map((complaint) => {
+      const closedAt = resolveComplaintEffectiveClosedAt(toSlaSnapshot(complaint))!;
+      return hoursBetween(complaint.processingStartedAt!, closedAt);
+    });
   const satisfaction = current.flatMap((complaint) =>
     complaint.beneficiarySatisfaction === null ? [] : [complaint.beneficiarySatisfaction]
   );
   const overdueNoActionCount = current.filter((complaint) =>
-    buildComplaintSlaTiming(complaint, now).isCurrentlyLate && !complaint.firstActionAt
+    buildComplaintSlaTiming(toSlaSnapshot(complaint), now).isCurrentlyLate && !complaint.firstActionAt
   ).length;
 
   return {
@@ -386,7 +396,7 @@ function buildKpiResult(
         complaint.priority === ComplaintPriority.CRITICAL || complaint.severity === ComplaintPriority.CRITICAL
       ).length,
       lateCritical: current.filter((complaint) =>
-        buildComplaintSlaTiming(complaint, now).isCurrentlyLate
+        buildComplaintSlaTiming(toSlaSnapshot(complaint), now).isCurrentlyLate
         && (complaint.priority === ComplaintPriority.CRITICAL || complaint.severity === ComplaintPriority.CRITICAL)
       ).length,
       missingFields: current.filter((complaint) => !complaint.region || !complaint.department || !complaint.classificationId).length,
@@ -404,6 +414,7 @@ function toSlaSnapshot(c: KpiComplaint) {
     complaintDate: c.complaintDate,
     receivedAt: c.receivedAt,
     closedAt: c.closedAt,
+    lastUpdatedAt: c.sourceUpdatedAt ?? null,
   };
 }
 
@@ -523,16 +534,18 @@ function negativeWhenHigher(key: string): boolean {
 
 function buildDistributions(complaints: KpiComplaint[], now: Date): ComplaintDistributions {
   return {
-    byRegion: groupMetrics(complaints, now, (complaint) => ({ name: normalizeRegionName(complaint.region) })),
+    byRegion: groupMetrics(complaints, now, (complaint) => ({
+      name: displayRegionName(normalizeRegionName(complaint.region)),
+    })),
     byFacility: groupMetrics(complaints, now, (complaint) => ({ name: complaint.facility ?? UNSPECIFIED_LABEL })),
     byDepartment: groupMetrics(complaints, now, (complaint) => ({ name: complaint.department ?? UNSPECIFIED_LABEL })),
     byClassification: groupMetrics(complaints, now, (complaint) => ({
       id: complaint.classification?.id ?? null,
-      name: complaint.classification?.nameAr ?? UNCLASSIFIED_LABEL,
+      name: classificationDisplayName(complaint.classification?.nameAr),
     })),
     byCategory: groupMetrics(complaints, now, (complaint) => ({
       id: complaint.category?.id ?? null,
-      name: complaint.category?.nameAr ?? UNCLASSIFIED_LABEL,
+      name: complaint.category?.nameAr ?? UNCLASSIFIED_CLASSIFICATION_LABEL,
     })),
     byChannel: groupMetrics(complaints, now, (complaint) => ({ name: complaint.channel ?? UNSPECIFIED_LABEL })),
     byStatus: groupCount(complaints, (complaint) => complaint.status),
@@ -548,7 +561,7 @@ function buildDistributions(complaints: KpiComplaint[], now: Date): ComplaintDis
 function buildRegionPriorityBreakdown(complaints: KpiComplaint[]): RegionPriorityBreakdownRow[] {
   const map = new Map<string, RegionPriorityBreakdownRow>();
   for (const c of complaints) {
-    const region = normalizeRegionName(c.region);
+    const region = displayRegionName(normalizeRegionName(c.region));
     const row = map.get(region) ?? { region, critical: 0, high: 0, medium: 0, low: 0, unknown: 0, total: 0 };
     if (c.priority === ComplaintPriority.CRITICAL) row.critical++;
     else if (c.priority === ComplaintPriority.HIGH) row.high++;
@@ -664,7 +677,7 @@ function buildClassificationCrossTab(
 ): CrossTabRow[] {
   const map = new Map<string, CrossTabRow>();
   for (const complaint of complaints) {
-    const classification = complaint.classification?.nameAr ?? UNCLASSIFIED_LABEL;
+    const classification = complaint.classification?.nameAr ?? UNCLASSIFIED_CLASSIFICATION_LABEL;
     const classificationId = complaint.classification?.id ?? null;
     const group = groupName(complaint);
     const key = `${classificationId ?? classification}:${group}`;

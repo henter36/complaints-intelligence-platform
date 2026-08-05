@@ -30,9 +30,20 @@ import type {
 } from "@/lib/reports/report-contract";
 import type { ExecutiveBriefV2Data, ReportData } from "./report-data-service";
 import { isExecutiveBriefV2Data } from "./report-data-service";
-import { renderLineChartPng } from "./report-chart-service";
+import { renderLineChartPng, MIN_CHART_HEIGHT } from "./report-chart-service";
 import { preparePdfText } from "./arabic-pdf-text";
 import { getComparisonModeDescription } from "@/lib/reports/comparison-mode-labels";
+import {
+  isValidMonthKey,
+  monthKeyFromReportEndDate,
+  sanitizeMonthlyTrendForReport,
+} from "./report-monthly-trend-sanitize";
+
+export {
+  sanitizeMonthlyTrendForReport,
+  monthKeyFromReportEndDate,
+  assertTrendEndsAtOrBeforeReportEnd,
+} from "./report-monthly-trend-sanitize";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -76,6 +87,41 @@ function createV2Layout(regionCount: number): V2Layout {
   const cardRows = Math.ceil(safeCount / 4);
   const pageH = Math.max(ph, 880 + cardRows * 118 + safeCount * 28);
   return { pageSize: [pw, pageH] as const, margin, contentWidth: pw - margin * 2 };
+}
+
+/** Remaining vertical space for the monthly chart (footer reserve 26 + gap 8). */
+export function resolveV2MonthlyChartAvailableHeight(
+  pageHeight: number,
+  margin: number,
+  y: number
+): number {
+  return Math.max(0, Math.floor(pageHeight - margin - 26 - y - 8));
+}
+
+/** Cap chart height without forcing a floor that can overflow the page. */
+export function resolveV2MonthlyChartHeight(availableForChart: number): number {
+  return Math.min(520, Math.max(0, availableForChart));
+}
+
+/** Decide whether remaining space can host a real chart (must be ≥ renderer minimum). */
+export function resolveV2MonthlyChartRenderPlan(availableForChart: number): {
+  chartHeight: number;
+  canRenderChart: boolean;
+} {
+  const chartHeight = resolveV2MonthlyChartHeight(availableForChart);
+  return {
+    chartHeight,
+    canRenderChart: chartHeight >= MIN_CHART_HEIGHT,
+  };
+}
+
+/** Remaining height for conclusions; y is absolute from page top so top margin is not subtracted again. */
+export function resolveV2ConclusionsAvailableHeight(
+  pageHeight: number,
+  margin: number,
+  y: number
+): number {
+  return Math.max(0, pageHeight - margin - 26 - y);
 }
 
 type V2Context = {
@@ -243,11 +289,13 @@ function drawDirectionArrow(doc: PDFKit.PDFDocument, direction: ExecutiveDirecti
 
 // ── KPI formatting ─────────────────────────────────────────────────────────────
 
+const REPORT_UNAVAILABLE = "غير متاح";
+
 function formatKpiValue(card: ExecutiveBriefKpiCard): string {
-  if (card.value === null) return "غير متاح";
-  if (card.format === "percent") return formatReportNumber(card.value, { percent: true });
+  if (card.value === null) return REPORT_UNAVAILABLE;
+  if (card.format === "percent") return formatReportNumber(card.value, { percent: true, maximumFractionDigits: 1 });
   if (card.format === "days") return `${formatReportNumber(card.value)} يوم`;
-  return formatReportNumber(card.value);
+  return formatReportNumber(card.value, { maximumFractionDigits: 0 });
 }
 
 function formatKpiDelta(card: ExecutiveBriefKpiCard): string {
@@ -255,6 +303,93 @@ function formatKpiDelta(card: ExecutiveBriefKpiCard): string {
   const diff = formatReportNumber(card.difference, { sign: true });
   if (card.changeRate === null) return diff;
   return `${diff}  (${formatReportNumber(card.changeRate, { sign: true, percent: true })})`;
+}
+
+/** Measure prepared Arabic (or mixed) text width for the active font/size. */
+export function measurePreparedArabicText(
+  doc: PDFKit.PDFDocument,
+  text: string,
+  fontSize: number,
+  fontName: "Body" | "Bold" = "Body"
+): number {
+  doc.font(fontName).fontSize(fontSize);
+  return doc.widthOfString(preparePdfText(text), { wordSpacing: WORD_SPACING });
+}
+
+/**
+ * Reduce font size until the (single-line) text fits within maxWidth,
+ * stopping at minFontSize. Returns the chosen size.
+ */
+export function fitTextToBox(
+  doc: PDFKit.PDFDocument,
+  text: string,
+  maxWidth: number,
+  maxFontSize: number,
+  minFontSize: number,
+  fontName: "Body" | "Bold" = "Bold"
+): number {
+  let size = maxFontSize;
+  while (size > minFontSize) {
+    if (measurePreparedArabicText(doc, text, size, fontName) <= maxWidth) {
+      return size;
+    }
+    size -= 0.5;
+  }
+  return minFontSize;
+}
+
+/** Draw a KPI primary value centered in a fixed box with auto-fit size. */
+export function drawKpiValue(
+  doc: PDFKit.PDFDocument,
+  valueText: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  options: { maxFontSize?: number; minFontSize?: number; isUnavailable?: boolean } = {}
+): { fontSize: number; usedHeight: number } {
+  const isUnavailable = options.isUnavailable ?? valueText === REPORT_UNAVAILABLE;
+  const maxFont = options.maxFontSize ?? (isUnavailable ? 14 : 22);
+  const minFont = options.minFontSize ?? (isUnavailable ? 10 : 11);
+  const pad = 6;
+  const innerWidth = Math.max(8, width - pad * 2);
+  const fontSize = fitTextToBox(doc, valueText, innerWidth, maxFont, minFont, "Bold");
+  doc.font("Bold").fontSize(fontSize).fillColor(COLORS.primary);
+  const textH = Math.min(height, fontSize + 4);
+  // Pure numeric displays skip Arabic token reorder so thousand separators stay intact.
+  const drawn = /[\u0600-\u06FF]/.test(valueText) ? preparePdfText(valueText) : valueText;
+  doc.text(drawn, x + pad, y + Math.max(0, (height - textH) / 2), {
+    width: innerWidth,
+    height: textH,
+    align: "center",
+    wordSpacing: WORD_SPACING,
+    lineBreak: false,
+    ellipsis: true,
+  });
+  return { fontSize, usedHeight: textH };
+}
+
+/** Draw secondary/comparison meta under a KPI value without colliding with it. */
+export function drawKpiMeta(
+  doc: PDFKit.PDFDocument,
+  text: string,
+  x: number,
+  y: number,
+  width: number,
+  options: { fontSize?: number; color?: string; height?: number } = {}
+): number {
+  const fontSize = options.fontSize ?? 8.5;
+  const height = options.height ?? 12;
+  doc.font("Body").fontSize(fontSize).fillColor(options.color ?? COLORS.neutral);
+  doc.text(preparePdfText(text), x + 4, y, {
+    width: width - 8,
+    height,
+    align: "center",
+    wordSpacing: WORD_SPACING,
+    lineBreak: false,
+    ellipsis: true,
+  });
+  return y + height;
 }
 
 // ── Page banner (pages 2-4) ───────────────────────────────────────────────────
@@ -431,17 +566,45 @@ function drawBulletBox(options: DrawBulletBoxOptions): void {
 
 // ── Info box (ℹ methodology note) ─────────────────────────────────────────────
 
-function drawInfoBox(doc: PDFKit.PDFDocument, text: string, x: number, y: number, width: number): number {
+export function drawInfoBox(
+  doc: PDFKit.PDFDocument,
+  text: string,
+  x: number,
+  y: number,
+  width: number,
+  options: { fontSize?: number } = {}
+): number {
   const r = REPORT_DESIGN_TOKENS.card.radius;
-  const fontSize = REPORT_DESIGN_TOKENS.fontSize.body;
-  const innerW = width - 48;
-  const textH = doc.heightOfString(preparePdfText(text), { width: innerW });
-  const boxH = Math.max(46, textH + 20);
+  const fontSize = options.fontSize ?? REPORT_DESIGN_TOKENS.fontSize.body;
+  const iconZoneWidth = 42;
+  const padX = 6;
+  const padY = 10;
+  const textWidth = Math.max(40, width - iconZoneWidth - padX);
+  const preparedText = preparePdfText(text);
+
+  doc.font("Body").fontSize(fontSize);
+  const textOptions = {
+    width: textWidth,
+    align: "right" as const,
+    wordSpacing: WORD_SPACING,
+    lineGap: 1,
+  };
+  const textH = doc.heightOfString(preparedText, textOptions);
+  const boxH = Math.max(46, textH + padY * 2);
+
   doc.roundedRect(x, y, width, boxH, r).fillAndStroke(COLORS.background, COLORS.border);
   drawIcon(doc, "info", x + 24, y + boxH / 2, 16);
+
+  const textX = x + iconZoneWidth;
+  const textY = y + padY;
   doc.font("Body").fontSize(fontSize).fillColor(COLORS.neutral).text(
-    preparePdfText(text), x + 42, y + (boxH - textH) / 2,
-    { width: innerW, align: "right", wordSpacing: WORD_SPACING }
+    preparedText,
+    textX,
+    textY,
+    {
+      ...textOptions,
+      height: Math.max(fontSize + 2, boxH - padY * 2),
+    }
   );
   resetInk(doc);
   return y + boxH;
@@ -496,20 +659,15 @@ function renderCoverPage(ctx: V2Context): void {
 
   // Comparison text
   const comparison = getComparisonModeDescription(data.comparisonMode, data.previousPeriod);
+  const comparisonY = periodY + 34;
+  const comparisonOpts = { width: contentWidth, align: "center" as const, wordSpacing: WORD_SPACING };
   doc.font("Body").fontSize(13).fillColor(COLORS.neutral).text(
-    preparePdfText(comparison), margin, periodY + 34,
-    { width: contentWidth, align: "center", wordSpacing: WORD_SPACING }
+    preparePdfText(comparison), margin, comparisonY, comparisonOpts
   );
+  const comparisonH = doc.heightOfString(preparePdfText(comparison), comparisonOpts);
 
-  // Policy note
-  const policyNote = "تعتمد شكاوى الفترة على تاريخ إنشاء الشكوى، بينما تشمل مؤشرات المفتوحة والمتأخرة جميع الحالات غير المغلقة حتى نهاية الفترة ولو أُنشئت قبل بداية الفترة.";
-  doc.font("Body").fontSize(11).fillColor(COLORS.neutral).text(
-    preparePdfText(policyNote), margin, periodY + 66,
-    { width: contentWidth, align: "center", wordSpacing: WORD_SPACING }
-  );
-
-  // 3 KPI cards on cover
-  const cardY = periodY + 130;
+  // 3 KPI cards on cover — sit just below the comparison line (no policy note gap).
+  const cardY = comparisonY + comparisonH + 18;
   const cardGap = 18;
   const cardW = (contentWidth - cardGap * 2) / 3;
   const cardH = 180;
@@ -615,6 +773,205 @@ function kpiSpecialSubText(card: ExecutiveBriefKpiCard): string | null {
   return null;
 }
 
+type KpiCardLayout = {
+  pad: number;
+  innerX: number;
+  innerWidth: number;
+  iconCenterX: number;
+  iconCenterY: number;
+  iconRadius: number;
+  titleY: number;
+  titleHeight: number;
+  valueTop: number;
+  valueHeight: number;
+  metaY: number;
+  subtitleHeight: number;
+  hasComparison: boolean;
+  specialSub: string | null;
+};
+
+function resolveKpiMaxFontSize(
+  card: ExecutiveBriefKpiCard,
+  isUnavailable: boolean,
+  longNumber: boolean
+): number {
+  if (isUnavailable) return 12;
+  if (longNumber) return 16;
+  if (card.format === "percent") return 18;
+  return 20;
+}
+
+function resolveKpiMinFontSize(isUnavailable: boolean): number {
+  if (isUnavailable) return 9;
+  return 10;
+}
+
+function resolveKpiPreviousFractionDigits(
+  format: ExecutiveBriefKpiCard["format"]
+): number {
+  if (format === "number") return 0;
+  return 1;
+}
+
+function computeKpiCardLayout(
+  card: ExecutiveBriefKpiCard,
+  x: number,
+  y: number,
+  cardW: number,
+  cardH: number
+): KpiCardLayout {
+  const pad = 6;
+  const iconRadius = 16;
+  const iconCenterX = x + cardW / 2;
+  const iconCenterY = y + iconRadius + 6;
+  const titleY = iconCenterY + iconRadius + 3;
+  const titleHeight = 16;
+  const specialSub = kpiSpecialSubText(card);
+  const hasComparison = card.difference !== null && specialSub === null;
+  let comparisonReserve = 0;
+  if (hasComparison && card.previousValue !== null) {
+    comparisonReserve = 24;
+  } else if (hasComparison) {
+    comparisonReserve = 14;
+  }
+  const subtitleHeight = specialSub ? 16 : 0;
+  const bottomReserve = comparisonReserve + subtitleHeight + 6;
+  const valueTop = titleY + titleHeight + 1;
+  const valueBottom = y + cardH - bottomReserve;
+  return {
+    pad,
+    innerX: x + pad,
+    innerWidth: cardW - pad * 2,
+    iconCenterX,
+    iconCenterY,
+    iconRadius,
+    titleY,
+    titleHeight,
+    valueTop,
+    valueHeight: Math.max(18, valueBottom - valueTop),
+    metaY: valueBottom + 2,
+    subtitleHeight,
+    hasComparison,
+    specialSub,
+  };
+}
+
+function drawKpiCardFrameAndIcon(
+  doc: PDFKit.PDFDocument,
+  card: ExecutiveBriefKpiCard,
+  x: number,
+  y: number,
+  cardW: number,
+  cardH: number,
+  layout: KpiCardLayout
+): void {
+  const r = REPORT_DESIGN_TOKENS.card.radius;
+  doc.roundedRect(x, y, cardW, cardH, r).fillAndStroke(COLORS.background, COLORS.border);
+  doc.circle(layout.iconCenterX, layout.iconCenterY, layout.iconRadius)
+    .lineWidth(1.5)
+    .strokeColor(COLORS.gold)
+    .stroke();
+  doc.lineWidth(1);
+  const iconType = ICON_KEY_MAP[card.key] ?? "clipboard";
+  drawIcon(doc, iconType, layout.iconCenterX, layout.iconCenterY, layout.iconRadius);
+}
+
+function drawKpiCardTitle(
+  doc: PDFKit.PDFDocument,
+  card: ExecutiveBriefKpiCard,
+  layout: KpiCardLayout
+): void {
+  doc.font("Body").fontSize(8.5).fillColor(COLORS.neutral).text(
+    preparePdfText(card.label),
+    layout.innerX,
+    layout.titleY,
+    {
+      width: layout.innerWidth,
+      height: layout.titleHeight,
+      align: "center",
+      wordSpacing: WORD_SPACING,
+      ellipsis: true,
+    }
+  );
+}
+
+function drawKpiCardPrimaryValue(
+  doc: PDFKit.PDFDocument,
+  card: ExecutiveBriefKpiCard,
+  layout: KpiCardLayout
+): void {
+  const valueText = formatKpiValue(card);
+  const isUnavailable = card.value === null;
+  const longNumber =
+    !isUnavailable && card.format === "number" && Math.abs(card.value ?? 0) >= 1000;
+  drawKpiValue(doc, valueText, layout.innerX, layout.valueTop, layout.innerWidth, layout.valueHeight, {
+    isUnavailable,
+    maxFontSize: resolveKpiMaxFontSize(card, isUnavailable, longNumber),
+    minFontSize: resolveKpiMinFontSize(isUnavailable),
+  });
+}
+
+function drawKpiCardSpecialSubtitle(
+  doc: PDFKit.PDFDocument,
+  specialSub: string,
+  layout: KpiCardLayout
+): void {
+  drawKpiMeta(doc, specialSub, layout.innerX, layout.metaY, layout.innerWidth, {
+    fontSize: 7,
+    height: layout.subtitleHeight - 1,
+  });
+}
+
+function drawKpiCardComparison(
+  doc: PDFKit.PDFDocument,
+  card: ExecutiveBriefKpiCard,
+  layout: KpiCardLayout,
+  cardW: number
+): void {
+  const dir = directionFromAssessment(card.assessment);
+  const deltaText = formatKpiDelta(card);
+  const arrowSize = 10;
+  const deltaSize = fitTextToBox(
+    doc,
+    deltaText,
+    layout.innerWidth - arrowSize - 6,
+    8.5,
+    7,
+    "Body"
+  );
+  const deltaW = measurePreparedArabicText(doc, deltaText, deltaSize, "Body");
+  const rowW = arrowSize + 4 + deltaW;
+  const cardLeft = layout.innerX - layout.pad;
+  const centeredStart = cardLeft + (cardW - rowW) / 2;
+  drawDirectionArrow(doc, dir, centeredStart, layout.metaY, arrowSize);
+  doc.font("Body").fontSize(deltaSize).fillColor(directionColor(dir)).text(
+    preparePdfText(deltaText),
+    centeredStart + arrowSize + 4,
+    layout.metaY,
+    {
+      width: deltaW + 2,
+      height: 11,
+      align: "left",
+      lineBreak: false,
+      wordSpacing: WORD_SPACING,
+    }
+  );
+  if (card.previousValue === null) return;
+  const previousFractionDigits = resolveKpiPreviousFractionDigits(card.format);
+  const prev = `السابق ${formatReportNumber(card.previousValue, {
+    maximumFractionDigits: previousFractionDigits,
+  })}`;
+  drawKpiMeta(doc, prev, layout.innerX, layout.metaY + 11, layout.innerWidth, {
+    fontSize: 7.5,
+    height: 11,
+  });
+}
+
+/**
+ * Fixed-zone KPI card:
+ * 1) icon  2) title  3) primary value  4) optional subtitle  5) comparison/trend
+ * Never places value and subtitle on the same baseline.
+ */
 function drawIconKpiCard(
   doc: PDFKit.PDFDocument,
   card: ExecutiveBriefKpiCard,
@@ -623,49 +980,14 @@ function drawIconKpiCard(
   cardW: number,
   cardH: number
 ): void {
-  const r = REPORT_DESIGN_TOKENS.card.radius;
-  const circR = 24;
-  doc.roundedRect(x, y, cardW, cardH, r).fillAndStroke(COLORS.background, COLORS.border);
-
-  const circX = x + cardW / 2;
-  const circY = y + circR + 10;
-  doc.circle(circX, circY, circR).lineWidth(1.5).strokeColor(COLORS.gold).stroke();
-  doc.lineWidth(1);
-  const iconType = ICON_KEY_MAP[card.key] ?? "clipboard";
-  drawIcon(doc, iconType, circX, circY, circR);
-
-  doc.font("Body").fontSize(10).fillColor(COLORS.neutral).text(
-    preparePdfText(card.label), x + 4, circY + circR + 6,
-    { width: cardW - 8, align: "center", wordSpacing: WORD_SPACING, height: 14, ellipsis: true }
-  );
-
-  const valueText = formatKpiValue(card);
-  doc.font("Bold").fontSize(card.key === "complianceRate" ? 20 : 24).fillColor(COLORS.primary).text(
-    preparePdfText(valueText), x + 4, circY + circR + 24,
-    { width: cardW - 8, align: "center", wordSpacing: WORD_SPACING, height: 28, ellipsis: true }
-  );
-
-  const specialSub = kpiSpecialSubText(card);
-  if (specialSub) {
-    doc.font("Body").fontSize(9).fillColor(COLORS.neutral).text(
-      preparePdfText(specialSub), x + 4, y + cardH - 26,
-      { width: cardW - 8, align: "center", lineBreak: false, ellipsis: true, wordSpacing: WORD_SPACING }
-    );
-  } else if (card.difference !== null) {
-    const dir = directionFromAssessment(card.assessment);
-    const deltaY = y + cardH - 26;
-    drawDirectionArrow(doc, dir, x + 4, deltaY - 2, 12);
-    doc.font("Body").fontSize(9).fillColor(directionColor(dir)).text(
-      preparePdfText(formatKpiDelta(card)), x + 18, deltaY,
-      { width: cardW - 22, align: "right", lineBreak: false, ellipsis: true, wordSpacing: WORD_SPACING }
-    );
-    if (card.previousValue !== null) {
-      doc.font("Body").fontSize(8.5).fillColor(COLORS.neutral).text(
-        preparePdfText(`السابق ${formatReportNumber(card.previousValue ?? 0)}`),
-        x + 4, deltaY + 14,
-        { width: cardW - 8, align: "center", lineBreak: false, ellipsis: true, wordSpacing: WORD_SPACING }
-      );
-    }
+  const layout = computeKpiCardLayout(card, x, y, cardW, cardH);
+  drawKpiCardFrameAndIcon(doc, card, x, y, cardW, cardH, layout);
+  drawKpiCardTitle(doc, card, layout);
+  drawKpiCardPrimaryValue(doc, card, layout);
+  if (layout.specialSub) {
+    drawKpiCardSpecialSubtitle(doc, layout.specialSub, layout);
+  } else if (layout.hasComparison) {
+    drawKpiCardComparison(doc, card, layout, cardW);
   }
   resetInk(doc);
 }
@@ -688,7 +1010,7 @@ async function renderPage2(ctx: V2Context): Promise<void> {
   const cols = 4;
   const gap = 10;
   const cardW = (contentWidth - gap * (cols - 1)) / cols;
-  const cardH = 122;
+  const cardH = 136;
   const cards = brief.briefKpis.slice(0, 8).map((card) => {
     if (card.key === "netChange") {
       return {
@@ -699,7 +1021,15 @@ async function renderPage2(ctx: V2Context): Promise<void> {
         difference: null,
         changeRate: null,
         previousValue: null,
+        format: "number" as const,
       };
+    }
+    // Keep presentation labels explicit for compliance card
+    if (card.key === "complianceRate") {
+      return { ...card, label: "الالتزام ضمن المهلة" };
+    }
+    if (card.key === "averageResolutionDays") {
+      return { ...card, label: "متوسط الإغلاق" };
     }
     return card;
   });
@@ -715,29 +1045,85 @@ async function renderPage2(ctx: V2Context): Promise<void> {
   // Monthly chart section
   y = drawSectionTitle(doc, "الاتجاه الزمني للشكاوى", margin, y, contentWidth);
 
-  const flow = brief.monthlyStockFlow;
-  const hasFlow = flow.some((p) => p.inflow > 0 || p.closed > 0);
-
-  const notesH = 120;
-  const chartHeight = Math.min(
-    380,
-    Math.max(280, Math.floor(layout.pageSize[1] - layout.margin - 26 - notesH - y))
+  const reportEndDate = data.period.to;
+  const rawFlow = brief.monthlyStockFlow;
+  const flow = sanitizeMonthlyTrendForReport(rawFlow, reportEndDate, 13);
+  const reportEndMonthKey = monthKeyFromReportEndDate(reportEndDate);
+  const droppedFuture = reportEndMonthKey !== null
+    && rawFlow.some(
+      (point) => isValidMonthKey(point.monthKey) && point.monthKey > reportEndMonthKey
+    );
+  if (droppedFuture) {
+    warnings.push("تم تجاهل نقاط زمنية تتجاوز نهاية فترة التقرير.");
+  }
+  const hasFlow = flow.some(
+    (p) =>
+      p.receivedCount > 0
+      || p.closedDuringMonthCount > 0
+      || p.openAtMonthEndCount > 0
+      || p.lateAtMonthEndCount > 0
   );
 
-  if (hasFlow) {
+  // Use remaining page space for the chart (notes / methodology boxes removed).
+  const availableForChart = resolveV2MonthlyChartAvailableHeight(
+    layout.pageSize[1],
+    layout.margin,
+    y
+  );
+  const { chartHeight, canRenderChart } = resolveV2MonthlyChartRenderPlan(availableForChart);
+
+  const monthlyChartSeries = [
+    {
+      name: "الواردة",
+      renderAs: "bar" as const,
+      points: flow.map((p) => ({ x: p.monthLabel, y: p.receivedCount })),
+    },
+    {
+      name: "المغلقة",
+      renderAs: "bar" as const,
+      points: flow.map((p) => ({ x: p.monthLabel, y: p.closedDuringMonthCount })),
+    },
+    {
+      name: "المفتوحة",
+      renderAs: "line" as const,
+      dash: "0",
+      points: flow.map((p) => ({ x: p.monthLabel, y: p.openAtMonthEndCount })),
+    },
+    {
+      name: "المتأخرة",
+      renderAs: "line" as const,
+      dash: "6,4",
+      points: flow.map((p) => ({ x: p.monthLabel, y: p.lateAtMonthEndCount })),
+    },
+  ];
+
+  if (!canRenderChart) {
+    warnings.push("تعذر رسم مخطط الاتجاه الزمني ضمن المساحة المتبقية من الصفحة.");
+    if (chartHeight > 0) {
+      doc.font("Body").fontSize(11).fillColor(COLORS.neutral).text(
+        preparePdfText("لا تتوفر مساحة كافية لعرض مخطط الاتجاه الزمني في هذه الصفحة."),
+        margin,
+        y,
+        {
+          width: contentWidth,
+          height: chartHeight,
+          align: "center",
+          wordSpacing: WORD_SPACING,
+        }
+      );
+      resetInk(doc);
+    }
+  } else {
     try {
-      const monthlyChartSeries = [
-        { name: "واردة خلال الفترة", points: flow.map((p) => ({ x: p.monthLabel, y: p.inflow })) },
-        { name: "مغلقة خلال الفترة", points: flow.map((p) => ({ x: p.monthLabel, y: p.closed })) },
-        { name: "مفتوحة نهاية الفترة", points: flow.map((p) => ({ x: p.monthLabel, y: p.openAtEnd })), axis: "right" as const },
-        { name: "متأخرة نهاية الفترة", points: flow.map((p) => ({ x: p.monthLabel, y: p.lateAtEnd })), axis: "right" as const },
-      ];
+      // Single Y-axis combo chart — system total is intentionally excluded.
+      // Empty series triggers the chart emptyState when hasFlow is false.
+      // Pass the same chartHeight to renderer and doc.image so PNG is never compressed.
       const png = await renderLineChartPng({
         id: "v2-monthly-flow",
         kind: "chart",
         chartType: "bar",
         title: "",
-        series: monthlyChartSeries,
+        series: hasFlow ? monthlyChartSeries : [],
         emptyState: "لا توجد بيانات للاتجاه الزمني.",
       }, Math.round(contentWidth), chartHeight);
       doc.image(png, margin, y, { width: contentWidth, height: chartHeight });
@@ -746,24 +1132,6 @@ async function renderPage2(ctx: V2Context): Promise<void> {
     }
   }
   y += chartHeight + 8;
-
-  // Info methodology box
-  const infoText = "تعتمد شكاوى الفترة على تاريخ إنشاء الشكوى، بينما تمثل المفتوحة والمتأخرة نهاية الفترة مؤشرات الرصيد القائم حتى نهاية الفترة ولو أنشئت الشكوى قبل بداية الفترة.";
-  y = drawInfoBox(doc, infoText, margin, y, contentWidth) + 8;
-
-  // Notes
-  const noteLines = (brief.notes ?? []).slice(0, 5);
-  const notesBoxH = Math.max(notesH, 28 + noteLines.length * 22);
-  drawBulletBox({
-    doc,
-    title: "ملاحظات",
-    icon: "clipboard",
-    points: noteLines,
-    x: margin,
-    y,
-    width: contentWidth,
-    height: notesBoxH,
-  });
 }
 
 // ── Page 3: Regions ───────────────────────────────────────────────────────────
@@ -861,9 +1229,9 @@ async function renderPage3(ctx: V2Context): Promise<void> {
   // ── Region comparison chart ──────────────────────────────────────────────
   y = drawSectionTitle(doc, "مقارنة المناطق", margin, y, contentWidth);
   const currentPts = regions.map((r) => ({ x: stripPrefix(r.regionName), y: r.currentCount }));
-  const series = [{ name: "شكاوى الفترة الحالية", points: currentPts }];
+  const series = [{ name: "الحالية", points: currentPts }];
   if (hasPrev) {
-    series.push({ name: "الفترة السابقة", points: regions.map((r) => ({ x: stripPrefix(r.regionName), y: r.previousCount })) });
+    series.push({ name: "السابقة", points: regions.map((r) => ({ x: stripPrefix(r.regionName), y: r.previousCount })) });
   }
   const chartH = 280;
   try {
@@ -979,7 +1347,7 @@ async function renderPage3(ctx: V2Context): Promise<void> {
 
   drawInfoBox(
     doc,
-    "يعرض الجدول الفرق العددي ونسبة التغير بين الفترتين، مع الموضوع صاحب أكبر تغير مطلق داخل كل منطقة. عندما تكون قيمة الفترة السابقة صفراً تظهر الحالة «جديد» بدلاً من نسبة غير معرفة.",
+    "يعرض الجدول التغير بين الفترتين حسب المنطقة، وتظهر «جديد» عند عدم وجود قيمة سابقة.",
     margin,
     y,
     contentWidth
@@ -1077,16 +1445,25 @@ function renderPage4(ctx: V2Context): void {
   });
   y += gap;
 
-  // ── Conclusions (full-width) ──────────────────────────────────────────────
+  // ── Conclusions (full-width) — data-quality notes are intentionally not rendered in V2 ──
   const lineH = 22;
   const boxHdrH = 30;
   const conclusions = (brief.conclusions ?? []).slice(0, 5);
-  const notes = (brief.notes ?? []).slice(0, 5);
-  const availableH = layout.pageSize[1] - layout.margin * 2 - 26 - y;
-  const eachBoxH = Math.max(boxHdrH + lineH + 12, Math.min(
-    boxHdrH + 12 + Math.max(conclusions.length, 1) * lineH,
-    Math.floor(availableH * 0.48)
-  ));
+  const availableH = resolveV2ConclusionsAvailableHeight(
+    layout.pageSize[1],
+    layout.margin,
+    y
+  );
+  if (availableH <= 0) {
+    return;
+  }
+  const conclusionsBoxH = Math.max(
+    boxHdrH + lineH + 12,
+    Math.min(
+      boxHdrH + 12 + Math.max(conclusions.length, 1) * lineH,
+      availableH
+    )
+  );
 
   drawBulletBox({
     doc,
@@ -1096,23 +1473,7 @@ function renderPage4(ctx: V2Context): void {
     x: margin,
     y,
     width: contentWidth,
-    height: eachBoxH,
-  });
-  y += eachBoxH + gap;
-
-  const notesBoxH = Math.max(boxHdrH + lineH + 12, Math.min(
-    boxHdrH + 12 + Math.max(notes.length, 1) * lineH,
-    layout.pageSize[1] - layout.margin * 2 - 26 - y
-  ));
-  drawBulletBox({
-    doc,
-    title: "ملاحظات جودة البيانات وتأثيرها على المؤشرات",
-    icon: "database",
-    points: notes,
-    x: margin,
-    y,
-    width: contentWidth,
-    height: notesBoxH,
+    height: conclusionsBoxH,
   });
 }
 

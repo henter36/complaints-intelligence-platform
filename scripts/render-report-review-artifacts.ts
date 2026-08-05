@@ -5,6 +5,7 @@ import type { ExecutiveBriefData, ExecutiveBriefV2Data, FullAnalyticalData, Repo
 import { renderExecutiveBriefPdf } from "@/server/reports/report-executive-brief-pdf-service";
 import { renderReportPdf } from "@/server/reports/report-pdf-service";
 import { renderExecutiveBriefV2Pdf } from "@/server/reports/report-executive-brief-v2-pdf-service";
+import { assertTrendEndsAtOrBeforeReportEnd } from "@/server/reports/report-monthly-trend-sanitize";
 
 const outputDir = path.join(process.cwd(), "output/pdf");
 
@@ -217,11 +218,19 @@ const v2BriefData: ExecutiveBriefV2Data = {
     c3: { openAtEnd: 18, lateAtEnd: 5 },
   },
   monthlyStockFlow: [
-    { monthLabel: "أغسطس 2025",   inflow: 1552, closed: 1412, openAtEnd: 158, lateAtEnd: 34 },
-    { monthLabel: "سبتمبر 2025",  inflow: 1468, closed: 1300, openAtEnd: 150, lateAtEnd: 32 },
-    { monthLabel: "أكتوبر 2025",  inflow: 1314, closed: 1170, openAtEnd: 140, lateAtEnd: 29 },
-    { monthLabel: "نوفمبر 2025",  inflow: 1231, closed: 1085, openAtEnd: 134, lateAtEnd: 27 },
-    { monthLabel: "ديسمبر 2025",  inflow: 1207, closed: 1145, openAtEnd: 128, lateAtEnd: 26 },
+    { monthKey: "2025-08", monthLabel: "أغسطس 2025", receivedCount: 1552, closedDuringMonthCount: 1412, openAtMonthEndCount: 158, lateAtMonthEndCount: 34 },
+    { monthKey: "2025-09", monthLabel: "سبتمبر 2025", receivedCount: 1468, closedDuringMonthCount: 1300, openAtMonthEndCount: 150, lateAtMonthEndCount: 32 },
+    { monthKey: "2025-10", monthLabel: "أكتوبر 2025", receivedCount: 1314, closedDuringMonthCount: 1170, openAtMonthEndCount: 140, lateAtMonthEndCount: 29 },
+    { monthKey: "2025-11", monthLabel: "نوفمبر 2025", receivedCount: 1231, closedDuringMonthCount: 1085, openAtMonthEndCount: 134, lateAtMonthEndCount: 27 },
+    { monthKey: "2025-12", monthLabel: "ديسمبر 2025", receivedCount: 1207, closedDuringMonthCount: 1145, openAtMonthEndCount: 128, lateAtMonthEndCount: 26 },
+    { monthKey: "2026-01", monthLabel: "يناير 2026", receivedCount: 1180, closedDuringMonthCount: 1100, openAtMonthEndCount: 130, lateAtMonthEndCount: 28 },
+    { monthKey: "2026-02", monthLabel: "فبراير 2026", receivedCount: 1095, closedDuringMonthCount: 1020, openAtMonthEndCount: 125, lateAtMonthEndCount: 25 },
+    { monthKey: "2026-03", monthLabel: "مارس 2026", receivedCount: 1210, closedDuringMonthCount: 1150, openAtMonthEndCount: 122, lateAtMonthEndCount: 24 },
+    { monthKey: "2026-04", monthLabel: "أبريل 2026", receivedCount: 980, closedDuringMonthCount: 940, openAtMonthEndCount: 118, lateAtMonthEndCount: 22 },
+    { monthKey: "2026-05", monthLabel: "مايو 2026", receivedCount: 1050, closedDuringMonthCount: 990, openAtMonthEndCount: 115, lateAtMonthEndCount: 21 },
+    { monthKey: "2026-06", monthLabel: "يونيو 2026", receivedCount: 1120, closedDuringMonthCount: 1080, openAtMonthEndCount: 110, lateAtMonthEndCount: 20 },
+    { monthKey: "2026-07", monthLabel: "يوليو 2026", receivedCount: 990, closedDuringMonthCount: 920, openAtMonthEndCount: 108, lateAtMonthEndCount: 19 },
+    { monthKey: "2026-08", monthLabel: "أغسطس 2026", receivedCount: 420, closedDuringMonthCount: 310, openAtMonthEndCount: 105, lateAtMonthEndCount: 18 },
   ],
 };
 
@@ -243,10 +252,24 @@ const ALL_SAUDI_REGIONS = [
 
 function v2BaseReport(): ReportData {
   const base = baseReport("PRINT_EXECUTIVE_BRIEF_V2");
-  base.briefData = v2BriefData;
-  base.period = { from: "2025-11-25", to: "2025-12-25" };
-  base.previousPeriod = { from: "2025-10-25", to: "2025-11-24" };
+  // Report window ends in August 2026 so the 13-month fixture (2025-08…2026-08) is valid.
+  base.period = { from: "2026-07-05", to: "2026-08-04" };
+  base.previousPeriod = { from: "2026-06-04", to: "2026-07-04" };
+  base.filters = { from: "2026-07-05", to: "2026-08-04" };
   base.comparisonMode = "PREVIOUS_EQUIVALENT_PERIOD";
+  base.comparisonData = {
+    ...base.comparisonData!,
+    currentPeriod: {
+      from: new Date("2026-07-05T00:00:00.000Z"),
+      toExclusive: new Date("2026-08-05T00:00:00.000Z"),
+    },
+    previousPeriod: {
+      from: new Date("2026-06-04T00:00:00.000Z"),
+      toExclusive: new Date("2026-07-05T00:00:00.000Z"),
+    },
+  };
+  base.briefData = v2BriefData;
+  assertTrendEndsAtOrBeforeReportEnd(v2BriefData.monthlyStockFlow, base.period.to);
   return base;
 }
 

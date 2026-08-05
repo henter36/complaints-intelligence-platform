@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import sharp from "sharp";
-import type { ReportChartSection } from "./report-data-service";
+import type { ChartSeries, ReportChartSection } from "./report-data-service";
 import {
   formatReportNumber,
   REPORT_DESIGN_TOKENS,
@@ -75,33 +75,88 @@ export function configureReportFontconfig(): void {
 export const MIN_CHART_WIDTH = 500;
 export const MIN_CHART_HEIGHT = 300;
 
-type SeriesStyle = { color: string; dash: string; width: number };
+type SeriesStyle = {
+  color: string;
+  dash: string;
+  width: number;
+  mark: "bar" | "line";
+};
 
 const COLORS = REPORT_DESIGN_TOKENS.colors;
 
 const SERIES_STYLES: SeriesStyle[] = [
-  { color: COLORS.primary, dash: "0", width: 2 },
-  { color: COLORS.gold, dash: "6,3", width: 2 },
-  { color: COLORS.primary, dash: "2,3", width: 2 },
-  { color: COLORS.neutral, dash: "6,3,2,3", width: 2 },
-  { color: COLORS.primary, dash: "10,4", width: 2 },
-  { color: COLORS.neutral, dash: "4,2", width: 2 },
-  { color: COLORS.primary, dash: "2,2", width: 2 },
-  { color: COLORS.neutral, dash: "0", width: 1 },
+  { color: COLORS.primary, dash: "0", width: 2, mark: "line" },
+  { color: COLORS.gold, dash: "6,3", width: 2, mark: "line" },
+  { color: COLORS.primary, dash: "2,3", width: 2, mark: "line" },
+  { color: COLORS.neutral, dash: "6,3,2,3", width: 2, mark: "line" },
+  { color: COLORS.primary, dash: "10,4", width: 2, mark: "line" },
+  { color: COLORS.neutral, dash: "4,2", width: 2, mark: "line" },
+  { color: COLORS.primary, dash: "2,2", width: 2, mark: "line" },
+  { color: COLORS.neutral, dash: "0", width: 1, mark: "line" },
 ];
 
-const OTHER_STYLE: SeriesStyle = { color: COLORS.neutral, dash: "5,3", width: 1.5 };
+const OTHER_STYLE: SeriesStyle = { color: COLORS.neutral, dash: "5,3", width: 1.5, mark: "line" };
 
-// Right-axis (secondary) line series styles for dual-axis charts.
+// Right-axis (secondary) line series styles for dual-axis charts (legacy).
 // Index 0 → open-at-end (green), index 1 → late-at-end (red).
 const RIGHT_AXIS_STYLES: SeriesStyle[] = [
-  { color: COLORS.primary, dash: "0", width: 2 },
-  { color: COLORS.danger, dash: "0", width: 2 },
+  { color: COLORS.primary, dash: "0", width: 2, mark: "line" },
+  { color: COLORS.danger, dash: "0", width: 2, mark: "line" },
 ];
 
-function seriesStyle(index: number, isOther: boolean): SeriesStyle {
-  if (isOther) return OTHER_STYLE;
-  return SERIES_STYLES[index % SERIES_STYLES.length];
+/** V2 monthly stock/flow palette: green bars, gold bars, dark-green line, alert dashed. */
+const MONTHLY_TREND_STYLES: SeriesStyle[] = [
+  { color: COLORS.primary, dash: "0", width: 2, mark: "bar" },
+  { color: COLORS.gold, dash: "0", width: 2, mark: "bar" },
+  { color: COLORS.primary, dash: "0", width: 2.2, mark: "line" },
+  { color: COLORS.danger, dash: "6,4", width: 2.2, mark: "line" },
+];
+
+function resolveSeriesMark(series: ChartSeries, sectionChartType: ReportChartSection["chartType"]): "bar" | "line" {
+  if (series.renderAs === "bar" || series.renderAs === "line") return series.renderAs;
+  return sectionChartType === "bar" ? "bar" : "line";
+}
+
+function seriesStyle(
+  index: number,
+  isOther: boolean,
+  mark: "bar" | "line",
+  series?: ChartSeries
+): SeriesStyle {
+  if (isOther) return { ...OTHER_STYLE, mark };
+  const base = SERIES_STYLES[index % SERIES_STYLES.length];
+  const color = base.color;
+  const dash = series?.dash ?? (mark === "bar" ? "0" : base.dash);
+  return { color, dash, width: mark === "bar" ? 2 : base.width, mark };
+}
+
+/** Bars always solid; lines use series/preset dash (late kept on preset). */
+function resolveMonthlyTrendDash(
+  mark: "bar" | "line",
+  series: ChartSeries,
+  preset: SeriesStyle
+): string {
+  if (mark === "bar") return "0";
+  if (series.dash) return series.dash;
+  return preset.dash;
+}
+
+function monthlyTrendStyle(
+  index: number,
+  series: ChartSeries,
+  sectionChartType: ReportChartSection["chartType"]
+): SeriesStyle {
+  const mark = resolveSeriesMark(series, sectionChartType);
+  const preset = MONTHLY_TREND_STYLES[index];
+  if (!preset) {
+    return seriesStyle(index, series.isOther === true, mark, series);
+  }
+  return {
+    ...preset,
+    mark,
+    dash: resolveMonthlyTrendDash(mark, series, preset),
+    color: preset.color,
+  };
 }
 
 function rightAxisStyle(index: number): SeriesStyle {
@@ -119,12 +174,21 @@ export function escapeXml(value: string): string {
     .replaceAll("'", "&apos;");
 }
 
-/** Chooses a "nice" upper bound and tick step for the Y axis. */
-function computeYScale(maxValue: number): { max: number; ticks: number[] } {
+/**
+ * Chooses a "nice" upper bound and tick step for the Y axis.
+ * Prefer integer ticks for complaint counts (no fractional half-complaints).
+ */
+export function computeYScale(
+  maxValue: number,
+  options: { integersOnly?: boolean; paddingRatio?: number } = {}
+): { max: number; ticks: number[] } {
+  const integersOnly = options.integersOnly ?? true;
+  const paddingRatio = options.paddingRatio ?? 0.12;
   if (maxValue <= 0) {
     return { max: 1, ticks: [0, 1] };
   }
-  const roughStep = maxValue / 4;
+  const padded = maxValue * (1 + paddingRatio);
+  const roughStep = padded / 4;
   const magnitude = Math.pow(10, Math.floor(Math.log10(roughStep)));
   const normalized = roughStep / magnitude;
   let niceStep: number;
@@ -132,19 +196,30 @@ function computeYScale(maxValue: number): { max: number; ticks: number[] } {
   else if (normalized <= 2) niceStep = 2 * magnitude;
   else if (normalized <= 5) niceStep = 5 * magnitude;
   else niceStep = 10 * magnitude;
-  const max = Math.ceil(maxValue / niceStep) * niceStep;
+
+  if (integersOnly) {
+    niceStep = Math.max(1, Math.ceil(niceStep));
+  }
+
+  const max = Math.ceil(padded / niceStep) * niceStep;
   const ticks: number[] = [];
   for (let value = 0; value <= max + 1e-9; value += niceStep) {
-    ticks.push(Math.round(value * 100) / 100);
+    ticks.push(integersOnly ? Math.round(value) : Math.round(value * 100) / 100);
   }
-  return { max, ticks };
+  // Deduplicate when rounding collapses ticks
+  const unique = [...new Set(ticks)];
+  const lastTick = unique.at(-1);
+  if (lastTick !== max) unique.push(max);
+  return { max, ticks: unique };
 }
 
-/** Short date label: "MM/DD" from a YYYY-MM-DD string. */
+/** Short date label: "MM/DD" from a YYYY-MM-DD string; otherwise keep as-is (Arabic months). */
 function shortDateLabel(iso: string): string {
   const parts = iso.split("-");
-  if (parts.length !== 3) return iso;
-  return `${parts[1]}/${parts[2]}`;
+  if (parts.length === 3 && parts.every((p) => /^\d+$/.test(p))) {
+    return `${parts[1]}/${parts[2]}`;
+  }
+  return iso;
 }
 
 /** Inline CSS that declares Amiri as the font family.
@@ -175,36 +250,262 @@ function yForValue(geo: ChartGeometry, value: number, yMax: number): number {
   return geo.plotBottom - t * (geo.plotBottom - geo.plotTop);
 }
 
+function estimateTextWidth(text: string, fontSize: number): number {
+  // Slightly wide Amiri estimate so legend labels stay inside their cell.
+  let units = 0;
+  for (const ch of text) {
+    if (ch === " " || ch === "\u00A0") units += 0.45;
+    else if (/[0-9.,+\-−%]/.test(ch)) units += 0.62;
+    else units += 1.05;
+  }
+  return units * fontSize;
+}
 
-function renderLineSeries(geo: ChartGeometry, section: ReportChartSection, yMax: number): string {
-  const parts: string[] = [];
-  section.series.forEach((series, seriesIndex) => {
-    const style = seriesStyle(seriesIndex, series.isOther === true);
-    const points = series.points.map((point, index) => {
-      const x = xForIndex(geo, index);
-      const y = yForValue(geo, point.y, yMax);
-      return { x, y };
-    });
-    if (points.length === 0) return;
-    const polyline = points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
-    const dashAttr = style.dash === "0" ? "" : ` stroke-dasharray="${style.dash}"`;
-    parts.push(`<polyline fill="none" stroke="${style.color}" stroke-width="${style.width}"${dashAttr} points="${polyline}"/>`);
-    for (const p of points) {
-      parts.push(`<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="2.2" fill="${style.color}"/>`);
+export type FittedLegendLabel = {
+  text: string;
+  fontSize: number;
+  measuredWidth: number;
+  truncated: boolean;
+};
+
+/**
+ * Fit a legend label into availableWidth by shrinking font then ellipsizing.
+ * Final measuredWidth is always <= availableWidth when availableWidth > 0.
+ */
+export function fitLegendLabel(
+  label: string,
+  availableWidth: number,
+  preferredFontSize: number,
+  minFontSize: number
+): FittedLegendLabel {
+  const widthCap = Math.max(0, availableWidth);
+  if (widthCap === 0) {
+    return { text: "", fontSize: minFontSize, measuredWidth: 0, truncated: label.length > 0 };
+  }
+
+  let fontSize = preferredFontSize;
+  while (fontSize > minFontSize) {
+    const measured = estimateTextWidth(label, fontSize);
+    if (measured <= widthCap) {
+      return { text: label, fontSize, measuredWidth: measured, truncated: false };
     }
+    fontSize -= 0.5;
+  }
+
+  // At min size: ellipsize one character at a time.
+  const ellipsis = "…";
+  let candidate = label;
+  while (candidate.length > 0) {
+    const text = candidate === label ? candidate : `${candidate}${ellipsis}`;
+    const measured = estimateTextWidth(text, minFontSize);
+    if (measured <= widthCap) {
+      return {
+        text,
+        fontSize: minFontSize,
+        measuredWidth: measured,
+        truncated: candidate !== label,
+      };
+    }
+    candidate = candidate.slice(0, -1);
+  }
+
+  // Fall back to bare ellipsis if even one char does not fit.
+  const bare = estimateTextWidth(ellipsis, minFontSize) <= widthCap ? ellipsis : "";
+  return {
+    text: bare,
+    fontSize: minFontSize,
+    measuredWidth: estimateTextWidth(bare, minFontSize),
+    truncated: label.length > 0,
+  };
+}
+
+type LegendItem = {
+  name: string;
+  style: SeriesStyle;
+};
+
+export type ChartLegendLabelBox = {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+  availableWidth: number;
+  measuredWidth: number;
+  originalName: string;
+  renderedName: string;
+  fontSize: number;
+  truncated: boolean;
+  /** Independent label-zone bounds (exclusive of swatch). */
+  labelLeft: number;
+  labelRight: number;
+  swatchLeft: number;
+  legendGap: number;
+};
+
+export type ChartLegendLayout = {
+  svg: string;
+  height: number;
+  labelBoxes: ChartLegendLabelBox[];
+};
+
+/** Gap between the independent label zone and swatch zone in each legend cell. */
+export const CHART_LEGEND_GAP = 14;
+
+/**
+ * Shared legend renderer: reserved band outside the plot, 2×2 grid when narrow.
+ * Each cell is split into [label zone][gap][swatch zone] so marks never overlap text.
+ * Arabic labels use text-anchor="middle" centered in the label zone (not end-anchored).
+ */
+export function drawChartLegend(
+  items: readonly LegendItem[],
+  options: {
+    width: number;
+    top: number;
+    fontSize?: number;
+    columns?: number;
+    paddingX?: number;
+  }
+): ChartLegendLayout {
+  const preferredFontSize = options.fontSize ?? 11;
+  const minFontSize = 8;
+  const paddingX = options.paddingX ?? 16;
+  const columns = Math.min(
+    options.columns ?? (options.width < 560 ? 2 : Math.min(4, Math.max(2, items.length))),
+    Math.max(1, items.length)
+  );
+  const rows = Math.max(1, Math.ceil(items.length / columns));
+  const rowH = 24;
+  const swatchZoneWidth = 28;
+  const legendGap = CHART_LEGEND_GAP;
+  const swatchW = 22;
+  const swatchH = 9;
+  const colGap = 14;
+  // Short legends (e.g. region الحالية/السابقة) pack to the inline-start (right in RTL)
+  // so middle-anchored labels stay near their swatches instead of floating in a wide cell.
+  const packedWidth =
+    items.length <= 2
+      ? Math.min(options.width, paddingX * 2 + columns * 150)
+      : options.width;
+  const packOffset = Math.max(0, options.width - packedWidth);
+  const usable = packedWidth - paddingX * 2;
+  const colW = usable / columns;
+
+  const parts: string[] = [];
+  const labelBoxes: ChartLegendLabelBox[] = [];
+
+  items.forEach((item, index) => {
+    const row = Math.floor(index / columns);
+    const col = index % columns;
+    // RTL reading order: column 0 is the rightmost cell
+    const rtlCol = columns - 1 - col;
+    const cellLeft = packOffset + paddingX + rtlCol * colW;
+    const cellRight = cellLeft + colW - colGap;
+    const cy = options.top + row * rowH + rowH / 2;
+
+    const swatchRight = cellRight - 2;
+    const swatchLeft = swatchRight - swatchZoneWidth;
+    const labelLeft = cellLeft + 4;
+    const labelRight = swatchLeft - legendGap;
+    const availableLabelWidth = Math.max(0, labelRight - labelLeft);
+    const fitted = fitLegendLabel(
+      item.name,
+      availableLabelWidth,
+      preferredFontSize,
+      minFontSize
+    );
+
+    const markLeft = swatchRight - swatchW;
+    if (item.style.mark === "bar") {
+      parts.push(
+        `<rect x="${markLeft.toFixed(1)}" y="${(cy - swatchH / 2).toFixed(1)}" width="${swatchW}" height="${swatchH}" rx="1.5" fill="${item.style.color}"/>`
+      );
+    } else {
+      const dashAttr = item.style.dash && item.style.dash !== "0"
+        ? ` stroke-dasharray="${item.style.dash}"`
+        : "";
+      parts.push(
+        `<line x1="${markLeft.toFixed(1)}" y1="${cy.toFixed(1)}" x2="${swatchRight.toFixed(1)}" y2="${cy.toFixed(1)}" stroke="${item.style.color}" stroke-width="${item.style.width}"${dashAttr}/>`,
+        `<circle cx="${((markLeft + swatchRight) / 2).toFixed(1)}" cy="${cy.toFixed(1)}" r="2.5" fill="${COLORS.white}" stroke="${item.style.color}" stroke-width="1.4"/>`
+      );
+    }
+
+    // Center the label in its own zone. Do not use text-anchor="end" for Arabic
+    // legend text — librsvg/PDF embedding does not keep end-anchored glyphs inside
+    // the computed box. Do not attach clip-path (librsvg drops Arabic glyphs).
+    const labelCenterX = (labelLeft + labelRight) / 2;
+    const measuredLeft = labelCenterX - fitted.measuredWidth / 2;
+    const measuredRight = labelCenterX + fitted.measuredWidth / 2;
+    parts.push(
+      `<text x="${labelCenterX.toFixed(1)}" y="${(cy + fitted.fontSize * 0.35).toFixed(1)}" text-anchor="middle" font-size="${fitted.fontSize}" fill="${COLORS.primary}" direction="rtl" unicode-bidi="plaintext">${escapeXml(fitted.text)}</text>`
+    );
+
+    labelBoxes.push({
+      left: measuredLeft,
+      right: measuredRight,
+      top: cy - rowH / 2,
+      bottom: cy + rowH / 2,
+      availableWidth: availableLabelWidth,
+      measuredWidth: fitted.measuredWidth,
+      originalName: item.name,
+      renderedName: fitted.text,
+      fontSize: fitted.fontSize,
+      truncated: fitted.truncated,
+      labelLeft,
+      labelRight,
+      swatchLeft,
+      legendGap,
+    });
   });
+
+  return {
+    svg: parts.join("\n"),
+    height: 12 + rows * rowH,
+    labelBoxes,
+  };
+}
+
+function renderLineSeries(
+  geo: ChartGeometry,
+  seriesList: Array<{ series: ChartSeries; style: SeriesStyle }>,
+  yMax: number,
+  categories: string[],
+  chartType: ReportChartSection["chartType"]
+): string {
+  const parts: string[] = [];
+  const catIndex = new Map(categories.map((c, i) => [c, i]));
+  const catCount = Math.max(1, categories.length);
+  const catWidth = (geo.plotRight - geo.plotLeft) / catCount;
+
+  for (const { series, style } of seriesList) {
+    const points = series.points
+      .map((p) => {
+        const idx = catIndex.get(p.x);
+        if (idx === undefined) return null;
+        const x = chartType === "bar"
+          ? geo.plotLeft + (idx + 0.5) * catWidth
+          : xForIndex(geo, idx);
+        const y = yForValue(geo, p.y, yMax);
+        return { x, y };
+      })
+      .filter((p): p is { x: number; y: number } => p !== null);
+    if (points.length === 0) continue;
+    const polyline = points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+    const dashAttr = style.dash && style.dash !== "0" ? ` stroke-dasharray="${style.dash}"` : "";
+    parts.push(
+      `<polyline fill="none" stroke="${style.color}" stroke-width="${style.width}"${dashAttr} points="${polyline}"/>`
+    );
+    for (const p of points) {
+      parts.push(
+        `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="2.6" fill="${COLORS.white}" stroke="${style.color}" stroke-width="1.4"/>`
+      );
+    }
+  }
   return parts.join("\n");
 }
 
 /**
  * Builds a canonical category list by taking the union of all point.x values
- * across every series, in first-occurrence order. This is the single source of
- * truth for bar chart axis labels and bar positions so that:
- *  - missing categories in a series are filled with zero (bar simply absent)
- *  - no bar appears under the wrong category label
- *  - order is stable and predictable regardless of which series is "first"
- *
- * Exported for unit tests; not part of the public rendering API.
+ * across every series, in first-occurrence order.
  */
 export function buildCategoryUnion(section: ReportChartSection): string[] {
   const seen = new Set<string>();
@@ -222,21 +523,21 @@ export function buildCategoryUnion(section: ReportChartSection): string[] {
 
 function renderBarSeries(
   geo: ChartGeometry,
-  section: ReportChartSection,
+  seriesList: Array<{ series: ChartSeries; style: SeriesStyle }>,
   yMax: number,
   categories: string[]
 ): string {
   const parts: string[] = [];
   const categoryCount = Math.max(1, categories.length);
-  const seriesCount = Math.max(1, section.series.length);
+  const seriesCount = Math.max(1, seriesList.length);
   const categoryWidth = (geo.plotRight - geo.plotLeft) / categoryCount;
   const groupWidth = categoryWidth * 0.72;
   const barWidth = Math.max(2, groupWidth / seriesCount);
   const categoryIndex = new Map(categories.map((cat, i) => [cat, i]));
   const preferredLabelY = (valueY: number) => valueY - 3;
   const minLabelY = geo.plotTop + 10;
-  section.series.forEach((series, seriesIndex) => {
-    const style = seriesStyle(seriesIndex, series.isOther === true);
+
+  seriesList.forEach(({ series, style }, seriesIndex) => {
     series.points.forEach((point) => {
       const catIdx = categoryIndex.get(point.x);
       if (catIdx === undefined) return;
@@ -254,14 +555,12 @@ function renderBarSeries(
         const labelX = (x + bw / 2).toFixed(1);
         const unclampedY = preferredLabelY(valueY);
         const clampedInsideBar = unclampedY < minLabelY;
-        // When a tall bar would push the label above the plot, place it inside
-        // the bar in white for contrast; otherwise keep series color above the bar.
         const labelY = (clampedInsideBar ? Math.min(valueY + 12, geo.plotBottom - 2) : unclampedY)
           .toFixed(1);
         const labelFill = clampedInsideBar ? COLORS.white : style.color;
         const labelFs = Math.max(7, Math.min(10, Math.round(bw * 0.55)));
         parts.push(
-          `<text x="${labelX}" y="${labelY}" text-anchor="middle" font-size="${labelFs}" fill="${labelFill}">${escapeXml(formatReportNumber(point.y))}</text>`
+          `<text x="${labelX}" y="${labelY}" text-anchor="middle" font-size="${labelFs}" fill="${labelFill}">${escapeXml(formatReportNumber(point.y, { maximumFractionDigits: 0 }))}</text>`
         );
       }
     });
@@ -269,18 +568,7 @@ function renderBarSeries(
   return parts.join("\n");
 }
 
-function renderSeries(
-  geo: ChartGeometry,
-  section: ReportChartSection,
-  yMax: number,
-  categories: string[]
-): string {
-  return section.chartType === "bar"
-    ? renderBarSeries(geo, section, yMax, categories)
-    : renderLineSeries(geo, section, yMax);
-}
-
-/** Renders right-axis line series using a secondary Y-scale. */
+/** Renders right-axis line series using a secondary Y-scale (legacy dual-axis). */
 function renderRightAxisLines(
   geo: ChartGeometry,
   rightSeries: ReportChartSection["series"],
@@ -288,38 +576,13 @@ function renderRightAxisLines(
   categories: string[],
   chartType: ReportChartSection["chartType"]
 ): string {
-  const parts: string[] = [];
-  const catIndex = new Map(categories.map((c, i) => [c, i]));
-  const catCount = Math.max(1, categories.length);
-  const catWidth = (geo.plotRight - geo.plotLeft) / catCount;
-
-  rightSeries.forEach((series, si) => {
-    const style = rightAxisStyle(si);
-    const points = series.points
-      .map((p) => {
-        const idx = catIndex.get(p.x);
-        if (idx === undefined) return null;
-        // Bar charts share category centers with bar groups; line charts use the shared time axis spacing.
-        const x = chartType === "bar"
-          ? geo.plotLeft + (idx + 0.5) * catWidth
-          : xForIndex(geo, idx);
-        const y = yForValue(geo, p.y, yMaxRight);
-        return { x, y };
-      })
-      .filter((p): p is { x: number; y: number } => p !== null);
-    if (points.length === 0) return;
-    const polyline = points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
-    parts.push(
-      `<polyline fill="none" stroke="${style.color}" stroke-width="${style.width}" points="${polyline}"/>`
-    );
-    for (const p of points) {
-      parts.push(`<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="4" fill="${COLORS.white}" stroke="${style.color}" stroke-width="1.5"/>`);
-    }
-  });
-  return parts.join("\n");
+  const styled = rightSeries.map((series, si) => ({
+    series,
+    style: rightAxisStyle(si),
+  }));
+  return renderLineSeries(geo, styled, yMaxRight, categories, chartType);
 }
 
-/** Renders axes, optionally adding a secondary Y-axis on the left for dual-axis charts. */
 function renderAxesWithOptionalSecondary(
   geo: ChartGeometry,
   yTicks: number[],
@@ -330,20 +593,17 @@ function renderAxesWithOptionalSecondary(
   yMaxRight: number | null
 ): string {
   const parts: string[] = [];
-  // Primary axis line (left edge of plot)
   parts.push(
     `<line x1="${geo.plotLeft}" y1="${geo.plotTop}" x2="${geo.plotLeft}" y2="${geo.plotBottom}" stroke="${COLORS.border}" stroke-width="1"/>`,
     `<line x1="${geo.plotLeft}" y1="${geo.plotBottom}" x2="${geo.plotRight}" y2="${geo.plotBottom}" stroke="${COLORS.border}" stroke-width="1"/>`
   );
-  // Primary Y-axis labels (right side)
   for (const tick of yTicks) {
     const y = yForValue(geo, tick, yMax);
     parts.push(
       `<line x1="${geo.plotLeft}" y1="${y}" x2="${geo.plotRight}" y2="${y}" stroke="${COLORS.border}" stroke-width="1" opacity="0.4"/>`,
-      `<text x="${geo.plotRight + 6}" y="${y + 4}" text-anchor="start" font-size="11" fill="${COLORS.neutral}">${formatReportNumber(tick)}</text>`
+      `<text x="${geo.plotRight + 6}" y="${y + 4}" text-anchor="start" font-size="11" fill="${COLORS.neutral}">${formatReportNumber(tick, { maximumFractionDigits: 0 })}</text>`
     );
   }
-  // Secondary Y-axis (left) for dual-axis — dash line aligns with secondary labels
   if (rightTicks && yMaxRight !== null) {
     parts.push(
       `<line x1="${geo.plotLeft}" y1="${geo.plotTop}" x2="${geo.plotLeft}" y2="${geo.plotBottom}" stroke="${COLORS.border}" stroke-width="1" stroke-dasharray="3,3"/>`
@@ -351,65 +611,58 @@ function renderAxesWithOptionalSecondary(
     for (const tick of rightTicks) {
       const y = yForValue(geo, tick, yMaxRight);
       parts.push(
-        `<text x="${geo.plotLeft - 6}" y="${y + 4}" text-anchor="end" font-size="11" fill="${COLORS.danger}">${formatReportNumber(tick)}</text>`
+        `<text x="${geo.plotLeft - 6}" y="${y + 4}" text-anchor="end" font-size="11" fill="${COLORS.danger}">${formatReportNumber(tick, { maximumFractionDigits: 0 })}</text>`
       );
     }
   }
-  // X-axis labels
-  const maxLabels = 12;
-  const step = Math.max(1, Math.ceil(dates.length / maxLabels));
+  // X labels: for long monthly windows label every other month to reduce clutter
+  // without dropping data points.
+  const step = dates.length >= 12 ? 2 : Math.max(1, Math.ceil(dates.length / 12));
   dates.forEach((date, index) => {
     if (index % step !== 0 && index !== dates.length - 1) return;
     const x = chartType === "bar"
       ? geo.plotLeft + (index + 0.5) * (geo.plotRight - geo.plotLeft) / Math.max(1, dates.length)
       : xForIndex(geo, index);
     parts.push(
-      `<text x="${x}" y="${geo.plotBottom + 18}" text-anchor="middle" font-size="11" fill="${COLORS.neutral}" direction="rtl">${escapeXml(shortDateLabel(date))}</text>`
+      `<text x="${x}" y="${geo.plotBottom + 18}" text-anchor="middle" font-size="10" fill="${COLORS.neutral}" direction="rtl" unicode-bidi="plaintext">${escapeXml(shortDateLabel(date))}</text>`
     );
   });
   return parts.join("\n");
 }
 
-type LegendStyleItem = {
-  name: string;
-  style: SeriesStyle;
-};
+function isMonthlyComboSection(section: ReportChartSection): boolean {
+  return section.series.some((s) => s.renderAs === "bar")
+    && section.series.some((s) => s.renderAs === "line")
+    && !section.series.some((s) => s.axis === "right");
+}
 
-function renderLegend(items: LegendStyleItem[], width: number, legendTop: number): string {
-  const parts: string[] = [];
-  const itemHeight = 16;
-  const swatchWidth = 22;
-  items.forEach((item, seriesIndex) => {
-    const { style } = item;
-    const row = Math.floor(seriesIndex / 3);
-    const column = seriesIndex % 3;
-    const centerX = width - (column + 0.5) * width / 3;
-    const currentX = centerX + 52;
-    const lineY = legendTop + row * itemHeight + 6;
-    const dashAttr = style.dash === "0" ? "" : ` stroke-dasharray="${style.dash}"`;
-    parts.push(
-      `<line x1="${currentX - swatchWidth}" y1="${lineY}" x2="${currentX}" y2="${lineY}" stroke="${style.color}" stroke-width="${style.width}"${dashAttr}/>`,
-      `<text x="${currentX - swatchWidth - 4}" y="${lineY + 4}" text-anchor="end" font-size="11" fill="${COLORS.primary}" direction="rtl">${escapeXml(item.name)}</text>`
-    );
-  });
-  return parts.join("\n");
+function styleForSectionSeries(
+  section: ReportChartSection,
+  series: ChartSeries,
+  index: number
+): SeriesStyle {
+  const mark = resolveSeriesMark(series, section.chartType);
+  if (isMonthlyComboSection(section) || section.id === "v2-monthly-flow") {
+    return monthlyTrendStyle(index, series, section.chartType);
+  }
+  return seriesStyle(index, series.isOther === true, mark, series);
 }
 
 function buildLegendItems(
   leftSeries: ReportChartSection["series"],
   rightSeries: ReportChartSection["series"],
   hasDualAxis: boolean,
-  allSeries: ReportChartSection["series"]
-): LegendStyleItem[] {
+  section: ReportChartSection
+): LegendItem[] {
   if (!hasDualAxis) {
-    return allSeries.map((series, index) => ({
+    return leftSeries.map((series, index) => ({
       name: series.name,
-      style: seriesStyle(index, series.isOther === true),
+      style: styleForSectionSeries(section, series, index),
     }));
   }
   const leftItems = leftSeries.map((series, index) => ({
     name: series.name,
-    style: seriesStyle(index, series.isOther === true),
+    style: styleForSectionSeries(section, series, index),
   }));
   const rightItems = rightSeries.map((series, index) => ({
     name: series.name,
@@ -418,53 +671,273 @@ function buildLegendItems(
   return [...leftItems, ...rightItems];
 }
 
-/** Exported for snapshot tests; not part of the public rendering API. */
-export function buildChartSvg(section: ReportChartSection, width: number, height: number): string {
-  // Dual-axis only when both left and right series exist; all-right is single-axis.
+export type AxisSeriesResolution = {
+  leftSeries: ChartSeries[];
+  rightSeries: ChartSeries[];
+  hasDualAxis: boolean;
+};
+
+export function resolveAxisSeries(section: ReportChartSection): AxisSeriesResolution {
   const leftCandidates = section.series.filter((s) => s.axis !== "right");
   const hasDualAxis = leftCandidates.length > 0 && section.series.some((s) => s.axis === "right");
-  const leftSeries = hasDualAxis ? leftCandidates : section.series;
-  const rightSeries = hasDualAxis ? section.series.filter((s) => s.axis === "right") : [];
-
-  // Bar charts build a union of all series categories so every bar aligns
-  // with its correct label even when series have different or missing entries.
-  // Line charts use the first series as the shared time axis (all series are
-  // expected to share the same date points).
-  const primarySeries = leftSeries;
-  const categories = section.chartType === "bar"
-    ? buildCategoryUnion({ ...section, series: primarySeries })
-    : (primarySeries[0]?.points.map((p) => p.x) ?? []);
-
-  const leftMaxValue = leftSeries.reduce(
-    (max, s) => s.points.reduce((m, p) => Math.max(m, p.y), max), 0
-  );
-  const rightMaxValue = rightSeries.reduce(
-    (max, s) => s.points.reduce((m, p) => Math.max(m, p.y), max), 0
-  );
-  const { max: yMax, ticks } = computeYScale(hasDualAxis ? leftMaxValue : Math.max(leftMaxValue, rightMaxValue));
-  const { max: yMaxRight, ticks: ticksRight } = hasDualAxis ? computeYScale(rightMaxValue) : { max: yMax, ticks };
-
-  const legendItems = buildLegendItems(leftSeries, rightSeries, hasDualAxis, section.series);
-  const legendRows = Math.max(1, Math.ceil(legendItems.length / 3));
-  const legendHeight = 12 + legendRows * 16;
-  const geo: ChartGeometry = {
-    plotLeft: hasDualAxis ? 76 : 54,
-    plotRight: width - 76,
-    plotTop: 48,
-    plotBottom: height - 46 - legendHeight,
-    xCount: categories.length,
+  if (!hasDualAxis) {
+    return { leftSeries: section.series, rightSeries: [], hasDualAxis: false };
+  }
+  return {
+    leftSeries: leftCandidates,
+    rightSeries: section.series.filter((s) => s.axis === "right"),
+    hasDualAxis: true,
   };
-  const leftSection = { ...section, series: leftSeries };
+}
+
+function resolveChartCategories(
+  section: ReportChartSection,
+  primarySeries: ChartSeries[]
+): string[] {
+  if (section.chartType === "bar" || isMonthlyComboSection(section)) {
+    return buildCategoryUnion({ ...section, series: primarySeries });
+  }
+  return primarySeries[0]?.points.map((p) => p.x) ?? [];
+}
+
+function seriesMaxY(seriesList: ChartSeries[]): number {
+  return seriesList.reduce(
+    (max, s) => s.points.reduce((m, p) => Math.max(m, p.y), max),
+    0
+  );
+}
+
+type ChartAxisScales = {
+  yMax: number;
+  ticks: number[];
+  yMaxRight: number;
+  ticksRight: number[] | null;
+};
+
+function computeChartAxisScales(
+  leftSeries: ChartSeries[],
+  rightSeries: ChartSeries[],
+  hasDualAxis: boolean
+): ChartAxisScales {
+  const leftMaxValue = seriesMaxY(leftSeries);
+  const rightMaxValue = seriesMaxY(rightSeries);
+  const primaryScaleInput = hasDualAxis
+    ? leftMaxValue
+    : Math.max(leftMaxValue, rightMaxValue);
+  const { max: yMax, ticks } = computeYScale(primaryScaleInput, {
+    integersOnly: true,
+    paddingRatio: 0.12,
+  });
+  if (!hasDualAxis) {
+    return { yMax, ticks, yMaxRight: yMax, ticksRight: null };
+  }
+  const rightScale = computeYScale(rightMaxValue, { integersOnly: true });
+  return {
+    yMax,
+    ticks,
+    yMaxRight: rightScale.max,
+    ticksRight: rightScale.ticks,
+  };
+}
+
+/** 4 series → 2×2 grid; otherwise pack up to 3 per row without nesting ternaries. */
+export function resolveLegendColumnCount(count: number): number {
+  if (count === 4) return 2;
+  if (count <= 3) return Math.max(1, count);
+  return 2;
+}
+
+export const MIN_PLOT_HEIGHT = 56;
+
+export function resolveChartGeometry(options: {
+  width: number;
+  height: number;
+  hasDualAxis: boolean;
+  plotTop: number;
+  xCount: number;
+}): ChartGeometry {
+  const requestedPlotBottom = options.height - 36;
+  const safePlotBottom = Number.isFinite(requestedPlotBottom)
+    ? Math.max(1, requestedPlotBottom)
+    : 1;
+  const availableHeight = Math.max(1, safePlotBottom);
+  const effectiveMinimumHeight = Math.min(MIN_PLOT_HEIGHT, availableHeight);
+  const maximumPlotTop = safePlotBottom - effectiveMinimumHeight;
+  let safePlotTop = Math.max(0, Math.min(options.plotTop, maximumPlotTop));
+
+  if (!Number.isFinite(safePlotTop) || safePlotTop >= safePlotBottom) {
+    safePlotTop = Math.max(0, safePlotBottom - 1);
+  }
+
+  const safeWidth = Number.isFinite(options.width) ? Math.max(1, options.width) : 1;
+  const requestedPlotLeft = options.hasDualAxis ? 76 : 54;
+  const requestedPlotRight = safeWidth - 76;
+  const safePlotLeft = Math.min(
+    Math.max(0, requestedPlotLeft),
+    Math.max(0, safeWidth - 1)
+  );
+  const safePlotRight = Math.max(
+    safePlotLeft + 1,
+    Math.min(safeWidth, requestedPlotRight)
+  );
+
+  return {
+    plotLeft: safePlotLeft,
+    plotRight: safePlotRight,
+    plotTop: safePlotTop,
+    plotBottom: safePlotBottom,
+    xCount: options.xCount,
+  };
+}
+
+type StyledSeries = { series: ChartSeries; style: SeriesStyle };
+
+function splitRenderableSeries(
+  section: ReportChartSection,
+  leftSeries: ChartSeries[]
+): { bars: StyledSeries[]; lines: StyledSeries[] } {
+  const barSeries = leftSeries
+    .map((series, index) => ({
+      series,
+      style: styleForSectionSeries(section, series, index),
+      index,
+    }))
+    .filter((entry) => resolveSeriesMark(entry.series, section.chartType) === "bar");
+  const lineSeries = leftSeries
+    .map((series, index) => ({
+      series,
+      style: styleForSectionSeries(section, series, index),
+      index,
+    }))
+    .filter((entry) => resolveSeriesMark(entry.series, section.chartType) === "line");
+
+  // Default mark when no renderAs: section chartType drives all series as bars.
+  const defaultBar =
+    section.chartType === "bar" && barSeries.length === 0 && lineSeries.length === 0;
+  if (defaultBar) {
+    return {
+      bars: leftSeries.map((series, index) => ({
+        series,
+        style: styleForSectionSeries(section, series, index),
+      })),
+      lines: [],
+    };
+  }
+  return {
+    bars: barSeries.map(({ series, style }) => ({ series, style })),
+    lines: lineSeries.map(({ series, style }) => ({ series, style })),
+  };
+}
+
+function resolveAxisChartType(
+  sectionChartType: ReportChartSection["chartType"],
+  barCount: number
+): ReportChartSection["chartType"] {
+  if (sectionChartType === "line" && barCount === 0) return "line";
+  return "bar";
+}
+
+function resolveLineRenderChartType(
+  sectionChartType: ReportChartSection["chartType"],
+  barCount: number
+): ReportChartSection["chartType"] {
+  if (barCount > 0) return "bar";
+  return sectionChartType;
+}
+
+function buildChartSvgBody(options: {
+  section: ReportChartSection;
+  width: number;
+  height: number;
+  geo: ChartGeometry;
+  categories: string[];
+  ticks: number[];
+  yMax: number;
+  ticksRight: number[] | null;
+  yMaxRight: number;
+  hasDualAxis: boolean;
+  bars: StyledSeries[];
+  lines: StyledSeries[];
+  legendSvg: string;
+  rightSeries: ChartSeries[];
+}): string {
+  const {
+    section,
+    width,
+    height,
+    geo,
+    categories,
+    ticks,
+    yMax,
+    ticksRight,
+    yMaxRight,
+    hasDualAxis,
+    bars,
+    lines,
+    legendSvg,
+    rightSeries,
+  } = options;
   const title = escapeXml(section.title);
+  const axisChartType = resolveAxisChartType(section.chartType, bars.length);
+  const lineRenderType = resolveLineRenderChartType(section.chartType, bars.length);
+  const titleSvg = section.title
+    ? `<text x="${width / 2}" y="24" text-anchor="middle" font-size="15" fill="${COLORS.primary}" direction="rtl" unicode-bidi="plaintext">${title}</text>`
+    : "";
+  const barsSvg = bars.length > 0 ? renderBarSeries(geo, bars, yMax, categories) : "";
+  const linesSvg = lines.length > 0
+    ? renderLineSeries(geo, lines, yMax, categories, lineRenderType)
+    : "";
+  const dualSvg = hasDualAxis
+    ? renderRightAxisLines(geo, rightSeries, yMaxRight, categories, section.chartType)
+    : "";
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
     ${fontStyleBlock()}
     <rect width="${width}" height="${height}" fill="${COLORS.white}" stroke="${COLORS.border}"/>
-    <text x="${width / 2}" y="28" text-anchor="middle" font-size="16" fill="${COLORS.primary}" direction="rtl" unicode-bidi="plaintext">${title}</text>
-    ${renderAxesWithOptionalSecondary(geo, ticks, yMax, categories, section.chartType, hasDualAxis ? ticksRight : null, hasDualAxis ? yMaxRight : null)}
-    ${renderSeries(geo, leftSection, yMax, categories)}
-    ${hasDualAxis ? renderRightAxisLines(geo, rightSeries, yMaxRight, categories, section.chartType) : ""}
-    ${renderLegend(legendItems, width, geo.plotBottom + 28)}
+    ${titleSvg}
+    ${legendSvg}
+    ${renderAxesWithOptionalSecondary(geo, ticks, yMax, categories, axisChartType, ticksRight, hasDualAxis ? yMaxRight : null)}
+    ${barsSvg}
+    ${linesSvg}
+    ${dualSvg}
   </svg>`;
+}
+
+/** Exported for snapshot tests; not part of the public rendering API. */
+export function buildChartSvg(section: ReportChartSection, width: number, height: number): string {
+  const { leftSeries, rightSeries, hasDualAxis } = resolveAxisSeries(section);
+  const categories = resolveChartCategories(section, leftSeries);
+  const scales = computeChartAxisScales(leftSeries, rightSeries, hasDualAxis);
+  const legendItems = buildLegendItems(leftSeries, rightSeries, hasDualAxis, section);
+  const legendTop = section.title ? 40 : 14;
+  const legend = drawChartLegend(legendItems, {
+    width,
+    top: legendTop,
+    columns: resolveLegendColumnCount(legendItems.length),
+  });
+  const geo = resolveChartGeometry({
+    width,
+    height,
+    hasDualAxis,
+    plotTop: legendTop + legend.height + 6,
+    xCount: categories.length,
+  });
+  const { bars, lines } = splitRenderableSeries(section, leftSeries);
+  return buildChartSvgBody({
+    section,
+    width,
+    height,
+    geo,
+    categories,
+    ticks: scales.ticks,
+    yMax: scales.yMax,
+    ticksRight: scales.ticksRight,
+    yMaxRight: scales.yMaxRight,
+    hasDualAxis,
+    bars,
+    lines,
+    legendSvg: legend.svg,
+    rightSeries,
+  });
 }
 
 function emptyChartSvg(section: ReportChartSection, width: number, height: number): string {

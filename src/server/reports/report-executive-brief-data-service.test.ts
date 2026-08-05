@@ -3,18 +3,39 @@
 // Unit tests for the executive brief data builder.
 // All DB calls are mocked — no real SQLite instance required in CI.
 
+import fs from "node:fs";
+import path from "node:path";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import {
   buildExecutiveBriefData,
   buildFullAnalyticalData,
   computeThirteenMonthWindow,
+  computeMonthlyHistoryWindow,
   groupComplaintsByMonth,
+  aggregateMonthlyComplaintTrend,
+  resolveTrustedClosedAt,
+  isComplaintAffectingMonthlyTrend,
+  dedupeTrendComplaintsById,
+  buildMonthlyTrendPrimaryWhere,
+  buildTopClassifications,
   MONTHLY_WINDOW_SIZE,
   ARABIC_MONTH_NAMES,
 } from "./report-executive-brief-data-service";
+import { ComplaintStatus } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import type { ReportFilters } from "./report-definition-service";
 import type { ComparisonResult, DeptClassPeriodCount, PeriodRange } from "./report-comparison";
-import type { ComplaintKpiResult } from "@/server/complaints/complaint-kpi-service";
+import type { ComplaintGroupMetrics, ComplaintKpiResult } from "@/server/complaints/complaint-kpi-service";
+import {
+  UNCLASSIFIED_CLASSIFICATION_KEY,
+  UNCLASSIFIED_CLASSIFICATION_LABEL,
+} from "@/lib/reports/classification-keys";
+import { assertRegionalReconciliation } from "@/lib/reports/region-normalization";
+import {
+  sumClassificationOpenLate,
+  sumRegionReferenceRows,
+  reconcileClassificationOpenLate,
+} from "./report-reconciliation";
 
 // ---------------------------------------------------------------------------
 // Hoist mocks so they are available before module imports are processed.
@@ -23,9 +44,11 @@ import type { ComplaintKpiResult } from "@/server/complaints/complaint-kpi-servi
 const dbMocks = vi.hoisted(() => ({
   complaintGroupBy: vi.fn(),
   complaintFindMany: vi.fn(),
+  complaintFindFirst: vi.fn(),
   complaintCount: vi.fn(),
   statusHistoryGroupBy: vi.fn(),
   statusHistoryCount: vi.fn(),
+  queryRaw: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -33,12 +56,14 @@ vi.mock("@/lib/db", () => ({
     complaint: {
       groupBy: dbMocks.complaintGroupBy,
       findMany: dbMocks.complaintFindMany,
+      findFirst: dbMocks.complaintFindFirst,
       count: dbMocks.complaintCount,
     },
     complaintStatusHistory: {
       groupBy: dbMocks.statusHistoryGroupBy,
       count: dbMocks.statusHistoryCount,
     },
+    $queryRaw: dbMocks.queryRaw,
   },
 }));
 
@@ -47,9 +72,11 @@ beforeEach(() => {
   // Default: no regions in the all-time list, no complaints in the DB.
   dbMocks.complaintGroupBy.mockResolvedValue([]);
   dbMocks.complaintFindMany.mockResolvedValue([]);
+  dbMocks.complaintFindFirst.mockResolvedValue(null);
   dbMocks.complaintCount.mockResolvedValue(0);
   dbMocks.statusHistoryGroupBy.mockResolvedValue([]);
   dbMocks.statusHistoryCount.mockResolvedValue(0);
+  dbMocks.queryRaw.mockResolvedValue([]);
 });
 
 // ---------------------------------------------------------------------------
@@ -1441,5 +1468,628 @@ describe("buildFullAnalyticalData — continuity rows", () => {
     const data = await buildFullAnalyticalData(BASE_FILTERS, result, comparison);
     const row = data.continuityRows.find((r) => r.departmentName === "التعليم");
     expect(row?.recurrenceType).toBe("new");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: computeMonthlyHistoryWindow (backward-looking)
+// ---------------------------------------------------------------------------
+
+describe("computeMonthlyHistoryWindow", () => {
+  it("returns Aug 2025–Aug 2026 = 13 months when data is older than the window", () => {
+    const buckets = computeMonthlyHistoryWindow({
+      reportEnd: new Date("2026-08-04T12:00:00.000Z"),
+      earliestAvailableDate: new Date("2024-01-01T00:00:00.000Z"),
+      maxMonths: 13,
+    });
+    expect(buckets).toHaveLength(13);
+    expect(buckets[0].key).toBe("2025-08");
+    expect(buckets[12].key).toBe("2026-08");
+  });
+
+  it("starts at November 2025 when earliest data is Nov 2025", () => {
+    const buckets = computeMonthlyHistoryWindow({
+      reportEnd: new Date("2026-08-04T12:00:00.000Z"),
+      earliestAvailableDate: new Date("2025-11-28T00:00:00.000Z"),
+      maxMonths: 13,
+    });
+    expect(buckets[0].key).toBe("2025-11");
+    expect(buckets.at(-1)?.key).toBe("2026-08");
+    expect(buckets).toHaveLength(10);
+  });
+
+  it("never creates a month after report end month", () => {
+    const buckets = computeMonthlyHistoryWindow({
+      reportEnd: new Date("2026-08-04T12:00:00.000Z"),
+      earliestAvailableDate: new Date("2026-07-05T00:00:00.000Z"),
+      maxMonths: 13,
+    });
+    expect(buckets.map((b) => b.key)).toEqual(["2026-07", "2026-08"]);
+    for (const b of buckets) {
+      expect(b.key <= "2026-08").toBe(true);
+    }
+  });
+
+  it("uses toExclusive − 1ms semantics for reportEndMonth", () => {
+    // Period ends exclusive on Sep 1 → last included day is Aug 31
+    const buckets = computeMonthlyHistoryWindow({
+      reportEnd: new Date(new Date("2026-09-01T00:00:00.000Z").getTime() - 1),
+      earliestAvailableDate: new Date("2025-01-01T00:00:00.000Z"),
+      maxMonths: 13,
+    });
+    expect(buckets.at(-1)?.key).toBe("2026-08");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests: aggregateMonthlyComplaintTrend series definitions
+// ---------------------------------------------------------------------------
+
+describe("aggregateMonthlyComplaintTrend", () => {
+  const buckets = computeMonthlyHistoryWindow({
+    reportEnd: new Date("2026-08-15T00:00:00.000Z"),
+    earliestAvailableDate: new Date("2026-07-01T00:00:00.000Z"),
+    maxMonths: 13,
+  });
+
+  const OPEN = ComplaintStatus.OPEN;
+  const CLOSED = ComplaintStatus.CLOSED;
+
+  function trend(partial: {
+    complaintDate: Date | null;
+    receivedAt: Date;
+    closedAt: Date | null;
+    status?: ComplaintStatus;
+    lastUpdatedAt?: Date | null;
+  }) {
+    return {
+      status: partial.status ?? OPEN,
+      complaintDate: partial.complaintDate,
+      receivedAt: partial.receivedAt,
+      closedAt: partial.closedAt,
+      lastUpdatedAt: partial.lastUpdatedAt ?? null,
+    };
+  }
+
+  it("receivedCount uses complaintDate ?? receivedAt", () => {
+    const points = aggregateMonthlyComplaintTrend(
+      [
+        trend({
+          complaintDate: new Date("2026-07-10T00:00:00.000Z"),
+          receivedAt: new Date("2026-01-01T00:00:00.000Z"),
+          closedAt: null,
+        }),
+        trend({
+          complaintDate: null,
+          receivedAt: new Date("2026-08-02T00:00:00.000Z"),
+          closedAt: null,
+        }),
+      ],
+      buckets
+    );
+    expect(points.find((p) => p.monthKey === "2026-07")?.receivedCount).toBe(1);
+    expect(points.find((p) => p.monthKey === "2026-08")?.receivedCount).toBe(1);
+  });
+
+  it("closedDuringMonthCount requires a trusted closedAt", () => {
+    const created = new Date("2026-07-01T00:00:00.000Z");
+    const points = aggregateMonthlyComplaintTrend(
+      [
+        trend({
+          status: CLOSED,
+          complaintDate: created,
+          receivedAt: created,
+          closedAt: new Date("2026-07-05T00:00:00.000Z"),
+        }),
+        trend({
+          status: CLOSED,
+          complaintDate: created,
+          receivedAt: created,
+          closedAt: new Date("2026-06-01T00:00:00.000Z"),
+        }),
+        trend({ status: CLOSED, complaintDate: created, receivedAt: created, closedAt: null }),
+      ],
+      buckets
+    );
+    expect(points.find((p) => p.monthKey === "2026-07")?.closedDuringMonthCount).toBe(1);
+  });
+
+  it("uses lastUpdatedAt as closedDuringMonth when closedAt is missing", () => {
+    const created = new Date("2026-07-01T00:00:00.000Z");
+    const points = aggregateMonthlyComplaintTrend(
+      [
+        trend({
+          status: CLOSED,
+          complaintDate: created,
+          receivedAt: created,
+          closedAt: null,
+          lastUpdatedAt: new Date("2026-07-08T00:00:00.000Z"),
+        }),
+      ],
+      buckets
+    );
+    expect(points.find((p) => p.monthKey === "2026-07")?.closedDuringMonthCount).toBe(1);
+    expect(points.find((p) => p.monthKey === "2026-07")?.openAtMonthEndCount).toBe(0);
+  });
+
+  it("openAtMonthEndCount rebuilds historic balance", () => {
+    const created = new Date("2026-07-01T00:00:00.000Z");
+    const points = aggregateMonthlyComplaintTrend(
+      [
+        trend({
+          status: CLOSED,
+          complaintDate: created,
+          receivedAt: created,
+          closedAt: new Date("2026-08-10T00:00:00.000Z"),
+        }),
+      ],
+      buckets
+    );
+    expect(points.find((p) => p.monthKey === "2026-07")?.openAtMonthEndCount).toBe(1);
+    expect(points.find((p) => p.monthKey === "2026-08")?.openAtMonthEndCount).toBe(0);
+  });
+
+  it("lateAtMonthEndCount uses a 7-day deadline; exact boundary is not late", () => {
+    const created = new Date("2026-07-01T00:00:00.000Z");
+    const exact7 = new Date("2026-07-25T00:00:00.000Z");
+    const lateOne = new Date("2026-07-20T00:00:00.000Z");
+
+    const points = aggregateMonthlyComplaintTrend(
+      [
+        trend({ complaintDate: exact7, receivedAt: exact7, closedAt: null }),
+        trend({ complaintDate: lateOne, receivedAt: lateOne, closedAt: null }),
+        trend({ complaintDate: created, receivedAt: created, closedAt: null }),
+      ],
+      buckets
+    );
+    const july = points.find((p) => p.monthKey === "2026-07")!;
+    expect(july.openAtMonthEndCount).toBe(3);
+    expect(july.lateAtMonthEndCount).toBe(2);
+  });
+
+  it("keeps zero months inside the window", () => {
+    const points = aggregateMonthlyComplaintTrend(
+      [
+        trend({
+          complaintDate: new Date("2026-07-05T00:00:00.000Z"),
+          receivedAt: new Date("2026-07-05T00:00:00.000Z"),
+          closedAt: null,
+        }),
+      ],
+      buckets
+    );
+    const aug = points.find((p) => p.monthKey === "2026-08");
+    expect(aug).toBeDefined();
+    expect(aug!.receivedCount).toBe(0);
+  });
+
+  it("resolveTrustedClosedAt rejects dates before creation without lastUpdatedAt", () => {
+    expect(
+      resolveTrustedClosedAt({
+        status: CLOSED,
+        complaintDate: new Date("2026-07-10T00:00:00.000Z"),
+        receivedAt: new Date("2026-07-10T00:00:00.000Z"),
+        closedAt: new Date("2026-07-01T00:00:00.000Z"),
+        lastUpdatedAt: null,
+      })
+    ).toBeNull();
+  });
+
+  it("empty month buckets yield empty trend", () => {
+    expect(aggregateMonthlyComplaintTrend([], [])).toEqual([]);
+  });
+});
+
+describe("isComplaintAffectingMonthlyTrend — candidate filter", () => {
+  const windowFrom = new Date("2025-08-01T00:00:00.000Z");
+  const windowToExclusive = new Date("2026-09-01T00:00:00.000Z");
+  const OPEN = ComplaintStatus.OPEN;
+  const CLOSED = ComplaintStatus.CLOSED;
+
+  function row(partial: {
+    complaintDate: Date | null;
+    receivedAt: Date;
+    closedAt: Date | null;
+    status?: ComplaintStatus;
+    lastUpdatedAt?: Date | null;
+    id?: string;
+  }) {
+    return {
+      id: partial.id,
+      status: partial.status ?? OPEN,
+      complaintDate: partial.complaintDate,
+      receivedAt: partial.receivedAt,
+      closedAt: partial.closedAt,
+      lastUpdatedAt: partial.lastUpdatedAt ?? null,
+    };
+  }
+
+  it("excludes created-and-closed fully before windowFrom", () => {
+    expect(
+      isComplaintAffectingMonthlyTrend(
+        row({
+          status: CLOSED,
+          complaintDate: new Date("2024-01-01T00:00:00.000Z"),
+          receivedAt: new Date("2024-01-01T00:00:00.000Z"),
+          closedAt: new Date("2024-02-01T00:00:00.000Z"),
+        }),
+        windowFrom,
+        windowToExclusive
+      )
+    ).toBe(false);
+  });
+
+  it("includes open carry-in (created before window, closedAt null)", () => {
+    expect(
+      isComplaintAffectingMonthlyTrend(
+        row({
+          complaintDate: new Date("2024-06-01T00:00:00.000Z"),
+          receivedAt: new Date("2024-06-01T00:00:00.000Z"),
+          closedAt: null,
+        }),
+        windowFrom,
+        windowToExclusive
+      )
+    ).toBe(true);
+  });
+
+  it("includes closed inside the window with creation before window", () => {
+    expect(
+      isComplaintAffectingMonthlyTrend(
+        row({
+          status: CLOSED,
+          complaintDate: new Date("2024-06-01T00:00:00.000Z"),
+          receivedAt: new Date("2024-06-01T00:00:00.000Z"),
+          closedAt: new Date("2025-09-15T00:00:00.000Z"),
+        }),
+        windowFrom,
+        windowToExclusive
+      )
+    ).toBe(true);
+  });
+
+  it("includes created inside the window", () => {
+    expect(
+      isComplaintAffectingMonthlyTrend(
+        row({
+          complaintDate: new Date("2026-01-10T00:00:00.000Z"),
+          receivedAt: new Date("2026-01-10T00:00:00.000Z"),
+          closedAt: null,
+        }),
+        windowFrom,
+        windowToExclusive
+      )
+    ).toBe(true);
+  });
+
+  it("excludes created at/after windowToExclusive", () => {
+    expect(
+      isComplaintAffectingMonthlyTrend(
+        row({
+          complaintDate: new Date("2026-09-01T00:00:00.000Z"),
+          receivedAt: new Date("2026-09-01T00:00:00.000Z"),
+          closedAt: null,
+        }),
+        windowFrom,
+        windowToExclusive
+      )
+    ).toBe(false);
+  });
+
+  it("keeps untrusted closedAt (closed before create) as affecting open stock", () => {
+    expect(
+      isComplaintAffectingMonthlyTrend(
+        row({
+          status: CLOSED,
+          complaintDate: new Date("2024-01-15T00:00:00.000Z"),
+          receivedAt: new Date("2024-01-15T00:00:00.000Z"),
+          closedAt: new Date("2023-12-01T00:00:00.000Z"),
+        }),
+        windowFrom,
+        windowToExclusive
+      )
+    ).toBe(true);
+  });
+
+  it("does not grow kept set with old trusted-closed history", () => {
+    const pool = Array.from({ length: 500 }, (_, i) =>
+      row({
+        id: `old-${i}`,
+        status: CLOSED,
+        complaintDate: new Date("2020-01-01T00:00:00.000Z"),
+        receivedAt: new Date("2020-01-01T00:00:00.000Z"),
+        closedAt: new Date("2020-02-01T00:00:00.000Z"),
+      })
+    );
+    pool.push(
+      row({
+        id: "open-carry",
+        complaintDate: new Date("2024-01-01T00:00:00.000Z"),
+        receivedAt: new Date("2024-01-01T00:00:00.000Z"),
+        closedAt: null,
+      }),
+      row({
+        id: "in-window",
+        complaintDate: new Date("2026-01-05T00:00:00.000Z"),
+        receivedAt: new Date("2026-01-05T00:00:00.000Z"),
+        closedAt: null,
+      }),
+      row({
+        id: "close-in-window",
+        status: CLOSED,
+        complaintDate: new Date("2024-03-01T00:00:00.000Z"),
+        receivedAt: new Date("2024-03-01T00:00:00.000Z"),
+        closedAt: new Date("2025-10-01T00:00:00.000Z"),
+      })
+    );
+    const kept = pool.filter((c) =>
+      isComplaintAffectingMonthlyTrend(c, windowFrom, windowToExclusive)
+    );
+    expect(kept).toHaveLength(3);
+    expect(kept.map((c) => c.id).sort()).toEqual([
+      "close-in-window",
+      "in-window",
+      "open-carry",
+    ]);
+  });
+
+  it("dedupeTrendComplaintsById uses id uniquely", () => {
+    const rows = dedupeTrendComplaintsById([
+      {
+        id: "a",
+        status: OPEN,
+        complaintDate: null,
+        receivedAt: new Date("2026-01-01T00:00:00.000Z"),
+        closedAt: null,
+        lastUpdatedAt: null,
+      },
+      {
+        id: "a",
+        status: OPEN,
+        complaintDate: new Date("2026-01-02T00:00:00.000Z"),
+        receivedAt: new Date("2026-01-01T00:00:00.000Z"),
+        closedAt: null,
+        lastUpdatedAt: null,
+      },
+      {
+        id: "b",
+        status: OPEN,
+        complaintDate: null,
+        receivedAt: new Date("2026-01-03T00:00:00.000Z"),
+        closedAt: null,
+        lastUpdatedAt: null,
+      },
+    ]);
+    expect(rows).toHaveLength(2);
+    expect(rows.find((r) => r.id === "a")?.complaintDate?.toISOString()).toContain("2026-01-02");
+  });
+
+  it("primary where includes a lower time bound and non-date base filters", () => {
+    const departmentPredicate = { department: "d1" };
+    const where = buildMonthlyTrendPrimaryWhere(
+      {
+        isDeleted: false,
+        region: "منطقة الرياض",
+        AND: [departmentPredicate],
+      },
+      windowFrom,
+      windowToExclusive
+    );
+    expect(where).toMatchObject({
+      isDeleted: false,
+      region: "منطقة الرياض",
+    });
+    expect(Array.isArray(where.AND)).toBe(true);
+    const andPredicates = where.AND as Prisma.ComplaintWhereInput[];
+    expect(andPredicates).toContainEqual(departmentPredicate);
+    expect(andPredicates).toContainEqual({
+      OR: [
+        { complaintDate: { lt: windowToExclusive } },
+        { complaintDate: null, receivedAt: { lt: windowToExclusive } },
+      ],
+    });
+    expect(andPredicates).toContainEqual({
+      OR: [
+        { complaintDate: { gte: windowFrom } },
+        { complaintDate: null, receivedAt: { gte: windowFrom } },
+        { closedAt: null },
+        { closedAt: { gte: windowFrom } },
+        { sourceUpdatedAt: { gte: windowFrom } },
+      ],
+    });
+  });
+});
+
+describe("MonthlyComplaintTrendPoint contract (no MonthlyStockFlowPoint alias)", () => {
+  it("alias MonthlyStockFlowPoint is gone from source surface", () => {
+    const contract = fs.readFileSync(
+      path.join(process.cwd(), "src/lib/reports/report-contract.ts"),
+      "utf8"
+    );
+    const dataService = fs.readFileSync(
+      path.join(process.cwd(), "src/server/reports/report-data-service.ts"),
+      "utf8"
+    );
+    expect(contract).not.toMatch(/MonthlyStockFlowPoint/);
+    expect(dataService).not.toMatch(/MonthlyStockFlowPoint/);
+    expect(contract).toContain("MonthlyComplaintTrendPoint");
+    expect(dataService).toContain("monthlyStockFlow: MonthlyComplaintTrendPoint[]");
+  });
+});
+
+describe("classification + region reconciliation", () => {
+  it("keys unclassified by sentinel and joins open/late stock", () => {
+    const current: ComplaintGroupMetrics[] = [
+      {
+        name: UNCLASSIFIED_CLASSIFICATION_LABEL,
+        id: null,
+        count: 8,
+        total: 8,
+        open: 5,
+        closed: 3,
+        currentlyLate: 5,
+        closedLate: 0,
+        withinDueDate: 0,
+        complianceRate: null,
+        averageResolutionDays: 0,
+        averageResolutionEligibleCount: 0,
+        slaEligibleCount: 0,
+        closedWithoutTrustedDateCount: 0,
+        highPriorityOpen: 0,
+        unclassified: 8,
+      },
+      {
+        name: "نقل",
+        id: "c-transfer",
+        count: 2,
+        total: 2,
+        open: 1,
+        closed: 1,
+        currentlyLate: 1,
+        closedLate: 0,
+        withinDueDate: 1,
+        complianceRate: 100,
+        averageResolutionDays: 2,
+        averageResolutionEligibleCount: 1,
+        slaEligibleCount: 1,
+        closedWithoutTrustedDateCount: 0,
+        highPriorityOpen: 0,
+        unclassified: 0,
+      },
+    ];
+    const rows = buildTopClassifications(current, [], 10);
+    expect(rows).toHaveLength(2);
+    const unclassified = rows.find((r) => r.classificationName === "غير مصنف")!;
+    expect(unclassified.classificationId).toBe(UNCLASSIFIED_CLASSIFICATION_KEY);
+    expect(unclassified.currentCount).toBe(8);
+
+    const openLate = {
+      [UNCLASSIFIED_CLASSIFICATION_KEY]: { openAtEnd: 5, lateAtEnd: 5 },
+      "c-transfer": { openAtEnd: 1, lateAtEnd: 1 },
+    };
+    const enriched = reconcileClassificationOpenLate(rows, openLate);
+    expect(enriched.find((r) => r.classificationId === UNCLASSIFIED_CLASSIFICATION_KEY)?.openAtEnd).toBe(5);
+    expect(enriched.find((r) => r.classificationId === "c-transfer")?.openAtEnd).toBe(1);
+    const totals = sumClassificationOpenLate(enriched);
+    expect(totals.openAtEnd).toBe(6);
+    expect(totals.lateAtEnd).toBe(6);
+    expect(rows.reduce((s, r) => s + r.currentCount, 0)).toBe(10);
+
+    // Regression: Arabic display name must never be the join key.
+    const wrongKeyMap: Record<string, { openAtEnd: number; lateAtEnd: number }> = {
+      "غير مصنف": { openAtEnd: 163, lateAtEnd: 163 },
+    };
+    expect(Object.prototype.hasOwnProperty.call(openLate, "غير مصنف")).toBe(false);
+    expect(
+      reconcileClassificationOpenLate(rows, wrongKeyMap)
+        .find((r) => r.classificationId === UNCLASSIFIED_CLASSIFICATION_KEY)?.openAtEnd
+    ).toBe(0);
+  });
+
+  it("reconciles regional sums with comparison totals after alias collapse", async () => {
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
+    const sums = sumRegionReferenceRows(data.allRegions);
+    assertRegionalReconciliation({
+      currentRows: data.allRegions,
+      previousRows: data.allRegions,
+      currentTotal: 100,
+      previousTotal: 80,
+    });
+    expect(sums.current).toBe(100);
+    expect(sums.previous).toBe(80);
+    expect(sums.difference).toBe(20);
+  });
+
+  it("keeps open/late classification totals aligned with overall open/late when rows cover all volume", () => {
+    const rows = buildTopClassifications(
+      [
+        {
+          name: "غير مصنف",
+          id: null,
+          count: 9192,
+          total: 9192,
+          open: 163,
+          closed: 0,
+          currentlyLate: 163,
+          closedLate: 0,
+          withinDueDate: 0,
+          complianceRate: null,
+          averageResolutionDays: 0,
+          averageResolutionEligibleCount: 0,
+          slaEligibleCount: 0,
+          closedWithoutTrustedDateCount: 0,
+          highPriorityOpen: 0,
+          unclassified: 9192,
+        },
+        {
+          name: "أ",
+          id: "a",
+          count: 10,
+          total: 10,
+          open: 1,
+          closed: 0,
+          currentlyLate: 1,
+          closedLate: 0,
+          withinDueDate: 0,
+          complianceRate: null,
+          averageResolutionDays: 0,
+          averageResolutionEligibleCount: 0,
+          slaEligibleCount: 0,
+          closedWithoutTrustedDateCount: 0,
+          highPriorityOpen: 0,
+          unclassified: 0,
+        },
+        {
+          name: "ب",
+          id: "b",
+          count: 10,
+          total: 10,
+          open: 1,
+          closed: 0,
+          currentlyLate: 1,
+          closedLate: 0,
+          withinDueDate: 0,
+          complianceRate: null,
+          averageResolutionDays: 0,
+          averageResolutionEligibleCount: 0,
+          slaEligibleCount: 0,
+          closedWithoutTrustedDateCount: 0,
+          highPriorityOpen: 0,
+          unclassified: 0,
+        },
+        {
+          name: "ج",
+          id: "c",
+          count: 10,
+          total: 10,
+          open: 1,
+          closed: 0,
+          currentlyLate: 1,
+          closedLate: 0,
+          withinDueDate: 0,
+          complianceRate: null,
+          averageResolutionDays: 0,
+          averageResolutionEligibleCount: 0,
+          slaEligibleCount: 0,
+          closedWithoutTrustedDateCount: 0,
+          highPriorityOpen: 0,
+          unclassified: 0,
+        },
+      ],
+      [],
+      9222
+    );
+    expect(rows.reduce((s, r) => s + r.currentCount, 0)).toBe(9222);
+    const enriched = reconcileClassificationOpenLate(rows, {
+      [UNCLASSIFIED_CLASSIFICATION_KEY]: { openAtEnd: 163, lateAtEnd: 163 },
+      a: { openAtEnd: 1, lateAtEnd: 1 },
+      b: { openAtEnd: 1, lateAtEnd: 1 },
+      c: { openAtEnd: 1, lateAtEnd: 1 },
+    });
+    const totals = sumClassificationOpenLate(enriched);
+    expect(totals.openAtEnd).toBe(166);
+    expect(totals.lateAtEnd).toBe(166);
+    expect(enriched.find((r) => r.classificationId === UNCLASSIFIED_CLASSIFICATION_KEY)?.openAtEnd).not.toBe(0);
+    expect(enriched.find((r) => r.classificationId === UNCLASSIFIED_CLASSIFICATION_KEY)?.openAtEnd).not.toBe(68);
   });
 });
