@@ -190,11 +190,11 @@ function makeKpiResult(overrides: Partial<ComplaintKpiResult> = {}): ComplaintKp
         { name: "الخدمات", id: "dept-svc", count: 20, total: 20, open: 8, closed: 10, currentlyLate: 2, closedLate: 0, withinDueDate: 10, complianceRate: 100.0, averageResolutionDays: 2.9, highPriorityOpen: 1, unclassified: 1, averageResolutionEligibleCount: 10, slaEligibleCount: 10, closedWithoutTrustedDateCount: 0 },
       ],
       byClassification: [
-        { name: "ضوضاء", id: "class-01", count: 30, total: 30, open: 8, closed: 20, currentlyLate: 3, closedLate: 1, withinDueDate: 19, complianceRate: 95.0, averageResolutionDays: 3.2, highPriorityOpen: 1, unclassified: 0, averageResolutionEligibleCount: 19, slaEligibleCount: 19, closedWithoutTrustedDateCount: 0 },
-        { name: "بنية تحتية", id: "class-02", count: 25, total: 25, open: 7, closed: 17, currentlyLate: 2, closedLate: 1, withinDueDate: 16, complianceRate: 94.1, averageResolutionDays: 3.8, highPriorityOpen: 2, unclassified: 1, averageResolutionEligibleCount: 16, slaEligibleCount: 16, closedWithoutTrustedDateCount: 0 },
-        { name: "مخلفات", id: "class-03", count: 20, total: 20, open: 5, closed: 13, currentlyLate: 1, closedLate: 0, withinDueDate: 13, complianceRate: 100.0, averageResolutionDays: 2.8, highPriorityOpen: 0, unclassified: 0, averageResolutionEligibleCount: 13, slaEligibleCount: 13, closedWithoutTrustedDateCount: 0 },
-        { name: "مياه", id: "class-04", count: 15, total: 15, open: 6, closed: 8, currentlyLate: 1, closedLate: 1, withinDueDate: 7, complianceRate: 87.5, averageResolutionDays: 4.5, highPriorityOpen: 2, unclassified: 1, averageResolutionEligibleCount: 7, slaEligibleCount: 7, closedWithoutTrustedDateCount: 0 },
-        { name: "إضاءة", id: "class-05", count: 10, total: 10, open: 4, closed: 7, currentlyLate: 1, closedLate: 0, withinDueDate: 7, complianceRate: 100.0, averageResolutionDays: 2.5, highPriorityOpen: 0, unclassified: 0, averageResolutionEligibleCount: 7, slaEligibleCount: 7, closedWithoutTrustedDateCount: 0 },
+        { name: "الرعاية / ضوضاء", id: "class-01", categoryId: "cat-01", categoryName: "الرعاية", classificationName: "ضوضاء", count: 30, total: 30, open: 8, closed: 20, currentlyLate: 3, closedLate: 1, withinDueDate: 19, complianceRate: 95.0, averageResolutionDays: 3.2, highPriorityOpen: 1, unclassified: 0, averageResolutionEligibleCount: 19, slaEligibleCount: 19, closedWithoutTrustedDateCount: 0 },
+        { name: "الرعاية / بنية تحتية", id: "class-02", categoryId: "cat-01", categoryName: "الرعاية", classificationName: "بنية تحتية", count: 25, total: 25, open: 7, closed: 17, currentlyLate: 2, closedLate: 1, withinDueDate: 16, complianceRate: 94.1, averageResolutionDays: 3.8, highPriorityOpen: 2, unclassified: 1, averageResolutionEligibleCount: 16, slaEligibleCount: 16, closedWithoutTrustedDateCount: 0 },
+        { name: "الرعاية / مخلفات", id: "class-03", categoryId: "cat-01", categoryName: "الرعاية", classificationName: "مخلفات", count: 20, total: 20, open: 5, closed: 13, currentlyLate: 1, closedLate: 0, withinDueDate: 13, complianceRate: 100.0, averageResolutionDays: 2.8, highPriorityOpen: 0, unclassified: 0, averageResolutionEligibleCount: 13, slaEligibleCount: 13, closedWithoutTrustedDateCount: 0 },
+        { name: "الرعاية / مياه", id: "class-04", categoryId: "cat-01", categoryName: "الرعاية", classificationName: "مياه", count: 15, total: 15, open: 6, closed: 8, currentlyLate: 1, closedLate: 1, withinDueDate: 7, complianceRate: 87.5, averageResolutionDays: 4.5, highPriorityOpen: 2, unclassified: 1, averageResolutionEligibleCount: 7, slaEligibleCount: 7, closedWithoutTrustedDateCount: 0 },
+        { name: "الرعاية / إضاءة", id: "class-05", categoryId: "cat-01", categoryName: "الرعاية", classificationName: "إضاءة", count: 10, total: 10, open: 4, closed: 7, currentlyLate: 1, closedLate: 0, withinDueDate: 7, complianceRate: 100.0, averageResolutionDays: 2.5, highPriorityOpen: 0, unclassified: 0, averageResolutionEligibleCount: 7, slaEligibleCount: 7, closedWithoutTrustedDateCount: 0 },
       ],
       byCategory: [],
       byChannel: [],
@@ -496,12 +496,14 @@ describe("buildExecutiveBriefData — topClassifications", () => {
     }
   });
 
-  it("each row has classificationId and classificationName but no categoryName", async () => {
+  it("each row has classification path and category identity", async () => {
     const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
     for (const row of data.topClassifications) {
       expect(typeof row.classificationId).toBe("string");
       expect(typeof row.classificationName).toBe("string");
-      expect(row).not.toHaveProperty("categoryName");
+      expect(typeof row.classificationPath).toBe("string");
+      expect(row).toHaveProperty("categoryId");
+      expect(row).toHaveProperty("categoryName");
     }
   });
 

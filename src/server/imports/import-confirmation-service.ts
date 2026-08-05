@@ -570,9 +570,16 @@ async function resolveTaxonomy(
   if (category && classification && classification.categoryId !== category.id) {
     throw new ImportConfirmationError("IMPORT_TAXONOMY_STALE", "التصنيف لم يعد يتبع الفئة المحددة", 409);
   }
+  if (classification && !classification.categoryId) {
+    throw new ImportConfirmationError(
+      "CATEGORY_CLASSIFICATION_MISMATCH",
+      "التصنيف الفرعي لا يرتبط بتصنيف رئيسي صالح",
+      422
+    );
+  }
 
   return {
-    categoryId: category?.id,
+    categoryId: classification?.categoryId ?? category?.id,
     classificationId: classification?.id,
   };
 }
@@ -798,10 +805,19 @@ function assignImportUpdateFields(
   const protectManual =
     current.classificationAssignmentSource === CLASSIFICATION_ASSIGNMENT_SOURCES.MANUAL;
   if (!protectManual) {
-    assignIfDefined(data, "categoryId", taxonomy.categoryId);
-    assignIfDefined(data, "classificationId", taxonomy.classificationId);
-    if (Object.keys(assignmentFields).length > 0) {
-      Object.assign(data, assignmentFields);
+    if (taxonomy.classificationId) {
+      // Always persist main + sub together from the classification relation.
+      data.classificationId = taxonomy.classificationId;
+      data.categoryId = taxonomy.categoryId ?? null;
+      if (Object.keys(assignmentFields).length > 0) {
+        Object.assign(data, assignmentFields);
+      }
+    } else {
+      assignIfDefined(data, "categoryId", taxonomy.categoryId);
+      assignIfDefined(data, "classificationId", taxonomy.classificationId);
+      if (Object.keys(assignmentFields).length > 0) {
+        Object.assign(data, assignmentFields);
+      }
     }
   }
 

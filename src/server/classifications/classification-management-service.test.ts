@@ -515,6 +515,17 @@ describe("isRetryableClassificationTransactionError", () => {
     expect(calls).toBe(1);
   });
 
+  it("rejects classification name equal to category name", async () => {
+    const client = createMemoryClient();
+    const category = await createCategory({ name: "طلب خدمة" }, client as never);
+    await expect(
+      createClassification(
+        { categoryId: category.id, name: "طلب خدمة", keywords: [] },
+        client as never
+      )
+    ).rejects.toMatchObject({ code: "CLASSIFICATION_NAME_EQUALS_CATEGORY_NAME" });
+  });
+
   it("keyword updates do not invoke historical backfill or complaint rewrites", async () => {
     const client = createMemoryClient();
     const category = await createCategory({ name: "فئة كلمات" }, client as never);

@@ -61,6 +61,7 @@ export const BACKFILL_SKIP_REASONS = {
   DELETED_AFTER_PREVIEW: "DELETED_AFTER_PREVIEW",
   TARGET_CHANGED: "TARGET_CHANGED",
   OUTSIDE_PERIOD: "OUTSIDE_PERIOD",
+  CATEGORY_CLASSIFICATION_MISMATCH: "CATEGORY_CLASSIFICATION_MISMATCH",
   ROLLBACK_SKIPPED_VERSION_CHANGED: "ROLLBACK_SKIPPED_VERSION_CHANGED",
   ROLLBACK_SKIPPED_MANUAL_CHANGE: "ROLLBACK_SKIPPED_MANUAL_CHANGE",
   ROLLBACK_SKIPPED_CLASSIFICATION_CHANGED: "ROLLBACK_SKIPPED_CLASSIFICATION_CHANGED",
@@ -108,8 +109,10 @@ export type ManifestRow = {
   complaintId: string;
   expectedVersion: number;
   previousClassificationId: string | null;
+  previousCategoryId?: string | null;
   previousAssignmentSource: string | null;
   targetClassificationId: string;
+  targetCategoryId: string;
   targetClassificationName: string;
   sourceDetailHash: string;
   matchCode: "MATCHED";
@@ -118,6 +121,8 @@ export type ManifestRow = {
 export type ClassificationDistributionEntry = {
   classificationId: string;
   classificationName: string;
+  categoryId: string;
+  categoryName: string;
   eligibleCount: number;
 };
 
@@ -446,6 +451,7 @@ export async function previewHistoricalClassificationBackfill(
       id: true,
       version: true,
       classificationId: true,
+      categoryId: true,
       classificationAssignmentSource: true,
       sourceDetail: true,
       complaintDate: true,
@@ -519,6 +525,8 @@ export async function previewHistoricalClassificationBackfill(
       distribution.set(resolution.match.classificationId, {
         classificationId: resolution.match.classificationId,
         classificationName: resolution.match.classificationName,
+        categoryId: resolution.match.categoryId,
+        categoryName: resolution.match.categoryName,
         eligibleCount: 1,
       });
     }
@@ -527,8 +535,10 @@ export async function previewHistoricalClassificationBackfill(
       complaintId: complaint.id,
       expectedVersion: complaint.version,
       previousClassificationId: null,
+      previousCategoryId: complaint.categoryId,
       previousAssignmentSource: null,
       targetClassificationId: resolution.match.classificationId,
+      targetCategoryId: resolution.match.categoryId,
       targetClassificationName: resolution.match.classificationName,
       sourceDetailHash: hashSourceDetailValue(sourceDetail),
       matchCode: "MATCHED",
@@ -690,10 +700,17 @@ async function assertTaxonomyMatchesManifest(
 
   const activeIds = new Set(taxonomy.map((c) => c.id));
   for (const row of manifest.rows) {
-    if (!activeIds.has(row.targetClassificationId)) {
+    const target = taxonomy.find((c) => c.id === row.targetClassificationId);
+    if (!target || !activeIds.has(row.targetClassificationId)) {
       throw new HistoricalBackfillError(
         BACKFILL_ERROR_CODES.CLASSIFICATION_TAXONOMY_CHANGED,
         "تصنيف مستهدف لم يعد ضمن القاموس النشط"
+      );
+    }
+    if (target.category.id !== row.targetCategoryId) {
+      throw new HistoricalBackfillError(
+        BACKFILL_ERROR_CODES.CLASSIFICATION_TAXONOMY_CHANGED,
+        "تصنيف مستهدف لم يعد يتبع الفئة المعاينة"
       );
     }
   }
@@ -808,7 +825,9 @@ export async function applyHistoricalClassificationBackfill(
           complaintId: row.complaintId,
           expectedVersion: row.expectedVersion,
           previousClassificationId: row.previousClassificationId,
+          previousCategoryId: row.previousCategoryId ?? null,
           targetClassificationId: row.targetClassificationId,
+          targetCategoryId: row.targetCategoryId,
           targetClassificationNameSnapshot: row.targetClassificationName,
           previousAssignmentSource: row.previousAssignmentSource,
           targetAssignmentSource: CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL,
@@ -989,6 +1008,23 @@ export async function applyHistoricalClassificationBackfill(
             continue;
           }
 
+          const targetCategoryId = item.targetCategoryId ?? resolution.match.categoryId;
+          if (
+            !targetCategoryId ||
+            resolution.match.categoryId !== targetCategoryId ||
+            (item.targetCategoryId != null && item.targetCategoryId !== resolution.match.categoryId)
+          ) {
+            await tx.classificationBackfillItem.update({
+              where: { id: item.id },
+              data: {
+                result: BACKFILL_ITEM_RESULTS.SKIPPED,
+                skipReason: BACKFILL_SKIP_REASONS.CATEGORY_CLASSIFICATION_MISMATCH,
+              },
+            });
+            skippedCount += 1;
+            continue;
+          }
+
           const assignment = buildClassificationAssignmentMetadata({
             source: CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL,
             assignedBy: actor,
@@ -1006,6 +1042,7 @@ export async function applyHistoricalClassificationBackfill(
             },
             data: {
               classificationId: item.targetClassificationId,
+              categoryId: targetCategoryId,
               ...assignment,
               version: { increment: 1 },
             },
@@ -1194,10 +1231,12 @@ export async function verifyHistoricalClassificationBackfill(
       select: {
         id: true,
         classificationId: true,
+        categoryId: true,
         classificationAssignmentSource: true,
         classificationAssignmentRunId: true,
         classificationTaxonomyFingerprint: true,
         isDeleted: true,
+        classification: { select: { categoryId: true } },
       },
     });
     const byId = new Map(complaints.map((c) => [c.id, c]));
@@ -1212,6 +1251,20 @@ export async function verifyHistoricalClassificationBackfill(
         c.classificationTaxonomyFingerprint !== run.taxonomyFingerprint
       ) {
         appliedOk = false;
+        break;
+      }
+      if (
+        !c.categoryId ||
+        !c.classification ||
+        c.categoryId !== c.classification.categoryId ||
+        (item.targetCategoryId != null && c.categoryId !== item.targetCategoryId)
+      ) {
+        appliedOk = false;
+        invariants.push({
+          code: BACKFILL_SKIP_REASONS.CATEGORY_CLASSIFICATION_MISMATCH,
+          ok: false,
+          detail: c.id,
+        });
         break;
       }
     }
@@ -1448,6 +1501,7 @@ export async function rollbackHistoricalClassificationBackfill(
           },
           data: {
             classificationId: item.previousClassificationId,
+            categoryId: item.previousCategoryId ?? null,
             classificationAssignmentSource: item.previousAssignmentSource,
             classificationAssignedAt: item.previousAssignedAt,
             classificationAssignedBy: item.previousAssignedBy,

@@ -161,8 +161,12 @@ export type RegionReferenceRow = {
  * the same logical classification appears under two Arabic-name variants.
  */
 export type ClassificationBriefRow = {
+  categoryId: string | null;
+  categoryName: string;
   classificationId: string;
   classificationName: string;
+  /** Display path: categoryName / classificationName (or single name when equal). */
+  classificationPath: string;
   currentCount: number;
   previousCount: number;
   difference: number;

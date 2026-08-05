@@ -7,6 +7,7 @@ import {
 } from "./complaint-sla-metrics";
 import { buildComplaintSlaTiming, resolveComplaintEffectiveClosedAt } from "./complaint-sla-timing";
 import {
+  buildClassificationPath,
   classificationDisplayName,
   UNCLASSIFIED_CLASSIFICATION_LABEL,
 } from "@/lib/reports/classification-keys";
@@ -108,6 +109,9 @@ export type ComplaintKpiSummary = {
 export type ComplaintGroupMetrics = {
   name: string;
   id?: string | null;
+  categoryId?: string | null;
+  categoryName?: string | null;
+  classificationName?: string | null;
   count: number;
   total: number;
   open: number;
@@ -539,10 +543,21 @@ function buildDistributions(complaints: KpiComplaint[], now: Date): ComplaintDis
     })),
     byFacility: groupMetrics(complaints, now, (complaint) => ({ name: complaint.facility ?? UNSPECIFIED_LABEL })),
     byDepartment: groupMetrics(complaints, now, (complaint) => ({ name: complaint.department ?? UNSPECIFIED_LABEL })),
-    byClassification: groupMetrics(complaints, now, (complaint) => ({
-      id: complaint.classification?.id ?? null,
-      name: classificationDisplayName(complaint.classification?.nameAr),
-    })),
+    byClassification: groupMetrics(complaints, now, (complaint) => {
+      const leafName = classificationDisplayName(complaint.classification?.nameAr);
+      const categoryName = complaint.category?.nameAr ?? null;
+      return {
+        id: complaint.classification?.id ?? null,
+        name: buildClassificationPath(categoryName, complaint.classification?.nameAr),
+        categoryId: complaint.classification?.id
+          ? (complaint.category?.id ?? complaint.categoryId)
+          : null,
+        categoryName,
+        classificationName: complaint.classification?.nameAr
+          ? leafName
+          : UNCLASSIFIED_CLASSIFICATION_LABEL,
+      };
+    }),
     byCategory: groupMetrics(complaints, now, (complaint) => ({
       id: complaint.category?.id ?? null,
       name: complaint.category?.nameAr ?? UNCLASSIFIED_CLASSIFICATION_LABEL,
@@ -577,7 +592,13 @@ function buildRegionPriorityBreakdown(complaints: KpiComplaint[]): RegionPriorit
 function groupMetrics(
   complaints: KpiComplaint[],
   now: Date,
-  keyFn: (complaint: KpiComplaint) => { name: string; id?: string | null }
+  keyFn: (complaint: KpiComplaint) => {
+    name: string;
+    id?: string | null;
+    categoryId?: string | null;
+    categoryName?: string | null;
+    classificationName?: string | null;
+  }
 ): ComplaintGroupMetrics[] {
   const map = new Map<string, { id?: string | null; items: KpiComplaint[] }>();
   for (const complaint of complaints) {
@@ -595,6 +616,9 @@ function groupMetrics(
       return {
         name: representative.name,
         id: value.id,
+        categoryId: representative.categoryId ?? null,
+        categoryName: representative.categoryName ?? null,
+        classificationName: representative.classificationName ?? null,
         count: raw.totalComplaints,
         total: raw.totalComplaints,
         open: raw.openComplaints,
@@ -677,7 +701,10 @@ function buildClassificationCrossTab(
 ): CrossTabRow[] {
   const map = new Map<string, CrossTabRow>();
   for (const complaint of complaints) {
-    const classification = complaint.classification?.nameAr ?? UNCLASSIFIED_CLASSIFICATION_LABEL;
+    const classification = buildClassificationPath(
+      complaint.category?.nameAr,
+      complaint.classification?.nameAr
+    );
     const classificationId = complaint.classification?.id ?? null;
     const group = groupName(complaint);
     const key = `${classificationId ?? classification}:${group}`;

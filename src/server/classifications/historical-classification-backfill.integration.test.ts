@@ -199,6 +199,7 @@ describe("historical classification backfill SQLite integration", () => {
 
     const c1 = await client.complaint.findUniqueOrThrow({ where: { id: eligible1.id } });
     expect(c1.classificationId).toBe(classificationA.id);
+    expect(c1.categoryId).toBe(category.id);
     expect(c1.classificationAssignmentSource).toBe(
       CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL
     );

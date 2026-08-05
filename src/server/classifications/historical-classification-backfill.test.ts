@@ -264,6 +264,7 @@ describe("dry-run preview", () => {
         previousClassificationId: null,
         previousAssignmentSource: null,
         targetClassificationId: "c1",
+        targetCategoryId: "cat1",
         targetClassificationName: "أ",
         sourceDetailHash: "h1",
         matchCode: "MATCHED",
@@ -274,6 +275,7 @@ describe("dry-run preview", () => {
         previousClassificationId: null,
         previousAssignmentSource: null,
         targetClassificationId: "c1",
+        targetCategoryId: "cat1",
         targetClassificationName: "أ",
         sourceDetailHash: "h2",
         matchCode: "MATCHED",
@@ -295,7 +297,13 @@ describe("dry-run preview", () => {
         outsidePeriodCount: 0,
       },
       classificationDistribution: [
-        { classificationId: "c1", classificationName: "أ", eligibleCount: 2 },
+        {
+          classificationId: "c1",
+          classificationName: "أ",
+          categoryId: "cat1",
+          categoryName: "فئة",
+          eligibleCount: 2,
+        },
       ],
       rows,
     };

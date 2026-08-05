@@ -183,10 +183,26 @@ async function validateEffectiveClassificationRelation(
   current: ActiveComplaintProjection,
   payload: ComplaintPatchPayload
 ): Promise<void> {
-  const effectiveCategoryId = payload.categoryId !== undefined ? payload.categoryId : current.categoryId;
   const effectiveClassificationId = payload.classificationId !== undefined
     ? payload.classificationId
     : current.classificationId;
+
+  if (!effectiveClassificationId) return;
+
+  const classification = await db.classification.findFirst({
+    where: { id: effectiveClassificationId, isDeleted: false, isActive: true },
+    select: { categoryId: true },
+  });
+  if (!classification) {
+    throw new ComplaintRouteError("CLASSIFICATION_NOT_FOUND", "التصنيف غير موجود أو غير فعال", 422);
+  }
+
+  const effectiveCategoryId =
+    payload.classificationId !== undefined
+      ? classification.categoryId
+      : payload.categoryId !== undefined
+        ? payload.categoryId
+        : current.categoryId;
 
   await assertClassificationRelation(effectiveCategoryId, effectiveClassificationId);
 }
@@ -194,7 +210,8 @@ async function validateEffectiveClassificationRelation(
 function buildComplaintUpdateData(
   payload: ComplaintPatchPayload,
   current: ActiveComplaintProjection,
-  actor: string
+  actor: string,
+  linkedCategoryId?: string | null
 ): Prisma.ComplaintUncheckedUpdateManyInput {
   const data: Prisma.ComplaintUncheckedUpdateManyInput = {
     sourceReference: payload.sourceReference,
@@ -218,14 +235,18 @@ function buildComplaintUpdateData(
   };
 
   if (payload.classificationId !== undefined) {
-    const assignment =
-      payload.classificationId === null
-        ? buildManualClearClassificationMetadata({ assignedBy: actor })
-        : buildClassificationAssignmentMetadata({
-            source: CLASSIFICATION_ASSIGNMENT_SOURCES.MANUAL,
-            assignedBy: actor,
-          });
-    Object.assign(data, assignment);
+    if (payload.classificationId === null) {
+      Object.assign(data, buildManualClearClassificationMetadata({ assignedBy: actor }));
+    } else {
+      data.categoryId = linkedCategoryId ?? payload.categoryId;
+      Object.assign(
+        data,
+        buildClassificationAssignmentMetadata({
+          source: CLASSIFICATION_ASSIGNMENT_SOURCES.MANUAL,
+          assignedBy: actor,
+        })
+      );
+    }
   }
 
   void current;
@@ -272,9 +293,21 @@ async function updateComplaint(
   payload: ComplaintPatchPayload,
   actor: string
 ): Promise<ComplaintDetailProjection> {
+  let linkedCategoryId: string | null | undefined;
+  if (payload.classificationId) {
+    const classification = await db.classification.findFirst({
+      where: { id: payload.classificationId, isDeleted: false, isActive: true },
+      select: { categoryId: true },
+    });
+    if (!classification) {
+      throw new ComplaintRouteError("CLASSIFICATION_NOT_FOUND", "التصنيف غير موجود أو غير فعال", 422);
+    }
+    linkedCategoryId = classification.categoryId;
+  }
+
   const result = await db.complaint.updateMany({
     where: { id: current.id, version: payload.expectedVersion, isDeleted: false },
-    data: buildComplaintUpdateData(payload, current, actor),
+    data: buildComplaintUpdateData(payload, current, actor, linkedCategoryId),
   });
 
   if (result.count !== 1) {

@@ -26,6 +26,15 @@
 
 وستقتصر على مصادر: `SOURCE_DETAIL_RULE` و`HISTORICAL_BACKFILL` فقط.
 
+## اتساق التصنيف الرئيسي والفرعي
+
+- `Category` = التصنيف الرئيسي، `Classification` = التصنيف الفرعي.
+- عند أي تعيين (استيراد / يدوي / Backfill) يُحفظ `categoryId` و`classificationId` معًا داخل نفس المعاملة.
+- لا يُحفظ `classificationId` دون `categoryId` المطابق لـ `classification.categoryId`.
+- عند الاختلاف يُتخطى السجل بـ `CATEGORY_CLASSIFICATION_MISMATCH`.
+- أسماء الفرعي المطابقة لاسم الرئيسي بعد التطبيع مرفوضة بـ `CLASSIFICATION_NAME_EQUALS_CATEGORY_NAME`.
+- العرض في التقارير يستخدم المسار الكامل: `categoryName / classificationName` عبر `classificationPath`، مع التجميع دائمًا بـ `classificationId`.
+
 ## مصادر تعيين التصنيف (`classificationAssignmentSource`)
 
 | المصدر | المعنى |

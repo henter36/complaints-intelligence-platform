@@ -851,7 +851,7 @@ function formatRiseCell(row: RiseTableRow, key: keyof RiseTableRow): string {
 }
 
 const BRIEF_CLASS_COLUMNS: readonly ColumnDefinition<ClassificationBriefRow>[] = [
-  { key: "classificationName", label: "التصنيف", weight: 2.4 },
+  { key: "classificationPath", label: "التصنيف", weight: 2.4 },
   { key: "currentCount", label: "الحالي", weight: 0.85 },
   { key: "previousCount", label: "السابق", weight: 0.85 },
   { key: "difference", label: "الفرق", weight: 0.85 },
@@ -864,8 +864,9 @@ function formatClassificationCell(
   if (key === "difference") return formatReportNumber(row.difference, { sign: true });
   if (key === "shareOfTotal") return formatReportNumber(row.shareOfTotal, { percent: true });
   if (key === "changeRate") return formatNullableReportNumber(row.changeRate, { percent: true });
+  if (key === "classificationPath") return row.classificationPath;
   const value = row[key];
-  return typeof value === "number" ? formatReportNumber(value) : String(value);
+  return typeof value === "number" ? formatReportNumber(value) : String(value ?? "");
 }
 
 type DeptTableRow = {

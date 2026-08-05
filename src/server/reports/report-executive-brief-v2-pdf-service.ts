@@ -1211,6 +1211,9 @@ function formatClassificationTableCell(
   if (key === "changeRate") {
     return formatNullableReportNumber(row.changeRate, { percent: true });
   }
+  if (key === "classificationPath") {
+    return row.classificationPath;
+  }
   return formatTableValue((row as Record<string, unknown>)[key]);
 }
 
@@ -1392,7 +1395,7 @@ function renderPage4(ctx: V2Context): void {
   y = drawSectionTitle(doc, "أعلى التصنيفات", margin, y, contentWidth);
   const classCols: ColDef[] = hasClassComparison
     ? [
-        { key: "classificationName", label: "التصنيف", weight: 2.4 },
+        { key: "classificationPath", label: "التصنيف", weight: 2.4 },
         { key: "currentCount", label: "شكاوى الفترة", weight: 0.9 },
         { key: "previousCount", label: "السابق", weight: 0.85 },
         { key: "difference", label: "الفرق", weight: 0.8 },
@@ -1400,7 +1403,7 @@ function renderPage4(ctx: V2Context): void {
         { key: "lateAtEnd", label: "متأخرة نهاية الفترة", weight: 0.95 },
       ]
     : [
-        { key: "classificationName", label: "التصنيف", weight: 2.6 },
+        { key: "classificationPath", label: "التصنيف", weight: 2.6 },
         { key: "currentCount", label: "شكاوى الفترة", weight: 1 },
         { key: "openAtEnd", label: "مفتوحة نهاية الفترة", weight: 1 },
         { key: "lateAtEnd", label: "متأخرة نهاية الفترة", weight: 1 },

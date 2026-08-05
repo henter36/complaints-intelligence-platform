@@ -136,3 +136,29 @@ export function rowResolvedClassificationFromSourceDetail(
       (entry as { code?: unknown }).code === "CLASSIFICATION_RESOLVED_FROM_SOURCE_DETAIL"
   );
 }
+
+/**
+ * Persist main + sub classification together.
+ * Never write classificationId without the matching categoryId.
+ */
+export function buildLinkedClassificationIds(input: {
+  classificationId: string;
+  categoryId: string;
+}): { classificationId: string; categoryId: string } {
+  if (!input.classificationId || !input.categoryId) {
+    throw new Error("CATEGORY_CLASSIFICATION_MISMATCH");
+  }
+  return {
+    classificationId: input.classificationId,
+    categoryId: input.categoryId,
+  };
+}
+
+export function assertClassificationBelongsToCategory(input: {
+  classificationCategoryId: string;
+  targetCategoryId: string;
+}): void {
+  if (input.classificationCategoryId !== input.targetCategoryId) {
+    throw new Error("CATEGORY_CLASSIFICATION_MISMATCH");
+  }
+}

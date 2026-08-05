@@ -75,6 +75,9 @@ describe("report-reconciliation helpers", () => {
         {
           classificationId: UNCLASSIFIED_CLASSIFICATION_KEY,
           classificationName: UNCLASSIFIED_CLASSIFICATION_LABEL,
+          categoryId: null,
+          categoryName: UNCLASSIFIED_CLASSIFICATION_LABEL,
+          classificationPath: UNCLASSIFIED_CLASSIFICATION_LABEL,
           currentCount: 8,
           previousCount: 0,
           difference: 8,
