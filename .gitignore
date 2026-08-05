@@ -34,6 +34,8 @@ temp/
 .playwright-cli/
 output/pdf/
 output/playwright/
+output/classification-backfill-*.json
+output/backups/
 .DS_Store
 
 .idea/

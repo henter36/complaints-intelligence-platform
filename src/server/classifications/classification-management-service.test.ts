@@ -514,4 +514,23 @@ describe("isRetryableClassificationTransactionError", () => {
     ).rejects.toMatchObject({ code: "P2028" });
     expect(calls).toBe(1);
   });
+
+  it("keyword updates do not invoke historical backfill or complaint rewrites", async () => {
+    const client = createMemoryClient();
+    const category = await createCategory({ name: "فئة كلمات" }, client as never);
+    const classification = await createClassification(
+      { categoryId: category.id, name: "تصنيف", keywords: ["أ"] },
+      client as never
+    );
+    const complaintUpdate = vi.fn();
+    (client as { complaint?: { update: unknown } }).complaint = { update: complaintUpdate };
+
+    await updateClassification(
+      classification.id,
+      { keywords: ["أ", "ب"], actor: "admin" },
+      client as never
+    );
+
+    expect(complaintUpdate).not.toHaveBeenCalled();
+  });
 });

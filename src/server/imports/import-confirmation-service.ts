@@ -10,6 +10,13 @@ import {
 } from "@prisma/client";
 import { db } from "@/lib/db";
 import { writeAuditLog, AUDIT_ACTOR_SINGLE_ADMIN } from "@/server/audit/audit-log-service";
+import {
+  buildClassificationAssignmentMetadata,
+  resolveImportClassificationAssignmentSource,
+  rowResolvedClassificationFromSourceDetail,
+  CLASSIFICATION_ASSIGNMENT_SOURCES,
+} from "@/server/classifications/classification-assignment";
+import { computeTaxonomyFingerprint } from "@/server/classifications/taxonomy-fingerprint";
 import { assertClosedAtMatchesStatus } from "@/server/complaints/status";
 import { calculateRowCounters } from "./import-batch-service";
 import { deriveSubject } from "./subject-derive";
@@ -54,6 +61,11 @@ const SNAPSHOT_FIELDS = [
   "department",
   "categoryId",
   "classificationId",
+  "classificationAssignmentSource",
+  "classificationAssignedAt",
+  "classificationAssignedBy",
+  "classificationTaxonomyFingerprint",
+  "classificationAssignmentRunId",
   "priority",
   "severity",
   "channel",
@@ -565,6 +577,48 @@ async function resolveTaxonomy(
   };
 }
 
+async function loadTaxonomyFingerprint(tx: Prisma.TransactionClient): Promise<string> {
+  const classifications = await tx.classification.findMany({
+    where: {
+      isDeleted: false,
+      isActive: true,
+      category: { isDeleted: false, isActive: true },
+    },
+    select: {
+      id: true,
+      nameAr: true,
+      keywords: true,
+      isActive: true,
+      isDeleted: true,
+      category: { select: { id: true, nameAr: true, isActive: true, isDeleted: true } },
+    },
+  });
+  return computeTaxonomyFingerprint(classifications);
+}
+
+function buildImportAssignmentFields(
+  row: ConfirmationRow,
+  taxonomy: { classificationId?: string | null },
+  actor: string,
+  assignedAt: Date,
+  taxonomyFingerprint: string | null
+): ReturnType<typeof buildClassificationAssignmentMetadata> | Record<string, never> {
+  const source = resolveImportClassificationAssignmentSource({
+    hasClassification: Boolean(taxonomy.classificationId),
+    resolvedFromSourceDetail: rowResolvedClassificationFromSourceDetail(row.validationWarnings),
+  });
+  if (!source) return {};
+  return buildClassificationAssignmentMetadata({
+    source,
+    assignedAt,
+    assignedBy: actor,
+    taxonomyFingerprint:
+      source === CLASSIFICATION_ASSIGNMENT_SOURCES.SOURCE_DETAIL_RULE
+        ? taxonomyFingerprint
+        : null,
+  });
+}
+
 /**
  * Subject precedence for NEW rows: explicit subject → sourceDetail → derived description → default.
  */
@@ -602,6 +656,16 @@ async function applyNewRow(
   assertClosedAtMatchesStatus(status, closedAt, { requireClosedAtForClosedStatuses: false });
 
   const complainantIdentifier = normalizeComplainantIdentifier(normalized.complainantIdentifier) ?? null;
+  const taxonomyFingerprint = taxonomy.classificationId
+    ? await loadTaxonomyFingerprint(tx)
+    : null;
+  const assignmentFields = buildImportAssignmentFields(
+    row,
+    taxonomy,
+    actor,
+    appliedAt,
+    taxonomyFingerprint
+  );
 
   let complaint: Complaint;
   try {
@@ -624,6 +688,7 @@ async function applyNewRow(
         department: normalized.department ?? null,
         categoryId: taxonomy.categoryId ?? null,
         classificationId: taxonomy.classificationId ?? null,
+        ...assignmentFields,
         priority: normalized.priority ?? ComplaintPriority.MEDIUM,
         severity: normalized.priority ?? ComplaintPriority.MEDIUM,
         channel: normalized.channel ?? null,
@@ -700,7 +765,8 @@ function assignImportUpdateFields(
   data: Prisma.ComplaintUncheckedUpdateManyInput,
   current: Complaint,
   normalized: NormalizedConfirmationRow,
-  taxonomy: { categoryId?: string | null; classificationId?: string | null }
+  taxonomy: { categoryId?: string | null; classificationId?: string | null },
+  assignmentFields: ReturnType<typeof buildImportAssignmentFields>
 ): void {
   assignIfDefined(data, "sourceReference", normalized.sourceReference);
   assignIfDefined(data, "complaintDate", normalized.complaintDate);
@@ -728,8 +794,17 @@ function assignImportUpdateFields(
   assignIfDefined(data, "region", normalized.region);
   assignIfDefined(data, "facility", normalized.facility);
   assignIfDefined(data, "department", normalized.department);
-  assignIfDefined(data, "categoryId", taxonomy.categoryId);
-  assignIfDefined(data, "classificationId", taxonomy.classificationId);
+
+  const protectManual =
+    current.classificationAssignmentSource === CLASSIFICATION_ASSIGNMENT_SOURCES.MANUAL;
+  if (!protectManual) {
+    assignIfDefined(data, "categoryId", taxonomy.categoryId);
+    assignIfDefined(data, "classificationId", taxonomy.classificationId);
+    if (Object.keys(assignmentFields).length > 0) {
+      Object.assign(data, assignmentFields);
+    }
+  }
+
   assignIfDefined(data, "priority", normalized.priority === null ? current.priority : normalized.priority);
   assignIfDefined(data, "severity", normalized.priority === null ? current.severity : normalized.priority);
   assignIfDefined(data, "channel", normalized.channel);
@@ -750,13 +825,14 @@ function assignImportUpdateFields(
 function buildUpdateData(
   current: Complaint,
   normalized: NormalizedConfirmationRow,
-  taxonomy: { categoryId?: string | null; classificationId?: string | null }
+  taxonomy: { categoryId?: string | null; classificationId?: string | null },
+  assignmentFields: ReturnType<typeof buildImportAssignmentFields>
 ): Prisma.ComplaintUncheckedUpdateManyInput {
   const data: Prisma.ComplaintUncheckedUpdateManyInput = {
     version: { increment: 1 },
   };
 
-  assignImportUpdateFields(data, current, normalized, taxonomy);
+  assignImportUpdateFields(data, current, normalized, taxonomy, assignmentFields);
 
   assertClosedAtMatchesStatus(
     (data.status as ComplaintStatus | undefined) ?? current.status,
@@ -787,8 +863,20 @@ async function applyUpdateRow(
     ? (normalizeComplainantIdentifier(normalized.complainantIdentifier) ?? null)
     : current.complainantIdentifier;
   const taxonomy = await resolveTaxonomy(tx, normalized);
+  const taxonomyFingerprint =
+    taxonomy.classificationId &&
+    current.classificationAssignmentSource !== CLASSIFICATION_ASSIGNMENT_SOURCES.MANUAL
+      ? await loadTaxonomyFingerprint(tx)
+      : null;
+  const assignmentFields = buildImportAssignmentFields(
+    row,
+    taxonomy,
+    actor,
+    appliedAt,
+    taxonomyFingerprint
+  );
   const beforeData = snapshotComplaint(current);
-  const updateData = buildUpdateData(current, normalized, taxonomy);
+  const updateData = buildUpdateData(current, normalized, taxonomy, assignmentFields);
   const result = await tx.complaint.updateMany({
     where: { id: current.id, version: row.matchedComplaintVersion, isDeleted: false },
     data: updateData,
@@ -1033,6 +1121,14 @@ function restoreSnapshotData(beforeData: Prisma.JsonValue | null): Prisma.Compla
     department: restoreOptionalTextField(data, "department"),
     categoryId: restoreOptionalTextField(data, "categoryId"),
     classificationId: restoreOptionalTextField(data, "classificationId"),
+    classificationAssignmentSource: restoreOptionalTextField(data, "classificationAssignmentSource"),
+    classificationAssignedAt: restoreOptionalDateField(data, "classificationAssignedAt"),
+    classificationAssignedBy: restoreOptionalTextField(data, "classificationAssignedBy"),
+    classificationTaxonomyFingerprint: restoreOptionalTextField(
+      data,
+      "classificationTaxonomyFingerprint"
+    ),
+    classificationAssignmentRunId: restoreOptionalTextField(data, "classificationAssignmentRunId"),
     priority: restoreRequiredPriorityField(data, "priority"),
     severity: restoreRequiredPriorityField(data, "severity"),
     channel: restoreOptionalTextField(data, "channel"),

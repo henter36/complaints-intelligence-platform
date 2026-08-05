@@ -1150,3 +1150,147 @@ describe("resolveImportedSubject", () => {
     ).toBe("الأولوية للموضوع");
   });
 });
+
+describe("import classification assignment metadata", () => {
+  it("records IMPORT_EXPLICIT for explicit file classification and SOURCE_DETAIL_RULE for derived", async () => {
+    const category = await prisma.category.create({
+      data: { nameAr: `فئة-تعيين-${crypto.randomUUID().slice(0, 8)}` },
+    });
+    const explicit = await prisma.classification.create({
+      data: {
+        categoryId: category.id,
+        nameAr: `صريح-${crypto.randomUUID().slice(0, 6)}`,
+        keywords: [],
+      },
+    });
+    const derived = await prisma.classification.create({
+      data: {
+        categoryId: category.id,
+        nameAr: `مشتق-${crypto.randomUUID().slice(0, 6)}`,
+        keywords: ["تفصيل مشتق"],
+      },
+    });
+
+    const batch = await createReadyBatch();
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 1,
+      action: ImportRowAction.NEW,
+      normalizedData: {
+        externalId: `EXT-EXPLICIT-${crypto.randomUUID().slice(0, 8)}`,
+        receivedAt: "2026-07-02T00:00:00.000Z",
+        subject: "صريح",
+        classification: explicit.nameAr,
+        category: category.nameAr,
+      },
+    });
+    const derivedExternalId = `EXT-DERIVED-${crypto.randomUUID().slice(0, 8)}`;
+    await prisma.importBatchRow.create({
+      data: {
+        importBatchId: batch.id,
+        rowNumber: 2,
+        rawData: { rowNumber: 2 },
+        normalizedData: {
+          externalId: derivedExternalId,
+          receivedAt: "2026-07-02T00:00:00.000Z",
+          subject: "مشتق",
+          sourceDetail: "تفصيل مشتق",
+          classification: derived.nameAr,
+          category: category.nameAr,
+        },
+        externalId: derivedExternalId,
+        action: ImportRowAction.NEW,
+        validationStatus: ImportRowValidationStatus.VALID,
+        validationWarnings: [
+          { code: "CLASSIFICATION_RESOLVED_FROM_SOURCE_DETAIL", field: "classification" },
+        ],
+      },
+    });
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 3,
+      action: ImportRowAction.NEW,
+      normalizedData: {
+        externalId: `EXT-NONE-${crypto.randomUUID().slice(0, 8)}`,
+        receivedAt: "2026-07-02T00:00:00.000Z",
+        subject: "بلا تصنيف",
+      },
+    });
+
+    await confirmReadyImportBatch(batch.id, { client: prisma, actor: "single-admin" });
+
+    const created = await prisma.complaint.findMany({
+      where: { importBatchId: batch.id },
+      orderBy: { subject: "asc" },
+    });
+    const bySubject = Object.fromEntries(created.map((c) => [c.subject, c]));
+
+    expect(bySubject["صريح"]?.classificationId).toBe(explicit.id);
+    expect(bySubject["صريح"]?.classificationAssignmentSource).toBe("IMPORT_EXPLICIT");
+    expect(bySubject["صريح"]?.classificationTaxonomyFingerprint).toBeNull();
+
+    expect(bySubject["مشتق"]?.classificationId).toBe(derived.id);
+    expect(bySubject["مشتق"]?.classificationAssignmentSource).toBe("SOURCE_DETAIL_RULE");
+    expect(bySubject["مشتق"]?.classificationTaxonomyFingerprint).toMatch(/^[a-f0-9]{64}$/);
+
+    expect(bySubject["بلا تصنيف"]?.classificationId).toBeNull();
+    expect(bySubject["بلا تصنيف"]?.classificationAssignmentSource).toBeNull();
+  });
+
+  it("does not replace MANUAL classification on re-import update", async () => {
+    const category = await prisma.category.create({
+      data: { nameAr: `فئة-يدوي-${crypto.randomUUID().slice(0, 8)}` },
+    });
+    const classification = await prisma.classification.create({
+      data: {
+        categoryId: category.id,
+        nameAr: `يدوي-هدف-${crypto.randomUUID().slice(0, 6)}`,
+        keywords: [],
+      },
+    });
+    const other = await prisma.classification.create({
+      data: {
+        categoryId: category.id,
+        nameAr: `استيراد-هدف-${crypto.randomUUID().slice(0, 6)}`,
+        keywords: [],
+      },
+    });
+
+    const complaint = await prisma.complaint.create({
+      data: {
+        externalId: `EXT-MANUAL-${crypto.randomUUID().slice(0, 8)}`,
+        receivedAt: new Date("2026-07-01T00:00:00Z"),
+        subject: "يدوي",
+        status: ComplaintStatus.OPEN,
+        priority: ComplaintPriority.MEDIUM,
+        classificationId: classification.id,
+        classificationAssignmentSource: "MANUAL",
+        classificationAssignedBy: "admin",
+        classificationAssignedAt: new Date(),
+      },
+    });
+
+    const batch = await createReadyBatch();
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 1,
+      action: ImportRowAction.UPDATE,
+      matchedComplaintId: complaint.id,
+      matchedComplaintVersion: complaint.version,
+      normalizedData: {
+        externalId: complaint.externalId,
+        receivedAt: "2026-07-02T00:00:00.000Z",
+        subject: "محدّث",
+        classification: other.nameAr,
+        category: category.nameAr,
+      },
+    });
+
+    await confirmReadyImportBatch(batch.id, { client: prisma });
+
+    const updated = await prisma.complaint.findUniqueOrThrow({ where: { id: complaint.id } });
+    expect(updated.subject).toBe("محدّث");
+    expect(updated.classificationId).toBe(classification.id);
+    expect(updated.classificationAssignmentSource).toBe("MANUAL");
+  });
+});

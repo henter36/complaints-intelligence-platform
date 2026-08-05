@@ -3,6 +3,11 @@ import { ComplaintPriority, type Complaint, type Prisma } from "@prisma/client";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { writeAuditLog } from "@/server/audit/audit-log-service";
+import {
+  buildClassificationAssignmentMetadata,
+  buildManualClearClassificationMetadata,
+  CLASSIFICATION_ASSIGNMENT_SOURCES,
+} from "@/server/classifications/classification-assignment";
 import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 import { buildComplaintTiming } from "@/server/complaints/complaint-timing";
 
@@ -186,8 +191,12 @@ async function validateEffectiveClassificationRelation(
   await assertClassificationRelation(effectiveCategoryId, effectiveClassificationId);
 }
 
-function buildComplaintUpdateData(payload: ComplaintPatchPayload): Prisma.ComplaintUncheckedUpdateManyInput {
-  return {
+function buildComplaintUpdateData(
+  payload: ComplaintPatchPayload,
+  current: ActiveComplaintProjection,
+  actor: string
+): Prisma.ComplaintUncheckedUpdateManyInput {
+  const data: Prisma.ComplaintUncheckedUpdateManyInput = {
     sourceReference: payload.sourceReference,
     complaintDate: parseDate(payload.complaintDate),
     receivedAt: payload.receivedAt ? new Date(payload.receivedAt) : undefined,
@@ -207,6 +216,20 @@ function buildComplaintUpdateData(payload: ComplaintPatchPayload): Prisma.Compla
     complainantPhone: payload.complainantPhone,
     version: { increment: 1 },
   };
+
+  if (payload.classificationId !== undefined) {
+    const assignment =
+      payload.classificationId === null
+        ? buildManualClearClassificationMetadata({ assignedBy: actor })
+        : buildClassificationAssignmentMetadata({
+            source: CLASSIFICATION_ASSIGNMENT_SOURCES.MANUAL,
+            assignedBy: actor,
+          });
+    Object.assign(data, assignment);
+  }
+
+  void current;
+  return data;
 }
 
 function toComplaintDetailResponse(complaint: ComplaintDetailProjection) {
@@ -246,11 +269,12 @@ function toComplaintDetailResponse(complaint: ComplaintDetailProjection) {
 
 async function updateComplaint(
   current: ActiveComplaintProjection,
-  payload: ComplaintPatchPayload
+  payload: ComplaintPatchPayload,
+  actor: string
 ): Promise<ComplaintDetailProjection> {
   const result = await db.complaint.updateMany({
     where: { id: current.id, version: payload.expectedVersion, isDeleted: false },
-    data: buildComplaintUpdateData(payload),
+    data: buildComplaintUpdateData(payload, current, actor),
   });
 
   if (result.count !== 1) {
@@ -303,7 +327,7 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
     const payload = await parseComplaintPatchRequest(req);
     validateComplaintPatchPayload(payload);
     await validateEffectiveClassificationRelation(current, payload);
-    const updated = await updateComplaint(current, payload);
+    const updated = await updateComplaint(current, payload, session.username);
 
     await writeAuditLog(db, {
       action: "COMPLAINT_UPDATED",

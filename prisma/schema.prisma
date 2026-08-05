@@ -154,6 +154,11 @@ model Complaint {
   category              Category?                @relation(fields: [categoryId], references: [id])
   classificationId      String?
   classification        Classification?          @relation(fields: [classificationId], references: [id])
+  classificationAssignmentSource     String?
+  classificationAssignedAt           DateTime?
+  classificationAssignedBy           String?
+  classificationTaxonomyFingerprint  String?
+  classificationAssignmentRunId      String?
   priority              ComplaintPriority        @default(MEDIUM)
   severity              ComplaintPriority        @default(MEDIUM)
   channel               String?
@@ -204,7 +209,70 @@ model Complaint {
   @@index([region])
   @@index([department])
   @@index([classificationId])
+  @@index([classificationAssignmentSource])
+  @@index([classificationAssignmentRunId])
   @@index([sourceReference, complaintDate])
+}
+
+model ClassificationBackfillRun {
+  id                   String   @id @default(cuid())
+  operation            String
+  status               String
+  periodFrom           DateTime
+  periodToExclusive    DateTime
+  taxonomyFingerprint  String
+  manifestHash         String
+  eligibleCount        Int      @default(0)
+  plannedCount         Int      @default(0)
+  appliedCount         Int      @default(0)
+  skippedCount         Int      @default(0)
+  failedCount          Int      @default(0)
+  batchSize            Int      @default(500)
+  actor                String
+  startedAt            DateTime @default(now())
+  completedAt          DateTime?
+  rollbackOfRunId      String?
+  failureCode          String?
+  failureMessage       String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  items                ClassificationBackfillItem[]
+
+  @@index([status])
+  @@index([manifestHash])
+  @@index([rollbackOfRunId])
+  @@index([startedAt])
+}
+
+model ClassificationBackfillItem {
+  id                              String    @id @default(cuid())
+  runId                           String
+  run                             ClassificationBackfillRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  complaintId                     String
+  expectedVersion                 Int
+  appliedVersion                  Int?
+  previousClassificationId        String?
+  targetClassificationId          String
+  targetClassificationNameSnapshot String
+  previousAssignmentSource        String?
+  targetAssignmentSource          String
+  previousAssignedAt              DateTime?
+  previousAssignedBy              String?
+  previousTaxonomyFingerprint     String?
+  previousAssignmentRunId         String?
+  sourceDetailHash                String
+  result                          String
+  skipReason                      String?
+  appliedAt                       DateTime?
+  rolledBackAt                    DateTime?
+  createdAt                       DateTime  @default(now())
+  updatedAt                       DateTime  @updatedAt
+
+  @@unique([runId, complaintId])
+  @@index([runId])
+  @@index([complaintId])
+  @@index([result])
+  @@index([targetClassificationId])
 }
 
 model ComplaintStatusHistory {

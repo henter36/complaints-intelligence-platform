@@ -28,6 +28,7 @@
     "backup:verify": "tsx scripts/backup-verify.ts",
     "backup:restore": "tsx scripts/backup-restore.ts",
     "integrity:check": "tsx scripts/integrity-check.ts",
+    "classifications:backfill": "tsx scripts/backfill-historical-classifications.ts",
     "release:manifest": "tsx scripts/release-manifest.ts",
     "release:check": "tsx scripts/release-check.ts"
   },
