@@ -294,7 +294,7 @@ function buildDeptClassRisesSheet(workbook: ExcelJS.Workbook, comparison: Compar
   for (const row of comparison.deptClassRises) {
     const added = sheet.addRow({
       department: sanitizeText(row.departmentName),
-      classification: sanitizeText(row.classificationName),
+      classification: sanitizeText(row.classificationPath ?? row.classificationName),
       current: row.currentCount,
       previous: row.previousCount,
       difference: row.difference,
@@ -397,7 +397,7 @@ function buildTopClassificationsSheet(workbook: ExcelJS.Workbook, briefData: Exe
 
   for (const row of briefData.topClassifications) {
     const added = sheet.addRow({
-      name: sanitizeText(row.classificationName),
+      name: sanitizeText(row.classificationPath),
       current: row.currentCount,
       previous: row.previousCount,
       difference: row.difference,
@@ -533,7 +533,7 @@ function buildContinuitySheet(workbook: ExcelJS.Workbook, rows: ContinuityRow[],
   for (const row of rows) {
     sheet.addRow({
       dept: sanitizeText(row.departmentName),
-      class: sanitizeText(row.classificationName),
+      class: sanitizeText(row.classificationPath ?? row.classificationName),
       current: row.currentCount,
       previous: row.previousCount,
       type: sanitizeText(row.recurrenceType),

@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-05T00:00:00+00:00",
+  "status": "PROPOSED_NOT_APPLIED",
+  "sourceSummary": {
+    "activeComplaintCount": 5,
+    "currentlyClassifiedComplaintCount": 2,
+    "currentlyUnclassifiedComplaintCount": 3
+  },
+  "principles": [
+    "test"
+  ],
+  "validation": {
+    "sourceDetailValuesMapped": 3,
+    "mappedComplaintCount": 3,
+    "legacyPreservedCount": 2,
+    "projectedTotalComplaintCount": 5,
+    "currentAmbiguousCount": 0,
+    "currentUnmatchedCount": 0,
+    "dataQualityHoldingCount": 1,
+    "dataQualityHoldingRate": 20
+  },
+  "proposedTaxonomy": [
+    {
+      "category": "الرعاية الصحية",
+      "projectedCount": 3,
+      "classifications": [
+        {
+          "category": "الرعاية الصحية",
+          "classification": "المواعيد والإحالات الصحية",
+          "classificationKey": "HEALTH_APPOINTMENTS",
+          "sourceDetails": [
+            "عدم خروجه لموعد"
+          ],
+          "mappedCount": 1,
+          "legacyPreservedCount": 1,
+          "projectedCount": 2,
+          "notes": ""
+        },
+        {
+          "category": "الرعاية الصحية",
+          "classification": "جودة الرعاية والعلاج",
+          "classificationKey": "HEALTH_QUALITY",
+          "sourceDetails": [
+            "لم يتلقى العلاج اللازم"
+          ],
+          "mappedCount": 1,
+          "legacyPreservedCount": 0,
+          "projectedCount": 1,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "category": "السلوك المهني والتعامل",
+      "projectedCount": 1,
+      "classifications": [
+        {
+          "category": "السلوك المهني والتعامل",
+          "classification": "تعامل الموظفين والسلوك المهني",
+          "classificationKey": "STAFF_CONDUCT",
+          "sourceDetails": [
+            "سوء التعامل"
+          ],
+          "mappedCount": 0,
+          "legacyPreservedCount": 1,
+          "projectedCount": 1,
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "category": "بيانات غير محددة",
+      "projectedCount": 1,
+      "classifications": [
+        {
+          "category": "بيانات غير محددة",
+          "classification": "أخرى تحتاج مراجعة",
+          "classificationKey": "OTHER_REVIEW",
+          "sourceDetails": [
+            "أخرى"
+          ],
+          "mappedCount": 1,
+          "legacyPreservedCount": 0,
+          "projectedCount": 1,
+          "notes": ""
+        }
+      ]
+    }
+  ],
+  "sourceDetailMappings": [
+    {
+      "sourceDetail": "عدم خروجه لموعد",
+      "count": 1,
+      "proposedPath": "الرعاية الصحية / المواعيد والإحالات الصحية",
+      "classificationKey": "HEALTH_APPOINTMENTS",
+      "legacyPreserved": false
+    },
+    {
+      "sourceDetail": "لم يتلقى العلاج اللازم",
+      "count": 1,
+      "proposedPath": "الرعاية الصحية / جودة الرعاية والعلاج",
+      "classificationKey": "HEALTH_QUALITY",
+      "legacyPreserved": false
+    },
+    {
+      "sourceDetail": "أخرى",
+      "count": 1,
+      "proposedPath": "بيانات غير محددة / أخرى تحتاج مراجعة",
+      "classificationKey": "OTHER_REVIEW",
+      "legacyPreserved": false
+    }
+  ],
+  "currentEntityMigration": [
+    {
+      "entityType": "Classification",
+      "currentId": "cls_appointments",
+      "currentName": "المواعيد",
+      "target": "الرعاية الصحية / المواعيد والإحالات الصحية",
+      "action": "RENAME",
+      "details": "إعادة تسمية مع الحفاظ على المعرف"
+    },
+    {
+      "entityType": "Category+Classification",
+      "currentId": "cat_services / cls_conduct",
+      "currentName": "الخدمات / السلوك المهني",
+      "target": "السلوك المهني والتعامل / تعامل الموظفين والسلوك المهني",
+      "action": "MOVE_AND_RENAME",
+      "details": "نقل وإعادة تسمية"
+    }
+  ]
+}

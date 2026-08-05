@@ -851,7 +851,7 @@ function formatRiseCell(row: RiseTableRow, key: keyof RiseTableRow): string {
 }
 
 const BRIEF_CLASS_COLUMNS: readonly ColumnDefinition<ClassificationBriefRow>[] = [
-  { key: "classificationName", label: "التصنيف", weight: 2.4 },
+  { key: "classificationPath", label: "التصنيف", weight: 2.4 },
   { key: "currentCount", label: "الحالي", weight: 0.85 },
   { key: "previousCount", label: "السابق", weight: 0.85 },
   { key: "difference", label: "الفرق", weight: 0.85 },
@@ -979,7 +979,7 @@ function buildAttentionItems(context: ExecutiveBriefRenderContext): AttentionIte
   const topRise = data.comparisonData?.deptClassRises[0];
   if (topRise && hasReferencePeriod(context)) {
     items.push({
-      text: `ارتفاع مؤثر في ${topRise.departmentName} / ${topRise.classificationName} بمقدار ${formatReportNumber(topRise.difference, { sign: true })}.`,
+      text: `ارتفاع مؤثر في ${topRise.departmentName} / ${topRise.classificationPath ?? topRise.classificationName} بمقدار ${formatReportNumber(topRise.difference, { sign: true })}.`,
       assessment: "warning",
     });
   }
@@ -1002,7 +1002,7 @@ function renderPage4(context: ExecutiveBriefRenderContext): void {
   if (rises.length > 0) {
     const riseRows: RiseTableRow[] = rises.slice(0, 8).map((r) => ({
       departmentName: r.departmentName,
-      classificationName: r.classificationName,
+      classificationName: r.classificationPath ?? r.classificationName,
       currentCount: r.currentCount,
       previousCount: r.previousCount,
       difference: r.difference,

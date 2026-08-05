@@ -41,6 +41,7 @@ import type {
   ExecutiveEntityRow,
 } from "@/lib/reports/report-contract";
 import {
+  buildClassificationPath,
   classificationKey,
   UNCLASSIFIED_CLASSIFICATION_KEY,
   UNCLASSIFIED_CLASSIFICATION_LABEL,
@@ -409,29 +410,36 @@ export function buildTopClassifications(
 ): ClassificationBriefRow[] {
   const toRowKey = (group: ComplaintGroupMetrics): string => {
     if (group.id) return group.id;
-    // Null id + unclassified display name → shared sentinel for open/late join.
-    if (group.name === UNCLASSIFIED_CLASSIFICATION_LABEL) {
+    if (
+      group.name === UNCLASSIFIED_CLASSIFICATION_LABEL ||
+      group.classificationName === UNCLASSIFIED_CLASSIFICATION_LABEL
+    ) {
       return UNCLASSIFIED_CLASSIFICATION_KEY;
     }
-    // Rare name-only groups (tests / legacy) keep a stable non-Arabic-sentinel key.
     return group.name;
   };
 
-  const prevMap = new Map(
-    previousDistributions.map((g) => [toRowKey(g), g.total])
-  );
+  const prevMap = new Map(previousDistributions.map((g) => [toRowKey(g), g.total]));
 
   return currentDistributions.slice(0, limit).map((group) => {
     const currentCount = group.total;
     const id = toRowKey(group);
     const previousCount = prevMap.get(id) ?? 0;
     const difference = currentCount - previousCount;
+    const isUnclassified = id === UNCLASSIFIED_CLASSIFICATION_KEY;
+    const classificationName = isUnclassified
+      ? UNCLASSIFIED_CLASSIFICATION_LABEL
+      : (group.classificationName ?? group.name);
+    const categoryName = isUnclassified ? "" : (group.categoryName ?? "");
+    const classificationPath = isUnclassified
+      ? UNCLASSIFIED_CLASSIFICATION_LABEL
+      : buildClassificationPath(categoryName || null, classificationName);
     return {
+      categoryId: isUnclassified ? null : (group.categoryId ?? null),
+      categoryName: categoryName || (isUnclassified ? UNCLASSIFIED_CLASSIFICATION_LABEL : ""),
       classificationId: id,
-      classificationName:
-        id === UNCLASSIFIED_CLASSIFICATION_KEY
-          ? UNCLASSIFIED_CLASSIFICATION_LABEL
-          : group.name,
+      classificationName,
+      classificationPath,
       currentCount,
       previousCount,
       difference,
@@ -762,6 +770,7 @@ function buildContinuityRows(allPairs: DeptClassPeriodCount[]): ContinuityRow[] 
     rows.push({
       departmentName: pair.departmentName,
       classificationName: pair.classificationName,
+      classificationPath: pair.classificationPath ?? pair.classificationName,
       currentCount: pair.currentCount,
       previousCount: pair.previousCount,
       appearsInBothPeriods: recurrenceType === "persistent",

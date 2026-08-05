@@ -7,6 +7,7 @@ import {
 } from "./complaint-sla-metrics";
 import { buildComplaintSlaTiming, resolveComplaintEffectiveClosedAt } from "./complaint-sla-timing";
 import {
+  buildClassificationPath,
   classificationDisplayName,
   UNCLASSIFIED_CLASSIFICATION_LABEL,
 } from "@/lib/reports/classification-keys";
@@ -108,6 +109,9 @@ export type ComplaintKpiSummary = {
 export type ComplaintGroupMetrics = {
   name: string;
   id?: string | null;
+  categoryId?: string | null;
+  categoryName?: string | null;
+  classificationName?: string | null;
   count: number;
   total: number;
   open: number;
@@ -539,10 +543,24 @@ function buildDistributions(complaints: KpiComplaint[], now: Date): ComplaintDis
     })),
     byFacility: groupMetrics(complaints, now, (complaint) => ({ name: complaint.facility ?? UNSPECIFIED_LABEL })),
     byDepartment: groupMetrics(complaints, now, (complaint) => ({ name: complaint.department ?? UNSPECIFIED_LABEL })),
-    byClassification: groupMetrics(complaints, now, (complaint) => ({
-      id: complaint.classification?.id ?? null,
-      name: classificationDisplayName(complaint.classification?.nameAr),
-    })),
+    byClassification: groupMetrics(complaints, now, (complaint) => {
+      const leafName = complaint.classification?.nameAr?.trim() || null;
+      const isClassified = Boolean(
+        leafName || complaint.classification?.id || complaint.classificationId
+      );
+      const categoryName = isClassified ? (complaint.category?.nameAr ?? null) : null;
+      return {
+        id: complaint.classification?.id ?? complaint.classificationId ?? null,
+        name: isClassified
+          ? buildClassificationPath(categoryName, leafName)
+          : UNCLASSIFIED_CLASSIFICATION_LABEL,
+        categoryId: isClassified ? (complaint.category?.id ?? complaint.categoryId) : null,
+        categoryName,
+        classificationName: isClassified
+          ? classificationDisplayName(leafName)
+          : UNCLASSIFIED_CLASSIFICATION_LABEL,
+      };
+    }),
     byCategory: groupMetrics(complaints, now, (complaint) => ({
       id: complaint.category?.id ?? null,
       name: complaint.category?.nameAr ?? UNCLASSIFIED_CLASSIFICATION_LABEL,
@@ -577,7 +595,13 @@ function buildRegionPriorityBreakdown(complaints: KpiComplaint[]): RegionPriorit
 function groupMetrics(
   complaints: KpiComplaint[],
   now: Date,
-  keyFn: (complaint: KpiComplaint) => { name: string; id?: string | null }
+  keyFn: (complaint: KpiComplaint) => {
+    name: string;
+    id?: string | null;
+    categoryId?: string | null;
+    categoryName?: string | null;
+    classificationName?: string | null;
+  }
 ): ComplaintGroupMetrics[] {
   const map = new Map<string, { id?: string | null; items: KpiComplaint[] }>();
   for (const complaint of complaints) {
@@ -595,6 +619,9 @@ function groupMetrics(
       return {
         name: representative.name,
         id: value.id,
+        categoryId: representative.categoryId ?? null,
+        categoryName: representative.categoryName ?? null,
+        classificationName: representative.classificationName ?? null,
         count: raw.totalComplaints,
         total: raw.totalComplaints,
         open: raw.openComplaints,
@@ -677,7 +704,11 @@ function buildClassificationCrossTab(
 ): CrossTabRow[] {
   const map = new Map<string, CrossTabRow>();
   for (const complaint of complaints) {
-    const classification = complaint.classification?.nameAr ?? UNCLASSIFIED_CLASSIFICATION_LABEL;
+    const leafName = complaint.classification?.nameAr ?? null;
+    const categoryName = complaint.category?.nameAr ?? null;
+    const classification = leafName
+      ? buildClassificationPath(categoryName, leafName)
+      : UNCLASSIFIED_CLASSIFICATION_LABEL;
     const classificationId = complaint.classification?.id ?? null;
     const group = groupName(complaint);
     const key = `${classificationId ?? classification}:${group}`;

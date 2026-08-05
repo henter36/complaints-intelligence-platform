@@ -60,8 +60,8 @@ function makeBriefData(overrides: Partial<ExecutiveBriefData> = {}): ExecutiveBr
       { regionName: "مكة", currentCount: 20, previousCount: 10, difference: 10, changeRate: 100.0, complianceRate: 91.7, averageResolutionDays: 4.1, currentlyLate: 2, direction: "↑ ارتفاع" },
     ],
     topClassifications: [
-      { classificationId: "class-01", classificationName: "ضوضاء", currentCount: 30, previousCount: 25, difference: 5, changeRate: 20.0, shareOfTotal: 30.0 },
-      { classificationId: "class-02", classificationName: "بنية تحتية", currentCount: 25, previousCount: 20, difference: 5, changeRate: 25.0, shareOfTotal: 25.0 },
+      {categoryId: "cat-class-01", categoryName: "فئة اختبار", classificationPath: "فئة اختبار / ضوضاء",  classificationId: "class-01", classificationName: "ضوضاء", currentCount: 30, previousCount: 25, difference: 5, changeRate: 20.0, shareOfTotal: 30.0 },
+      {categoryId: "cat-class-02", categoryName: "فئة اختبار", classificationPath: "فئة اختبار / بنية تحتية",  classificationId: "class-02", classificationName: "بنية تحتية", currentCount: 25, previousCount: 20, difference: 5, changeRate: 25.0, shareOfTotal: 25.0 },
     ],
     comparativeTimeline: {
       current: {

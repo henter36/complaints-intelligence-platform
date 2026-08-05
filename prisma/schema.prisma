@@ -631,3 +631,54 @@ model AiFeedback {
 
   @@index([analysisRunId])
 }
+
+model ClassificationTaxonomyRestructureRun {
+  id                              String   @id @default(cuid())
+  operation                       String
+  status                          String
+  proposalHash                    String
+  mappingHash                     String
+  currentTaxonomyFingerprint      String
+  targetTaxonomyFingerprint       String
+  manifestHash                    String
+  actor                           String
+  startedAt                       DateTime @default(now())
+  completedAt                     DateTime?
+  createdCount                    Int      @default(0)
+  renamedCount                    Int      @default(0)
+  movedCount                      Int      @default(0)
+  deactivatedCount                Int      @default(0)
+  keywordChangeCount              Int      @default(0)
+  legacyComplaintConsistencyUpdateCount Int @default(0)
+  failureCode                     String?
+  failureMessage                  String?
+  rollbackOfRunId                 String?
+  createdAt                       DateTime @default(now())
+  updatedAt                       DateTime @updatedAt
+  items                           ClassificationTaxonomyRestructureItem[]
+
+  @@index([status])
+  @@index([manifestHash])
+  @@index([proposalHash])
+  @@index([rollbackOfRunId])
+}
+
+model ClassificationTaxonomyRestructureItem {
+  id                String   @id @default(cuid())
+  runId             String
+  run               ClassificationTaxonomyRestructureRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  entityType        String
+  action            String
+  entityId          String?
+  previousStateJson Json?
+  nextStateJson     Json?
+  result            String
+  skipReason        String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([runId])
+  @@index([entityType])
+  @@index([action])
+  @@index([result])
+}

@@ -10,6 +10,7 @@ import {
 } from "@/lib/reports/region-normalization";
 import { comparisonHalfOpenPeriod } from "@/lib/reports/period-range";
 import type { ComparisonMode } from "@/lib/reports/report-contract";
+import { buildClassificationPath } from "@/lib/reports/classification-keys";
 
 // ---------------------------------------------------------------------------
 // Centralized period-comparison module.
@@ -77,6 +78,7 @@ export type DeptClassRiseRow = {
   departmentName: string;
   classificationId: string;
   classificationName: string;
+  classificationPath: string;
   currentCount: number;
   previousCount: number;
   difference: number;
@@ -107,6 +109,7 @@ export type DeptClassPeriodCount = {
   departmentName: string;
   classificationId: string;
   classificationName: string;
+  classificationPath: string;
   currentCount: number;
   previousCount: number;
 };
@@ -144,7 +147,9 @@ const comparisonSelect = {
   subject: true,
   department: true,
   classificationId: true,
-  classification: { select: { id: true, nameAr: true } },
+  categoryId: true,
+  classification: { select: { id: true, nameAr: true, categoryId: true } },
+  category: { select: { id: true, nameAr: true } },
 } satisfies Prisma.ComplaintSelect;
 
 type ComparisonComplaint = Prisma.ComplaintGetPayload<{ select: typeof comparisonSelect }>;
@@ -454,6 +459,7 @@ type DeptClassAccumulator = {
   departmentName: string;
   classificationId: string;
   classificationName: string;
+  classificationPath: string;
   currentCount: number;
   previousCount: number;
 };
@@ -484,12 +490,20 @@ function accumulateDeptClass(
         departmentName: departmentId,
         classificationId,
         classificationName: complaint.classification?.nameAr ?? classificationId,
+        classificationPath: buildClassificationPath(
+          complaint.category?.nameAr,
+          complaint.classification?.nameAr ?? classificationId
+        ),
         currentCount: 0,
         previousCount: 0,
       } satisfies DeptClassAccumulator);
     // Prefer a real classification name whenever we encounter one.
     if (complaint.classification?.nameAr) {
       existing.classificationName = complaint.classification.nameAr;
+      existing.classificationPath = buildClassificationPath(
+        complaint.category?.nameAr,
+        complaint.classification.nameAr
+      );
     }
     existing[field] += 1;
     map.set(key, existing);
@@ -541,6 +555,7 @@ function buildDeptClassRises(
     departmentName: acc.departmentName,
     classificationId: acc.classificationId,
     classificationName: acc.classificationName,
+    classificationPath: acc.classificationPath,
     currentCount: acc.currentCount,
     previousCount: acc.previousCount,
   }));
@@ -567,6 +582,7 @@ function buildDeptClassRises(
       departmentName: row.departmentName,
       classificationId: row.classificationId,
       classificationName: row.classificationName,
+      classificationPath: row.classificationPath,
       currentCount: row.currentCount,
       previousCount: row.previousCount,
       difference: row.difference,

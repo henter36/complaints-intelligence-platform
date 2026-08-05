@@ -27,7 +27,7 @@ function makeBriefData(): ExecutiveBriefData {
       { regionName: "جدة", currentCount: 30, previousCount: 35, difference: -5, changeRate: -14.3, complianceRate: 95.0, averageResolutionDays: 3.5, currentlyLate: 2, direction: "↓ انخفاض" },
     ],
     topClassifications: [
-      { classificationId: "class-01", classificationName: "ضوضاء", currentCount: 30, previousCount: 25, difference: 5, changeRate: 20.0, shareOfTotal: 30.0 },
+      {categoryId: "cat-class-01", categoryName: "فئة اختبار", classificationPath: "فئة اختبار / ضوضاء",  classificationId: "class-01", classificationName: "ضوضاء", currentCount: 30, previousCount: 25, difference: 5, changeRate: 20.0, shareOfTotal: 30.0 },
     ],
     comparativeTimeline: {
       current: {
@@ -61,8 +61,8 @@ function makeFullAnalyticalData(): FullAnalyticalData {
       { entityName: "التعليم", totalComplaints: 35, complianceRate: 95.8, averageResolutionDays: 3.2, currentlyLate: 2, share: 35.0 },
     ],
     continuityRows: [
-      { departmentName: "الصحة", classificationName: "ضوضاء", currentCount: 15, previousCount: 10, appearsInBothPeriods: true, recurrenceType: "persistent" },
-      { departmentName: "التعليم", classificationName: "مخلفات", currentCount: 5, previousCount: 0, appearsInBothPeriods: false, recurrenceType: "new" },
+      { departmentName: "الصحة", classificationName: "ضوضاء", classificationPath: "فئة اختبار / ضوضاء", currentCount: 15, previousCount: 10, appearsInBothPeriods: true, recurrenceType: "persistent" },
+      { departmentName: "التعليم", classificationName: "مخلفات", classificationPath: "فئة اختبار / مخلفات", currentCount: 5, previousCount: 0, appearsInBothPeriods: false, recurrenceType: "new" },
     ],
   };
 }

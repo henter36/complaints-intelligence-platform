@@ -357,7 +357,7 @@ async function requireActiveCategory(
 ) {
   const category = await client.category.findFirst({
     where: { id: categoryId, isDeleted: false, isActive: true },
-    select: { id: true },
+    select: { id: true, nameAr: true },
   });
   if (!category) {
     throw new ClassificationManagementError(
@@ -367,6 +367,25 @@ async function requireActiveCategory(
     );
   }
   return category;
+}
+
+export function assertClassificationNameDiffersFromCategory(
+  categoryName: string,
+  classificationName: string
+): void {
+  const normalizedCategory = normalizeClassificationKeyword(categoryName);
+  const normalizedClassification = normalizeClassificationKeyword(classificationName);
+  if (
+    normalizedCategory &&
+    normalizedClassification &&
+    normalizedCategory === normalizedClassification
+  ) {
+    throw new ClassificationManagementError(
+      "CLASSIFICATION_NAME_EQUALS_CATEGORY_NAME",
+      "يجب أن يكون اسم التصنيف الفرعي مختلفًا عن اسم التصنيف الرئيسي.",
+      422
+    );
+  }
 }
 
 function translateClassificationUniqueConflict(error: unknown): never {
@@ -403,7 +422,8 @@ export async function createClassification(
   const keywordList = normalizeAndValidateKeywords(input.keywords ?? []);
 
   return runSerializableClassificationMutation(client, async (tx) => {
-    await requireActiveCategory(tx, input.categoryId);
+    const category = await requireActiveCategory(tx, input.categoryId);
+    assertClassificationNameDiffersFromCategory(category.nameAr, name);
     await assertNoKeywordConflicts(tx, keywordList);
 
     try {
@@ -576,7 +596,9 @@ export async function updateClassification(
       existing.categoryId,
       input.categoryId
     );
+    const category = await requireActiveCategory(tx, nextCategoryId);
     const name = resolveClassificationName(existing.nameAr, input.name);
+    assertClassificationNameDiffersFromCategory(category.nameAr, name);
     const previousKeywords = readStoredKeywordsTolerantly(existing.keywords, existing.id);
     const nextKeywords = resolveNextKeywordList(previousKeywords, input.keywords);
 

@@ -190,11 +190,16 @@ function makeKpiResult(overrides: Partial<ComplaintKpiResult> = {}): ComplaintKp
         { name: "الخدمات", id: "dept-svc", count: 20, total: 20, open: 8, closed: 10, currentlyLate: 2, closedLate: 0, withinDueDate: 10, complianceRate: 100.0, averageResolutionDays: 2.9, highPriorityOpen: 1, unclassified: 1, averageResolutionEligibleCount: 10, slaEligibleCount: 10, closedWithoutTrustedDateCount: 0 },
       ],
       byClassification: [
-        { name: "ضوضاء", id: "class-01", count: 30, total: 30, open: 8, closed: 20, currentlyLate: 3, closedLate: 1, withinDueDate: 19, complianceRate: 95.0, averageResolutionDays: 3.2, highPriorityOpen: 1, unclassified: 0, averageResolutionEligibleCount: 19, slaEligibleCount: 19, closedWithoutTrustedDateCount: 0 },
-        { name: "بنية تحتية", id: "class-02", count: 25, total: 25, open: 7, closed: 17, currentlyLate: 2, closedLate: 1, withinDueDate: 16, complianceRate: 94.1, averageResolutionDays: 3.8, highPriorityOpen: 2, unclassified: 1, averageResolutionEligibleCount: 16, slaEligibleCount: 16, closedWithoutTrustedDateCount: 0 },
-        { name: "مخلفات", id: "class-03", count: 20, total: 20, open: 5, closed: 13, currentlyLate: 1, closedLate: 0, withinDueDate: 13, complianceRate: 100.0, averageResolutionDays: 2.8, highPriorityOpen: 0, unclassified: 0, averageResolutionEligibleCount: 13, slaEligibleCount: 13, closedWithoutTrustedDateCount: 0 },
-        { name: "مياه", id: "class-04", count: 15, total: 15, open: 6, closed: 8, currentlyLate: 1, closedLate: 1, withinDueDate: 7, complianceRate: 87.5, averageResolutionDays: 4.5, highPriorityOpen: 2, unclassified: 1, averageResolutionEligibleCount: 7, slaEligibleCount: 7, closedWithoutTrustedDateCount: 0 },
-        { name: "إضاءة", id: "class-05", count: 10, total: 10, open: 4, closed: 7, currentlyLate: 1, closedLate: 0, withinDueDate: 7, complianceRate: 100.0, averageResolutionDays: 2.5, highPriorityOpen: 0, unclassified: 0, averageResolutionEligibleCount: 7, slaEligibleCount: 7, closedWithoutTrustedDateCount: 0 },
+        { name: "فئة اختبار / ضوضاء", id: "class-01", categoryId: "cat-1", categoryName: "فئة اختبار", classificationName: "ضوضاء",
+      classificationPath: "فئة اختبار / ضوضاء", count: 30, total: 30, open: 8, closed: 20, currentlyLate: 3, closedLate: 1, withinDueDate: 19, complianceRate: 95.0, averageResolutionDays: 3.2, highPriorityOpen: 1, unclassified: 0, averageResolutionEligibleCount: 19, slaEligibleCount: 19, closedWithoutTrustedDateCount: 0 },
+        { name: "فئة اختبار / بنية تحتية", id: "class-02", categoryId: "cat-1", categoryName: "فئة اختبار", classificationName: "بنية تحتية",
+      classificationPath: "فئة اختبار / بنية تحتية", count: 25, total: 25, open: 7, closed: 17, currentlyLate: 2, closedLate: 1, withinDueDate: 16, complianceRate: 94.1, averageResolutionDays: 3.8, highPriorityOpen: 2, unclassified: 1, averageResolutionEligibleCount: 16, slaEligibleCount: 16, closedWithoutTrustedDateCount: 0 },
+        { name: "فئة اختبار / مخلفات", id: "class-03", categoryId: "cat-1", categoryName: "فئة اختبار", classificationName: "مخلفات",
+      classificationPath: "فئة اختبار / مخلفات", count: 20, total: 20, open: 5, closed: 13, currentlyLate: 1, closedLate: 0, withinDueDate: 13, complianceRate: 100.0, averageResolutionDays: 2.8, highPriorityOpen: 0, unclassified: 0, averageResolutionEligibleCount: 13, slaEligibleCount: 13, closedWithoutTrustedDateCount: 0 },
+        { name: "فئة اختبار / مياه", id: "class-04", categoryId: "cat-1", categoryName: "فئة اختبار", classificationName: "مياه",
+      classificationPath: "فئة اختبار / مياه", count: 15, total: 15, open: 6, closed: 8, currentlyLate: 1, closedLate: 1, withinDueDate: 7, complianceRate: 87.5, averageResolutionDays: 4.5, highPriorityOpen: 2, unclassified: 1, averageResolutionEligibleCount: 7, slaEligibleCount: 7, closedWithoutTrustedDateCount: 0 },
+        { name: "فئة اختبار / إضاءة", id: "class-05", categoryId: "cat-1", categoryName: "فئة اختبار", classificationName: "إضاءة",
+      classificationPath: "فئة اختبار / إضاءة", count: 10, total: 10, open: 4, closed: 7, currentlyLate: 1, closedLate: 0, withinDueDate: 7, complianceRate: 100.0, averageResolutionDays: 2.5, highPriorityOpen: 0, unclassified: 0, averageResolutionEligibleCount: 7, slaEligibleCount: 7, closedWithoutTrustedDateCount: 0 },
       ],
       byCategory: [],
       byChannel: [],
@@ -224,6 +229,7 @@ function makeComparison(hasPrevious = true): ComparisonResult {
       departmentName: "الصحة",
       classificationId: "class-01",
       classificationName: "ضوضاء",
+      classificationPath: "فئة اختبار / ضوضاء",
       currentCount: 15,
       previousCount: 10,
     },
@@ -277,6 +283,7 @@ function makeComparison(hasPrevious = true): ComparisonResult {
         departmentName: "الصحة",
         classificationId: "class-01",
         classificationName: "ضوضاء",
+      classificationPath: "فئة اختبار / ضوضاء",
         currentCount: 15,
         previousCount: 10,
         difference: 5,
@@ -496,12 +503,14 @@ describe("buildExecutiveBriefData — topClassifications", () => {
     }
   });
 
-  it("each row has classificationId and classificationName but no categoryName", async () => {
+  it("each row has classification path fields and ids", async () => {
     const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
     for (const row of data.topClassifications) {
       expect(typeof row.classificationId).toBe("string");
       expect(typeof row.classificationName).toBe("string");
-      expect(row).not.toHaveProperty("categoryName");
+      expect(typeof row.classificationPath).toBe("string");
+      expect(typeof row.categoryName).toBe("string");
+      expect(row.classificationPath).toContain(row.classificationName);
     }
   });
 
@@ -814,8 +823,10 @@ describe("buildFullAnalyticalData — continuityRows", () => {
   it("returns no continuity rows when the comparison period is unavailable", async () => {
     const comparison = makeComparison(false);
     comparison.deptClassAllPairs = [
-      { departmentId: "d1", departmentName: "الصحة", classificationId: "c1", classificationName: "ضوضاء", currentCount: 5, previousCount: 0 },
-      { departmentId: "d2", departmentName: "التعليم", classificationId: "c2", classificationName: "مخلفات", currentCount: 3, previousCount: 0 },
+      { departmentId: "d1", departmentName: "الصحة", classificationId: "c1", classificationName: "ضوضاء",
+      classificationPath: "فئة اختبار / ضوضاء", currentCount: 5, previousCount: 0 },
+      { departmentId: "d2", departmentName: "التعليم", classificationId: "c2", classificationName: "مخلفات",
+      classificationPath: "فئة اختبار / مخلفات", currentCount: 3, previousCount: 0 },
     ];
 
     const data = await buildFullAnalyticalData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
@@ -831,7 +842,8 @@ describe("buildFullAnalyticalData — continuityRows", () => {
   it("persistent: both periods > 0", async () => {
     const comparison = makeComparison();
     comparison.deptClassAllPairs = [
-      { departmentId: "d1", departmentName: "الصحة", classificationId: "c1", classificationName: "ضوضاء", currentCount: 10, previousCount: 8 },
+      { departmentId: "d1", departmentName: "الصحة", classificationId: "c1", classificationName: "ضوضاء",
+      classificationPath: "فئة اختبار / ضوضاء", currentCount: 10, previousCount: 8 },
     ];
     const data = await buildFullAnalyticalData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
     expect(data.continuityRows).toHaveLength(1);
@@ -842,7 +854,8 @@ describe("buildFullAnalyticalData — continuityRows", () => {
   it("new: only in current period", async () => {
     const comparison = makeComparison();
     comparison.deptClassAllPairs = [
-      { departmentId: "d1", departmentName: "الصحة", classificationId: "c1", classificationName: "ضوضاء", currentCount: 5, previousCount: 0 },
+      { departmentId: "d1", departmentName: "الصحة", classificationId: "c1", classificationName: "ضوضاء",
+      classificationPath: "فئة اختبار / ضوضاء", currentCount: 5, previousCount: 0 },
     ];
     const data = await buildFullAnalyticalData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
     expect(data.continuityRows[0].recurrenceType).toBe("new");
@@ -852,7 +865,8 @@ describe("buildFullAnalyticalData — continuityRows", () => {
   it("resolved: only in previous period", async () => {
     const comparison = makeComparison();
     comparison.deptClassAllPairs = [
-      { departmentId: "d1", departmentName: "الصحة", classificationId: "c1", classificationName: "ضوضاء", currentCount: 0, previousCount: 7 },
+      { departmentId: "d1", departmentName: "الصحة", classificationId: "c1", classificationName: "ضوضاء",
+      classificationPath: "فئة اختبار / ضوضاء", currentCount: 0, previousCount: 7 },
     ];
     const data = await buildFullAnalyticalData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
     expect(data.continuityRows[0].recurrenceType).toBe("resolved");
@@ -862,7 +876,8 @@ describe("buildFullAnalyticalData — continuityRows", () => {
   it("skips pairs where both counts are 0", async () => {
     const comparison = makeComparison();
     comparison.deptClassAllPairs = [
-      { departmentId: "d1", departmentName: "الصحة", classificationId: "c1", classificationName: "ضوضاء", currentCount: 0, previousCount: 0 },
+      { departmentId: "d1", departmentName: "الصحة", classificationId: "c1", classificationName: "ضوضاء",
+      classificationPath: "فئة اختبار / ضوضاء", currentCount: 0, previousCount: 0 },
     ];
     const data = await buildFullAnalyticalData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
     expect(data.continuityRows).toHaveLength(0);
@@ -874,7 +889,8 @@ describe("buildFullAnalyticalData — continuityRows", () => {
     const comparison = makeComparison();
     comparison.deptClassRises = [];
     comparison.deptClassAllPairs = [
-      { departmentId: "d1", departmentName: "الصحة", classificationId: "c1", classificationName: "ضوضاء", currentCount: 0, previousCount: 5 },
+      { departmentId: "d1", departmentName: "الصحة", classificationId: "c1", classificationName: "ضوضاء",
+      classificationPath: "فئة اختبار / ضوضاء", currentCount: 0, previousCount: 5 },
     ];
     const data = await buildFullAnalyticalData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
     expect(data.continuityRows).toHaveLength(1);
@@ -884,9 +900,12 @@ describe("buildFullAnalyticalData — continuityRows", () => {
   it("no absent rows are produced", async () => {
     const comparison = makeComparison();
     comparison.deptClassAllPairs = [
-      { departmentId: "d1", departmentName: "الصحة", classificationId: "c1", classificationName: "ضوضاء", currentCount: 5, previousCount: 3 },
-      { departmentId: "d1", departmentName: "الصحة", classificationId: "c2", classificationName: "مياه", currentCount: 0, previousCount: 2 },
-      { departmentId: "d2", departmentName: "التعليم", classificationId: "c3", classificationName: "بنية تحتية", currentCount: 3, previousCount: 0 },
+      { departmentId: "d1", departmentName: "الصحة", classificationId: "c1", classificationName: "ضوضاء",
+      classificationPath: "فئة اختبار / ضوضاء", currentCount: 5, previousCount: 3 },
+      { departmentId: "d1", departmentName: "الصحة", classificationId: "c2", classificationName: "مياه",
+      classificationPath: "فئة اختبار / مياه", currentCount: 0, previousCount: 2 },
+      { departmentId: "d2", departmentName: "التعليم", classificationId: "c3", classificationName: "بنية تحتية",
+      classificationPath: "فئة اختبار / بنية تحتية", currentCount: 3, previousCount: 0 },
     ];
     const data = await buildFullAnalyticalData(BASE_FILTERS, makeKpiResult(), comparison, undefined, NOW);
     for (const row of data.continuityRows) {
@@ -1450,6 +1469,7 @@ describe("buildFullAnalyticalData — continuity rows", () => {
     comparison.deptClassAllPairs = [{
       departmentId: "dept-a", departmentName: "الصحة",
       classificationId: "class-01", classificationName: "ضوضاء",
+      classificationPath: "فئة اختبار / ضوضاء",
       currentCount: 10, previousCount: 8,
     }];
     const data = await buildFullAnalyticalData(BASE_FILTERS, result, comparison);
@@ -1463,6 +1483,7 @@ describe("buildFullAnalyticalData — continuity rows", () => {
     comparison.deptClassAllPairs = [{
       departmentId: "dept-b", departmentName: "التعليم",
       classificationId: "class-02", classificationName: "مخلفات",
+      classificationPath: "فئة اختبار / مخلفات",
       currentCount: 5, previousCount: 0,
     }];
     const data = await buildFullAnalyticalData(BASE_FILTERS, result, comparison);

@@ -591,7 +591,7 @@ describe("Phase 2 API routes", () => {
 
   it("creates a classification only under an active parent category", async () => {
     vi.resetModules();
-    const categoryFindFirst = vi.fn().mockResolvedValue({ id: "cat-1" });
+    const categoryFindFirst = vi.fn().mockResolvedValue({ id: "cat-1", nameAr: "فئة رئيسية" });
     const classificationCreate = vi.fn().mockResolvedValue({
       id: "cls-1",
       categoryId: "cat-1",
@@ -632,7 +632,7 @@ describe("Phase 2 API routes", () => {
     expect(body.nodeType).toBe("CLASSIFICATION");
     expect(categoryFindFirst).toHaveBeenCalledWith({
       where: { id: "cat-1", isDeleted: false, isActive: true },
-      select: { id: true },
+      select: { id: true, nameAr: true },
     });
     expect(classificationCreate).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ categoryId: "cat-1" }),
@@ -704,7 +704,7 @@ describe("Phase 2 API routes", () => {
     expect(response.status).toBe(404);
     expect(categoryFindFirst).toHaveBeenCalledWith({
       where: { id: "soft-deleted-cat", isDeleted: false, isActive: true },
-      select: { id: true },
+      select: { id: true, nameAr: true },
     });
     expect(classificationCreate).not.toHaveBeenCalled();
   });

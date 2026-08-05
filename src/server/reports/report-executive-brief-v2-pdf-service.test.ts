@@ -45,11 +45,14 @@ function makeV2Brief(overrides: Partial<ExecutiveBriefV2Data> = {}): ExecutiveBr
       { regionName: "منطقة مكة", currentCount: 15, previousCount: 0, difference: 15, changeRate: null, complianceRate: 90, averageResolutionDays: 4, openCount: 5, closedCount: 10, currentlyLate: 1, direction: "ارتفاع" },
     ],
     topClassifications: [
-      { classificationId: "c1", classificationName: "نقل", currentCount: 30, previousCount: 25, difference: 5, changeRate: 20, shareOfTotal: 30 },
-      { classificationId: "c2", classificationName: "علاج", currentCount: 20, previousCount: 0, difference: 20, changeRate: null, shareOfTotal: 20 },
+      {categoryId: "cat-c1", categoryName: "فئة اختبار", classificationPath: "فئة اختبار / نقل",  classificationId: "c1", classificationName: "نقل", currentCount: 30, previousCount: 25, difference: 5, changeRate: 20, shareOfTotal: 30 },
+      {categoryId: "cat-c2", categoryName: "فئة اختبار", classificationPath: "فئة اختبار / علاج",  classificationId: "c2", classificationName: "علاج", currentCount: 20, previousCount: 0, difference: 20, changeRate: null, shareOfTotal: 20 },
       {
         classificationId: UNCLASSIFIED_CLASSIFICATION_KEY,
         classificationName: "غير مصنف",
+        categoryId: null,
+        categoryName: "غير مصنف",
+        classificationPath: "غير مصنف",
         currentCount: 50,
         previousCount: 40,
         difference: 10,
@@ -115,6 +118,7 @@ function makeV2Report(overrides: Partial<ReportData> = {}): ReportData {
           departmentName: "المتابعة",
           classificationId: "c1",
           classificationName: "نقل",
+          classificationPath: "فئة اختبار / نقل",
           currentCount: 10,
           previousCount: 2,
           difference: 8,
@@ -224,7 +228,7 @@ describe("renderExecutiveBriefV2Pdf", () => {
           changeRate: null,
         })),
         topClassifications: [
-          { classificationId: "c1", classificationName: "نقل", currentCount: 30, previousCount: 25, difference: 5, changeRate: 20, shareOfTotal: 30 },
+          {categoryId: "cat-c1", categoryName: "فئة اختبار", classificationPath: "فئة اختبار / نقل",  classificationId: "c1", classificationName: "نقل", currentCount: 30, previousCount: 25, difference: 5, changeRate: 20, shareOfTotal: 30 },
         ],
       });
       await renderExecutiveBriefV2Pdf(data);

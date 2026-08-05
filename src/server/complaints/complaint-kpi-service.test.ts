@@ -177,7 +177,7 @@ describe("complaint KPI service", () => {
     const result = await getComplaintKpis(new URLSearchParams(), new Date("2026-07-31T00:00:00Z"));
 
     expect(result.crossTabs.classificationByRegion).toEqual([
-      expect.objectContaining({ classification: "تصنيف", group: "الرياض", count: 2 }),
+      expect.objectContaining({ classification: "فئة / تصنيف", group: "الرياض", count: 2 }),
     ]);
     expect(result.crossTabs.classificationByDepartment).toEqual([
       expect.objectContaining({ group: "أ", count: 1 }),
