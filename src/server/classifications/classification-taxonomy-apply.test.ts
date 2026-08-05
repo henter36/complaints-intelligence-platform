@@ -7,10 +7,13 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   applyTaxonomyRestructure,
   buildConfirmationToken,
+  buildReactivationStateSnapshotFromCurrent,
   computeManifestHash,
+  computeReactivationStateFingerprint,
   computeTaxonomyShapeFingerprint,
   emptyPlan,
   loadCurrentTaxonomy,
+  RESTRUCTURE_MANIFEST_SCHEMA_VERSION,
   rollbackTaxonomyRestructure,
   writeManifestAtomically,
   RESTRUCTURE_ERROR_CODES,
@@ -126,12 +129,15 @@ async function writeApplyManifest(
     })),
   ];
   const withoutHash: Omit<RestructureManifest, "manifestHash" | "confirmationToken"> = {
-    schemaVersion: 1,
+    schemaVersion: RESTRUCTURE_MANIFEST_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
     proposalHash: "p".repeat(64),
     mappingHash: "m".repeat(64),
     currentTaxonomyFingerprint: current.fingerprint,
     targetTaxonomyFingerprint: computeTaxonomyShapeFingerprint(targetCats, targetCls),
+    reactivationStateFingerprint: computeReactivationStateFingerprint(
+      buildReactivationStateSnapshotFromCurrent(current, plan)
+    ),
     plan,
     totals: {
       changeCount: 1,
@@ -815,5 +821,407 @@ describe("taxonomy apply rename cycles and collisions", () => {
     expect(rolled.status).toBe("ROLLED_BACK");
     expect(rolled.skipped).toBe(0);
     expect(rolled.rolledBack).toBe(items);
+  }, 60_000);
+
+  it("rejects duplicate rename targets without exclusive ownership", async () => {
+    const client = db();
+    await resetTaxonomy();
+    const a = await client.category.create({ data: { nameAr: "مصدر-1" } });
+    const b = await client.category.create({ data: { nameAr: "مصدر-2" } });
+    const plan = emptyPlan();
+    plan.categoriesToRename = [
+      renameChange({ currentId: a.id, currentName: "مصدر-1", targetName: "هدف واحد" }),
+      renameChange({ currentId: b.id, currentName: "مصدر-2", targetName: "هدف واحد" }),
+    ];
+    plan.finalCategoryTargets = {
+      "هدف واحد": { reuseId: a.id },
+    };
+    const path = join(tempDir!, "dup-rename.json");
+    const { manifest } = await writeApplyManifest(plan, path);
+    await expect(
+      applyTaxonomyRestructure(client, {
+        manifestPath: path,
+        confirm: manifest.confirmationToken,
+        actor: "test",
+      })
+    ).rejects.toMatchObject({ code: RESTRUCTURE_ERROR_CODES.TAXONOMY_RENAME_COLLISION });
+  }, 60_000);
+
+  it("uses finalCategoryTargets reuseId when a freed label is reused as another target", async () => {
+    const client = db();
+    await resetTaxonomy();
+    const catA = await client.category.create({ data: { nameAr: "اعتداء" } });
+    const catB = await client.category.create({ data: { nameAr: "الأمن والسلامة" } });
+    const cls = await client.classification.create({
+      data: { categoryId: catA.id, nameAr: "عنف", keywords: ["اعتداء"] },
+    });
+    const before = await loadCurrentTaxonomy(client);
+    const plan = emptyPlan();
+    plan.categoriesToRename = [
+      renameChange({
+        currentId: catB.id,
+        currentName: "الأمن والسلامة",
+        targetName: "فئة محررة",
+      }),
+      renameChange({
+        currentId: catA.id,
+        currentName: "اعتداء",
+        targetName: "الأمن والسلامة",
+      }),
+    ];
+    plan.classificationsToMove = [
+      renameChange({
+        currentId: cls.id,
+        currentName: "عنف",
+        targetName: "الاعتداء والعنف",
+        currentCategory: "اعتداء",
+        targetCategory: "الأمن والسلامة",
+        action: "MOVE_AND_RENAME",
+      }),
+    ];
+    plan.finalCategoryTargets = {
+      "الأمن والسلامة": { reuseId: catA.id },
+      "فئة محررة": { reuseId: catB.id },
+    };
+    plan.finalClassificationTargets = {
+      "الأمن والسلامة::الاعتداء والعنف": {
+        categoryName: "الأمن والسلامة",
+        classificationName: "الاعتداء والعنف",
+        reuseId: cls.id,
+      },
+    };
+    const path = join(tempDir!, "freed-label.json");
+    const { manifest } = await writeApplyManifest(plan, path);
+    const applied = await applyTaxonomyRestructure(client, {
+      manifestPath: path,
+      confirm: manifest.confirmationToken,
+      actor: "test",
+    });
+    expect(applied.status).toBe("APPLIED");
+    const moved = await client.classification.findUniqueOrThrow({ where: { id: cls.id } });
+    expect(moved.categoryId).toBe(catA.id);
+    expect(moved.categoryId).not.toBe(catB.id);
+    expect((await client.category.findUniqueOrThrow({ where: { id: catA.id } })).nameAr).toBe(
+      "الأمن والسلامة"
+    );
+    expect((await client.category.findUniqueOrThrow({ where: { id: catB.id } })).nameAr).toBe(
+      "فئة محررة"
+    );
+    const afterApply = await loadCurrentTaxonomy(client);
+    expect(afterApply.fingerprint).toBe(manifest.targetTaxonomyFingerprint);
+
+    const rolled = await rollbackTaxonomyRestructure(client, {
+      runId: applied.runId,
+      confirm: applied.rollbackToken,
+      actor: "test",
+    });
+    expect(rolled.status).toBe("ROLLED_BACK");
+    expect(rolled.skipped).toBe(0);
+    const afterRollback = await loadCurrentTaxonomy(client);
+    expect(afterRollback.fingerprint).toBe(before.fingerprint);
+    expect(
+      (await client.classification.findUniqueOrThrow({ where: { id: cls.id } })).categoryId
+    ).toBe(catA.id);
+  }, 60_000);
+
+  it("rejects missing targetCategory with PROPOSAL_INVALID", async () => {
+    const client = db();
+    await resetTaxonomy();
+    const cat = await client.category.create({ data: { nameAr: "فئة" } });
+    const cls = await client.classification.create({
+      data: { categoryId: cat.id, nameAr: "تصنيف", keywords: [] },
+    });
+    const plan = emptyPlan();
+    plan.categoriesToKeep = [
+      renameChange({
+        currentId: cat.id,
+        currentName: "فئة",
+        targetName: "فئة",
+        action: "KEEP",
+      }),
+    ];
+    plan.classificationsToMove = [
+      renameChange({
+        currentId: cls.id,
+        currentName: "تصنيف",
+        targetName: "تصنيف",
+        currentCategory: "فئة",
+        targetCategory: "غير موجودة",
+        action: "MOVE",
+      }),
+    ];
+    plan.finalCategoryTargets = { فئة: { reuseId: cat.id } };
+    plan.finalClassificationTargets = {
+      "غير موجودة::تصنيف": {
+        categoryName: "غير موجودة",
+        classificationName: "تصنيف",
+        reuseId: cls.id,
+      },
+    };
+    const path = join(tempDir!, "missing-target.json");
+    const { manifest } = await writeApplyManifest(plan, path);
+    await expect(
+      applyTaxonomyRestructure(client, {
+        manifestPath: path,
+        confirm: manifest.confirmationToken,
+        actor: "test",
+      })
+    ).rejects.toMatchObject({ code: RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID });
+  }, 60_000);
+});
+
+describe("reactivation state fingerprint guards", () => {
+  it("allows apply when reactivation list is empty with a stable empty fingerprint", async () => {
+    const client = db();
+    await resetTaxonomy();
+    const cat = await client.category.create({ data: { nameAr: "نشطة" } });
+    const plan = emptyPlan();
+    plan.categoriesToRename = [
+      renameChange({ currentId: cat.id, currentName: "نشطة", targetName: "نشطة-2" }),
+    ];
+    plan.finalCategoryTargets = { "نشطة-2": { reuseId: cat.id } };
+    const path = join(tempDir!, "empty-reactivation.json");
+    const { manifest } = await writeApplyManifest(plan, path);
+    expect(manifest.reactivationStateFingerprint).toBe(
+      computeReactivationStateFingerprint({ categories: [], classifications: [] })
+    );
+    const applied = await applyTaxonomyRestructure(client, {
+      manifestPath: path,
+      confirm: manifest.confirmationToken,
+      actor: "test",
+    });
+    expect(applied.status).toBe("APPLIED");
+  }, 60_000);
+
+  it("rejects category reactivation drift after dry-run", async () => {
+    const client = db();
+    await resetTaxonomy();
+    const cat = await client.category.create({
+      data: { nameAr: "معطلة", isActive: false },
+    });
+    const plan = emptyPlan();
+    plan.categoriesToReactivate = [
+      renameChange({
+        currentId: cat.id,
+        currentName: "معطلة",
+        targetName: "معطلة",
+        action: "REACTIVATE",
+      }),
+    ];
+    plan.finalCategoryTargets = { معطلة: { reuseId: cat.id } };
+    const path = join(tempDir!, "cat-reactivate-drift.json");
+    const { manifest } = await writeApplyManifest(plan, path);
+
+    await client.category.update({ where: { id: cat.id }, data: { nameAr: "اسم مختلف" } });
+    await expect(
+      applyTaxonomyRestructure(client, {
+        manifestPath: path,
+        confirm: manifest.confirmationToken,
+        actor: "test",
+      })
+    ).rejects.toMatchObject({
+      code: RESTRUCTURE_ERROR_CODES.REACTIVATION_STATE_CHANGED_AFTER_PREVIEW,
+    });
+
+    await client.category.update({
+      where: { id: cat.id },
+      data: { nameAr: "معطلة", isDeleted: true },
+    });
+    await expect(
+      applyTaxonomyRestructure(client, {
+        manifestPath: path,
+        confirm: manifest.confirmationToken,
+        actor: "test",
+      })
+    ).rejects.toMatchObject({
+      code: RESTRUCTURE_ERROR_CODES.REACTIVATION_STATE_CHANGED_AFTER_PREVIEW,
+    });
+
+    // Reactivating outside the plan also changes the active operational fingerprint.
+    await client.category.update({
+      where: { id: cat.id },
+      data: { isDeleted: false, isActive: true, nameAr: "معطلة" },
+    });
+    await expect(
+      applyTaxonomyRestructure(client, {
+        manifestPath: path,
+        confirm: manifest.confirmationToken,
+        actor: "test",
+      })
+    ).rejects.toMatchObject({
+      code: RESTRUCTURE_ERROR_CODES.CLASSIFICATION_TAXONOMY_CHANGED_AFTER_PREVIEW,
+    });
+  }, 60_000);
+
+  it("rejects classification reactivation drift and ignores keyword order-only changes", async () => {
+    const client = db();
+    await resetTaxonomy();
+    const host = await client.category.create({ data: { nameAr: "مضيف" } });
+    const other = await client.category.create({ data: { nameAr: "أخرى" } });
+    const cls = await client.classification.create({
+      data: {
+        categoryId: host.id,
+        nameAr: "معطل",
+        keywords: ["ب", "أ"],
+        isActive: false,
+      },
+    });
+    const plan = emptyPlan();
+    plan.categoriesToKeep = [
+      renameChange({
+        currentId: host.id,
+        currentName: "مضيف",
+        targetName: "مضيف",
+        action: "KEEP",
+      }),
+    ];
+    plan.classificationsToReactivate = [
+      renameChange({
+        currentId: cls.id,
+        currentName: "معطل",
+        targetName: "معطل",
+        currentCategory: "مضيف",
+        targetCategory: "مضيف",
+        action: "REACTIVATE",
+      }),
+    ];
+    plan.finalCategoryTargets = { مضيف: { reuseId: host.id } };
+    plan.finalClassificationTargets = {
+      "مضيف::معطل": {
+        categoryName: "مضيف",
+        classificationName: "معطل",
+        reuseId: cls.id,
+      },
+    };
+    const path = join(tempDir!, "cls-reactivate-drift.json");
+    const { manifest } = await writeApplyManifest(plan, path);
+
+    await client.classification.update({
+      where: { id: cls.id },
+      data: { keywords: ["أ", "ب"] },
+    });
+    const applied = await applyTaxonomyRestructure(client, {
+      manifestPath: path,
+      confirm: manifest.confirmationToken,
+      actor: "test",
+    });
+    expect(applied.status).toBe("APPLIED");
+
+    await resetTaxonomy();
+    const host2 = await client.category.create({ data: { nameAr: "مضيف" } });
+    const other2 = await client.category.create({ data: { nameAr: "أخرى" } });
+    const cls2 = await client.classification.create({
+      data: {
+        categoryId: host2.id,
+        nameAr: "معطل",
+        keywords: ["ب", "أ"],
+        isActive: false,
+      },
+    });
+    plan.classificationsToReactivate[0]!.currentId = cls2.id;
+    plan.categoriesToKeep[0]!.currentId = host2.id;
+    plan.finalCategoryTargets = { مضيف: { reuseId: host2.id } };
+    plan.finalClassificationTargets["مضيف::معطل"]!.reuseId = cls2.id;
+    const path2 = join(tempDir!, "cls-reactivate-drift-2.json");
+    const { manifest: manifest2 } = await writeApplyManifest(plan, path2);
+    await client.classification.update({
+      where: { id: cls2.id },
+      data: { categoryId: other2.id },
+    });
+    await expect(
+      applyTaxonomyRestructure(client, {
+        manifestPath: path2,
+        confirm: manifest2.confirmationToken,
+        actor: "test",
+      })
+    ).rejects.toMatchObject({
+      code: RESTRUCTURE_ERROR_CODES.REACTIVATION_STATE_CHANGED_AFTER_PREVIEW,
+    });
+  }, 60_000);
+
+  it("ignores unrelated inactive entity changes and still guards active taxonomy drift", async () => {
+    const client = db();
+    await resetTaxonomy();
+    const active = await client.category.create({ data: { nameAr: "نشطة" } });
+    const unrelated = await client.category.create({
+      data: { nameAr: "غير مرتبطة", isActive: false },
+    });
+    const plan = emptyPlan();
+    plan.categoriesToRename = [
+      renameChange({ currentId: active.id, currentName: "نشطة", targetName: "نشطة-2" }),
+    ];
+    plan.finalCategoryTargets = { "نشطة-2": { reuseId: active.id } };
+    const path = join(tempDir!, "unrelated-inactive.json");
+    const { manifest } = await writeApplyManifest(plan, path);
+
+    await client.category.update({
+      where: { id: unrelated.id },
+      data: { nameAr: "تغيرت دون أثر" },
+    });
+    const applied = await applyTaxonomyRestructure(client, {
+      manifestPath: path,
+      confirm: manifest.confirmationToken,
+      actor: "test",
+    });
+    expect(applied.status).toBe("APPLIED");
+
+    await resetTaxonomy();
+    const active2 = await client.category.create({ data: { nameAr: "نشطة" } });
+    plan.categoriesToRename[0]!.currentId = active2.id;
+    plan.finalCategoryTargets = { "نشطة-2": { reuseId: active2.id } };
+    const path2 = join(tempDir!, "active-drift.json");
+    const { manifest: manifest2 } = await writeApplyManifest(plan, path2);
+    await client.category.update({ where: { id: active2.id }, data: { nameAr: "تغيرت" } });
+    await expect(
+      applyTaxonomyRestructure(client, {
+        manifestPath: path2,
+        confirm: manifest2.confirmationToken,
+        actor: "test",
+      })
+    ).rejects.toMatchObject({
+      code: RESTRUCTURE_ERROR_CODES.CLASSIFICATION_TAXONOMY_CHANGED_AFTER_PREVIEW,
+    });
+  }, 60_000);
+
+  it("rejects manifest schemaVersion 1 and requires a fresh dry-run", async () => {
+    const client = db();
+    await resetTaxonomy();
+    const path = join(tempDir!, "legacy-manifest.json");
+    const legacy = {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      proposalHash: "p".repeat(64),
+      mappingHash: "m".repeat(64),
+      currentTaxonomyFingerprint: "c".repeat(64),
+      targetTaxonomyFingerprint: "t".repeat(64),
+      plan: emptyPlan(),
+      totals: {
+        changeCount: 0,
+        categoriesToCreate: 0,
+        categoriesToRename: 0,
+        categoriesToReactivate: 0,
+        classificationsToCreate: 0,
+        classificationsToRename: 0,
+        classificationsToMove: 0,
+        classificationsToReactivate: 0,
+        classificationsToDeactivate: 0,
+        keywordChangeCount: 0,
+        legacyComplaintConsistencyUpdateCount: 0,
+        unclassifiedComplaintsUntouched: true as const,
+      },
+      manifestHash: "h".repeat(64),
+      confirmationToken: "RESTRUCTURE-0-DEADBEEF00",
+    };
+    await writeManifestAtomically(path, legacy as RestructureManifest, true);
+    await expect(
+      applyTaxonomyRestructure(client, {
+        manifestPath: path,
+        confirm: legacy.confirmationToken,
+        actor: "test",
+      })
+    ).rejects.toMatchObject({
+      code: RESTRUCTURE_ERROR_CODES.MANIFEST_SCHEMA_UNSUPPORTED,
+    });
+    expect(RESTRUCTURE_MANIFEST_SCHEMA_VERSION).toBe(2);
   }, 60_000);
 });

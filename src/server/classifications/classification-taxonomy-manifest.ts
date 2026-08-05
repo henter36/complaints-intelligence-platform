@@ -21,6 +21,7 @@ import {
 } from "./classification-taxonomy-proposal";
 
 export const RESTRUCTURE_OPERATIONS = { APPLY: "APPLY", ROLLBACK: "ROLLBACK" } as const;
+export const RESTRUCTURE_MANIFEST_SCHEMA_VERSION = 2;
 export const RESTRUCTURE_RUN_STATUSES = {
   APPLYING: "APPLYING",
   APPLIED: "APPLIED",
@@ -97,6 +98,7 @@ export type RestructureManifest = {
   mappingHash: string;
   currentTaxonomyFingerprint: string;
   targetTaxonomyFingerprint: string;
+  reactivationStateFingerprint: string;
   plan: RestructurePlan;
   totals: {
     changeCount: number;
@@ -341,6 +343,162 @@ export async function loadCurrentTaxonomy(db: RestructureDb) {
   };
 }
 
+export type ReactivationStateSnapshot = {
+  categories: Array<{
+    id: string;
+    normalizedName: string;
+    isActive: boolean;
+    isDeleted: boolean;
+  }>;
+  classifications: Array<{
+    id: string;
+    normalizedName: string;
+    categoryId: string;
+    normalizedKeywords: string[];
+    isActive: boolean;
+    isDeleted: boolean;
+  }>;
+};
+
+function normalizeKeywordList(keywords: unknown): string[] {
+  let parsed: string[] = [];
+  try {
+    parsed = parseClassificationKeywords(keywords ?? []);
+  } catch {
+    parsed = [];
+  }
+  return [
+    ...new Set(parsed.map((k) => normalizeClassificationKeyword(k)).filter(Boolean)),
+  ].sort(compareCodeUnits);
+}
+
+export function computeReactivationStateFingerprint(
+  snapshot: ReactivationStateSnapshot
+): string {
+  const categories = [...snapshot.categories].sort((a, b) => compareCodeUnits(a.id, b.id));
+  const classifications = [...snapshot.classifications].sort((a, b) =>
+    compareCodeUnits(a.id, b.id)
+  );
+  return sha256(
+    stableStringify({
+      categories: categories.map((c) => ({ entityType: "Category", ...c })),
+      classifications: classifications.map((c) => ({ entityType: "Classification", ...c })),
+    })
+  );
+}
+
+export function buildReactivationStateSnapshotFromCurrent(
+  current: {
+    categories: readonly LoadedCategory[];
+    classifications: readonly LoadedClassification[];
+  },
+  plan: RestructurePlan
+): ReactivationStateSnapshot {
+  const categoriesById = new Map(current.categories.map((c) => [c.id, c]));
+  const classificationsById = new Map(current.classifications.map((c) => [c.id, c]));
+  const categories: ReactivationStateSnapshot["categories"] = [];
+  for (const item of plan.categoriesToReactivate) {
+    if (!item.currentId) continue;
+    const cat = categoriesById.get(item.currentId);
+    if (!cat) continue;
+    categories.push({
+      id: cat.id,
+      normalizedName: normalizeClassificationKeyword(cat.nameAr),
+      isActive: cat.isActive,
+      isDeleted: cat.isDeleted,
+    });
+  }
+  const classifications: ReactivationStateSnapshot["classifications"] = [];
+  for (const item of plan.classificationsToReactivate) {
+    if (!item.currentId) continue;
+    const cls = classificationsById.get(item.currentId);
+    if (!cls) continue;
+    classifications.push({
+      id: cls.id,
+      normalizedName: normalizeClassificationKeyword(cls.nameAr),
+      categoryId: cls.categoryId,
+      normalizedKeywords: normalizeKeywordList(cls.keywords),
+      isActive: cls.isActive,
+      isDeleted: cls.isDeleted,
+    });
+  }
+  categories.sort((a, b) => compareCodeUnits(a.id, b.id));
+  classifications.sort((a, b) => compareCodeUnits(a.id, b.id));
+  return { categories, classifications };
+}
+
+export async function loadReactivationStateSnapshot(
+  db: RestructureDb,
+  plan: RestructurePlan
+): Promise<ReactivationStateSnapshot> {
+  const categoryIds = [
+    ...new Set(
+      plan.categoriesToReactivate.map((c) => c.currentId).filter((id): id is string => Boolean(id))
+    ),
+  ].sort(compareCodeUnits);
+  const classificationIds = [
+    ...new Set(
+      plan.classificationsToReactivate
+        .map((c) => c.currentId)
+        .filter((id): id is string => Boolean(id))
+    ),
+  ].sort(compareCodeUnits);
+
+  const categories =
+    categoryIds.length === 0
+      ? []
+      : await db.category.findMany({
+          where: { id: { in: categoryIds } },
+          select: { id: true, nameAr: true, isActive: true, isDeleted: true },
+        });
+  const classifications =
+    classificationIds.length === 0
+      ? []
+      : await db.classification.findMany({
+          where: { id: { in: classificationIds } },
+          select: {
+            id: true,
+            nameAr: true,
+            categoryId: true,
+            keywords: true,
+            isActive: true,
+            isDeleted: true,
+          },
+        });
+
+  const byCatId = new Map(categories.map((c) => [c.id, c]));
+  const byClsId = new Map(classifications.map((c) => [c.id, c]));
+  const snapshot: ReactivationStateSnapshot = {
+    categories: categoryIds.flatMap((id) => {
+      const cat = byCatId.get(id);
+      if (!cat) return [];
+      return [
+        {
+          id: cat.id,
+          normalizedName: normalizeClassificationKeyword(cat.nameAr),
+          isActive: cat.isActive,
+          isDeleted: cat.isDeleted,
+        },
+      ];
+    }),
+    classifications: classificationIds.flatMap((id) => {
+      const cls = byClsId.get(id);
+      if (!cls) return [];
+      return [
+        {
+          id: cls.id,
+          normalizedName: normalizeClassificationKeyword(cls.nameAr),
+          categoryId: cls.categoryId,
+          normalizedKeywords: normalizeKeywordList(cls.keywords),
+          isActive: cls.isActive,
+          isDeleted: cls.isDeleted,
+        },
+      ];
+    }),
+  };
+  return snapshot;
+}
+
 export function computeManifestHash(
   manifest: Omit<RestructureManifest, "manifestHash" | "confirmationToken">
 ): string {
@@ -382,8 +540,11 @@ export function readAndValidateManifest(path: string): RestructureManifest {
     throw new TaxonomyRestructureError(RESTRUCTURE_ERROR_CODES.MANIFEST_NOT_FOUND, "ملف manifest غير موجود");
   }
   const manifest = JSON.parse(readFileSync(absolute, "utf8")) as RestructureManifest;
-  if (manifest.schemaVersion !== 1) {
-    throw new TaxonomyRestructureError(RESTRUCTURE_ERROR_CODES.MANIFEST_INVALID, "إصدار manifest غير مدعوم");
+  if (manifest.schemaVersion !== RESTRUCTURE_MANIFEST_SCHEMA_VERSION) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.MANIFEST_SCHEMA_UNSUPPORTED,
+      "إصدار Manifest قديم؛ أعد تشغيل dry-run لإنشاء Manifest جديدة."
+    );
   }
   const { manifestHash, confirmationToken, ...rest } = manifest;
   if (computeManifestHash(rest) !== manifestHash) {

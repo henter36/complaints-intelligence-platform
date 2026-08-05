@@ -11,6 +11,10 @@ import {
   computeManifestHash,
   countPlanChanges,
   writeManifestAtomically,
+  RESTRUCTURE_MANIFEST_SCHEMA_VERSION,
+  buildReactivationStateSnapshotFromCurrent,
+  computeReactivationStateFingerprint,
+  loadCurrentTaxonomy,
   type RestructureDb,
   type RestructureManifest,
 } from "./classification-taxonomy-manifest";
@@ -19,9 +23,13 @@ import { buildRestructurePlan } from "./classification-taxonomy-plan";
 export * from "./classification-taxonomy-proposal";
 export {
   RESTRUCTURE_OPERATIONS,
+  RESTRUCTURE_MANIFEST_SCHEMA_VERSION,
   RESTRUCTURE_RUN_STATUSES,
   computeTaxonomyFingerprint,
   computeTaxonomyShapeFingerprint,
+  computeReactivationStateFingerprint,
+  buildReactivationStateSnapshotFromCurrent,
+  loadReactivationStateSnapshot,
   loadCurrentTaxonomy,
   computeManifestHash,
   writeManifestAtomically,
@@ -33,6 +41,7 @@ export {
   type PlanChange,
   type RestructurePlan,
   type RestructureManifest,
+  type ReactivationStateSnapshot,
   type LoadedCategory,
   type LoadedClassification,
   type RestructureItemSequence,
@@ -57,14 +66,19 @@ export async function previewTaxonomyRestructure(
     input.mappingPath
   );
   const { plan, currentFingerprint, targetFingerprint } = await buildRestructurePlan(db, proposal);
+  const current = await loadCurrentTaxonomy(db);
+  const reactivationStateFingerprint = computeReactivationStateFingerprint(
+    buildReactivationStateSnapshotFromCurrent(current, plan)
+  );
   const changeCount = countPlanChanges(plan);
   const withoutHash: Omit<RestructureManifest, "manifestHash" | "confirmationToken"> = {
-    schemaVersion: 1,
+    schemaVersion: RESTRUCTURE_MANIFEST_SCHEMA_VERSION,
     generatedAt: new Date().toISOString(),
     proposalHash,
     mappingHash,
     currentTaxonomyFingerprint: currentFingerprint,
     targetTaxonomyFingerprint: targetFingerprint,
+    reactivationStateFingerprint,
     plan,
     totals: {
       changeCount,
