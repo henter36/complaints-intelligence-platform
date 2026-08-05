@@ -13,6 +13,9 @@ import {
   resolveLegendColumnCount,
   resolveChartGeometry,
   fitLegendLabel,
+  resolveXAxisLabelStep,
+  wrapCategoricalAxisLabel,
+  resolveXAxisBottomReserve,
   MIN_PLOT_HEIGHT,
   CHART_LEGEND_GAP,
 } from "./report-chart-service";
@@ -683,5 +686,157 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
     expect(svg).toContain("السابقة");
     expect(svg).toContain('text-anchor="middle"');
     expect(svg).not.toContain('text-anchor="end"');
+  });
+});
+
+describe("resolveXAxisLabelStep", () => {
+  it("keeps every label when policy is all", () => {
+    expect(resolveXAxisLabelStep(13, "all")).toBe(1);
+  });
+
+  it("uses every-other label for crowded auto timelines", () => {
+    expect(resolveXAxisLabelStep(13, "auto")).toBe(2);
+    expect(resolveXAxisLabelStep(24, "auto")).toBe(2);
+  });
+
+  it("keeps all labels for shorter auto windows", () => {
+    expect(resolveXAxisLabelStep(11, "auto")).toBe(1);
+  });
+
+  it("does not divide by zero for empty or single label sets", () => {
+    expect(resolveXAxisLabelStep(0, "auto")).toBe(1);
+    expect(resolveXAxisLabelStep(1, "auto")).toBe(1);
+    expect(resolveXAxisLabelStep(0, "all")).toBe(1);
+  });
+});
+
+describe("wrapCategoricalAxisLabel", () => {
+  it("wraps long region names into at most two lines", () => {
+    expect(wrapCategoricalAxisLabel("الحدود الشمالية", 2)).toEqual(["الحدود", "الشمالية"]);
+    expect(wrapCategoricalAxisLabel("المدينة المنورة", 2)).toEqual(["المدينة", "المنورة"]);
+    expect(wrapCategoricalAxisLabel("مكة المكرمة", 2)).toEqual(["مكة", "المكرمة"]);
+  });
+
+  it("keeps short region names on one line", () => {
+    for (const label of ["الرياض", "القصيم", "تبوك", "جازان", "حائل", "عسير", "نجران", "الجوف", "الباحة", "الشرقية"]) {
+      expect(wrapCategoricalAxisLabel(label, 2)).toEqual([label]);
+    }
+  });
+
+  it("never returns more than maxLines", () => {
+    expect(wrapCategoricalAxisLabel("أ ب ج د هـ", 2)).toHaveLength(2);
+  });
+});
+
+describe("region categorical x-axis labels", () => {
+  const REGION_NAMES = [
+    "الشرقية",
+    "الباحة",
+    "الجوف",
+    "الحدود الشمالية",
+    "الرياض",
+    "القصيم",
+    "المدينة المنورة",
+    "تبوك",
+    "جازان",
+    "حائل",
+    "عسير",
+    "مكة المكرمة",
+    "نجران",
+  ] as const;
+
+  function makeRegionSection(): ReportChartSection {
+    return {
+      id: "v2-region-bar",
+      kind: "chart",
+      chartType: "bar",
+      title: "مقارنة شكاوى الفترة الحالية مقابل الفترة السابقة حسب المنطقة",
+      series: [
+        {
+          name: "الحالية",
+          points: REGION_NAMES.map((name, index) => ({ x: name, y: 100 + index * 10 })),
+        },
+        {
+          name: "السابقة",
+          points: REGION_NAMES.map((name, index) => ({ x: name, y: 80 + index * 8 })),
+        },
+      ],
+    };
+  }
+
+  it("shows all thirteen region labels with policy=all", () => {
+    const svg = buildChartSvg(makeRegionSection(), 900, 296, {
+      xLabelPolicy: "all",
+      xLabelLayout: "wrap-two-lines",
+    });
+
+    for (const name of REGION_NAMES) {
+      if (name.includes(" ")) {
+        const [first, second] = wrapCategoricalAxisLabel(name, 2);
+        expect(svg).toContain(first);
+        expect(svg).toContain(second);
+      } else {
+        expect(svg).toContain(name);
+      }
+    }
+
+    // Previously dropped odd indices under auto step=2.
+    for (const previouslyHidden of ["الباحة", "القصيم", "تبوك", "حائل"]) {
+      expect(svg).toContain(previouslyHidden);
+    }
+    expect(svg).toContain("<tspan");
+    expect(svg).toContain("الحدود");
+    expect(svg).toContain("الشمالية");
+    expect(svg).toContain("المدينة");
+    expect(svg).toContain("المنورة");
+    expect(svg).toContain("مكة");
+    expect(svg).toContain("المكرمة");
+    expect(resolveXAxisBottomReserve("wrap-two-lines")).toBe(50);
+  });
+
+  it("keeps temporal auto policy skipping labels without dropping points", () => {
+    const months = Array.from({ length: 14 }, (_, i) => {
+      const date = new Date(Date.UTC(2024, i, 1));
+      const y = date.getUTCFullYear();
+      const m = String(date.getUTCMonth() + 1).padStart(2, "0");
+      return `${y}-${m}-01`;
+    });
+    const section: ReportChartSection = {
+      id: "v2-monthly-flow",
+      kind: "chart",
+      chartType: "bar",
+      title: "",
+      series: [
+        {
+          name: "الواردة",
+          renderAs: "bar",
+          points: months.map((x, i) => ({ x, y: 10 + i })),
+        },
+        {
+          name: "المغلقة",
+          renderAs: "bar",
+          points: months.map((x, i) => ({ x, y: 8 + i })),
+        },
+      ],
+    };
+
+    const autoSvg = buildChartSvg(section, 900, 320);
+    const allSvg = buildChartSvg(section, 900, 320, { xLabelPolicy: "all" });
+
+    // Data values remain present as bar heights / text values regardless of label step.
+    expect(autoSvg).toContain('fill=');
+    expect(autoSvg.match(/<rect /g)?.length ?? 0).toBeGreaterThanOrEqual(months.length);
+    expect(allSvg.match(/<rect /g)?.length ?? 0).toBe(autoSvg.match(/<rect /g)?.length);
+
+    // Auto skips some date labels; all would include more.
+    const countDateLabels = (svg: string) =>
+      [...svg.matchAll(/>\d{2}\/\d{2}</g)].length;
+    expect(countDateLabels(autoSvg)).toBeLessThan(countDateLabels(allSvg));
+    expect(countDateLabels(autoSvg)).toBeLessThan(months.length);
+    expect(countDateLabels(allSvg)).toBe(months.length);
+    expect(autoSvg).toContain("الواردة");
+    expect(autoSvg).toContain("المغلقة");
+    expect(autoSvg).toContain(`fill="${PRIMARY}"`);
+    expect(autoSvg).toContain(`fill="${GOLD}"`);
   });
 });
