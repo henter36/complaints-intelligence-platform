@@ -64,12 +64,14 @@ export type RestructurePlan = {
   categoriesToCreate: PlanChange[];
   categoriesToRename: PlanChange[];
   categoriesToKeep: PlanChange[];
+  categoriesToReactivate: PlanChange[];
   categoriesToDeactivate: PlanChange[];
   classificationsToCreate: PlanChange[];
   classificationsToRename: PlanChange[];
   classificationsToMove: PlanChange[];
   classificationsToSplit: PlanChange[];
   classificationsToKeep: PlanChange[];
+  classificationsToReactivate: PlanChange[];
   classificationsToDeactivate: PlanChange[];
   keywordsToAdd: PlanChange[];
   keywordsToRemove: PlanChange[];
@@ -100,9 +102,11 @@ export type RestructureManifest = {
     changeCount: number;
     categoriesToCreate: number;
     categoriesToRename: number;
+    categoriesToReactivate: number;
     classificationsToCreate: number;
     classificationsToRename: number;
     classificationsToMove: number;
+    classificationsToReactivate: number;
     classificationsToDeactivate: number;
     keywordChangeCount: number;
     legacyComplaintConsistencyUpdateCount: number;
@@ -136,12 +140,14 @@ export function emptyPlan(): RestructurePlan {
     categoriesToCreate: [],
     categoriesToRename: [],
     categoriesToKeep: [],
+    categoriesToReactivate: [],
     categoriesToDeactivate: [],
     classificationsToCreate: [],
     classificationsToRename: [],
     classificationsToMove: [],
     classificationsToSplit: [],
     classificationsToKeep: [],
+    classificationsToReactivate: [],
     classificationsToDeactivate: [],
     keywordsToAdd: [],
     keywordsToRemove: [],
@@ -162,11 +168,13 @@ export function countPlanChanges(plan: RestructurePlan): number {
   return (
     plan.categoriesToCreate.length +
     plan.categoriesToRename.length +
+    plan.categoriesToReactivate.length +
     plan.categoriesToDeactivate.length +
     plan.classificationsToCreate.length +
     plan.classificationsToRename.length +
     plan.classificationsToMove.length +
     plan.classificationsToSplit.length +
+    plan.classificationsToReactivate.length +
     plan.classificationsToDeactivate.length +
     plan.keywordsToAdd.length +
     plan.keywordsToRemove.length +

@@ -284,6 +284,139 @@ describe("classification taxonomy proposal validation", () => {
   it("builds confirmation tokens from manifest hash and change count", () => {
     expect(buildConfirmationToken("abcdef1234567890", 12)).toBe("RESTRUCTURE-12-ABCDEF1234");
   });
+
+  it("rejects missing structural fields with PROPOSAL_INVALID not TypeError", () => {
+    const cases: Array<{ mutate: (p: Record<string, unknown>) => void; label: string }> = [
+      { label: "missing validation", mutate: (p) => delete p.validation },
+      { label: "null validation", mutate: (p) => { p.validation = null; } },
+      {
+        label: "missing mappedComplaintCount",
+        mutate: (p) => {
+          const validation = p.validation as Record<string, unknown>;
+          delete validation.mappedComplaintCount;
+        },
+      },
+      { label: "missing proposedTaxonomy", mutate: (p) => delete p.proposedTaxonomy },
+      { label: "proposedTaxonomy not array", mutate: (p) => { p.proposedTaxonomy = {}; } },
+      {
+        label: "classifications missing",
+        mutate: (p) => {
+          const tax = p.proposedTaxonomy as Array<Record<string, unknown>>;
+          delete tax[0]!.classifications;
+        },
+      },
+      {
+        label: "classifications not array",
+        mutate: (p) => {
+          const tax = p.proposedTaxonomy as Array<Record<string, unknown>>;
+          tax[0]!.classifications = {};
+        },
+      },
+      {
+        label: "sourceDetails not array",
+        mutate: (p) => {
+          const tax = p.proposedTaxonomy as Array<Record<string, unknown>>;
+          const classifications = tax[0]!.classifications as Array<Record<string, unknown>>;
+          classifications[0]!.sourceDetails = "x";
+        },
+      },
+      {
+        label: "currentEntityMigration not array",
+        mutate: (p) => {
+          p.currentEntityMigration = {};
+        },
+      },
+    ];
+    for (const testCase of cases) {
+      withTempDir("cip-restructure-struct-", (dir) => {
+        const bad = JSON.parse(readFileSync(PROPOSAL, "utf8"));
+        testCase.mutate(bad);
+        const path = join(dir, "bad.json");
+        writeFileSync(path, JSON.stringify(bad));
+        try {
+          loadAndValidateProposal(path, MAPPING);
+          throw new Error(`expected throw for ${testCase.label}`);
+        } catch (error) {
+          expect(error, testCase.label).toBeInstanceOf(TaxonomyRestructureError);
+          expect(error, testCase.label).toMatchObject({
+            code: RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID,
+          });
+          expect(error).not.toBeInstanceOf(TypeError);
+        }
+      });
+    }
+  });
+
+  it("trims sourceDetail at JSON read boundary and rejects whitespace-only duplicates", () => {
+    withTempDir("cip-restructure-trim-", (dir) => {
+      const good = JSON.parse(readFileSync(PROPOSAL, "utf8"));
+      good.sourceDetailMappings[0].sourceDetail = " عدم خروجه لموعد";
+      good.sourceDetailMappings[2].sourceDetail = "أخرى ";
+      const proposalPath = join(dir, "trimmed.json");
+      writeFileSync(proposalPath, JSON.stringify(good));
+      const { proposal } = loadAndValidateProposal(proposalPath, MAPPING);
+      expect(proposal.sourceDetailMappings.map((m) => m.sourceDetail)).toEqual([
+        "عدم خروجه لموعد",
+        "لم يتلقى العلاج اللازم",
+        "أخرى",
+      ]);
+      expect(
+        proposal.sourceDetailMappings.find((m) => m.sourceDetail === "أخرى")?.classificationKey
+      ).toBe("OTHER_REVIEW");
+    });
+
+    withTempDir("cip-restructure-trim-dup-", (dir) => {
+      const bad = JSON.parse(readFileSync(PROPOSAL, "utf8"));
+      bad.sourceDetailMappings[1].sourceDetail = ` ${bad.sourceDetailMappings[0].sourceDetail} `;
+      const path = join(dir, "dup.json");
+      writeFileSync(path, JSON.stringify(bad));
+      try {
+        loadAndValidateProposal(path, MAPPING);
+        throw new Error("expected duplicate");
+      } catch (error) {
+        expect(error).toMatchObject({ code: RESTRUCTURE_ERROR_CODES.DUPLICATE_SOURCE_DETAIL });
+        const details = (error as TaxonomyRestructureError).details ?? {};
+        expect(JSON.stringify(details)).not.toContain("عدم خروجه لموعد");
+      }
+    });
+
+    withTempDir("cip-restructure-trim-blank-", (dir) => {
+      const bad = JSON.parse(readFileSync(PROPOSAL, "utf8"));
+      bad.sourceDetailMappings[0].sourceDetail = "   ";
+      const path = join(dir, "blank.json");
+      writeFileSync(path, JSON.stringify(bad));
+      expect(() => loadAndValidateProposal(path, MAPPING)).toThrowError(
+        expect.objectContaining({ code: RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID })
+      );
+    });
+  });
+
+  it("requires full one-to-one JSON↔CSV coverage", () => {
+    withTempDir("cip-restructure-1to1-", (dir) => {
+      const original = readFileSync(MAPPING, "utf8").trim().split("\n");
+      const header = original[0]!;
+      const rows = original.slice(1);
+      const reordered = join(dir, "reordered.csv");
+      writeFileSync(reordered, [header, rows[2]!, rows[0]!, rows[1]!].join("\n"), "utf8");
+      expect(() => loadAndValidateProposal(PROPOSAL, reordered)).not.toThrow();
+
+      const dupOmit = join(dir, "dup-omit.csv");
+      writeFileSync(
+        dupOmit,
+        [header, rows[0]!, rows[0]!, rows[2]!].join("\n"),
+        "utf8"
+      );
+      try {
+        loadAndValidateProposal(PROPOSAL, dupOmit);
+        throw new Error("expected mismatch");
+      } catch (error) {
+        expect(error).toMatchObject({ code: RESTRUCTURE_ERROR_CODES.MAPPING_MISMATCH });
+        expect(JSON.stringify((error as TaxonomyRestructureError).details ?? {})).not.toContain(
+          "عدم خروجه لموعد"
+        );
+      }
+    });
+  });
 });
 
 describe("classification path and naming guards", () => {

@@ -70,9 +70,11 @@ export async function previewTaxonomyRestructure(
       changeCount,
       categoriesToCreate: plan.categoriesToCreate.length,
       categoriesToRename: plan.categoriesToRename.length,
+      categoriesToReactivate: plan.categoriesToReactivate.length,
       classificationsToCreate: plan.classificationsToCreate.length,
       classificationsToRename: plan.classificationsToRename.length,
       classificationsToMove: plan.classificationsToMove.length,
+      classificationsToReactivate: plan.classificationsToReactivate.length,
       classificationsToDeactivate: plan.classificationsToDeactivate.length,
       keywordChangeCount: plan.keywordsToAdd.length + plan.keywordsToRemove.length,
       legacyComplaintConsistencyUpdateCount:
@@ -95,6 +97,7 @@ export async function previewTaxonomyRestructure(
     planSummary: {
       categoriesToCreate: plan.categoriesToCreate.map((c) => c.targetName),
       categoriesToRename: plan.categoriesToRename.map((c) => `${c.currentName} → ${c.targetName}`),
+      categoriesToReactivate: plan.categoriesToReactivate.map((c) => c.targetName),
       classificationsToCreate: plan.classificationsToCreate.map(
         (c) => `${c.targetCategory} / ${c.targetName}`
       ),
@@ -103,6 +106,9 @@ export async function previewTaxonomyRestructure(
       ),
       classificationsToRename: plan.classificationsToRename.map(
         (c) => `${c.currentName} → ${c.targetName}`
+      ),
+      classificationsToReactivate: plan.classificationsToReactivate.map(
+        (c) => `${c.targetCategory} / ${c.targetName}`
       ),
       keywordChanges: plan.keywordsToAdd.length + plan.keywordsToRemove.length,
       legacyComplaintsAffected: plan.legacyComplaintsAffected.length,

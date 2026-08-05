@@ -1,5 +1,8 @@
 import type { Prisma } from "@prisma/client";
 import { writeAuditLog, AUDIT_ACTOR_SYSTEM } from "@/server/audit/audit-log-service";
+import { normalizeClassificationKeyword } from "@/lib/classifications/classification-keyword-normalizer";
+import { parseClassificationKeywords } from "./classification-keywords";
+import { compareCodeUnits } from "./canonical-string-order";
 import {
   RESTRUCTURE_ERROR_CODES,
   TaxonomyRestructureError,
@@ -169,6 +172,36 @@ function optionalBooleanMatches(expected: unknown, actual: boolean | undefined):
   return actual === expected;
 }
 
+export function canonicalizeKeywordsForComparison(value: unknown): string[] | null {
+  try {
+    const parsed = parseClassificationKeywords(value ?? []);
+    const normalized = parsed
+      .map((kw) => normalizeClassificationKeyword(kw))
+      .filter((kw) => kw.length > 0);
+    const unique = [...new Set(normalized)];
+    unique.sort(compareCodeUnits);
+    return unique;
+  } catch {
+    return null;
+  }
+}
+
+export function keywordsMatch(expected: unknown, actual: unknown): boolean {
+  const left = canonicalizeKeywordsForComparison(expected);
+  const right = canonicalizeKeywordsForComparison(actual);
+  if (left === null || right === null) return false;
+  if (left.length !== right.length) return false;
+  return left.every((kw, index) => kw === right[index]);
+}
+
+function optionalKeywordsMatch(
+  next: Record<string, unknown>,
+  actualKeywords: unknown
+): boolean {
+  if (!Object.prototype.hasOwnProperty.call(next, "keywords")) return true;
+  return keywordsMatch(next.keywords, actualKeywords);
+}
+
 async function categoryMatchesNextState(
   tx: Prisma.TransactionClient,
   entityId: string,
@@ -192,7 +225,8 @@ async function classificationMatchesNextState(
   return (
     optionalStringMatches(next.nameAr, current.nameAr) &&
     optionalStringMatches(next.categoryId, current.categoryId) &&
-    optionalBooleanMatches(next.isActive, current.isActive)
+    optionalBooleanMatches(next.isActive, current.isActive) &&
+    optionalKeywordsMatch(next, current.keywords)
   );
 }
 
@@ -252,6 +286,22 @@ async function evaluateDeactivatedRollback(
   return { action: "SKIP", reason: "UNSUPPORTED_OR_MISSING_STATE", entityId: item.entityId };
 }
 
+async function evaluateReactivatedRollback(
+  tx: Prisma.TransactionClient,
+  item: AppliedItem
+): Promise<RollbackItemDecision | null> {
+  if (item.action !== "REACTIVATE" || !item.entityId) return null;
+  const drift = await skipIfEntityDrifted(tx, item);
+  if (drift) return drift;
+  if (item.entityType === "Classification") {
+    return { action: "DEACTIVATE_CREATED_CLASSIFICATION", entityId: item.entityId };
+  }
+  if (item.entityType === "Category") {
+    return { action: "DEACTIVATE_CREATED_CATEGORY", entityId: item.entityId };
+  }
+  return { action: "SKIP", reason: "UNSUPPORTED_OR_MISSING_STATE", entityId: item.entityId };
+}
+
 async function evaluateRestoredRollback(
   tx: Prisma.TransactionClient,
   item: AppliedItem,
@@ -303,6 +353,7 @@ async function evaluateRollbackItem(
   return (
     (await evaluateCreatedRollback(tx, item)) ??
     (await evaluateDeactivatedRollback(tx, item)) ??
+    (await evaluateReactivatedRollback(tx, item)) ??
     (await evaluateRestoredRollback(tx, item, prev)) ??
     evaluateComplaintConsistencyRollback(item, prev) ?? {
       action: "SKIP",

@@ -238,8 +238,58 @@ function registerKeptCategories(ctx: RestructureExecutionContext): void {
   for (const item of ctx.plan.categoriesToKeep) {
     if (item.currentId) ctx.categoryIdByName.set(item.targetName, item.currentId);
   }
+  for (const item of ctx.plan.categoriesToReactivate) {
+    if (item.currentId) ctx.categoryIdByName.set(item.targetName, item.currentId);
+  }
   for (const [name, meta] of Object.entries(ctx.plan.finalCategoryTargets)) {
     if (meta.reuseId) ctx.categoryIdByName.set(name, meta.reuseId);
+  }
+}
+
+async function applyCategoryReactivations(ctx: RestructureExecutionContext): Promise<void> {
+  for (const item of ctx.plan.categoriesToReactivate) {
+    if (!item.currentId) continue;
+    const before = await ctx.tx.category.findUniqueOrThrow({ where: { id: item.currentId } });
+    await ctx.tx.category.update({
+      where: { id: item.currentId },
+      data: { isActive: true },
+    });
+    ctx.categoryIdByName.set(item.targetName, item.currentId);
+    await recordItem(ctx, {
+      entityType: "Category",
+      action: "REACTIVATE",
+      entityId: item.currentId,
+      previousStateJson: { isActive: before.isActive, nameAr: before.nameAr },
+      nextStateJson: { isActive: true, nameAr: item.targetName },
+    });
+  }
+}
+
+async function applyClassificationReactivations(ctx: RestructureExecutionContext): Promise<void> {
+  for (const item of ctx.plan.classificationsToReactivate) {
+    if (!item.currentId) continue;
+    const before = await ctx.tx.classification.findUniqueOrThrow({
+      where: { id: item.currentId },
+    });
+    await ctx.tx.classification.update({
+      where: { id: item.currentId },
+      data: { isActive: true },
+    });
+    await recordItem(ctx, {
+      entityType: "Classification",
+      action: "REACTIVATE",
+      entityId: item.currentId,
+      previousStateJson: {
+        isActive: before.isActive,
+        nameAr: before.nameAr,
+        categoryId: before.categoryId,
+      },
+      nextStateJson: {
+        isActive: true,
+        nameAr: item.targetName,
+        categoryId: before.categoryId,
+      },
+    });
   }
 }
 
@@ -562,10 +612,12 @@ async function executeRestructurePlan(input: {
         itemSequence: createRestructureItemSequence(),
       };
       registerKeptCategories(ctx);
+      await applyCategoryReactivations(ctx);
       await stageCategoryTemporaryNames(ctx);
       await applyCategoryCreates(ctx);
       await finalizeCategoryRenames(ctx);
       registerKeptCategories(ctx);
+      await applyClassificationReactivations(ctx);
       await stageClassificationTemporaryNames(ctx);
       await applyClassificationCreates(ctx);
       await finalizeClassificationMovesAndRenames(ctx);

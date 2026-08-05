@@ -114,9 +114,11 @@ async function writeApplyManifest(
       changeCount: 1,
       categoriesToCreate: plan.categoriesToCreate.length,
       categoriesToRename: plan.categoriesToRename.length,
+      categoriesToReactivate: plan.categoriesToReactivate.length,
       classificationsToCreate: plan.classificationsToCreate.length,
       classificationsToRename: plan.classificationsToRename.length,
       classificationsToMove: plan.classificationsToMove.length,
+      classificationsToReactivate: plan.classificationsToReactivate.length,
       classificationsToDeactivate: plan.classificationsToDeactivate.length,
       keywordChangeCount: 0,
       legacyComplaintConsistencyUpdateCount: 0,
@@ -358,6 +360,48 @@ describe("taxonomy apply rename cycles and collisions", () => {
         actor: "test",
       })
     ).rejects.toMatchObject({ code: RESTRUCTURE_ERROR_CODES.TAXONOMY_RENAME_COLLISION });
+  }, 60_000);
+
+  it("reactivates inactive category instead of failing unique create", async () => {
+    const client = db();
+    await resetTaxonomy();
+    const inactive = await client.category.create({
+      data: { nameAr: "بيانات غير محددة", isActive: false },
+    });
+    const plan = emptyPlan();
+    plan.categoriesToReactivate = [
+      renameChange({
+        currentId: inactive.id,
+        currentName: "بيانات غير محددة",
+        targetName: "بيانات غير محددة",
+        action: "REACTIVATE",
+      }),
+    ];
+    plan.finalCategoryTargets = { "بيانات غير محددة": { reuseId: inactive.id } };
+    const path = join(tempDir!, "reactivate-cat.json");
+    const { manifest } = await writeApplyManifest(plan, path);
+    const applied = await applyTaxonomyRestructure(client, {
+      manifestPath: path,
+      confirm: manifest.confirmationToken,
+      actor: "test",
+    });
+    expect(applied.status).toBe("APPLIED");
+    const after = await client.category.findUniqueOrThrow({ where: { id: inactive.id } });
+    expect(after.isActive).toBe(true);
+    expect(after.nameAr).toBe("بيانات غير محددة");
+    const items = await client.classificationTaxonomyRestructureItem.findMany({
+      where: { runId: applied.runId, action: "REACTIVATE" },
+    });
+    expect(items).toHaveLength(1);
+    const rolled = await rollbackTaxonomyRestructure(client, {
+      runId: applied.runId,
+      confirm: applied.rollbackToken,
+      actor: "test",
+    });
+    expect(rolled.status).toBe("ROLLED_BACK");
+    expect(
+      (await client.category.findUniqueOrThrow({ where: { id: inactive.id } })).isActive
+    ).toBe(false);
   }, 60_000);
 
   it("records CATEGORY_CONSISTENCY only for mismatched complaints", async () => {

@@ -7,6 +7,8 @@ import {
 import {
   assertPlanIsApplicable,
   createPlanningContext,
+  ensureProposedCategories,
+  resolveExistingCategory,
   resolveExistingClassification,
 } from "./classification-taxonomy-plan";
 import { loadAndValidateProposal, RESTRUCTURE_ERROR_CODES } from "./classification-taxonomy-proposal";
@@ -116,5 +118,123 @@ describe("classification resolution ambiguity", () => {
     expect(() => assertPlanIsApplicable(plan)).toThrowError(
       expect.objectContaining({ code: RESTRUCTURE_ERROR_CODES.PLAN_NOT_APPLICABLE })
     );
+  });
+});
+
+describe("inactive category reuse and reactivation", () => {
+  it("plans REACTIVATE instead of CREATE for inactive matching category", () => {
+    const proposal = loadAndValidateProposal(PROPOSAL, MAPPING).proposal;
+    const inactiveId = "inactive_data_quality";
+    const current = {
+      categories: [
+        {
+          id: inactiveId,
+          nameAr: "بيانات غير محددة",
+          isActive: false,
+          isDeleted: false,
+          complaintCount: 0,
+        },
+      ],
+      classifications: [],
+      fingerprint: "f",
+    };
+    const ctx = createPlanningContext(current, proposal);
+    ensureProposedCategories(ctx);
+    expect(ctx.plan.categoriesToCreate.some((c) => c.targetName === "بيانات غير محددة")).toBe(
+      false
+    );
+    expect(ctx.plan.categoriesToReactivate).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          currentId: inactiveId,
+          targetName: "بيانات غير محددة",
+          action: "REACTIVATE",
+        }),
+      ])
+    );
+    expect(ctx.plan.finalCategoryTargets["بيانات غير محددة"]?.reuseId).toBe(inactiveId);
+  });
+
+  it("keeps active matching category as KEEP and creates only missing ones", () => {
+    const proposal = loadAndValidateProposal(PROPOSAL, MAPPING).proposal;
+    const current = {
+      categories: [
+        {
+          id: "active_health",
+          nameAr: "الرعاية الصحية",
+          isActive: true,
+          isDeleted: false,
+          complaintCount: 0,
+        },
+      ],
+      classifications: [],
+      fingerprint: "f",
+    };
+    const ctx = createPlanningContext(current, proposal);
+    ensureProposedCategories(ctx);
+    expect(ctx.plan.categoriesToReactivate).toHaveLength(0);
+    expect(ctx.plan.categoriesToKeep.some((c) => c.currentId === "active_health")).toBe(true);
+    expect(ctx.plan.categoriesToCreate.some((c) => c.targetName === "الرعاية الصحية")).toBe(false);
+    expect(ctx.plan.categoriesToCreate.some((c) => c.targetName === "بيانات غير محددة")).toBe(true);
+  });
+
+  it("prefers exact name over normalized peers", () => {
+    const proposal = loadAndValidateProposal(PROPOSAL, MAPPING).proposal;
+    const current = {
+      categories: [
+        {
+          id: "a1",
+          nameAr: "بيانات  غير محددة",
+          isActive: true,
+          isDeleted: false,
+          complaintCount: 0,
+        },
+        {
+          id: "a2",
+          nameAr: "بيانات غير محددة",
+          isActive: false,
+          isDeleted: false,
+          complaintCount: 0,
+        },
+      ],
+      classifications: [],
+      fingerprint: "f",
+    };
+    const ctx = createPlanningContext(current, proposal);
+    const resolution = resolveExistingCategory(ctx, "", "بيانات غير محددة");
+    expect(resolution.status).toBe("FOUND");
+    if (resolution.status === "FOUND") {
+      expect(resolution.category.id).toBe("a2");
+    }
+  });
+
+  it("returns AMBIGUOUS when multiple categories match only after normalization", () => {
+    const proposal = loadAndValidateProposal(PROPOSAL, MAPPING).proposal;
+    const current = {
+      categories: [
+        {
+          id: "n1",
+          nameAr: "بيانات  غير محددة",
+          isActive: true,
+          isDeleted: false,
+          complaintCount: 0,
+        },
+        {
+          id: "n2",
+          nameAr: "بيانات غير  محددة",
+          isActive: false,
+          isDeleted: false,
+          complaintCount: 0,
+        },
+      ],
+      classifications: [],
+      fingerprint: "f",
+    };
+    const ctx = createPlanningContext(current, proposal);
+    const resolution = resolveExistingCategory(ctx, "", "بيانات غير محددة");
+    expect(resolution.status).toBe("AMBIGUOUS");
+    if (resolution.status === "AMBIGUOUS") {
+      expect(resolution.matches).toHaveLength(2);
+    }
   });
 });

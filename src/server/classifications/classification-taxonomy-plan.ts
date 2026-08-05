@@ -30,7 +30,6 @@ export type RestructurePlanningContext = {
   plan: RestructurePlan;
   categoriesById: Map<string, LoadedCategory>;
   classificationsById: Map<string, LoadedClassification>;
-  categoriesByNormalizedName: Map<string, LoadedCategory>;
   proposedClassificationsByKey: Map<string, ProposedClassification>;
   proposedKeyByCategoryAndName: Map<string, string>;
   categoryReuseByTargetName: Map<string, string>;
@@ -86,11 +85,6 @@ export function createPlanningContext(
     plan: emptyPlan(),
     categoriesById: new Map(current.categories.map((c) => [c.id, c])),
     classificationsById: new Map(current.classifications.map((c) => [c.id, c])),
-    categoriesByNormalizedName: new Map(
-      current.categories
-        .filter((c) => c.isActive)
-        .map((c) => [normalizeClassificationKeyword(c.nameAr), c])
-    ),
     proposedClassificationsByKey: new Map(),
     proposedKeyByCategoryAndName: new Map(),
     categoryReuseByTargetName: new Map(),
@@ -124,15 +118,33 @@ export function findProposedClassificationKey(
   );
 }
 
-function resolveExistingCategory(
+export type CategoryResolution =
+  | { status: "FOUND"; category: LoadedCategory }
+  | { status: "MISSING" }
+  | { status: "AMBIGUOUS"; matches: LoadedCategory[] };
+
+export function resolveExistingCategory(
   ctx: RestructurePlanningContext,
   currentId: string,
   currentName: string
-): LoadedCategory | undefined {
-  return (
-    ctx.categoriesById.get(currentId) ??
-    ctx.categoriesByNormalizedName.get(normalizeClassificationKeyword(currentName))
+): CategoryResolution {
+  if (currentId) {
+    const byId = ctx.categoriesById.get(currentId);
+    if (byId && !byId.isDeleted) return { status: "FOUND", category: byId };
+  }
+  const live = [...ctx.categoriesById.values()].filter((c) => !c.isDeleted);
+  const exact = live.filter((c) => c.nameAr === currentName);
+  if (exact.length === 1) return { status: "FOUND", category: exact[0]! };
+  if (exact.length > 1) return { status: "AMBIGUOUS", matches: exact };
+
+  const normalized = normalizeClassificationKeyword(currentName);
+  if (!normalized) return { status: "MISSING" };
+  const matches = live.filter(
+    (c) => normalizeClassificationKeyword(c.nameAr) === normalized
   );
+  if (matches.length === 1) return { status: "FOUND", category: matches[0]! };
+  if (matches.length === 0) return { status: "MISSING" };
+  return { status: "AMBIGUOUS", matches };
 }
 
 export type ClassificationResolution =
@@ -144,19 +156,22 @@ export function resolveExistingClassification(
   ctx: RestructurePlanningContext,
   currentId: string,
   currentName: string,
-  categoryHint?: string | null
+  categoryHint?: string | null,
+  options?: { includeInactive?: boolean }
 ): ClassificationResolution {
   if (currentId) {
     const byId = ctx.classificationsById.get(currentId);
-    if (byId) return { status: "FOUND", classification: byId };
+    if (byId && !byId.isDeleted) return { status: "FOUND", classification: byId };
   }
   const normalized = normalizeClassificationKeyword(currentName);
   if (!normalized) return { status: "MISSING" };
   const categoryNorm = categoryHint
     ? normalizeClassificationKeyword(categoryHint)
     : null;
+  const includeInactive = options?.includeInactive === true;
   const matches = [...ctx.classificationsById.values()].filter((cls) => {
-    if (!cls.isActive) return false;
+    if (cls.isDeleted) return false;
+    if (!includeInactive && !cls.isActive) return false;
     if (normalizeClassificationKeyword(cls.nameAr) !== normalized) return false;
     if (!categoryNorm) return true;
     return normalizeClassificationKeyword(cls.categoryName) === categoryNorm;
@@ -168,13 +183,13 @@ export function resolveExistingClassification(
 
 function resolutionConflictLabel(
   currentName: string,
-  resolution: ClassificationResolution
+  resolution: ClassificationResolution | CategoryResolution
 ): string {
   if (resolution.status === "MISSING") {
-    return `تصنيف الترحيل غير موجود: ${currentName}`;
+    return `كيان الترحيل غير موجود: ${currentName}`;
   }
   if (resolution.status === "AMBIGUOUS") {
-    return `تصنيف الترحيل غامض بالاسم: ${currentName}`;
+    return `كيان الترحيل غامض بالاسم: ${currentName}`;
   }
   return currentName;
 }
@@ -187,6 +202,27 @@ function registerCategoryReuse(
   ctx.categoryReuseByTargetName.set(targetName, categoryId);
 }
 
+function ensureCategoryReactivation(
+  ctx: RestructurePlanningContext,
+  category: LoadedCategory,
+  targetName: string
+): void {
+  if (category.isActive) return;
+  if (ctx.plan.categoriesToReactivate.some((x) => x.currentId === category.id)) return;
+  ctx.plan.categoriesToReactivate.push(
+    buildPlanChange({
+      currentId: category.id,
+      currentName: category.nameAr,
+      targetName,
+      currentCategory: category.nameAr,
+      targetCategory: targetName,
+      action: "REACTIVATE",
+      reason: "إعادة تفعيل فئة غير نشطة مطابقة",
+      affectedExistingComplaintCount: category.complaintCount,
+    })
+  );
+}
+
 function registerClassificationReuse(
   ctx: RestructurePlanningContext,
   key: string | null,
@@ -196,6 +232,32 @@ function registerClassificationReuse(
   if (!key) return;
   ctx.classificationReuseByKey.set(key, classificationId);
   ctx.classificationKeyByReuseId.set(classificationId, key);
+}
+
+function ensureClassificationReactivation(
+  ctx: RestructurePlanningContext,
+  classification: LoadedClassification,
+  targetName: string,
+  targetCategory: string,
+  classificationKey?: string | null
+): void {
+  if (classification.isActive) return;
+  if (ctx.plan.classificationsToReactivate.some((x) => x.currentId === classification.id)) {
+    return;
+  }
+  ctx.plan.classificationsToReactivate.push(
+    buildPlanChange({
+      currentId: classification.id,
+      currentName: classification.nameAr,
+      targetName,
+      currentCategory: classification.categoryName,
+      targetCategory,
+      action: "REACTIVATE",
+      reason: "إعادة تفعيل تصنيف غير نشط مطابق",
+      affectedExistingComplaintCount: classification.complaintCount,
+      classificationKey: classificationKey ?? undefined,
+    })
+  );
 }
 
 function appendCategoryKeep(ctx: RestructurePlanningContext, change: PlanChange): void {
@@ -232,15 +294,28 @@ function appendClassificationRename(ctx: RestructurePlanningContext, change: Pla
   appendLegacyComplaintTrack(ctx, change);
 }
 
+function categoryAlreadyTracked(ctx: RestructurePlanningContext, categoryId: string): boolean {
+  return (
+    ctx.plan.categoriesToKeep.some((x) => x.currentId === categoryId) ||
+    ctx.plan.categoriesToRename.some((x) => x.currentId === categoryId) ||
+    ctx.plan.categoriesToReactivate.some((x) => x.currentId === categoryId)
+  );
+}
+
 export function processCategoryMigration(
   ctx: RestructurePlanningContext,
   mig: EntityMigration
 ): MigrationProcessingResult {
-  const existing = resolveExistingCategory(ctx, mig.currentId, mig.currentName);
-  if (!existing) {
-    return { kind: "MISSING", conflict: `فئة الترحيل غير موجودة: ${mig.currentName}` };
+  const resolution = resolveExistingCategory(ctx, mig.currentId, mig.currentName);
+  if (resolution.status !== "FOUND") {
+    return {
+      kind: "MISSING",
+      conflict: resolutionConflictLabel(mig.currentName, resolution),
+    };
   }
+  const existing = resolution.category;
   registerCategoryReuse(ctx, mig.target, existing.id);
+  ensureCategoryReactivation(ctx, existing, mig.target);
   const change = buildPlanChange({
     currentId: existing.id,
     currentName: existing.nameAr,
@@ -252,7 +327,7 @@ export function processCategoryMigration(
     affectedExistingComplaintCount: existing.complaintCount,
   });
   if (mig.action === "KEEP" && existing.nameAr === mig.target) {
-    appendCategoryKeep(ctx, change);
+    if (existing.isActive) appendCategoryKeep(ctx, change);
   } else {
     appendCategoryRename(ctx, change);
   }
@@ -282,6 +357,7 @@ export function processClassificationMigration(
   const categoryName = target.categoryName || resolved.categoryName;
   const key = findProposedClassificationKey(ctx, categoryName, classificationName);
   registerClassificationReuse(ctx, key, resolved.id);
+  ensureClassificationReactivation(ctx, resolved, classificationName, categoryName, key);
   const isMove =
     mig.action.includes("MOVE") ||
     (Boolean(target.categoryName) &&
@@ -308,24 +384,23 @@ function resolveCompositeCategory(
   ctx: RestructurePlanningContext,
   categoryId: string | null | undefined,
   catNameHint: string
-): LoadedCategory | undefined {
-  return (
-    (categoryId ? ctx.categoriesById.get(categoryId) : undefined) ??
-    ctx.categoriesByNormalizedName.get(normalizeClassificationKeyword(catNameHint))
-  );
+): CategoryResolution {
+  return resolveExistingCategory(ctx, categoryId ?? "", catNameHint);
 }
 
 function planCompositeCategorySide(
   ctx: RestructurePlanningContext,
   mig: EntityMigration,
-  cat: LoadedCategory | undefined,
+  catResolution: CategoryResolution,
   targetCategoryName: string
 ): void {
-  if (!cat) {
-    ctx.plan.namingConflicts.push(`فئة مركبة غير موجودة: ${mig.currentName}`);
+  if (catResolution.status !== "FOUND") {
+    ctx.plan.namingConflicts.push(resolutionConflictLabel(mig.currentName, catResolution));
     return;
   }
+  const cat = catResolution.category;
   registerCategoryReuse(ctx, targetCategoryName, cat.id);
+  ensureCategoryReactivation(ctx, cat, targetCategoryName);
   const change = buildPlanChange({
     currentId: cat.id,
     currentName: cat.nameAr,
@@ -337,7 +412,7 @@ function planCompositeCategorySide(
     affectedExistingComplaintCount: cat.complaintCount,
   });
   if (cat.nameAr === targetCategoryName) {
-    appendCategoryKeep(ctx, change);
+    if (cat.isActive) appendCategoryKeep(ctx, change);
   } else {
     appendCategoryRename(ctx, change);
   }
@@ -368,6 +443,13 @@ export function processCompositeMigration(
 
   const key = findProposedClassificationKey(ctx, target.categoryName, target.classificationName);
   registerClassificationReuse(ctx, key, cls.id);
+  ensureClassificationReactivation(
+    ctx,
+    cls,
+    target.classificationName,
+    target.categoryName,
+    key
+  );
   const moveNeeded =
     normalizeClassificationKeyword(cls.categoryName) !==
     normalizeClassificationKeyword(target.categoryName);
@@ -404,15 +486,14 @@ export function processEntityMigrations(ctx: RestructurePlanningContext): void {
 export function ensureProposedCategories(ctx: RestructurePlanningContext): void {
   for (const cat of ctx.proposal.proposedTaxonomy) {
     if (!ctx.categoryReuseByTargetName.has(cat.category)) {
-      const existing = ctx.categoriesByNormalizedName.get(
-        normalizeClassificationKeyword(cat.category)
-      );
-      if (existing) {
+      const resolution = resolveExistingCategory(ctx, "", cat.category);
+      if (resolution.status === "AMBIGUOUS") {
+        ctx.plan.namingConflicts.push(resolutionConflictLabel(cat.category, resolution));
+      } else if (resolution.status === "FOUND") {
+        const existing = resolution.category;
         registerCategoryReuse(ctx, cat.category, existing.id);
-        const alreadyTracked =
-          ctx.plan.categoriesToKeep.some((x) => x.currentId === existing.id) ||
-          ctx.plan.categoriesToRename.some((x) => x.currentId === existing.id);
-        if (!alreadyTracked) {
+        ensureCategoryReactivation(ctx, existing, cat.category);
+        if (existing.isActive && !categoryAlreadyTracked(ctx, existing.id)) {
           ctx.plan.categoriesToKeep.push(
             buildPlanChange({
               currentId: existing.id,
@@ -450,7 +531,46 @@ export function ensureProposedCategories(ctx: RestructurePlanningContext): void 
 export function ensureProposedClassifications(ctx: RestructurePlanningContext): void {
   for (const cat of ctx.proposal.proposedTaxonomy) {
     for (const cls of cat.classifications) {
-      const reuseClsId = ctx.classificationReuseByKey.get(cls.classificationKey) ?? null;
+      let reuseClsId = ctx.classificationReuseByKey.get(cls.classificationKey) ?? null;
+      if (!reuseClsId) {
+        const resolution = resolveExistingClassification(
+          ctx,
+          "",
+          cls.classification,
+          cls.category,
+          { includeInactive: true }
+        );
+        if (resolution.status === "AMBIGUOUS") {
+          ctx.plan.namingConflicts.push(
+            resolutionConflictLabel(`${cls.category} / ${cls.classification}`, resolution)
+          );
+        } else if (resolution.status === "FOUND") {
+          reuseClsId = resolution.classification.id;
+          registerClassificationReuse(ctx, cls.classificationKey, reuseClsId);
+          ensureClassificationReactivation(
+            ctx,
+            resolution.classification,
+            cls.classification,
+            cls.category,
+            cls.classificationKey
+          );
+          if (resolution.classification.isActive) {
+            ctx.plan.classificationsToKeep.push(
+              buildPlanChange({
+                currentId: reuseClsId,
+                currentName: resolution.classification.nameAr,
+                targetName: cls.classification,
+                currentCategory: resolution.classification.categoryName,
+                targetCategory: cls.category,
+                action: "KEEP",
+                reason: "مطابقة بالاسم والفئة",
+                affectedExistingComplaintCount: resolution.classification.complaintCount,
+                classificationKey: cls.classificationKey,
+              })
+            );
+          }
+        }
+      }
       ctx.plan.finalClassificationTargets[cls.classificationKey] = {
         categoryName: cls.category,
         classificationName: cls.classification,
