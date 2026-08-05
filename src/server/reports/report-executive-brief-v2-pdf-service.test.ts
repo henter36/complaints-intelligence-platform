@@ -13,11 +13,13 @@ import {
   measurePreparedArabicText,
   resolveV2MonthlyChartAvailableHeight,
   resolveV2MonthlyChartHeight,
+  resolveV2MonthlyChartRenderPlan,
   resolveV2ConclusionsAvailableHeight,
 } from "./report-executive-brief-v2-pdf-service";
 import { preparePdfText } from "./arabic-pdf-text";
 import { REPORT_DESIGN_TOKENS } from "@/lib/reports/design-tokens";
 import { UNCLASSIFIED_CLASSIFICATION_KEY } from "@/lib/reports/classification-keys";
+import { MIN_CHART_HEIGHT } from "./report-chart-service";
 
 const DANGER = REPORT_DESIGN_TOKENS.colors.danger;
 
@@ -476,6 +478,56 @@ describe("V2 monthly chart contract + KPI packing", () => {
     expect(negativeSpace).toBe(0);
     expect(resolveV2MonthlyChartHeight(negativeSpace)).toBe(0);
     expect(resolveV2MonthlyChartHeight(-40)).toBe(0);
+  });
+
+  it("requires MIN_CHART_HEIGHT before calling the monthly chart renderer", () => {
+    expect(resolveV2MonthlyChartRenderPlan(520)).toEqual({
+      chartHeight: 520,
+      canRenderChart: true,
+    });
+    expect(resolveV2MonthlyChartRenderPlan(300)).toEqual({
+      chartHeight: 300,
+      canRenderChart: true,
+    });
+    expect(resolveV2MonthlyChartRenderPlan(299)).toEqual({
+      chartHeight: 299,
+      canRenderChart: false,
+    });
+    expect(resolveV2MonthlyChartRenderPlan(80)).toEqual({
+      chartHeight: 80,
+      canRenderChart: false,
+    });
+    expect(MIN_CHART_HEIGHT).toBe(300);
+  });
+
+  it("passes the same chartHeight to renderer and doc.image when space is sufficient", async () => {
+    const chartService = await import("./report-chart-service");
+    const pngSpy = vi.spyOn(chartService, "renderLineChartPng").mockResolvedValue(Buffer.from("png"));
+    const imageSpy = vi.spyOn(PDFDocument.prototype, "image").mockReturnValue(undefined as never);
+    try {
+      await renderExecutiveBriefV2Pdf(makeV2Report());
+      const flowCall = pngSpy.mock.calls.find(
+        (call) => (call[0] as { id?: string }).id === "v2-monthly-flow"
+      );
+      expect(flowCall).toBeDefined();
+      const renderHeight = flowCall![2] as number;
+      expect(renderHeight).toBeGreaterThanOrEqual(MIN_CHART_HEIGHT);
+      const matchingImage = imageSpy.mock.calls.find(
+        (call) => (call[3] as { height?: number } | undefined)?.height === renderHeight
+      );
+      expect(matchingImage).toBeDefined();
+      expect((matchingImage![3] as { height: number }).height).toBe(renderHeight);
+    } finally {
+      pngSpy.mockRestore();
+      imageSpy.mockRestore();
+    }
+  });
+
+  it("keeps conclusions available height non-negative and skips the box at zero", () => {
+    expect(resolveV2ConclusionsAvailableHeight(842, 42, 520)).toBeGreaterThan(0);
+    expect(resolveV2ConclusionsAvailableHeight(842, 42, 816)).toBe(0);
+    expect(resolveV2ConclusionsAvailableHeight(842, 42, 900)).toBe(0);
+    expect(resolveV2ConclusionsAvailableHeight(842, 42, 900)).toBeGreaterThanOrEqual(0);
   });
 
   it("keeps conclusions box within the footer reserve", () => {

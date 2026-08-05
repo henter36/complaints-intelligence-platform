@@ -30,7 +30,7 @@ import type {
 } from "@/lib/reports/report-contract";
 import type { ExecutiveBriefV2Data, ReportData } from "./report-data-service";
 import { isExecutiveBriefV2Data } from "./report-data-service";
-import { renderLineChartPng } from "./report-chart-service";
+import { renderLineChartPng, MIN_CHART_HEIGHT } from "./report-chart-service";
 import { preparePdfText } from "./arabic-pdf-text";
 import { getComparisonModeDescription } from "@/lib/reports/comparison-mode-labels";
 import {
@@ -103,13 +103,25 @@ export function resolveV2MonthlyChartHeight(availableForChart: number): number {
   return Math.min(520, Math.max(0, availableForChart));
 }
 
+/** Decide whether remaining space can host a real chart (must be ≥ renderer minimum). */
+export function resolveV2MonthlyChartRenderPlan(availableForChart: number): {
+  chartHeight: number;
+  canRenderChart: boolean;
+} {
+  const chartHeight = resolveV2MonthlyChartHeight(availableForChart);
+  return {
+    chartHeight,
+    canRenderChart: chartHeight >= MIN_CHART_HEIGHT,
+  };
+}
+
 /** Remaining height for conclusions; y is absolute from page top so top margin is not subtracted again. */
 export function resolveV2ConclusionsAvailableHeight(
   pageHeight: number,
   margin: number,
   y: number
 ): number {
-  return pageHeight - margin - 26 - y;
+  return Math.max(0, pageHeight - margin - 26 - y);
 }
 
 type V2Context = {
@@ -1058,8 +1070,7 @@ async function renderPage2(ctx: V2Context): Promise<void> {
     layout.margin,
     y
   );
-  const chartHeight = resolveV2MonthlyChartHeight(availableForChart);
-  const minPracticalChartHeight = 80;
+  const { chartHeight, canRenderChart } = resolveV2MonthlyChartRenderPlan(availableForChart);
 
   const monthlyChartSeries = [
     {
@@ -1086,11 +1097,11 @@ async function renderPage2(ctx: V2Context): Promise<void> {
     },
   ];
 
-  if (chartHeight < minPracticalChartHeight) {
+  if (!canRenderChart) {
     warnings.push("تعذر رسم مخطط الاتجاه الزمني ضمن المساحة المتبقية من الصفحة.");
     if (chartHeight > 0) {
       doc.font("Body").fontSize(11).fillColor(COLORS.neutral).text(
-        preparePdfText("لا توجد بيانات للاتجاه الزمني."),
+        preparePdfText("لا تتوفر مساحة كافية لعرض مخطط الاتجاه الزمني في هذه الصفحة."),
         margin,
         y,
         {
@@ -1106,6 +1117,7 @@ async function renderPage2(ctx: V2Context): Promise<void> {
     try {
       // Single Y-axis combo chart — system total is intentionally excluded.
       // Empty series triggers the chart emptyState when hasFlow is false.
+      // Pass the same chartHeight to renderer and doc.image so PNG is never compressed.
       const png = await renderLineChartPng({
         id: "v2-monthly-flow",
         kind: "chart",
@@ -1442,6 +1454,9 @@ function renderPage4(ctx: V2Context): void {
     layout.margin,
     y
   );
+  if (availableH <= 0) {
+    return;
+  }
   const conclusionsBoxH = Math.max(
     boxHdrH + lineH + 12,
     Math.min(

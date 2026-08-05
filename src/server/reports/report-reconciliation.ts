@@ -1,5 +1,8 @@
 import type { ClassificationBriefRow, RegionReferenceRow } from "@/lib/reports/report-contract";
-import { UNCLASSIFIED_CLASSIFICATION_KEY } from "@/lib/reports/classification-keys";
+import {
+  UNCLASSIFIED_CLASSIFICATION_KEY,
+  UNCLASSIFIED_CLASSIFICATION_LABEL,
+} from "@/lib/reports/classification-keys";
 
 /** Visible PDF-style sums for regional reference rows. */
 export function sumRegionReferenceRows(rows: ReadonlyArray<RegionReferenceRow>): {
@@ -53,7 +56,9 @@ export function assertUnclassifiedUsesSentinel(
   rows: ReadonlyArray<{ classificationId: string; classificationName: string }>
 ): void {
   const unclassified = rows.filter(
-    (row) => row.classificationName === "غير مصنف" || row.classificationId === UNCLASSIFIED_CLASSIFICATION_KEY
+    (row) =>
+      row.classificationName === UNCLASSIFIED_CLASSIFICATION_LABEL
+      || row.classificationId === UNCLASSIFIED_CLASSIFICATION_KEY
   );
   for (const row of unclassified) {
     if (row.classificationId !== UNCLASSIFIED_CLASSIFICATION_KEY) {

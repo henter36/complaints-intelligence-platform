@@ -602,6 +602,122 @@ describe("buildComparisonResult — currentTotal and previousTotal", () => {
   });
 });
 
+describe("regional reconciliation warnings", () => {
+  beforeEach(() => dbMocks.findMany.mockReset());
+
+  it("does not warn when regional sums match period totals", async () => {
+    const { buildComparisonResult } = await loadModule();
+    mockPeriods(
+      [row({ region: R_RIYADH }), row({ region: R_MAKKAH })],
+      [row({ region: R_RIYADH })]
+    );
+    const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
+    expect(result.warnings.some((w) => w.code === "REGIONAL_RECONCILIATION_DRIFT")).toBe(false);
+  });
+
+  it("throws in strict mode when reconciliation drifts", async () => {
+    const { validateRegionalReconciliation } = await loadModule();
+    const warnings: Array<{ code: string }> = [];
+    expect(() =>
+      validateRegionalReconciliation(
+        {
+          currentRows: [{ currentCount: 1 }],
+          previousRows: [{ previousCount: 9 }],
+          currentTotal: 5,
+          previousTotal: 9,
+        },
+        warnings as never,
+        true
+      )
+    ).toThrow(/current sum/);
+    expect(warnings).toHaveLength(0);
+  });
+
+  it("adds REGIONAL_RECONCILIATION_DRIFT without throwing when not strict", async () => {
+    const { validateRegionalReconciliation, comparisonWarningMessage } = await loadModule();
+    const existing = {
+      code: "NO_COMPARISON_PERIOD" as const,
+      message: "تعذّر احتساب فترة مرجعية للمقارنة لهذه الفترة.",
+    };
+    const warnings: Array<{
+      code: string;
+      message: string;
+      currentTotal?: number;
+      previousTotal?: number | null;
+    }> = [existing];
+    expect(() =>
+      validateRegionalReconciliation(
+        {
+          currentRows: [{ currentCount: 1 }],
+          previousRows: [{ previousCount: 2 }],
+          currentTotal: 9,
+          previousTotal: 2,
+        },
+        warnings as never,
+        false
+      )
+    ).not.toThrow();
+    expect(warnings[0]).toBe(existing);
+    expect(warnings.some((w) => w.code === "REGIONAL_RECONCILIATION_DRIFT")).toBe(true);
+    const drift = warnings.find((w) => w.code === "REGIONAL_RECONCILIATION_DRIFT")!;
+    expect(comparisonWarningMessage(drift as never)).toContain("تعذر التحقق من تطابق مجموع المناطق");
+    expect(drift).toMatchObject({ currentTotal: 9, previousTotal: 2 });
+  });
+
+  it("keeps independent current and previous reconciliation row arrays", async () => {
+    const currentCounts = new Map([
+      ["a", 3],
+      ["b", 2],
+    ]);
+    const previousCounts = new Map([
+      ["a", 1],
+      ["c", 4],
+    ]);
+    const currentReconciliationRows = Array.from(
+      currentCounts.values(),
+      (currentCount) => ({ currentCount })
+    );
+    const previousReconciliationRows = Array.from(
+      previousCounts.values(),
+      (previousCount) => ({ previousCount })
+    );
+    expect(currentReconciliationRows).not.toBe(previousReconciliationRows as unknown);
+    expect(currentReconciliationRows.reduce((s, r) => s + r.currentCount, 0)).toBe(5);
+    expect(previousReconciliationRows.reduce((s, r) => s + r.previousCount, 0)).toBe(5);
+    expect(currentReconciliationRows.every((r) => "previousCount" in r)).toBe(false);
+    expect(previousReconciliationRows.every((r) => "currentCount" in r)).toBe(false);
+  });
+
+  it("non-strict mode records drift without stopping the caller", async () => {
+    const { validateRegionalReconciliation, buildComparisonResult, comparisonWarningMessage } =
+      await loadModule();
+    const warnings: Array<{ code: string; message: string }> = [
+      { code: "MISSING_DEPARTMENT", message: "keep-me" },
+    ];
+    validateRegionalReconciliation(
+      {
+        currentRows: [{ currentCount: 1 }],
+        previousRows: [{ previousCount: 1 }],
+        currentTotal: 99,
+        previousTotal: 1,
+      },
+      warnings as never,
+      false
+    );
+    expect(warnings[0]?.code).toBe("MISSING_DEPARTMENT");
+    expect(warnings.some((w) => w.code === "REGIONAL_RECONCILIATION_DRIFT")).toBe(true);
+    const drift = warnings.find((w) => w.code === "REGIONAL_RECONCILIATION_DRIFT")!;
+    expect(comparisonWarningMessage(drift as never)).toContain("تعذر التحقق من تطابق مجموع المناطق");
+
+    mockPeriods([row({ region: R_RIYADH })], [row({ region: R_RIYADH })]);
+    const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"), {
+      strictRegionalReconciliation: false,
+    });
+    expect(result.currentTotal).toBe(1);
+    expect(result.warnings.some((w) => w.code === "REGIONAL_RECONCILIATION_DRIFT")).toBe(false);
+  });
+});
+
 describe("executiveSummaryPoints", () => {
   beforeEach(() => dbMocks.findMany.mockReset());
 

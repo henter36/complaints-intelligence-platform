@@ -6,6 +6,7 @@ import {
   assertRegionalReconciliation,
   displayRegionName,
   normalizeRegionName,
+  type RegionalReconciliationInput,
 } from "@/lib/reports/region-normalization";
 import { comparisonHalfOpenPeriod } from "@/lib/reports/period-range";
 import type { ComparisonMode } from "@/lib/reports/report-contract";
@@ -88,7 +89,13 @@ export type ComparisonWarning =
   | { code: "CHART_TRUNCATED"; message: string; shown: number; total: number }
   | { code: "RISES_TRUNCATED"; message: string; shown: number; total: number }
   | { code: "MISSING_DEPARTMENT"; count: number; message: string }
-  | { code: "MISSING_CLASSIFICATION"; count: number; message: string };
+  | { code: "MISSING_CLASSIFICATION"; count: number; message: string }
+  | {
+      code: "REGIONAL_RECONCILIATION_DRIFT";
+      message: string;
+      currentTotal: number;
+      previousTotal: number | null;
+    };
 
 /**
  * All dept+class pairs that appeared in either the current or the previous
@@ -286,9 +293,31 @@ function compareRegionChangeRows(a: RegionChangeRow, b: RegionChangeRow): number
   return a.regionName.localeCompare(b.regionName, "ar");
 }
 
+/** Captures reconciliation drift as a warning in production; throws when strict. */
+export function validateRegionalReconciliation(
+  input: RegionalReconciliationInput,
+  warnings: ComparisonWarning[],
+  strict: boolean
+): void {
+  try {
+    assertRegionalReconciliation(input);
+  } catch (error) {
+    if (strict) throw error;
+    warnings.push({
+      code: "REGIONAL_RECONCILIATION_DRIFT",
+      message:
+        "تعذر التحقق من تطابق مجموع المناطق مع إجمالي الفترة؛ تم إنشاء التقرير مع تحذير للمراجعة.",
+      currentTotal: input.currentTotal,
+      previousTotal: input.previousTotal,
+    });
+  }
+}
+
 function buildRegionChanges(
   current: ComparisonComplaint[],
-  previous: ComparisonComplaint[]
+  previous: ComparisonComplaint[],
+  warnings: ComparisonWarning[],
+  strictRegionalReconciliation: boolean
 ): RegionChangeRow[] {
   const currentCounts = countByRegion(current);
   const previousCounts = countByRegion(previous);
@@ -309,14 +338,29 @@ function buildRegionChanges(
     });
   }
 
-  const sorted = rows.sort(compareRegionChangeRows);
-  assertRegionalReconciliation({
-    currentRows: sorted,
-    previousRows: sorted,
-    currentTotal: current.length,
-    previousTotal: previous.length,
-  });
-  return sorted;
+  rows.sort(compareRegionChangeRows);
+
+  const currentReconciliationRows = Array.from(
+    currentCounts.values(),
+    (currentCount) => ({ currentCount })
+  );
+  const previousReconciliationRows = Array.from(
+    previousCounts.values(),
+    (previousCount) => ({ previousCount })
+  );
+
+  validateRegionalReconciliation(
+    {
+      currentRows: currentReconciliationRows,
+      previousRows: previousReconciliationRows,
+      currentTotal: current.length,
+      previousTotal: previous.length,
+    },
+    warnings,
+    strictRegionalReconciliation
+  );
+
+  return rows;
 }
 
 // ---------------------------------------------------------------------------
@@ -628,6 +672,8 @@ export type BuildComparisonOptions = {
   minimumIncreaseCount?: number;
   comparisonMode?: ComparisonMode;
   includeComparison?: boolean;
+  /** When true, regional reconciliation drift throws. Defaults to NODE_ENV === "test". */
+  strictRegionalReconciliation?: boolean;
 };
 
 /**
@@ -641,6 +687,8 @@ export async function buildComparisonResult(
 ): Promise<ComparisonResult> {
   const minimumIncreaseCount = options.minimumIncreaseCount ?? DEFAULT_MINIMUM_INCREASE_COUNT;
   const comparisonMode = options.comparisonMode ?? "PREVIOUS_EQUIVALENT_PERIOD";
+  const strictRegionalReconciliation =
+    options.strictRegionalReconciliation ?? process.env.NODE_ENV === "test";
 
   // The report's own filters express the current period as inclusive date-only
   // strings [from, to]. Convert to a half-open UTC interval [from, toExclusive)
@@ -675,7 +723,9 @@ export async function buildComparisonResult(
   const trend = buildRegionTrend(current, currentPeriod);
   if (trend.warning) warnings.push(trend.warning);
 
-  const regionChanges = previousPeriod ? buildRegionChanges(current, previous) : buildRegionChanges(current, []);
+  const regionChanges = previousPeriod
+    ? buildRegionChanges(current, previous, warnings, strictRegionalReconciliation)
+    : buildRegionChanges(current, [], warnings, strictRegionalReconciliation);
   const regionSubjectChanges = previousPeriod ? buildRegionSubjectChanges(current, previous) : [];
 
   const rises = previousPeriod

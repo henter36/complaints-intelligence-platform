@@ -8,21 +8,19 @@ import {
 } from "./region-normalization";
 
 describe("normalizeRegionName", () => {
-  it("collapses eastern and makkah aliases into one canonical bucket each", () => {
-    const eastern = [
-      "المنطقة الشرقية",
-      "الشرقية",
-      "منطقة الشرقية",
-      " المنطقة الشرقية ",
-    ].map((value) => normalizeRegionName(value));
-    expect(new Set(eastern)).toEqual(new Set(["المنطقة الشرقية"]));
+  it("collapses eastern aliases including منطقة الشرقية via regionKey", () => {
+    expect(normalizeRegionName("المنطقة الشرقية")).toBe("المنطقة الشرقية");
+    expect(normalizeRegionName("منطقة الشرقية")).toBe("المنطقة الشرقية");
+    expect(normalizeRegionName("الشرقية")).toBe("المنطقة الشرقية");
+    expect(normalizeRegionName("الشرقيه")).toBe("المنطقة الشرقية");
+  });
 
-    const makkah = [
-      "منطقة مكة المكرمة",
-      "مكة المكرمة",
-      "مكة",
-    ].map((value) => normalizeRegionName(value));
-    expect(new Set(makkah)).toEqual(new Set(["منطقة مكة المكرمة"]));
+  it("collapses makkah and madinah aliases", () => {
+    expect(normalizeRegionName("مكة")).toBe("منطقة مكة المكرمة");
+    expect(normalizeRegionName("مكة المكرمة")).toBe("منطقة مكة المكرمة");
+    expect(normalizeRegionName("المدينة")).toBe("منطقة المدينة المنورة");
+    expect(normalizeRegionName("المدينة المنورة")).toBe("منطقة المدينة المنورة");
+    expect(normalizeRegionName("الرياض")).toBe("منطقة الرياض");
   });
 
   it("maps blank regions to the unspecified sentinel and displays Arabic label", () => {

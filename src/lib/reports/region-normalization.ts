@@ -29,6 +29,20 @@ const SAUDI_REGION_NAMES = [
   "منطقة الجوف",
 ] as const;
 
+type SaudiRegionName = (typeof SAUDI_REGION_NAMES)[number];
+
+/**
+ * Extra aliases beyond the canonical name itself.
+ * Keys are already passed through regionKey when building the lookup map.
+ * Do not add forms that regionKey already collapses (e.g. "منطقه الشرقيه" → "الشرقيه").
+ */
+const REGION_ALIASES_BY_CANONICAL: Partial<Record<SaudiRegionName, readonly string[]>> = {
+  "المنطقة الشرقية": ["الشرقيه"],
+  "منطقة مكة المكرمة": ["مكه", "مكه المكرمه"],
+  "منطقة المدينة المنورة": ["المدينه", "المدينه المنوره"],
+  "منطقة الرياض": ["الرياض"],
+};
+
 function regionKey(value: string): string {
   return normalizeArabic(value)
     .replace(/^منطقه\s+/, "")
@@ -38,25 +52,11 @@ function regionKey(value: string): string {
 }
 
 const CANONICAL_REGION_BY_KEY = new Map(
-  SAUDI_REGION_NAMES.flatMap((name) => {
-    const key = regionKey(name);
-    const aliases: Array<[string, string]> = [[key, name]];
-    if (name === "المنطقة الشرقية") {
-      aliases.push(["الشرقيه", name]);
-      aliases.push(["منطقه الشرقيه", name]);
-    }
-    if (name === "منطقة مكة المكرمة") {
-      aliases.push(["مكه", name]);
-      aliases.push(["مكه المكرمه", name]);
-    }
-    if (name === "منطقة المدينة المنورة") {
-      aliases.push(["المدينه", name]);
-      aliases.push(["المدينه المنوره", name]);
-    }
-    if (name === "منطقة الرياض") {
-      aliases.push(["الرياض", name]);
-    }
-    return aliases;
+  SAUDI_REGION_NAMES.flatMap((canonicalName) => {
+    const aliases = REGION_ALIASES_BY_CANONICAL[canonicalName] ?? [];
+    return [canonicalName, ...aliases].map(
+      (alias) => [regionKey(alias), canonicalName] as const
+    );
   })
 );
 
