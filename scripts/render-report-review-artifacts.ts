@@ -26,9 +26,9 @@ const briefData: ExecutiveBriefData = {
     { regionName: "المنطقة الشرقية", currentCount: 0, previousCount: 1, difference: -1, changeRate: -100, complianceRate: null, averageResolutionDays: null, openCount: 0, closedCount: 0, currentlyLate: 0, direction: "انخفاض" },
   ],
   topClassifications: [
-    { classificationId: "c1", classificationName: "طلب نقل", categoryId: "cat-c1", categoryName: "فئة", classificationPath: "فئة / طلب نقل", currentCount: 2, previousCount: 0, difference: 2, changeRate: null, shareOfTotal: 66.7 },
-    { classificationId: "c2", classificationName: "طلب علاج", categoryId: "cat-c2", categoryName: "فئة", classificationPath: "فئة / طلب علاج", currentCount: 1, previousCount: 0, difference: 1, changeRate: null, shareOfTotal: 33.3 },
-    { classificationId: "c3", classificationName: "خدمات تشغيلية", categoryId: "cat-c3", categoryName: "فئة", classificationPath: "فئة / خدمات تشغيلية", currentCount: 0, previousCount: 1, difference: -1, changeRate: -100, shareOfTotal: 0 },
+    { classificationId: "c1", classificationName: "طلب نقل", categoryId: "cat1", categoryName: "الخدمات", classificationPath: "الخدمات / طلب نقل", currentCount: 2, previousCount: 0, difference: 2, changeRate: null, shareOfTotal: 66.7 },
+    { classificationId: "c2", classificationName: "طلب علاج", categoryId: "cat1", categoryName: "الخدمات", classificationPath: "الخدمات / طلب علاج", currentCount: 1, previousCount: 0, difference: 1, changeRate: null, shareOfTotal: 33.3 },
+    { classificationId: "c3", classificationName: "خدمات تشغيلية", categoryId: "cat1", categoryName: "الخدمات", classificationPath: "الخدمات / خدمات تشغيلية", currentCount: 0, previousCount: 1, difference: -1, changeRate: -100, shareOfTotal: 0 },
   ],
   comparativeTimeline: {
     current: { label: "الفترة الحالية", points: [{ relativeDay: 1, count: 1 }, { relativeDay: 2, count: 2 }] },
@@ -93,7 +93,8 @@ function baseReport(mode: "DIGITAL_EXECUTIVE_BRIEF" | "PRINT_EXECUTIVE_BRIEF" | 
       { regionName: "المنطقة الشرقية", subject: "استفسار عن معاملة", currentCount: 1, previousCount: 8, difference: -7, changeRate: -87.5, direction: "انخفاض" },
     ],
     deptClassRises: [{
-        departmentId: "d1", departmentName: "إدارة المتابعة", classificationId: "c1", classificationName: "فئة / طلب نقل", currentCount: 2, previousCount: 0,
+        departmentId: "d1", departmentName: "إدارة المتابعة", classificationId: "c1",
+        classificationName: "طلب نقل", classificationPath: "الخدمات / طلب نقل", currentCount: 2, previousCount: 0,
         difference: 2, changeRate: null, classificationContribution: 100,
       }],
       deptClassRisesTotal: 1,
@@ -117,7 +118,7 @@ function fullReport(): ReportData {
       share: row.currentCount / 3 * 100,
     })),
     continuityRows: [{
-      departmentName: "إدارة المتابعة", classificationName: "طلب نقل",
+      departmentName: "إدارة المتابعة", classificationName: "طلب نقل", classificationPath: "الخدمات / طلب نقل",
       currentCount: 2, previousCount: 1, appearsInBothPeriods: true, recurrenceType: "persistent",
     }],
   };

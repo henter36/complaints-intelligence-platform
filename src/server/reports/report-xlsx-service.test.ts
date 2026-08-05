@@ -196,6 +196,7 @@ describe("XLSX report rendering", () => {
             departmentName: "إدارة الرعاية الصحية",
             classificationId: "c1",
             classificationName: "تصنيف الرعاية الصحية",
+            classificationPath: "الرعاية الصحية / تصنيف الرعاية الصحية",
             currentCount: 5,
             previousCount: 2,
             difference: 3,

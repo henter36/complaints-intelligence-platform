@@ -980,7 +980,7 @@ function buildAttentionItems(context: ExecutiveBriefRenderContext): AttentionIte
   const topRise = data.comparisonData?.deptClassRises[0];
   if (topRise && hasReferencePeriod(context)) {
     items.push({
-      text: `ارتفاع مؤثر في ${topRise.departmentName} / ${topRise.classificationName} بمقدار ${formatReportNumber(topRise.difference, { sign: true })}.`,
+      text: `ارتفاع مؤثر في ${topRise.departmentName} / ${topRise.classificationPath ?? topRise.classificationName} بمقدار ${formatReportNumber(topRise.difference, { sign: true })}.`,
       assessment: "warning",
     });
   }
@@ -1003,7 +1003,7 @@ function renderPage4(context: ExecutiveBriefRenderContext): void {
   if (rises.length > 0) {
     const riseRows: RiseTableRow[] = rises.slice(0, 8).map((r) => ({
       departmentName: r.departmentName,
-      classificationName: r.classificationName,
+      classificationName: r.classificationPath ?? r.classificationName,
       currentCount: r.currentCount,
       previousCount: r.previousCount,
       difference: r.difference,

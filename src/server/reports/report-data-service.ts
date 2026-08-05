@@ -332,7 +332,7 @@ function deptClassRisesTable(rows: DeptClassRiseRow[], totalMatched: number): Re
     title: "الإدارات والتصنيفات التي شهدت ارتفاعًا عن الأسبوع السابق",
     columns: [
       { key: "departmentName", label: "الإدارة", format: "text" },
-      { key: "classificationName", label: "التصنيف", format: "text" },
+      { key: "classificationPath", label: "التصنيف", format: "text" },
       { key: "currentCount", label: "الحالي", format: "number" },
       { key: "previousCount", label: "السابق", format: "number" },
       { key: "difference", label: "الفرق", format: "signed-number" },
@@ -341,7 +341,7 @@ function deptClassRisesTable(rows: DeptClassRiseRow[], totalMatched: number): Re
     ],
     rows: rows.map((row) => ({
       departmentName: row.departmentName,
-      classificationName: row.classificationName,
+      classificationPath: row.classificationPath ?? row.classificationName,
       currentCount: row.currentCount,
       previousCount: row.previousCount,
       difference: row.difference,

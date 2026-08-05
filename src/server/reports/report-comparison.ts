@@ -78,6 +78,7 @@ export type DeptClassRiseRow = {
   departmentName: string;
   classificationId: string;
   classificationName: string;
+  classificationPath: string;
   currentCount: number;
   previousCount: number;
   difference: number;
@@ -108,6 +109,7 @@ export type DeptClassPeriodCount = {
   departmentName: string;
   classificationId: string;
   classificationName: string;
+  classificationPath: string;
   currentCount: number;
   previousCount: number;
 };
@@ -554,7 +556,8 @@ function buildDeptClassRises(
     departmentId: acc.departmentId,
     departmentName: acc.departmentName,
     classificationId: acc.classificationId,
-    classificationName: acc.classificationPath,
+    classificationName: acc.classificationName,
+    classificationPath: acc.classificationPath,
     currentCount: acc.currentCount,
     previousCount: acc.previousCount,
   }));
@@ -580,7 +583,8 @@ function buildDeptClassRises(
       departmentId: row.departmentId,
       departmentName: row.departmentName,
       classificationId: row.classificationId,
-      classificationName: row.classificationPath,
+      classificationName: row.classificationName,
+      classificationPath: row.classificationPath,
       currentCount: row.currentCount,
       previousCount: row.previousCount,
       difference: row.difference,

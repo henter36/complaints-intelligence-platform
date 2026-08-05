@@ -306,6 +306,7 @@ export type ReportMatrixSection = {
 export type ContinuityRow = {
   departmentName: string;
   classificationName: string;
+  classificationPath: string;
   currentCount: number;
   previousCount: number;
   appearsInBothPeriods: boolean;

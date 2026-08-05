@@ -417,13 +417,10 @@ export function buildTopClassifications(
     ) {
       return UNCLASSIFIED_CLASSIFICATION_KEY;
     }
-    // Rare name-only groups (tests / legacy) keep a stable non-Arabic-sentinel key.
     return group.name;
   };
 
-  const prevMap = new Map(
-    previousDistributions.map((g) => [toRowKey(g), g.total])
-  );
+  const prevMap = new Map(previousDistributions.map((g) => [toRowKey(g), g.total]));
 
   return currentDistributions.slice(0, limit).map((group) => {
     const currentCount = group.total;
@@ -774,6 +771,7 @@ function buildContinuityRows(allPairs: DeptClassPeriodCount[]): ContinuityRow[] 
     rows.push({
       departmentName: pair.departmentName,
       classificationName: pair.classificationName,
+      classificationPath: pair.classificationPath ?? pair.classificationName,
       currentCount: pair.currentCount,
       previousCount: pair.previousCount,
       appearsInBothPeriods: recurrenceType === "persistent",

@@ -1376,7 +1376,7 @@ function renderPage4(ctx: V2Context): void {
   y = drawSectionTitle(doc, "الارتفاعات الملحوظة", margin, y, contentWidth);
   const rises = hasPrevPeriod ? (data.comparisonData?.deptClassRises ?? []).slice(0, 6) : [];
   const riseTexts = rises.length > 0
-    ? rises.map((r) => `${r.departmentName} / ${r.classificationName}: ${formatReportNumber(r.difference, { sign: true })} شكوى`)
+    ? rises.map((r) => `${r.departmentName} / ${r.classificationPath ?? r.classificationName}: ${formatReportNumber(r.difference, { sign: true })} شكوى`)
     : ["لا توجد ارتفاعات إدارية حادة في هذه الفترة."];
   const riseBoxH = Math.max(60, 18 + riseTexts.length * 22);
   doc.roundedRect(margin, y, contentWidth, riseBoxH, REPORT_DESIGN_TOKENS.card.radius)
