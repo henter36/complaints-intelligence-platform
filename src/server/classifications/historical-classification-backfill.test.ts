@@ -351,3 +351,247 @@ describe("fingerprint isolation from management", () => {
     expect(createHash("sha256").update("relation-only").digest("hex")).toBeTruthy();
   });
 });
+
+describe("verify protects rollback terminal states", () => {
+  function baseRun(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "run-1",
+      operation: "APPLY",
+      status: "APPLIED",
+      manifestHash: "mh",
+      taxonomyFingerprint: "fp",
+      periodFrom: new Date("2025-09-08T00:00:00.000Z"),
+      periodToExclusive: new Date("2026-07-16T00:00:00.000Z"),
+      eligibleCount: 1,
+      plannedCount: 1,
+      appliedCount: 1,
+      skippedCount: 0,
+      failedCount: 0,
+      batchSize: 100,
+      rollbackOfRunId: null,
+      ...overrides,
+    };
+  }
+
+  function baseItem(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "item-1",
+      runId: "run-1",
+      complaintId: "cmp-1",
+      result: "APPLIED",
+      skipReason: null,
+      targetClassificationId: "cls-a",
+      targetCategoryId: "cat-1",
+      expectedVersion: 1,
+      previousClassificationId: null,
+      previousCategoryId: null,
+      previousAssignmentSource: null,
+      sourceDetailHash: "hash",
+      ...overrides,
+    };
+  }
+
+  function createVerifyDb(input: {
+    run: ReturnType<typeof baseRun>;
+    items: ReturnType<typeof baseItem>[];
+    complaints?: Array<Record<string, unknown>>;
+  }) {
+    const runState = { ...input.run };
+    return {
+      classificationBackfillRun: {
+        findUnique: vi.fn(async () => runState),
+        update: vi.fn(async ({ data }: { data: Record<string, unknown> }) => {
+          Object.assign(runState, data);
+          return runState;
+        }),
+      },
+      classificationBackfillItem: {
+        findMany: vi.fn(async () => input.items),
+        count: vi.fn(async () => 0),
+      },
+      complaint: {
+        findMany: vi.fn(async () => input.complaints ?? []),
+        count: vi.fn(async () => 0),
+      },
+      classification: {
+        findMany: vi.fn(async () => sampleTaxonomy()),
+      },
+      auditLog: {
+        create: vi.fn(async () => ({ id: "audit-1" })),
+      },
+      _runState: runState,
+    };
+  }
+
+  it("does not write VERIFY_FAILED after ROLLED_BACK", async () => {
+    const { verifyHistoricalClassificationBackfill } = await import(
+      "./historical-classification-backfill"
+    );
+    const db = createVerifyDb({
+      run: baseRun({ status: "ROLLED_BACK", appliedCount: 1 }),
+      items: [
+        baseItem({ result: "ROLLED_BACK" }),
+      ],
+      complaints: [
+        {
+          id: "cmp-1",
+          classificationAssignmentRunId: null,
+          classificationAssignmentSource: null,
+        },
+      ],
+    });
+
+    const result = await verifyHistoricalClassificationBackfill(db as never, { runId: "run-1" });
+    expect(result.status).toBe("ROLLED_BACK");
+    expect(db.classificationBackfillRun.update).not.toHaveBeenCalled();
+    expect(result.invariants.some((i) => i.code === "APPLIED_COUNT")).toBe(false);
+  });
+
+  it("does not write VERIFY_FAILED for PARTIALLY_ROLLED_BACK with ROLLBACK_SKIPPED", async () => {
+    const { verifyHistoricalClassificationBackfill } = await import(
+      "./historical-classification-backfill"
+    );
+    const db = createVerifyDb({
+      run: baseRun({ status: "PARTIALLY_ROLLED_BACK", appliedCount: 2 }),
+      items: [
+        baseItem({ id: "i1", complaintId: "cmp-1", result: "ROLLED_BACK" }),
+        baseItem({ id: "i2", complaintId: "cmp-2", result: "ROLLBACK_SKIPPED" }),
+      ],
+      complaints: [
+        {
+          id: "cmp-1",
+          classificationAssignmentRunId: null,
+          classificationAssignmentSource: null,
+        },
+      ],
+    });
+
+    const result = await verifyHistoricalClassificationBackfill(db as never, { runId: "run-1" });
+    expect(result.status).toBe("PARTIALLY_ROLLED_BACK");
+    expect(db.classificationBackfillRun.update).not.toHaveBeenCalled();
+  });
+
+  it("keeps ROLLBACK operation run status unchanged", async () => {
+    const { verifyHistoricalClassificationBackfill } = await import(
+      "./historical-classification-backfill"
+    );
+    const db = createVerifyDb({
+      run: baseRun({
+        id: "rb-1",
+        operation: "ROLLBACK",
+        status: "ROLLED_BACK",
+        rollbackOfRunId: "run-1",
+      }),
+      items: [baseItem({ runId: "rb-1", result: "ROLLED_BACK" })],
+      complaints: [
+        {
+          id: "cmp-1",
+          classificationAssignmentRunId: null,
+          classificationAssignmentSource: null,
+        },
+      ],
+    });
+
+    const result = await verifyHistoricalClassificationBackfill(db as never, { runId: "rb-1" });
+    expect(result.status).toBe("ROLLED_BACK");
+    expect(db.classificationBackfillRun.update).not.toHaveBeenCalled();
+  });
+
+  it("writes VERIFY_FAILED for a failed APPLY verification", async () => {
+    const { verifyHistoricalClassificationBackfill } = await import(
+      "./historical-classification-backfill"
+    );
+    const db = createVerifyDb({
+      run: baseRun({ status: "APPLIED", appliedCount: 1 }),
+      items: [baseItem({ result: "APPLIED", targetClassificationId: "cls-a" })],
+      complaints: [
+        {
+          id: "cmp-1",
+          classificationId: "wrong",
+          categoryId: "cat-1",
+          classificationAssignmentSource: "HISTORICAL_BACKFILL",
+          classificationAssignmentRunId: "run-1",
+          classificationTaxonomyFingerprint: "fp",
+          isDeleted: false,
+          classification: { categoryId: "cat-1" },
+        },
+      ],
+    });
+
+    const result = await verifyHistoricalClassificationBackfill(db as never, { runId: "run-1" });
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("VERIFY_FAILED");
+    expect(db._runState.status).toBe("VERIFY_FAILED");
+  });
+
+  it("restores operational status after a later successful verify from VERIFY_FAILED", async () => {
+    const { verifyHistoricalClassificationBackfill } = await import(
+      "./historical-classification-backfill"
+    );
+    const db = createVerifyDb({
+      run: baseRun({ status: "VERIFY_FAILED", appliedCount: 1 }),
+      items: [baseItem({ result: "APPLIED", targetClassificationId: "cls-a", targetCategoryId: "cat-1" })],
+      complaints: [
+        {
+          id: "cmp-1",
+          classificationId: "cls-a",
+          categoryId: "cat-1",
+          classificationAssignmentSource: "HISTORICAL_BACKFILL",
+          classificationAssignmentRunId: "run-1",
+          classificationTaxonomyFingerprint: "fp",
+          isDeleted: false,
+          classification: { categoryId: "cat-1" },
+        },
+      ],
+    });
+
+    const result = await verifyHistoricalClassificationBackfill(db as never, { runId: "run-1" });
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe("APPLIED");
+    expect(db._runState.status).toBe("APPLIED");
+  });
+
+  it("does not mutate terminal rollback status even when rolled-back items look inconsistent", async () => {
+    const { verifyHistoricalClassificationBackfill } = await import(
+      "./historical-classification-backfill"
+    );
+    const db = createVerifyDb({
+      run: baseRun({ status: "ROLLED_BACK", appliedCount: 1 }),
+      items: [baseItem({ result: "ROLLED_BACK" })],
+      complaints: [
+        {
+          id: "cmp-1",
+          // Still linked — verify fails invariants but must not overwrite status
+          classificationAssignmentRunId: "run-1",
+          classificationAssignmentSource: "HISTORICAL_BACKFILL",
+        },
+      ],
+    });
+
+    const result = await verifyHistoricalClassificationBackfill(db as never, { runId: "run-1" });
+    expect(result.ok).toBe(false);
+    expect(result.status).toBe("ROLLED_BACK");
+    expect(db.classificationBackfillRun.update).not.toHaveBeenCalled();
+    expect(db._runState.status).toBe("ROLLED_BACK");
+  });
+
+  it("expects ROLLED_BACK complaints to be detached from the original backfill run", async () => {
+    const { verifyHistoricalClassificationBackfill } = await import(
+      "./historical-classification-backfill"
+    );
+    const db = createVerifyDb({
+      run: baseRun({ status: "ROLLED_BACK" }),
+      items: [baseItem({ result: "ROLLED_BACK" })],
+      complaints: [
+        {
+          id: "cmp-1",
+          classificationAssignmentRunId: null,
+          classificationAssignmentSource: null,
+        },
+      ],
+    });
+
+    const result = await verifyHistoricalClassificationBackfill(db as never, { runId: "run-1" });
+    expect(result.invariants.find((i) => i.code === "ROLLED_BACK_ITEMS_CLEARED")?.ok).toBe(true);
+  });
+});

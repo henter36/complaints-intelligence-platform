@@ -603,28 +603,51 @@ async function loadTaxonomyFingerprint(tx: Prisma.TransactionClient): Promise<st
   return computeTaxonomyFingerprint(classifications);
 }
 
-function buildImportAssignmentFields(
+type ImportClassificationContext = {
+  getTaxonomyFingerprint: () => Promise<string>;
+};
+
+export function createImportClassificationContext(
+  tx: Prisma.TransactionClient
+): ImportClassificationContext {
+  let fingerprintPromise: Promise<string> | undefined;
+  return {
+    getTaxonomyFingerprint() {
+      fingerprintPromise ??= loadTaxonomyFingerprint(tx);
+      return fingerprintPromise;
+    },
+  };
+}
+
+async function buildImportAssignmentFields(
   row: ConfirmationRow,
   taxonomy: { classificationId?: string | null },
   actor: string,
   assignedAt: Date,
-  taxonomyFingerprint: string | null
-): ReturnType<typeof buildClassificationAssignmentMetadata> | Record<string, never> {
+  classificationContext: ImportClassificationContext
+): Promise<ImportAssignmentFields> {
   const source = resolveImportClassificationAssignmentSource({
     hasClassification: Boolean(taxonomy.classificationId),
     resolvedFromSourceDetail: rowResolvedClassificationFromSourceDetail(row.validationWarnings),
   });
   if (!source) return {};
+
+  let taxonomyFingerprint: string | null = null;
+  if (source === CLASSIFICATION_ASSIGNMENT_SOURCES.SOURCE_DETAIL_RULE) {
+    taxonomyFingerprint = await classificationContext.getTaxonomyFingerprint();
+  }
+
   return buildClassificationAssignmentMetadata({
     source,
     assignedAt,
     assignedBy: actor,
-    taxonomyFingerprint:
-      source === CLASSIFICATION_ASSIGNMENT_SOURCES.SOURCE_DETAIL_RULE
-        ? taxonomyFingerprint
-        : null,
+    taxonomyFingerprint,
   });
 }
+
+type ImportAssignmentFields =
+  | ReturnType<typeof buildClassificationAssignmentMetadata>
+  | Record<string, never>;
 
 /**
  * Subject precedence for NEW rows: explicit subject → sourceDetail → derived description → default.
@@ -654,7 +677,8 @@ async function applyNewRow(
   batchId: string,
   row: ConfirmationRow,
   actor: string,
-  appliedAt: Date
+  appliedAt: Date,
+  classificationContext: ImportClassificationContext
 ): Promise<string | null> {
   const normalized = parseNormalizedRow(row);
   const taxonomy = await resolveTaxonomy(tx, normalized);
@@ -663,15 +687,12 @@ async function applyNewRow(
   assertClosedAtMatchesStatus(status, closedAt, { requireClosedAtForClosedStatuses: false });
 
   const complainantIdentifier = normalizeComplainantIdentifier(normalized.complainantIdentifier) ?? null;
-  const taxonomyFingerprint = taxonomy.classificationId
-    ? await loadTaxonomyFingerprint(tx)
-    : null;
-  const assignmentFields = buildImportAssignmentFields(
+  const assignmentFields = await buildImportAssignmentFields(
     row,
     taxonomy,
     actor,
     appliedAt,
-    taxonomyFingerprint
+    classificationContext
   );
 
   let complaint: Complaint;
@@ -772,7 +793,7 @@ function assignImportClassificationFields(
   data: Prisma.ComplaintUncheckedUpdateManyInput,
   current: Complaint,
   taxonomy: { categoryId?: string | null; classificationId?: string | null },
-  assignmentFields: ReturnType<typeof buildImportAssignmentFields>
+  assignmentFields: ImportAssignmentFields
 ): void {
   const protectManual =
     current.classificationAssignmentSource === CLASSIFICATION_ASSIGNMENT_SOURCES.MANUAL;
@@ -802,7 +823,7 @@ function assignImportUpdateFields(
   current: Complaint,
   normalized: NormalizedConfirmationRow,
   taxonomy: { categoryId?: string | null; classificationId?: string | null },
-  assignmentFields: ReturnType<typeof buildImportAssignmentFields>
+  assignmentFields: ImportAssignmentFields
 ): void {
   assignIfDefined(data, "sourceReference", normalized.sourceReference);
   assignIfDefined(data, "complaintDate", normalized.complaintDate);
@@ -854,7 +875,7 @@ function buildUpdateData(
   current: Complaint,
   normalized: NormalizedConfirmationRow,
   taxonomy: { categoryId?: string | null; classificationId?: string | null },
-  assignmentFields: ReturnType<typeof buildImportAssignmentFields>
+  assignmentFields: ImportAssignmentFields
 ): Prisma.ComplaintUncheckedUpdateManyInput {
   const data: Prisma.ComplaintUncheckedUpdateManyInput = {
     version: { increment: 1 },
@@ -875,7 +896,8 @@ async function applyUpdateRow(
   batchId: string,
   row: ConfirmationRow,
   actor: string,
-  appliedAt: Date
+  appliedAt: Date,
+  classificationContext: ImportClassificationContext
 ): Promise<{ beforeIdentifier: string | null; afterIdentifier: string | null }> {
   if (!row.matchedComplaintId || row.matchedComplaintVersion == null) {
     throw new ImportConfirmationError("IMPORT_PREVIEW_STALE", "معاينة الدفعة قديمة ويجب إعادة المعالجة قبل التأكيد", 409);
@@ -891,18 +913,16 @@ async function applyUpdateRow(
     ? (normalizeComplainantIdentifier(normalized.complainantIdentifier) ?? null)
     : current.complainantIdentifier;
   const taxonomy = await resolveTaxonomy(tx, normalized);
-  const taxonomyFingerprint =
-    taxonomy.classificationId &&
-    current.classificationAssignmentSource !== CLASSIFICATION_ASSIGNMENT_SOURCES.MANUAL
-      ? await loadTaxonomyFingerprint(tx)
-      : null;
-  const assignmentFields = buildImportAssignmentFields(
-    row,
-    taxonomy,
-    actor,
-    appliedAt,
-    taxonomyFingerprint
-  );
+  const assignmentFields =
+    current.classificationAssignmentSource === CLASSIFICATION_ASSIGNMENT_SOURCES.MANUAL
+      ? {}
+      : await buildImportAssignmentFields(
+          row,
+          taxonomy,
+          actor,
+          appliedAt,
+          classificationContext
+        );
   const beforeData = snapshotComplaint(current);
   const updateData = buildUpdateData(current, normalized, taxonomy, assignmentFields);
   const result = await tx.complaint.updateMany({
@@ -1013,13 +1033,21 @@ export async function confirmReadyImportBatch(
     await resolveIncomingExternalIdConflicts(tx, batchId, actor, rows);
 
     const touchedIdentifiers = new Set<string | null>();
+    const classificationContext = createImportClassificationContext(tx);
     for (const row of rows) {
       if (row.action === ImportRowAction.NEW) {
-        const id = await applyNewRow(tx, batchId, row, actor, confirmedAt);
+        const id = await applyNewRow(tx, batchId, row, actor, confirmedAt, classificationContext);
         touchedIdentifiers.add(id);
       }
       if (row.action === ImportRowAction.UPDATE) {
-        const { beforeIdentifier, afterIdentifier } = await applyUpdateRow(tx, batchId, row, actor, confirmedAt);
+        const { beforeIdentifier, afterIdentifier } = await applyUpdateRow(
+          tx,
+          batchId,
+          row,
+          actor,
+          confirmedAt,
+          classificationContext
+        );
         touchedIdentifiers.add(beforeIdentifier);
         touchedIdentifiers.add(afterIdentifier);
       }

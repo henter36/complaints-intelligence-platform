@@ -598,7 +598,11 @@ export async function updateClassification(
     );
     const category = await requireActiveCategory(tx, nextCategoryId);
     const name = resolveClassificationName(existing.nameAr, input.name);
-    assertClassificationNameDiffersFromCategory(category.nameAr, name);
+    const changesNameOrCategory =
+      input.name !== undefined || input.categoryId !== undefined;
+    if (changesNameOrCategory) {
+      assertClassificationNameDiffersFromCategory(category.nameAr, name);
+    }
     const previousKeywords = readStoredKeywordsTolerantly(existing.keywords, existing.id);
     const nextKeywords = resolveNextKeywordList(previousKeywords, input.keywords);
 

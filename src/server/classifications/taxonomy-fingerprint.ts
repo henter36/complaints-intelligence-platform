@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { compareCodeUnits } from "./canonical-string-order";
 import { parseClassificationKeywords } from "./classification-keywords";
 import { normalizeSourceDetailClassificationValue } from "./source-detail-classification-resolver";
 
@@ -35,7 +36,7 @@ export function buildTaxonomyFingerprintPayload(
     const keywords = parseClassificationKeywords(c.keywords ?? []);
     const normalizedKeywords = [
       ...new Set(keywords.map((k) => normalizeSourceDetailClassificationValue(k)).filter(Boolean)),
-    ].sort((a, b) => a.localeCompare(b, "ar"));
+    ].sort(compareCodeUnits);
 
     return {
       classificationId: c.id,
@@ -50,7 +51,7 @@ export function buildTaxonomyFingerprintPayload(
     };
   });
 
-  entries.sort((a, b) => a.classificationId.localeCompare(b.classificationId));
+  entries.sort((a, b) => compareCodeUnits(a.classificationId, b.classificationId));
   return entries;
 }
 

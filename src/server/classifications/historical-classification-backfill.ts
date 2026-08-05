@@ -13,6 +13,7 @@ import {
   resolveSourceDetailClassification,
   type SourceDetailClassificationCandidate,
 } from "./source-detail-classification-resolver";
+import { compareCodeUnits } from "./canonical-string-order";
 import {
   computeTaxonomyFingerprint,
   hashSourceDetailValue,
@@ -212,7 +213,7 @@ export function stableStringify(value: unknown): string {
     return "[" + value.map((item) => stableStringify(item)).join(",") + "]";
   }
   const obj = value as Record<string, unknown>;
-  const keys = Object.keys(obj).sort((a, b) => a.localeCompare(b, "en"));
+  const keys = Object.keys(obj).sort(compareCodeUnits);
   return "{" + keys.map((key) => serializeStableEntry(key, obj[key])).join(",") + "}";
 }
 
@@ -301,13 +302,13 @@ export function computeManifestHash(manifestWithoutHashAndToken: Omit<
   "manifestHash" | "confirmationToken"
 >): string {
   const rows = [...manifestWithoutHashAndToken.rows].sort((a, b) =>
-    a.complaintId.localeCompare(b.complaintId)
+    compareCodeUnits(a.complaintId, b.complaintId)
   );
   const payload = {
     ...manifestWithoutHashAndToken,
     rows,
     classificationDistribution: [...manifestWithoutHashAndToken.classificationDistribution].sort(
-      (a, b) => a.classificationId.localeCompare(b.classificationId)
+      (a, b) => compareCodeUnits(a.classificationId, b.classificationId)
     ),
   };
   return createHash("sha256").update(stableStringify(payload), "utf8").digest("hex");
@@ -627,9 +628,9 @@ export async function previewHistoricalClassificationBackfill(
     });
   }
 
-  rows.sort((a, b) => a.complaintId.localeCompare(b.complaintId));
+  rows.sort((a, b) => compareCodeUnits(a.complaintId, b.complaintId));
   const classificationDistribution = [...distribution.values()].sort((a, b) =>
-    a.classificationId.localeCompare(b.classificationId)
+    compareCodeUnits(a.classificationId, b.classificationId)
   );
 
   const withoutHash: Omit<BackfillManifest, "manifestHash" | "confirmationToken"> = {
@@ -928,34 +929,71 @@ function resolveApplyAuditAction(status: BackfillRunStatus): string {
   return "CLASSIFICATION_HISTORICAL_BACKFILL_FAILED";
 }
 
-export async function applyHistoricalClassificationBackfill(
-  db: BackfillDb,
-  input: {
-    manifestPath: string;
-    confirm?: string;
-    batchSize?: number;
-    actor?: string;
-    resumeRunId?: string;
-  }
-): Promise<ApplyResult> {
+
+type ApplyInput = {
+  manifestPath: string;
+  confirm?: string;
+  batchSize?: number;
+  actor?: string;
+  resumeRunId?: string;
+};
+
+type ApplyBatchContext = {
+  db: BackfillDb;
+  runId: string;
+  actor: string;
+  manifest: BackfillManifest;
+  batchSize: number;
+  candidates: SourceDetailClassificationCandidate[];
+  activeIds: Set<string>;
+};
+
+type ApplyBatchOutcome = {
+  appliedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  halted: boolean;
+  failureCode: string | null;
+  failureMessage: string | null;
+};
+
+type ApplyRecount = {
+  appliedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  plannedCount: number;
+};
+
+function validateApplyInput(input: ApplyInput): { batchSize: number; actor: string; confirm: string } {
   if (!input.confirm) {
     throw new HistoricalBackfillError(
       BACKFILL_ERROR_CODES.BACKFILL_CONFIRMATION_REQUIRED,
       "رمز التأكيد مطلوب لتطبيق الـBackfill"
     );
   }
+  return {
+    batchSize: validateBatchSize(input.batchSize ?? DEFAULT_BATCH_SIZE),
+    actor: input.actor ?? AUDIT_ACTOR_SYSTEM,
+    confirm: input.confirm,
+  };
+}
 
-  const batchSize = validateBatchSize(input.batchSize ?? DEFAULT_BATCH_SIZE);
-  const actor = input.actor ?? AUDIT_ACTOR_SYSTEM;
-  const manifest = readAndValidateManifest(input.manifestPath);
-
-  if (input.confirm !== manifest.confirmationToken) {
+function loadAndValidateApplyManifest(manifestPath: string, confirm: string): BackfillManifest {
+  const manifest = readAndValidateManifest(manifestPath);
+  if (confirm !== manifest.confirmationToken) {
     throw new HistoricalBackfillError(
       BACKFILL_ERROR_CODES.BACKFILL_CONFIRMATION_INVALID,
       "رمز التأكيد غير صحيح"
     );
   }
+  return manifest;
+}
 
+async function assertApplyCanStart(
+  db: BackfillDb,
+  manifest: BackfillManifest,
+  resumeRunId?: string
+): Promise<void> {
   await assertTaxonomyMatchesManifest(db, manifest);
 
   const existingApplied = await db.classificationBackfillRun.findFirst({
@@ -966,7 +1004,7 @@ export async function applyHistoricalClassificationBackfill(
     },
     orderBy: { startedAt: "desc" },
   });
-  if (existingApplied && !input.resumeRunId) {
+  if (existingApplied && !resumeRunId) {
     throw new HistoricalBackfillError(
       BACKFILL_ERROR_CODES.BACKFILL_ALREADY_APPLIED,
       "تم تطبيق هذا الـmanifest مسبقًا",
@@ -982,17 +1020,51 @@ export async function applyHistoricalClassificationBackfill(
     },
     orderBy: { startedAt: "desc" },
   });
-  if (existingPartial && !input.resumeRunId) {
+  if (existingPartial && !resumeRunId) {
     throw new HistoricalBackfillError(
       BACKFILL_ERROR_CODES.BACKFILL_PARTIAL_NEEDS_EXPLICIT_RESUME,
       "يوجد تشغيل جزئي؛ استكمل بـ --run-id أو نفّذ rollback",
       { runId: existingPartial.id }
     );
   }
+}
 
-  let runId = input.resumeRunId;
-  if (runId) {
-    const run = await db.classificationBackfillRun.findUnique({ where: { id: runId } });
+async function createPlannedBackfillItems(
+  db: BackfillDb,
+  runId: string,
+  manifest: BackfillManifest,
+  batchSize: number
+): Promise<void> {
+  for (const batch of chunks(manifest.rows, batchSize)) {
+    if (batch.length === 0) continue;
+    await db.classificationBackfillItem.createMany({
+      data: batch.map((row) => ({
+        runId,
+        complaintId: row.complaintId,
+        expectedVersion: row.expectedVersion,
+        previousClassificationId: row.previousClassificationId,
+        previousCategoryId: row.previousCategoryId ?? null,
+        targetClassificationId: row.targetClassificationId,
+        targetCategoryId: row.targetCategoryId,
+        targetClassificationNameSnapshot: row.targetClassificationName,
+        previousAssignmentSource: row.previousAssignmentSource,
+        targetAssignmentSource: CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL,
+        sourceDetailHash: row.sourceDetailHash,
+        result: BACKFILL_ITEM_RESULTS.PLANNED,
+      })),
+    });
+  }
+}
+
+async function prepareOrResumeApplyRun(
+  db: BackfillDb,
+  manifest: BackfillManifest,
+  batchSize: number,
+  actor: string,
+  resumeRunId?: string
+): Promise<string> {
+  if (resumeRunId) {
+    const run = await db.classificationBackfillRun.findUnique({ where: { id: resumeRunId } });
     if (run?.manifestHash !== manifest.manifestHash) {
       throw new HistoricalBackfillError(
         BACKFILL_ERROR_CODES.BACKFILL_RUN_NOT_FOUND,
@@ -1000,70 +1072,141 @@ export async function applyHistoricalClassificationBackfill(
       );
     }
     await db.classificationBackfillRun.update({
-      where: { id: runId },
+      where: { id: resumeRunId },
       data: { status: BACKFILL_RUN_STATUSES.APPLYING, failureCode: null, failureMessage: null },
     });
-  } else {
-    const run = await db.classificationBackfillRun.create({
-      data: {
-        operation: BACKFILL_OPERATIONS.APPLY,
-        status: BACKFILL_RUN_STATUSES.APPLYING,
-        periodFrom: new Date(`${manifest.period.from}T00:00:00.000Z`),
-        periodToExclusive: new Date(`${manifest.period.toExclusive}T00:00:00.000Z`),
-        taxonomyFingerprint: manifest.taxonomyFingerprint,
-        manifestHash: manifest.manifestHash,
-        eligibleCount: manifest.totals.eligibleCount,
-        plannedCount: manifest.rows.length,
-        batchSize,
-        actor,
-      },
-    });
-    runId = run.id;
-
-    for (const batch of chunks(manifest.rows, batchSize)) {
-      if (batch.length === 0) continue;
-      await db.classificationBackfillItem.createMany({
-        data: batch.map((row) => ({
-          runId: runId!,
-          complaintId: row.complaintId,
-          expectedVersion: row.expectedVersion,
-          previousClassificationId: row.previousClassificationId,
-          previousCategoryId: row.previousCategoryId ?? null,
-          targetClassificationId: row.targetClassificationId,
-          targetCategoryId: row.targetCategoryId,
-          targetClassificationNameSnapshot: row.targetClassificationName,
-          previousAssignmentSource: row.previousAssignmentSource,
-          targetAssignmentSource: CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL,
-          sourceDetailHash: row.sourceDetailHash,
-          result: BACKFILL_ITEM_RESULTS.PLANNED,
-        })),
-      });
-    }
-
-    await writeAuditLog(db, {
-      action: "CLASSIFICATION_HISTORICAL_BACKFILL_STARTED",
-      entityType: "ClassificationBackfillRun",
-      entityId: runId,
-      actor,
-      metadata: {
-        runId,
-        manifestHash: manifest.manifestHash,
-        taxonomyFingerprint: manifest.taxonomyFingerprint,
-        periodFrom: manifest.period.from,
-        periodTo: manifest.period.toInclusive,
-        eligibleCount: manifest.totals.eligibleCount,
-        plannedCount: manifest.rows.length,
-        batchSize,
-        classificationDistribution: manifest.classificationDistribution,
-        startedAt: new Date().toISOString(),
-      },
-    });
+    return resumeRunId;
   }
 
-  const taxonomy = await loadActiveTaxonomy(db);
-  const candidates = taxonomy as SourceDetailClassificationCandidate[];
-  const activeIds = new Set(taxonomy.map((c) => c.id));
+  const run = await db.classificationBackfillRun.create({
+    data: {
+      operation: BACKFILL_OPERATIONS.APPLY,
+      status: BACKFILL_RUN_STATUSES.APPLYING,
+      periodFrom: new Date(`${manifest.period.from}T00:00:00.000Z`),
+      periodToExclusive: new Date(`${manifest.period.toExclusive}T00:00:00.000Z`),
+      taxonomyFingerprint: manifest.taxonomyFingerprint,
+      manifestHash: manifest.manifestHash,
+      eligibleCount: manifest.totals.eligibleCount,
+      plannedCount: manifest.rows.length,
+      batchSize,
+      actor,
+    },
+  });
 
+  await createPlannedBackfillItems(db, run.id, manifest, batchSize);
+
+  await writeAuditLog(db, {
+    action: "CLASSIFICATION_HISTORICAL_BACKFILL_STARTED",
+    entityType: "ClassificationBackfillRun",
+    entityId: run.id,
+    actor,
+    metadata: {
+      runId: run.id,
+      manifestHash: manifest.manifestHash,
+      taxonomyFingerprint: manifest.taxonomyFingerprint,
+      periodFrom: manifest.period.from,
+      periodTo: manifest.period.toInclusive,
+      eligibleCount: manifest.totals.eligibleCount,
+      plannedCount: manifest.rows.length,
+      batchSize,
+      classificationDistribution: manifest.classificationDistribution,
+      startedAt: new Date().toISOString(),
+    },
+  });
+
+  return run.id;
+}
+
+async function loadPendingBackfillItems(db: BackfillDb, runId: string) {
+  return db.classificationBackfillItem.findMany({
+    where: {
+      runId,
+      result: { in: [BACKFILL_ITEM_RESULTS.PLANNED, BACKFILL_ITEM_RESULTS.FAILED] },
+    },
+    orderBy: { complaintId: "asc" },
+  });
+}
+
+async function processApplyBatch(
+  ctx: ApplyBatchContext,
+  batch: Awaited<ReturnType<typeof loadPendingBackfillItems>>
+): Promise<{ applied: number; skipped: number }> {
+  let applied = 0;
+  let skipped = 0;
+  await ctx.db.$transaction(async (tx) => {
+    for (const item of batch) {
+      const complaint = await tx.complaint.findUnique({
+        where: { id: item.complaintId },
+        select: {
+          id: true,
+          version: true,
+          isDeleted: true,
+          classificationId: true,
+          classificationAssignmentSource: true,
+          sourceDetail: true,
+        },
+      });
+
+      const decision = evaluateApplyItem({
+        complaint,
+        item,
+        activeIds: ctx.activeIds,
+        candidates: ctx.candidates,
+      });
+      if (decision.action === "SKIP") {
+        await markBackfillItemSkipped(tx, item.id, decision.reason);
+        skipped += 1;
+        continue;
+      }
+
+      const assignment = buildClassificationAssignmentMetadata({
+        source: CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL,
+        assignedBy: ctx.actor,
+        taxonomyFingerprint: ctx.manifest.taxonomyFingerprint,
+        assignmentRunId: ctx.runId,
+      });
+
+      const updateResult = await tx.complaint.updateMany({
+        where: {
+          id: complaint!.id,
+          version: item.expectedVersion,
+          isDeleted: false,
+          classificationId: null,
+          classificationAssignmentSource: null,
+        },
+        data: {
+          classificationId: item.targetClassificationId,
+          categoryId: decision.targetCategoryId,
+          ...assignment,
+          version: { increment: 1 },
+        },
+      });
+
+      if (updateResult.count !== 1) {
+        await markBackfillItemSkipped(tx, item.id, BACKFILL_SKIP_REASONS.VERSION_CHANGED);
+        skipped += 1;
+        continue;
+      }
+
+      await tx.classificationBackfillItem.update({
+        where: { id: item.id },
+        data: {
+          result: BACKFILL_ITEM_RESULTS.APPLIED,
+          appliedVersion: item.expectedVersion + 1,
+          appliedAt: new Date(),
+          skipReason: null,
+        },
+      });
+      applied += 1;
+    }
+  });
+  return { applied, skipped };
+}
+
+async function processApplyBatches(
+  ctx: ApplyBatchContext,
+  pendingItems: Awaited<ReturnType<typeof loadPendingBackfillItems>>
+): Promise<ApplyBatchOutcome> {
   let appliedCount = 0;
   let skippedCount = 0;
   let failedCount = 0;
@@ -1071,94 +1214,20 @@ export async function applyHistoricalClassificationBackfill(
   let failureCode: string | null = null;
   let failureMessage: string | null = null;
 
-  const pendingItems = await db.classificationBackfillItem.findMany({
-    where: {
-      runId,
-      result: { in: [BACKFILL_ITEM_RESULTS.PLANNED, BACKFILL_ITEM_RESULTS.FAILED] },
-    },
-    orderBy: { complaintId: "asc" },
-  });
-
-  for (const batch of chunks(pendingItems, batchSize)) {
+  for (const batch of chunks(pendingItems, ctx.batchSize)) {
     if (halted) break;
     try {
-      await db.$transaction(async (tx) => {
-        for (const item of batch) {
-          const complaint = await tx.complaint.findUnique({
-            where: { id: item.complaintId },
-            select: {
-              id: true,
-              version: true,
-              isDeleted: true,
-              classificationId: true,
-              classificationAssignmentSource: true,
-              sourceDetail: true,
-            },
-          });
-
-          const decision = evaluateApplyItem({
-            complaint,
-            item,
-            activeIds,
-            candidates,
-          });
-          if (decision.action === "SKIP") {
-            await markBackfillItemSkipped(tx, item.id, decision.reason);
-            skippedCount += 1;
-            continue;
-          }
-
-          const assignment = buildClassificationAssignmentMetadata({
-            source: CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL,
-            assignedBy: actor,
-            taxonomyFingerprint: manifest.taxonomyFingerprint,
-            assignmentRunId: runId,
-          });
-
-          const updateResult = await tx.complaint.updateMany({
-            where: {
-              id: complaint!.id,
-              version: item.expectedVersion,
-              isDeleted: false,
-              classificationId: null,
-              classificationAssignmentSource: null,
-            },
-            data: {
-              classificationId: item.targetClassificationId,
-              categoryId: decision.targetCategoryId,
-              ...assignment,
-              version: { increment: 1 },
-            },
-          });
-
-          if (updateResult.count !== 1) {
-            await markBackfillItemSkipped(tx, item.id, BACKFILL_SKIP_REASONS.VERSION_CHANGED);
-            skippedCount += 1;
-            continue;
-          }
-
-          const appliedAt = new Date();
-          await tx.classificationBackfillItem.update({
-            where: { id: item.id },
-            data: {
-              result: BACKFILL_ITEM_RESULTS.APPLIED,
-              appliedVersion: item.expectedVersion + 1,
-              appliedAt,
-              skipReason: null,
-            },
-          });
-          appliedCount += 1;
-        }
-      });
+      const result = await processApplyBatch(ctx, batch);
+      appliedCount += result.applied;
+      skippedCount += result.skipped;
     } catch (error) {
       halted = true;
       failureCode = "BATCH_TRANSACTION_FAILED";
       failureMessage = sanitizeFailureMessage(error);
       failedCount += batch.length;
-      // Mark batch items that are still PLANNED as FAILED after rollback of this batch
-      await db.classificationBackfillItem.updateMany({
+      await ctx.db.classificationBackfillItem.updateMany({
         where: {
-          runId,
+          runId: ctx.runId,
           id: { in: batch.map((b) => b.id) },
           result: BACKFILL_ITEM_RESULTS.PLANNED,
         },
@@ -1170,8 +1239,11 @@ export async function applyHistoricalClassificationBackfill(
     }
   }
 
-  // Recount from DB for accuracy (includes previously applied on resume)
-  const [appliedDb, skippedDb, failedDb, plannedDb] = await Promise.all([
+  return { appliedCount, skippedCount, failedCount, halted, failureCode, failureMessage };
+}
+
+async function recountApplyResults(db: BackfillDb, runId: string): Promise<ApplyRecount> {
+  const [appliedCount, skippedCount, failedCount, plannedCount] = await Promise.all([
     db.classificationBackfillItem.count({
       where: { runId, result: BACKFILL_ITEM_RESULTS.APPLIED },
     }),
@@ -1185,93 +1257,195 @@ export async function applyHistoricalClassificationBackfill(
       where: { runId, result: BACKFILL_ITEM_RESULTS.PLANNED },
     }),
   ]);
+  return { appliedCount, skippedCount, failedCount, plannedCount };
+}
 
-  appliedCount = appliedDb;
-  skippedCount = skippedDb;
-  failedCount = failedDb;
-
+async function finalizeApplyRun(input: {
+  db: BackfillDb;
+  runId: string;
+  actor: string;
+  manifest: BackfillManifest;
+  batchSize: number;
+  recount: ApplyRecount;
+  halted: boolean;
+  failureCode: string | null;
+  failureMessage: string | null;
+}): Promise<{ status: BackfillRunStatus; completedAt: Date }> {
   const status = resolveApplyRunStatus({
-    halted,
-    failedDb,
-    plannedDb,
-    appliedDb,
+    halted: input.halted,
+    failedDb: input.recount.failedCount,
+    plannedDb: input.recount.plannedCount,
+    appliedDb: input.recount.appliedCount,
   });
-
   const completedAt = new Date();
-  await db.classificationBackfillRun.update({
-    where: { id: runId },
+  await input.db.classificationBackfillRun.update({
+    where: { id: input.runId },
     data: {
       status,
-      appliedCount,
-      skippedCount,
-      failedCount,
+      appliedCount: input.recount.appliedCount,
+      skippedCount: input.recount.skippedCount,
+      failedCount: input.recount.failedCount,
       completedAt,
-      failureCode,
-      failureMessage,
+      failureCode: input.failureCode,
+      failureMessage: input.failureMessage,
     },
   });
 
-  const auditAction = resolveApplyAuditAction(status);
-
-  await writeAuditLog(db, {
-    action: auditAction,
+  await writeAuditLog(input.db, {
+    action: resolveApplyAuditAction(status),
     entityType: "ClassificationBackfillRun",
-    entityId: runId,
-    actor,
+    entityId: input.runId,
+    actor: input.actor,
     metadata: {
-      runId,
-      manifestHash: manifest.manifestHash,
-      taxonomyFingerprint: manifest.taxonomyFingerprint,
-      periodFrom: manifest.period.from,
-      periodTo: manifest.period.toInclusive,
-      eligibleCount: manifest.totals.eligibleCount,
-      plannedCount: manifest.rows.length,
-      appliedCount,
-      skippedCount,
-      failedCount,
-      batchSize,
-      classificationDistribution: manifest.classificationDistribution,
+      runId: input.runId,
+      manifestHash: input.manifest.manifestHash,
+      taxonomyFingerprint: input.manifest.taxonomyFingerprint,
+      periodFrom: input.manifest.period.from,
+      periodTo: input.manifest.period.toInclusive,
+      eligibleCount: input.manifest.totals.eligibleCount,
+      plannedCount: input.manifest.rows.length,
+      appliedCount: input.recount.appliedCount,
+      skippedCount: input.recount.skippedCount,
+      failedCount: input.recount.failedCount,
+      batchSize: input.batchSize,
+      classificationDistribution: input.manifest.classificationDistribution,
       completedAt: completedAt.toISOString(),
     },
   });
 
+  return { status, completedAt };
+}
+
+function buildApplyResult(input: {
+  runId: string;
+  status: BackfillRunStatus;
+  manifest: BackfillManifest;
+  recount: ApplyRecount;
+}): ApplyResult {
   return {
     mode: "apply",
-    runId,
-    status,
-    manifestHash: manifest.manifestHash,
-    taxonomyFingerprint: manifest.taxonomyFingerprint,
-    plannedCount: manifest.rows.length,
-    appliedCount,
-    skippedCount,
-    failedCount,
-    confirmationToken: manifest.confirmationToken,
+    runId: input.runId,
+    status: input.status,
+    manifestHash: input.manifest.manifestHash,
+    taxonomyFingerprint: input.manifest.taxonomyFingerprint,
+    plannedCount: input.manifest.rows.length,
+    appliedCount: input.recount.appliedCount,
+    skippedCount: input.recount.skippedCount,
+    failedCount: input.recount.failedCount,
+    confirmationToken: input.manifest.confirmationToken,
     rollbackToken: buildRollbackToken({
-      runId,
-      manifestHash: manifest.manifestHash,
-      appliedCount,
+      runId: input.runId,
+      manifestHash: input.manifest.manifestHash,
+      appliedCount: input.recount.appliedCount,
     }),
   };
 }
 
-export async function verifyHistoricalClassificationBackfill(
+export async function applyHistoricalClassificationBackfill(
   db: BackfillDb,
-  input: { runId: string }
-): Promise<VerifyResult> {
-  const run = await db.classificationBackfillRun.findUnique({ where: { id: input.runId } });
+  input: ApplyInput
+): Promise<ApplyResult> {
+  const { batchSize, actor, confirm } = validateApplyInput(input);
+  const manifest = loadAndValidateApplyManifest(input.manifestPath, confirm);
+  await assertApplyCanStart(db, manifest, input.resumeRunId);
+  const runId = await prepareOrResumeApplyRun(db, manifest, batchSize, actor, input.resumeRunId);
+
+  const taxonomy = await loadActiveTaxonomy(db);
+  const batchOutcome = await processApplyBatches(
+    {
+      db,
+      runId,
+      actor,
+      manifest,
+      batchSize,
+      candidates: taxonomy as SourceDetailClassificationCandidate[],
+      activeIds: new Set(taxonomy.map((c) => c.id)),
+    },
+    await loadPendingBackfillItems(db, runId)
+  );
+
+  const recount = await recountApplyResults(db, runId);
+  const { status } = await finalizeApplyRun({
+    db,
+    runId,
+    actor,
+    manifest,
+    batchSize,
+    recount,
+    halted: batchOutcome.halted,
+    failureCode: batchOutcome.failureCode,
+    failureMessage: batchOutcome.failureMessage,
+  });
+
+  return buildApplyResult({ runId, status, manifest, recount });
+}
+
+type VerificationRun = NonNullable<
+  Awaited<ReturnType<BackfillDb["classificationBackfillRun"]["findUnique"]>>
+>;
+type VerificationItem = Awaited<
+  ReturnType<BackfillDb["classificationBackfillItem"]["findMany"]>
+>[number];
+
+type PartitionedVerificationItems = {
+  appliedItems: VerificationItem[];
+  skippedItems: VerificationItem[];
+  failedItems: VerificationItem[];
+  rolledBackItems: VerificationItem[];
+  rollbackSkippedItems: VerificationItem[];
+};
+
+function isRollbackTerminalOrActive(run: VerificationRun): boolean {
+  if (run.operation === BACKFILL_OPERATIONS.ROLLBACK) return true;
+  return (
+    run.status === BACKFILL_RUN_STATUSES.ROLLED_BACK ||
+    run.status === BACKFILL_RUN_STATUSES.PARTIALLY_ROLLED_BACK ||
+    run.status === BACKFILL_RUN_STATUSES.ROLLING_BACK
+  );
+}
+
+function isApplyVerifiableState(run: VerificationRun): boolean {
+  if (run.operation !== BACKFILL_OPERATIONS.APPLY) return false;
+  return (
+    run.status === BACKFILL_RUN_STATUSES.APPLYING ||
+    run.status === BACKFILL_RUN_STATUSES.APPLIED ||
+    run.status === BACKFILL_RUN_STATUSES.PARTIALLY_APPLIED ||
+    run.status === BACKFILL_RUN_STATUSES.FAILED ||
+    run.status === BACKFILL_RUN_STATUSES.VERIFY_FAILED
+  );
+}
+
+async function loadVerificationRun(db: BackfillDb, runId: string): Promise<VerificationRun> {
+  const run = await db.classificationBackfillRun.findUnique({ where: { id: runId } });
   if (!run) {
     throw new HistoricalBackfillError(
       BACKFILL_ERROR_CODES.BACKFILL_RUN_NOT_FOUND,
       "تشغيل الـBackfill غير موجود"
     );
   }
+  return run;
+}
 
-  const items = await db.classificationBackfillItem.findMany({ where: { runId: run.id } });
-  const appliedItems = items.filter((i) => i.result === BACKFILL_ITEM_RESULTS.APPLIED);
-  const skippedItems = items.filter((i) => i.result === BACKFILL_ITEM_RESULTS.SKIPPED);
-  const failedItems = items.filter((i) => i.result === BACKFILL_ITEM_RESULTS.FAILED);
+async function loadVerificationItems(db: BackfillDb, runId: string): Promise<VerificationItem[]> {
+  return db.classificationBackfillItem.findMany({ where: { runId } });
+}
 
-  const countInvariants: VerifyResult["invariants"] = [
+function partitionVerificationItems(items: VerificationItem[]): PartitionedVerificationItems {
+  return {
+    appliedItems: items.filter((i) => i.result === BACKFILL_ITEM_RESULTS.APPLIED),
+    skippedItems: items.filter((i) => i.result === BACKFILL_ITEM_RESULTS.SKIPPED),
+    failedItems: items.filter((i) => i.result === BACKFILL_ITEM_RESULTS.FAILED),
+    rolledBackItems: items.filter((i) => i.result === BACKFILL_ITEM_RESULTS.ROLLED_BACK),
+    rollbackSkippedItems: items.filter((i) => i.result === BACKFILL_ITEM_RESULTS.ROLLBACK_SKIPPED),
+  };
+}
+
+function buildApplyCountInvariants(
+  run: VerificationRun,
+  items: VerificationItem[],
+  partitioned: PartitionedVerificationItems
+): VerifyResult["invariants"] {
+  return [
     {
       code: "PLANNED_COUNT",
       ok: items.length === run.plannedCount,
@@ -1279,83 +1453,244 @@ export async function verifyHistoricalClassificationBackfill(
     },
     {
       code: "APPLIED_COUNT",
-      ok: appliedItems.length === run.appliedCount,
-      detail: `${appliedItems.length}/${run.appliedCount}`,
+      ok: partitioned.appliedItems.length === run.appliedCount,
+      detail: `${partitioned.appliedItems.length}/${run.appliedCount}`,
     },
     {
       code: "SKIPPED_COUNT",
-      ok: skippedItems.length === run.skippedCount,
-      detail: `${skippedItems.length}/${run.skippedCount}`,
+      ok: partitioned.skippedItems.length === run.skippedCount,
+      detail: `${partitioned.skippedItems.length}/${run.skippedCount}`,
     },
     {
       code: "FAILED_COUNT",
-      ok: failedItems.length === run.failedCount,
-      detail: `${failedItems.length}/${run.failedCount}`,
+      ok: partitioned.failedItems.length === run.failedCount,
+      detail: `${partitioned.failedItems.length}/${run.failedCount}`,
     },
   ];
-  const invariants: VerifyResult["invariants"] = [...countInvariants];
+}
 
-  let appliedOk = true;
+async function verifyAppliedBatch(
+  db: BackfillDb,
+  run: VerificationRun,
+  batch: VerificationItem[],
+  invariants: VerifyResult["invariants"]
+): Promise<boolean> {
+  const complaints = await db.complaint.findMany({
+    where: { id: { in: batch.map((i) => i.complaintId) } },
+    select: {
+      id: true,
+      classificationId: true,
+      categoryId: true,
+      classificationAssignmentSource: true,
+      classificationAssignmentRunId: true,
+      classificationTaxonomyFingerprint: true,
+      isDeleted: true,
+      classification: { select: { categoryId: true } },
+    },
+  });
+  const byId = new Map(complaints.map((c) => [c.id, c]));
+  for (const item of batch) {
+    const c = byId.get(item.complaintId);
+    if (
+      !c ||
+      c.isDeleted ||
+      c.classificationId !== item.targetClassificationId ||
+      c.classificationAssignmentSource !== CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL ||
+      c.classificationAssignmentRunId !== run.id ||
+      c.classificationTaxonomyFingerprint !== run.taxonomyFingerprint
+    ) {
+      return false;
+    }
+    if (
+      !c.categoryId ||
+      !c.classification ||
+      c.categoryId !== c.classification.categoryId ||
+      (item.targetCategoryId != null && c.categoryId !== item.targetCategoryId)
+    ) {
+      invariants.push({
+        code: BACKFILL_SKIP_REASONS.CATEGORY_CLASSIFICATION_MISMATCH,
+        ok: false,
+        detail: c.id,
+      });
+      return false;
+    }
+  }
+  return true;
+}
+
+async function verifyAppliedItems(
+  db: BackfillDb,
+  run: VerificationRun,
+  appliedItems: VerificationItem[],
+  invariants: VerifyResult["invariants"]
+): Promise<boolean> {
   for (const batch of chunks(appliedItems, DEFAULT_BATCH_SIZE)) {
+    const ok = await verifyAppliedBatch(db, run, batch, invariants);
+    if (!ok) return false;
+  }
+  return true;
+}
+
+async function countOrphanAssignments(
+  db: BackfillDb,
+  runId: string,
+  appliedItems: VerificationItem[]
+): Promise<number> {
+  const orphanWhere: Prisma.ComplaintWhereInput = {
+    classificationAssignmentRunId: runId,
+    classificationAssignmentSource: CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL,
+  };
+  if (appliedItems.length > 0) {
+    orphanWhere.id = { notIn: appliedItems.map((i) => i.complaintId) };
+  }
+  return db.complaint.count({ where: orphanWhere });
+}
+
+async function buildTaxonomyVerificationNote(
+  db: BackfillDb,
+  run: VerificationRun,
+  invariants: VerifyResult["invariants"]
+): Promise<string | undefined> {
+  const currentTaxonomy = await loadActiveTaxonomy(db);
+  const currentFingerprint = computeTaxonomyFingerprint(currentTaxonomy);
+  if (currentFingerprint === run.taxonomyFingerprint) return undefined;
+  invariants.push({
+    code: BACKFILL_ERROR_CODES.CURRENT_TAXONOMY_DIFFERS_FROM_APPLIED_FINGERPRINT,
+    ok: true,
+    detail: "informative only; data not mutated",
+  });
+  return BACKFILL_ERROR_CODES.CURRENT_TAXONOMY_DIFFERS_FROM_APPLIED_FINGERPRINT;
+}
+
+function resolveVerifiedApplyStatus(input: {
+  appliedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  plannedCount: number;
+}): BackfillRunStatus {
+  if (input.failedCount > 0 || input.plannedCount > 0) {
+    if (input.appliedCount > 0) return BACKFILL_RUN_STATUSES.PARTIALLY_APPLIED;
+    return BACKFILL_RUN_STATUSES.FAILED;
+  }
+  return BACKFILL_RUN_STATUSES.APPLIED;
+}
+
+async function persistVerificationOutcome(input: {
+  db: BackfillDb;
+  run: VerificationRun;
+  ok: boolean;
+  mode: "apply" | "rollback";
+  partitioned: PartitionedVerificationItems;
+}): Promise<BackfillRunStatus> {
+  if (input.mode === "rollback") {
+    return input.run.status as BackfillRunStatus;
+  }
+
+  if (!input.ok) {
+    await input.db.classificationBackfillRun.update({
+      where: { id: input.run.id },
+      data: { status: BACKFILL_RUN_STATUSES.VERIFY_FAILED },
+    });
+    return BACKFILL_RUN_STATUSES.VERIFY_FAILED;
+  }
+
+  if (input.run.status === BACKFILL_RUN_STATUSES.VERIFY_FAILED) {
+    const restored = resolveVerifiedApplyStatus({
+      appliedCount: input.partitioned.appliedItems.length,
+      skippedCount: input.partitioned.skippedItems.length,
+      failedCount: input.partitioned.failedItems.length,
+      plannedCount: (
+        await input.db.classificationBackfillItem.count({
+          where: { runId: input.run.id, result: BACKFILL_ITEM_RESULTS.PLANNED },
+        })
+      ),
+    });
+    await input.db.classificationBackfillRun.update({
+      where: { id: input.run.id },
+      data: { status: restored },
+    });
+    return restored;
+  }
+
+  return input.run.status as BackfillRunStatus;
+}
+
+async function verifyRollbackOutcome(
+  db: BackfillDb,
+  run: VerificationRun,
+  partitioned: PartitionedVerificationItems
+): Promise<VerifyResult["invariants"]> {
+  const originalApplyRunId =
+    run.operation === BACKFILL_OPERATIONS.ROLLBACK && run.rollbackOfRunId
+      ? run.rollbackOfRunId
+      : run.id;
+
+  const rolledBack = partitioned.rolledBackItems;
+  let clearedOk = true;
+  for (const batch of chunks(rolledBack, DEFAULT_BATCH_SIZE)) {
     const complaints = await db.complaint.findMany({
       where: { id: { in: batch.map((i) => i.complaintId) } },
       select: {
         id: true,
-        classificationId: true,
-        categoryId: true,
-        classificationAssignmentSource: true,
         classificationAssignmentRunId: true,
-        classificationTaxonomyFingerprint: true,
-        isDeleted: true,
-        classification: { select: { categoryId: true } },
+        classificationAssignmentSource: true,
       },
     });
     const byId = new Map(complaints.map((c) => [c.id, c]));
     for (const item of batch) {
       const c = byId.get(item.complaintId);
       if (
-        !c ||
-        c.isDeleted ||
-        c.classificationId !== item.targetClassificationId ||
-        c.classificationAssignmentSource !== CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL ||
-        c.classificationAssignmentRunId !== run.id ||
-        c.classificationTaxonomyFingerprint !== run.taxonomyFingerprint
+        c &&
+        c.classificationAssignmentRunId === originalApplyRunId &&
+        c.classificationAssignmentSource === CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL
       ) {
-        appliedOk = false;
-        break;
-      }
-      if (
-        !c.categoryId ||
-        !c.classification ||
-        c.categoryId !== c.classification.categoryId ||
-        (item.targetCategoryId != null && c.categoryId !== item.targetCategoryId)
-      ) {
-        appliedOk = false;
-        invariants.push({
-          code: BACKFILL_SKIP_REASONS.CATEGORY_CLASSIFICATION_MISMATCH,
-          ok: false,
-          detail: c.id,
-        });
+        clearedOk = false;
         break;
       }
     }
-    if (!appliedOk) break;
+    if (!clearedOk) break;
   }
-  invariants.push({ code: "APPLIED_ITEMS_MATCH_COMPLAINTS", ok: appliedOk });
 
-  const orphanWhere: Prisma.ComplaintWhereInput = {
-    classificationAssignmentRunId: run.id,
-    classificationAssignmentSource: CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL,
+  return [
+    {
+      code: "ROLLBACK_TERMINAL_STATE_PRESERVED",
+      ok: true,
+      detail: run.status,
+    },
+    {
+      code: "ROLLED_BACK_ITEMS_CLEARED",
+      ok: clearedOk,
+      detail: String(rolledBack.length),
+    },
+  ];
+}
+
+function buildVerifyResult(input: {
+  run: VerificationRun;
+  ok: boolean;
+  status: BackfillRunStatus;
+  invariants: VerifyResult["invariants"];
+  remainingUnclassifiedInPeriod: number;
+  taxonomyNote?: string;
+}): VerifyResult {
+  return {
+    mode: "verify",
+    runId: input.run.id,
+    ok: input.ok,
+    status: input.status,
+    invariants: input.invariants,
+    remainingUnclassifiedInPeriod: input.remainingUnclassifiedInPeriod,
+    taxonomyNote: input.taxonomyNote,
   };
-  if (appliedItems.length > 0) {
-    orphanWhere.id = { notIn: appliedItems.map((i) => i.complaintId) };
-  }
-  const orphanComplaints = await db.complaint.count({ where: orphanWhere });
-  invariants.push({
-    code: "NO_ORPHAN_COMPLAINTS",
-    ok: orphanComplaints === 0,
-    detail: String(orphanComplaints),
-  });
+}
+
+export async function verifyHistoricalClassificationBackfill(
+  db: BackfillDb,
+  input: { runId: string }
+): Promise<VerifyResult> {
+  const run = await loadVerificationRun(db, input.runId);
+  const items = await loadVerificationItems(db, run.id);
+  const partitioned = partitionVerificationItems(items);
 
   const remainingUnclassifiedInPeriod = await db.complaint.count({
     where: {
@@ -1365,25 +1700,64 @@ export async function verifyHistoricalClassificationBackfill(
     },
   });
 
-  const currentTaxonomy = await loadActiveTaxonomy(db);
-  const currentFingerprint = computeTaxonomyFingerprint(currentTaxonomy);
-  let taxonomyNote: string | undefined;
-  if (currentFingerprint !== run.taxonomyFingerprint) {
-    taxonomyNote = BACKFILL_ERROR_CODES.CURRENT_TAXONOMY_DIFFERS_FROM_APPLIED_FINGERPRINT;
-    invariants.push({
-      code: BACKFILL_ERROR_CODES.CURRENT_TAXONOMY_DIFFERS_FROM_APPLIED_FINGERPRINT,
-      ok: true,
-      detail: "informative only; data not mutated",
+  if (isRollbackTerminalOrActive(run)) {
+    const invariants = await verifyRollbackOutcome(db, run, partitioned);
+    const ok = invariants.every((i) => i.ok);
+    const status = await persistVerificationOutcome({
+      db,
+      run,
+      ok,
+      mode: "rollback",
+      partitioned,
+    });
+    await writeAuditLog(db, {
+      action: "CLASSIFICATION_HISTORICAL_BACKFILL_VERIFIED",
+      entityType: "ClassificationBackfillRun",
+      entityId: run.id,
+      actor: AUDIT_ACTOR_SYSTEM,
+      metadata: {
+        runId: run.id,
+        verificationMode: "rollback",
+        status,
+        ok,
+      },
+    });
+    return buildVerifyResult({
+      run,
+      ok,
+      status,
+      invariants,
+      remainingUnclassifiedInPeriod,
     });
   }
 
-  const ok = invariants.every((i) => i.ok);
-  if (!ok) {
-    await db.classificationBackfillRun.update({
-      where: { id: run.id },
-      data: { status: BACKFILL_RUN_STATUSES.VERIFY_FAILED },
-    });
+  if (!isApplyVerifiableState(run)) {
+    throw new HistoricalBackfillError(
+      BACKFILL_ERROR_CODES.BACKFILL_RUN_NOT_FOUND,
+      "تشغيل الـBackfill غير قابل للتحقق في حالته الحالية"
+    );
   }
+
+  const invariants = buildApplyCountInvariants(run, items, partitioned);
+  const appliedOk = await verifyAppliedItems(db, run, partitioned.appliedItems, invariants);
+  invariants.push({ code: "APPLIED_ITEMS_MATCH_COMPLAINTS", ok: appliedOk });
+
+  const orphanComplaints = await countOrphanAssignments(db, run.id, partitioned.appliedItems);
+  invariants.push({
+    code: "NO_ORPHAN_COMPLAINTS",
+    ok: orphanComplaints === 0,
+    detail: String(orphanComplaints),
+  });
+
+  const taxonomyNote = await buildTaxonomyVerificationNote(db, run, invariants);
+  const ok = invariants.every((i) => i.ok);
+  const status = await persistVerificationOutcome({
+    db,
+    run,
+    ok,
+    mode: "apply",
+    partitioned,
+  });
 
   await writeAuditLog(db, {
     action: "CLASSIFICATION_HISTORICAL_BACKFILL_VERIFIED",
@@ -1392,6 +1766,7 @@ export async function verifyHistoricalClassificationBackfill(
     actor: AUDIT_ACTOR_SYSTEM,
     metadata: {
       runId: run.id,
+      verificationMode: "apply",
       manifestHash: run.manifestHash,
       taxonomyFingerprint: run.taxonomyFingerprint,
       periodFrom: run.periodFrom.toISOString(),
@@ -1406,16 +1781,16 @@ export async function verifyHistoricalClassificationBackfill(
     },
   });
 
-  return {
-    mode: "verify",
-    runId: run.id,
+  return buildVerifyResult({
+    run,
     ok,
-    status: ok ? run.status : BACKFILL_RUN_STATUSES.VERIFY_FAILED,
+    status,
     invariants,
     remainingUnclassifiedInPeriod,
     taxonomyNote,
-  };
+  });
 }
+
 
 
 type RollbackItemDecision =

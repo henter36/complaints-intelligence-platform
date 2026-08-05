@@ -167,13 +167,18 @@ function createMemoryClient() {
         data,
       }: {
         where: { id: string };
-        data: Partial<ClassificationRow>;
+        data: Partial<ClassificationRow> & {
+          category?: { connect?: { id: string } };
+          nameAr?: string;
+        };
       }) => {
         const row = classifications.get(where.id);
         if (!row) throw new Error("missing");
+        const { category, ...rest } = data;
         const next = {
           ...row,
-          ...data,
+          ...rest,
+          categoryId: category?.connect?.id ?? rest.categoryId ?? row.categoryId,
           keywords: data.keywords !== undefined ? (data.keywords as string[]) : row.keywords,
         };
         classifications.set(where.id, next);
@@ -543,5 +548,117 @@ describe("isRetryableClassificationTransactionError", () => {
     );
 
     expect(complaintUpdate).not.toHaveBeenCalled();
+  });
+
+  it("allows keyword-only update when historical name equals category name", async () => {
+    const client = createMemoryClient();
+    const category = await createCategory({ name: "طلب خدمة" }, client as never);
+    const seeded = await client.classification.create({
+      data: {
+        categoryId: category.id,
+        nameAr: "طلب خدمة",
+        keywords: ["قديم"],
+        color: "#111111",
+        description: "وصف قديم",
+      },
+    });
+
+    const updated = await updateClassification(
+      seeded.id,
+      { keywords: ["جديد"], actor: "admin" },
+      client as never
+    );
+    expect(updated.keywords).toEqual(["جديد"]);
+    expect(updated.nameAr).toBe("طلب خدمة");
+  });
+
+  it("allows color-only update when historical name equals category name", async () => {
+    const client = createMemoryClient();
+    const category = await createCategory({ name: "طلب خدمة" }, client as never);
+    const seeded = await client.classification.create({
+      data: {
+        categoryId: category.id,
+        nameAr: "طلب خدمة",
+        keywords: ["ك"],
+        color: "#111111",
+      },
+    });
+    const updated = await updateClassification(
+      seeded.id,
+      { color: "#abcdef", actor: "admin" },
+      client as never
+    );
+    expect(updated.color).toBe("#abcdef");
+  });
+
+  it("allows description-only update when historical name equals category name", async () => {
+    const client = createMemoryClient();
+    const category = await createCategory({ name: "طلب خدمة" }, client as never);
+    const seeded = await client.classification.create({
+      data: {
+        categoryId: category.id,
+        nameAr: "طلب خدمة",
+        keywords: ["ك"],
+      },
+    });
+    const updated = await updateClassification(
+      seeded.id,
+      { description: "وصف محدّث", actor: "admin" },
+      client as never
+    );
+    expect(updated.description).toBe("وصف محدّث");
+  });
+
+  it("rejects renaming a classification to equal its category name", async () => {
+    const client = createMemoryClient();
+    const category = await createCategory({ name: "طلب خدمة" }, client as never);
+    const classification = await createClassification(
+      { categoryId: category.id, name: "فرعي", keywords: [] },
+      client as never
+    );
+    await expect(
+      updateClassification(
+        classification.id,
+        { name: "طلب خدمة", actor: "admin" },
+        client as never
+      )
+    ).rejects.toMatchObject({ code: "CLASSIFICATION_NAME_EQUALS_CATEGORY_NAME" });
+  });
+
+  it("rejects moving a classification into a category with the same name", async () => {
+    const client = createMemoryClient();
+    const categoryA = await createCategory({ name: "فئة أ" }, client as never);
+    const categoryB = await createCategory({ name: "نفس الاسم" }, client as never);
+    const classification = await createClassification(
+      { categoryId: categoryA.id, name: "نفس الاسم", keywords: [] },
+      client as never
+    );
+    await expect(
+      updateClassification(
+        classification.id,
+        { categoryId: categoryB.id, actor: "admin" },
+        client as never
+      )
+    ).rejects.toMatchObject({ code: "CLASSIFICATION_NAME_EQUALS_CATEGORY_NAME" });
+  });
+
+  it("allows renaming and moving together to a non-conflicting path", async () => {
+    const client = createMemoryClient();
+    const categoryA = await createCategory({ name: "فئة أ" }, client as never);
+    const categoryB = await createCategory({ name: "فئة ب" }, client as never);
+    const seeded = await client.classification.create({
+      data: {
+        categoryId: categoryA.id,
+        nameAr: "فئة أ",
+        keywords: ["ك"],
+      },
+    });
+    const updated = await updateClassification(
+      seeded.id,
+      { categoryId: categoryB.id, name: "فرعي جديد", actor: "admin" },
+      client as never
+    );
+    expect(updated.categoryId).toBe(categoryB.id);
+    expect(updated.nameAr).toBe("فرعي جديد");
   });
 });

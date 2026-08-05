@@ -15,6 +15,10 @@ import {
   rollbackHistoricalClassificationBackfill,
   verifyHistoricalClassificationBackfill,
 } from "../src/server/classifications/historical-classification-backfill";
+import {
+  formatBackfillCliError,
+  handleUnhandledCliFailure,
+} from "../src/server/classifications/backfill-cli-runtime";
 
 const prisma = new PrismaClient();
 
@@ -56,16 +60,6 @@ function parseCliOptions(): CliOptions {
     confirm: readArg("confirm"),
     runId: readArg("run-id"),
     overwrite: readFlag("overwrite"),
-  };
-}
-
-function formatCliError(error: unknown): { code: string; message: string; details?: unknown } {
-  if (error instanceof HistoricalBackfillError) {
-    return { code: error.code, message: error.message, details: error.details };
-  }
-  return {
-    code: "UNEXPECTED_ERROR",
-    message: error instanceof Error ? error.message.slice(0, 200) : "unknown",
   };
 }
 
@@ -151,13 +145,22 @@ async function main(): Promise<number> {
   try {
     return await dispatchMode(options);
   } catch (error) {
-    safePrint({ error: formatCliError(error) });
+    safePrint({ error: formatBackfillCliError(error) });
     return 1;
   } finally {
     await prisma.$disconnect();
   }
 }
 
-main().then((code) => {
-  process.exitCode = code;
-});
+main()
+  .then((code) => {
+    process.exitCode = code;
+  })
+  .catch((error) => {
+    handleUnhandledCliFailure(error, {
+      print: safePrint,
+      setExitCode: (code) => {
+        process.exitCode = code;
+      },
+    });
+  });
