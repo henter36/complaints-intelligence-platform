@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { normalizeClassificationKeyword } from "@/lib/classifications/classification-keyword-normalizer";
 import { compareCodeUnits } from "./canonical-string-order";
 import { assertClassificationNameDiffersFromCategory } from "./classification-management-service";
 
@@ -104,12 +103,18 @@ export type ClassificationTaxonomyProposal = {
   currentEntityMigration: EntityMigration[];
 };
 
+function serializeStableEntry(key: string, value: unknown): string {
+  return JSON.stringify(key) + ":" + stableStringify(value);
+}
+
 export function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map((v) => stableStringify(v)).join(",")}]`;
+  if (Array.isArray(value)) {
+    return "[" + value.map((item) => stableStringify(item)).join(",") + "]";
+  }
   const obj = value as Record<string, unknown>;
   const keys = Object.keys(obj).sort(compareCodeUnits);
-  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
+  return "{" + keys.map((key) => serializeStableEntry(key, obj[key])).join(",") + "}";
 }
 
 export function sha256(text: string): string {
@@ -165,10 +170,10 @@ export function parseCsv(content: string): Record<string, string>[] {
   });
 }
 
-export function loadAndValidateProposal(
+function resolveProposalInputPaths(
   proposalPath: string,
   mappingCsvPath: string
-): { proposal: ClassificationTaxonomyProposal; proposalHash: string; mappingHash: string } {
+): { proposalAbs: string; mappingAbs: string } {
   if (!proposalPath) {
     throw new TaxonomyRestructureError(RESTRUCTURE_ERROR_CODES.PROPOSAL_REQUIRED, "مسار المقترح مطلوب");
   }
@@ -183,54 +188,72 @@ export function loadAndValidateProposal(
   if (!existsSync(mappingAbs)) {
     throw new TaxonomyRestructureError(RESTRUCTURE_ERROR_CODES.MAPPING_NOT_FOUND, "ملف CSV غير موجود");
   }
+  return { proposalAbs, mappingAbs };
+}
 
-  let proposal: ClassificationTaxonomyProposal;
+function readProposalJson(proposalAbs: string): ClassificationTaxonomyProposal {
   try {
-    proposal = JSON.parse(readFileSync(proposalAbs, "utf8")) as ClassificationTaxonomyProposal;
+    return JSON.parse(readFileSync(proposalAbs, "utf8")) as ClassificationTaxonomyProposal;
   } catch {
     throw new TaxonomyRestructureError(RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID, "تعذر قراءة JSON");
   }
+}
 
+function validateProposalSchema(proposal: ClassificationTaxonomyProposal): void {
   if (proposal.schemaVersion !== RESTRUCTURE_SCHEMA_VERSION) {
     throw new TaxonomyRestructureError(
       RESTRUCTURE_ERROR_CODES.PROPOSAL_SCHEMA_UNSUPPORTED,
       `إصدار schema غير مدعوم: ${String(proposal.schemaVersion)}`
     );
   }
+}
+
+function validateProposalStatus(proposal: ClassificationTaxonomyProposal): void {
   if (proposal.status !== PROPOSAL_STATUS_REQUIRED) {
     throw new TaxonomyRestructureError(
       RESTRUCTURE_ERROR_CODES.PROPOSAL_STATUS_INVALID,
       `حالة المقترح غير صالحة: ${proposal.status}`
     );
   }
+}
 
+function validateProposalTotals(proposal: ClassificationTaxonomyProposal): void {
   const val = proposal.validation;
   if (val.mappedComplaintCount + val.legacyPreservedCount !== val.projectedTotalComplaintCount) {
     throw new TaxonomyRestructureError(RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID, "مجاميع التحقق غير متسقة");
   }
+}
 
-  const classificationKeys = proposal.proposedTaxonomy.flatMap((c) =>
+function collectProposedClassificationKeys(
+  proposal: ClassificationTaxonomyProposal
+): string[] {
+  return proposal.proposedTaxonomy.flatMap((c) =>
     c.classifications.map((x) => x.classificationKey)
   );
-  const dupKeys = findDuplicates(classificationKeys);
-  if (dupKeys.length) {
-    throw new TaxonomyRestructureError(
-      RESTRUCTURE_ERROR_CODES.DUPLICATE_CLASSIFICATION_KEY,
-      "مفاتيح تصنيف مكررة",
-      { keys: dupKeys }
-    );
-  }
+}
 
+function assertUniqueClassificationKeys(keys: string[]): void {
+  const dupKeys = findDuplicates(keys);
+  if (dupKeys.length === 0) return;
+  throw new TaxonomyRestructureError(
+    RESTRUCTURE_ERROR_CODES.DUPLICATE_CLASSIFICATION_KEY,
+    "مفاتيح تصنيف مكررة",
+    { keys: dupKeys }
+  );
+}
+
+function assertUniqueSourceDetails(proposal: ClassificationTaxonomyProposal): void {
   const sourceDetails = proposal.sourceDetailMappings.map((m) => m.sourceDetail);
   const dupDetails = findDuplicates(sourceDetails);
-  if (dupDetails.length) {
-    throw new TaxonomyRestructureError(
-      RESTRUCTURE_ERROR_CODES.DUPLICATE_SOURCE_DETAIL,
-      "قيم sourceDetail مكررة",
-      { values: dupDetails }
-    );
-  }
+  if (dupDetails.length === 0) return;
+  throw new TaxonomyRestructureError(
+    RESTRUCTURE_ERROR_CODES.DUPLICATE_SOURCE_DETAIL,
+    "قيم sourceDetail مكررة",
+    { values: dupDetails }
+  );
+}
 
+function validateClassificationNames(proposal: ClassificationTaxonomyProposal): void {
   for (const cat of proposal.proposedTaxonomy) {
     for (const cls of cat.classifications) {
       try {
@@ -243,60 +266,104 @@ export function loadAndValidateProposal(
       }
     }
   }
+}
 
+function validateOtherReviewMapping(proposal: ClassificationTaxonomyProposal): void {
   const other = proposal.sourceDetailMappings.find((m) => m.sourceDetail.trim() === "أخرى");
-  if (
-    !other ||
-    other.classificationKey !== "OTHER_REVIEW" ||
-    other.proposedPath !== "بيانات غير محددة / أخرى تحتاج مراجعة"
-  ) {
-    throw new TaxonomyRestructureError(
-      RESTRUCTURE_ERROR_CODES.OTHER_REVIEW_MISSING,
-      "قيمة «أخرى» يجب أن ترتبط بحاوية جودة البيانات"
-    );
-  }
+  const isValid =
+    other?.classificationKey === "OTHER_REVIEW" &&
+    other?.proposedPath === "بيانات غير محددة / أخرى تحتاج مراجعة";
+  if (isValid) return;
+  throw new TaxonomyRestructureError(
+    RESTRUCTURE_ERROR_CODES.OTHER_REVIEW_MISSING,
+    "قيمة «أخرى» يجب أن ترتبط بحاوية جودة البيانات"
+  );
+}
 
-  const csvRows = parseCsv(readFileSync(mappingAbs, "utf8"));
-  const byDetail = new Map(proposal.sourceDetailMappings.map((m) => [m.sourceDetail, m]));
-  if (csvRows.length !== proposal.sourceDetailMappings.length) {
+function loadMappingCsv(mappingAbs: string): Record<string, string>[] {
+  return parseCsv(readFileSync(mappingAbs, "utf8"));
+}
+
+function validateMappingRowCount(
+  csvRows: Record<string, string>[],
+  proposal: ClassificationTaxonomyProposal
+): void {
+  if (csvRows.length === proposal.sourceDetailMappings.length) return;
+  throw new TaxonomyRestructureError(
+    RESTRUCTURE_ERROR_CODES.MAPPING_MISMATCH,
+    `عدد صفوف CSV (${csvRows.length}) لا يطابق JSON (${proposal.sourceDetailMappings.length})`
+  );
+}
+
+function validateMappingRow(
+  row: Record<string, string>,
+  byDetail: Map<string, SourceDetailMapping>
+): void {
+  const sd = (row["قيمة تفصيل"] ?? "").trim();
+  const mapped = byDetail.get(sd);
+  if (!mapped) {
     throw new TaxonomyRestructureError(
       RESTRUCTURE_ERROR_CODES.MAPPING_MISMATCH,
-      `عدد صفوف CSV (${csvRows.length}) لا يطابق JSON (${proposal.sourceDetailMappings.length})`
+      "قيمة CSV غير موجودة في JSON",
+      { sourceDetailHash: sha256(sd).slice(0, 12) }
     );
   }
-  for (const row of csvRows) {
-    const sd = (row["قيمة تفصيل"] ?? "").trim();
-    const mapped = byDetail.get(sd);
-    if (!mapped) {
-      throw new TaxonomyRestructureError(
-        RESTRUCTURE_ERROR_CODES.MAPPING_MISMATCH,
-        "قيمة CSV غير موجودة في JSON",
-        { sourceDetailHash: sha256(sd).slice(0, 12) }
-      );
-    }
-    if (Number(row["عدد الشكاوى"]) !== mapped.count) {
-      throw new TaxonomyRestructureError(
-        RESTRUCTURE_ERROR_CODES.MAPPING_MISMATCH,
-        `عدد غير متطابق لـ ${mapped.classificationKey}`
-      );
-    }
-    if ((row["المسار المقترح"] ?? "").trim() !== mapped.proposedPath) {
-      throw new TaxonomyRestructureError(
-        RESTRUCTURE_ERROR_CODES.MAPPING_MISMATCH,
-        `مسار غير متطابق لـ ${mapped.classificationKey}`
-      );
-    }
-    if ((row["مفتاح التصنيف"] ?? "").trim() !== mapped.classificationKey) {
-      throw new TaxonomyRestructureError(RESTRUCTURE_ERROR_CODES.MAPPING_MISMATCH, "مفتاح غير متطابق");
-    }
+  if (Number(row["عدد الشكاوى"]) !== mapped.count) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.MAPPING_MISMATCH,
+      `عدد غير متطابق لـ ${mapped.classificationKey}`
+    );
   }
+  if ((row["المسار المقترح"] ?? "").trim() !== mapped.proposedPath) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.MAPPING_MISMATCH,
+      `مسار غير متطابق لـ ${mapped.classificationKey}`
+    );
+  }
+  if ((row["مفتاح التصنيف"] ?? "").trim() !== mapped.classificationKey) {
+    throw new TaxonomyRestructureError(RESTRUCTURE_ERROR_CODES.MAPPING_MISMATCH, "مفتاح غير متطابق");
+  }
+}
 
-  void normalizeClassificationKeyword;
+function validateMappingRows(
+  csvRows: Record<string, string>[],
+  proposal: ClassificationTaxonomyProposal
+): void {
+  const byDetail = new Map(proposal.sourceDetailMappings.map((m) => [m.sourceDetail, m]));
+  for (const row of csvRows) {
+    validateMappingRow(row, byDetail);
+  }
+}
+
+function buildProposalValidationResult(
+  proposal: ClassificationTaxonomyProposal,
+  proposalAbs: string,
+  mappingAbs: string
+): { proposal: ClassificationTaxonomyProposal; proposalHash: string; mappingHash: string } {
   return {
     proposal,
     proposalHash: fileContentHash(proposalAbs),
     mappingHash: fileContentHash(mappingAbs),
   };
+}
+
+export function loadAndValidateProposal(
+  proposalPath: string,
+  mappingCsvPath: string
+): { proposal: ClassificationTaxonomyProposal; proposalHash: string; mappingHash: string } {
+  const { proposalAbs, mappingAbs } = resolveProposalInputPaths(proposalPath, mappingCsvPath);
+  const proposal = readProposalJson(proposalAbs);
+  validateProposalSchema(proposal);
+  validateProposalStatus(proposal);
+  validateProposalTotals(proposal);
+  assertUniqueClassificationKeys(collectProposedClassificationKeys(proposal));
+  assertUniqueSourceDetails(proposal);
+  validateClassificationNames(proposal);
+  validateOtherReviewMapping(proposal);
+  const csvRows = loadMappingCsv(mappingAbs);
+  validateMappingRowCount(csvRows, proposal);
+  validateMappingRows(csvRows, proposal);
+  return buildProposalValidationResult(proposal, proposalAbs, mappingAbs);
 }
 
 export function buildConfirmationToken(manifestHash: string, changeCount: number): string {

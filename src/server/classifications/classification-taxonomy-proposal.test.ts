@@ -7,6 +7,8 @@ import {
   loadAndValidateProposal,
   buildConfirmationToken,
   RESTRUCTURE_ERROR_CODES,
+  stableStringify,
+  sha256,
 } from "./classification-taxonomy-proposal";
 import { buildClassificationPath } from "@/lib/reports/classification-keys";
 import { assertClassificationNameDiffersFromCategory } from "./classification-management-service";
@@ -15,6 +17,41 @@ import { normalizeClassificationKeyword } from "@/lib/classifications/classifica
 const FIXTURE_DIR = join(process.cwd(), "src/server/classifications/__fixtures__");
 const PROPOSAL = join(FIXTURE_DIR, "mini-proposed-taxonomy.json");
 const MAPPING = join(FIXTURE_DIR, "mini-source-detail-mapping.csv");
+
+function withTempDir(prefix: string, run: (dir: string) => void): void {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  try {
+    run(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe("stableStringify canonical hashing", () => {
+  it("is independent of object key insertion order", () => {
+    const left = { schemaVersion: 1, totals: { a: 1 }, period: { from: "x", to: "y" } };
+    const right = { period: { to: "y", from: "x" }, totals: { a: 1 }, schemaVersion: 1 };
+    expect(stableStringify(left)).toBe(stableStringify(right));
+    expect(sha256(stableStringify(left))).toBe(sha256(stableStringify(right)));
+  });
+
+  it("preserves array order", () => {
+    expect(stableStringify({ rows: ["b", "a"] })).not.toBe(stableStringify({ rows: ["a", "b"] }));
+  });
+
+  it("keeps proposalHash and mappingHash stable for the same fixture files", () => {
+    const first = loadAndValidateProposal(PROPOSAL, MAPPING);
+    const second = loadAndValidateProposal(PROPOSAL, MAPPING);
+    expect(first.proposalHash).toBe(second.proposalHash);
+    expect(first.mappingHash).toBe(second.mappingHash);
+  });
+
+  it("changes hash when a real value changes", () => {
+    const before = sha256(stableStringify({ keyword: "أ" }));
+    const after = sha256(stableStringify({ keyword: "ب" }));
+    expect(after).not.toBe(before);
+  });
+});
 
 describe("classification taxonomy proposal validation", () => {
   it("loads a valid proposal and mapping", () => {
@@ -29,45 +66,143 @@ describe("classification taxonomy proposal validation", () => {
     expect(other?.proposedPath).toBe("بيانات غير محددة / أخرى تحتاج مراجعة");
   });
 
+  it("rejects missing proposal and mapping paths", () => {
+    expect(() => loadAndValidateProposal("", MAPPING)).toThrowError(
+      expect.objectContaining({ code: RESTRUCTURE_ERROR_CODES.PROPOSAL_REQUIRED })
+    );
+    expect(() => loadAndValidateProposal(PROPOSAL, "")).toThrowError(
+      expect.objectContaining({ code: RESTRUCTURE_ERROR_CODES.MAPPING_REQUIRED })
+    );
+  });
+
+  it("rejects missing proposal or mapping files", () => {
+    expect(() => loadAndValidateProposal("/tmp/missing-proposal.json", MAPPING)).toThrowError(
+      expect.objectContaining({ code: RESTRUCTURE_ERROR_CODES.PROPOSAL_NOT_FOUND })
+    );
+    expect(() => loadAndValidateProposal(PROPOSAL, "/tmp/missing-mapping.csv")).toThrowError(
+      expect.objectContaining({ code: RESTRUCTURE_ERROR_CODES.MAPPING_NOT_FOUND })
+    );
+  });
+
   it("rejects unsupported schema versions", () => {
-    const dir = mkdtempSync(join(tmpdir(), "cip-restructure-schema-"));
-    try {
+    withTempDir("cip-restructure-schema-", (dir) => {
       const bad = JSON.parse(readFileSync(PROPOSAL, "utf8"));
       bad.schemaVersion = 99;
       const path = join(dir, "bad.json");
       writeFileSync(path, JSON.stringify(bad));
-      expect(() => loadAndValidateProposal(path, MAPPING)).toThrow(TaxonomyRestructureError);
-      try {
-        loadAndValidateProposal(path, MAPPING);
-      } catch (error) {
-        expect(error).toBeInstanceOf(TaxonomyRestructureError);
-        expect((error as TaxonomyRestructureError).code).toBe(
-          RESTRUCTURE_ERROR_CODES.PROPOSAL_SCHEMA_UNSUPPORTED
-        );
-      }
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+      expect(() => loadAndValidateProposal(path, MAPPING)).toThrowError(
+        expect.objectContaining({ code: RESTRUCTURE_ERROR_CODES.PROPOSAL_SCHEMA_UNSUPPORTED })
+      );
+    });
   });
 
-  it("rejects mismatched JSON and CSV mappings", () => {
-    const dir = mkdtempSync(join(tmpdir(), "cip-restructure-map-"));
-    try {
+  it("rejects invalid proposal status", () => {
+    withTempDir("cip-restructure-status-", (dir) => {
+      const bad = JSON.parse(readFileSync(PROPOSAL, "utf8"));
+      bad.status = "APPLIED";
+      const path = join(dir, "bad.json");
+      writeFileSync(path, JSON.stringify(bad));
+      expect(() => loadAndValidateProposal(path, MAPPING)).toThrowError(
+        expect.objectContaining({ code: RESTRUCTURE_ERROR_CODES.PROPOSAL_STATUS_INVALID })
+      );
+    });
+  });
+
+  it("rejects inconsistent validation totals", () => {
+    withTempDir("cip-restructure-totals-", (dir) => {
+      const bad = JSON.parse(readFileSync(PROPOSAL, "utf8"));
+      bad.validation.projectedTotalComplaintCount = 1;
+      const path = join(dir, "bad.json");
+      writeFileSync(path, JSON.stringify(bad));
+      expect(() => loadAndValidateProposal(path, MAPPING)).toThrowError(
+        expect.objectContaining({ code: RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID })
+      );
+    });
+  });
+
+  it("rejects duplicate classificationKey", () => {
+    withTempDir("cip-restructure-dup-key-", (dir) => {
+      const bad = JSON.parse(readFileSync(PROPOSAL, "utf8"));
+      const first = bad.proposedTaxonomy[0].classifications[0];
+      bad.proposedTaxonomy[1].classifications[0].classificationKey = first.classificationKey;
+      const path = join(dir, "bad.json");
+      writeFileSync(path, JSON.stringify(bad));
+      expect(() => loadAndValidateProposal(path, MAPPING)).toThrowError(
+        expect.objectContaining({ code: RESTRUCTURE_ERROR_CODES.DUPLICATE_CLASSIFICATION_KEY })
+      );
+    });
+  });
+
+  it("rejects duplicate sourceDetail", () => {
+    withTempDir("cip-restructure-dup-sd-", (dir) => {
+      const bad = JSON.parse(readFileSync(PROPOSAL, "utf8"));
+      bad.sourceDetailMappings[1].sourceDetail = bad.sourceDetailMappings[0].sourceDetail;
+      const path = join(dir, "bad.json");
+      writeFileSync(path, JSON.stringify(bad));
+      expect(() => loadAndValidateProposal(path, MAPPING)).toThrowError(
+        expect.objectContaining({ code: RESTRUCTURE_ERROR_CODES.DUPLICATE_SOURCE_DETAIL })
+      );
+    });
+  });
+
+  it("rejects classification name equal to category name", () => {
+    withTempDir("cip-restructure-name-", (dir) => {
+      const bad = JSON.parse(readFileSync(PROPOSAL, "utf8"));
+      bad.proposedTaxonomy[0].classifications[0].classification =
+        bad.proposedTaxonomy[0].classifications[0].category;
+      const path = join(dir, "bad.json");
+      writeFileSync(path, JSON.stringify(bad));
+      expect(() => loadAndValidateProposal(path, MAPPING)).toThrowError(
+        expect.objectContaining({ code: RESTRUCTURE_ERROR_CODES.NAMING_CONFLICT })
+      );
+    });
+  });
+
+  it("rejects أخرى mapped to the wrong path", () => {
+    withTempDir("cip-restructure-other-", (dir) => {
+      const bad = JSON.parse(readFileSync(PROPOSAL, "utf8"));
+      const other = bad.sourceDetailMappings.find(
+        (m: { sourceDetail: string }) => m.sourceDetail === "أخرى"
+      );
+      other.proposedPath = "الرعاية الصحية / مواعيد";
+      other.classificationKey = "WRONG";
+      const path = join(dir, "bad.json");
+      writeFileSync(path, JSON.stringify(bad));
+      expect(() => loadAndValidateProposal(path, MAPPING)).toThrowError(
+        expect.objectContaining({ code: RESTRUCTURE_ERROR_CODES.OTHER_REVIEW_MISSING })
+      );
+    });
+  });
+
+  it("rejects mismatched JSON and CSV row counts", () => {
+    withTempDir("cip-restructure-map-", (dir) => {
       const path = join(dir, "bad.csv");
       writeFileSync(
         path,
-        "قيمة تفصيل,عدد الشكاوى,المسار المقترح,مفتاح التصنيف\nأخرى,999,بيانات غير محددة / أخرى تحتاج مراجعة,OTHER_REVIEW\n",
+        "قيمة تفصيل,عدد الشكاوى,المسار المقترح,مفتاح التصنيف\nأخرى,1,بيانات غير محددة / أخرى تحتاج مراجعة,OTHER_REVIEW\n",
         "utf8"
       );
-      expect(() => loadAndValidateProposal(PROPOSAL, path)).toThrow(TaxonomyRestructureError);
-      try {
-        loadAndValidateProposal(PROPOSAL, path);
-      } catch (error) {
-        expect((error as TaxonomyRestructureError).code).toBe(RESTRUCTURE_ERROR_CODES.MAPPING_MISMATCH);
-      }
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+      expect(() => loadAndValidateProposal(PROPOSAL, path)).toThrowError(
+        expect.objectContaining({ code: RESTRUCTURE_ERROR_CODES.MAPPING_MISMATCH })
+      );
+    });
+  });
+
+  it("rejects CSV count mismatches", () => {
+    withTempDir("cip-restructure-map-fields-", (dir) => {
+      const original = readFileSync(MAPPING, "utf8").trim().split("\n");
+      const header = original[0]!;
+      const rows = original.slice(1).map((line) => {
+        const cols = line.split(",");
+        if (cols[0] === "أخرى") cols[1] = "999";
+        return cols.join(",");
+      });
+      const path = join(dir, "bad-count.csv");
+      writeFileSync(path, [header, ...rows].join("\n"), "utf8");
+      expect(() => loadAndValidateProposal(PROPOSAL, path)).toThrowError(
+        expect.objectContaining({ code: RESTRUCTURE_ERROR_CODES.MAPPING_MISMATCH })
+      );
+    });
   });
 
   it("builds confirmation tokens from manifest hash and change count", () => {
@@ -110,8 +245,8 @@ describe("restructure does not auto-run backfill", () => {
     );
     expect(cli).not.toMatch(/classification-historical-backfill|classifications:backfill/);
     expect(cli).toContain("dry-run");
-    expect(existsSync(join(process.cwd(), "src/server/classifications/classification-taxonomy-restructure.ts"))).toBe(
-      true
-    );
+    expect(
+      existsSync(join(process.cwd(), "src/server/classifications/classification-taxonomy-restructure.ts"))
+    ).toBe(true);
   });
 });
