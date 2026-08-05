@@ -23,14 +23,14 @@ describe("complaint query filters", () => {
 
   it("accepts a valid to date only", () => {
     expect(buildComplaintWhereFromParams(params("to=2026-07-31")).complaintDate).toEqual({
-      lte: new Date("2026-07-31"),
+      lt: new Date("2026-08-01T00:00:00.000Z"),
     });
   });
 
   it("accepts a valid inclusive date range", () => {
     expect(buildComplaintWhereFromParams(params("from=2026-07-01&to=2026-07-31")).complaintDate).toEqual({
       gte: new Date("2026-07-01"),
-      lte: new Date("2026-07-31"),
+      lt: new Date("2026-08-01T00:00:00.000Z"),
     });
   });
 
@@ -45,7 +45,7 @@ describe("complaint query filters", () => {
       isDeleted: false,
       complaintDate: {
         gte: new Date("2026-07-01"),
-        lte: new Date("2026-07-31"),
+        lt: new Date("2026-08-01T00:00:00.000Z"),
       },
       region: "riyadh",
       department: "er",
@@ -129,7 +129,7 @@ describe("complaint query filters", () => {
       expect.objectContaining({
         complaintDate: {
           gte: new Date("2026-07-01"),
-          lte: new Date("2026-07-31"),
+          lt: new Date("2026-08-01T00:00:00.000Z"),
         },
       }),
       {

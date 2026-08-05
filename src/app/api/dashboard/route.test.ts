@@ -133,7 +133,7 @@ describe("GET /api/dashboard", () => {
         isValidated: true,
         complaintDate: {
           gte: new Date("2026-07-20"),
-          lte: new Date("2026-07-31"),
+          lt: new Date("2026-08-01T00:00:00.000Z"),
         },
       }),
       select: expect.objectContaining({ complaintDate: true, status: true, receivedAt: true }),

@@ -43,8 +43,18 @@ describe("central complaint query service", () => {
     const parsed = parseComplaintQuery(query("dueTo=2026-07-31&hasDueDate=true"));
     const where = buildComplaintWhere(parsed, new Date("2026-07-30T00:00:00Z"));
 
-    expect(where.dueDate).toEqual({ lte: new Date("2026-07-31") });
+    expect(where.dueDate).toEqual({ lt: new Date("2026-08-01T00:00:00.000Z") });
     expect(where.AND).toEqual([{ dueDate: { not: null } }]);
+  });
+
+  it("treats calendar to=YYYY-MM-DD as inclusive through end of that UTC day", () => {
+    const parsed = parseComplaintQuery(query("from=2025-09-08&to=2026-07-15"));
+    const where = buildComplaintWhere(parsed, new Date("2026-07-30T00:00:00Z"));
+
+    expect(where.complaintDate).toEqual({
+      gte: new Date("2025-09-08T00:00:00.000Z"),
+      lt: new Date("2026-07-16T00:00:00.000Z"),
+    });
   });
 
   it("intersects hasClassification=false with explicit classificationId", () => {
