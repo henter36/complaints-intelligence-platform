@@ -30,6 +30,7 @@
     "integrity:check": "tsx scripts/integrity-check.ts",
     "classifications:restructure": "tsx scripts/restructure-classification-taxonomy.ts",
     "classifications:backfill": "tsx scripts/backfill-historical-classifications.ts",
+    "db:repair-taxonomy-migration": "tsx scripts/repair-classification-taxonomy-migration.ts",
     "release:manifest": "tsx scripts/release-manifest.ts",
     "release:check": "tsx scripts/release-check.ts"
   },
