@@ -27,7 +27,7 @@ function makeBriefData(): ExecutiveBriefData {
       { regionName: "جدة", currentCount: 30, previousCount: 35, difference: -5, changeRate: -14.3, complianceRate: 95.0, averageResolutionDays: 3.5, currentlyLate: 2, direction: "↓ انخفاض" },
     ],
     topClassifications: [
-      { classificationId: "class-01", classificationName: "ضوضاء", currentCount: 30, previousCount: 25, difference: 5, changeRate: 20.0, shareOfTotal: 30.0 },
+      { classificationId: "class-01", classificationName: "ضوضاء", categoryId: "cat-class-01", categoryName: "فئة", classificationPath: "فئة / ضوضاء", currentCount: 30, previousCount: 25, difference: 5, changeRate: 20.0, shareOfTotal: 30.0 },
     ],
     comparativeTimeline: {
       current: {

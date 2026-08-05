@@ -397,7 +397,7 @@ function buildTopClassificationsSheet(workbook: ExcelJS.Workbook, briefData: Exe
 
   for (const row of briefData.topClassifications) {
     const added = sheet.addRow({
-      name: sanitizeText(row.classificationName),
+      name: sanitizeText(row.classificationPath),
       current: row.currentCount,
       previous: row.previousCount,
       difference: row.difference,

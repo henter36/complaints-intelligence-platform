@@ -41,6 +41,7 @@ import type {
   ExecutiveEntityRow,
 } from "@/lib/reports/report-contract";
 import {
+  buildClassificationPath,
   classificationKey,
   UNCLASSIFIED_CLASSIFICATION_KEY,
   UNCLASSIFIED_CLASSIFICATION_LABEL,
@@ -410,7 +411,10 @@ export function buildTopClassifications(
   const toRowKey = (group: ComplaintGroupMetrics): string => {
     if (group.id) return group.id;
     // Null id + unclassified display name → shared sentinel for open/late join.
-    if (group.name === UNCLASSIFIED_CLASSIFICATION_LABEL) {
+    if (
+      group.name === UNCLASSIFIED_CLASSIFICATION_LABEL ||
+      group.classificationName === UNCLASSIFIED_CLASSIFICATION_LABEL
+    ) {
       return UNCLASSIFIED_CLASSIFICATION_KEY;
     }
     // Rare name-only groups (tests / legacy) keep a stable non-Arabic-sentinel key.
@@ -426,12 +430,20 @@ export function buildTopClassifications(
     const id = toRowKey(group);
     const previousCount = prevMap.get(id) ?? 0;
     const difference = currentCount - previousCount;
+    const isUnclassified = id === UNCLASSIFIED_CLASSIFICATION_KEY;
+    const classificationName = isUnclassified
+      ? UNCLASSIFIED_CLASSIFICATION_LABEL
+      : (group.classificationName ?? group.name);
+    const categoryName = isUnclassified ? "" : (group.categoryName ?? "");
+    const classificationPath = isUnclassified
+      ? UNCLASSIFIED_CLASSIFICATION_LABEL
+      : buildClassificationPath(categoryName || null, classificationName);
     return {
+      categoryId: isUnclassified ? null : (group.categoryId ?? null),
+      categoryName: categoryName || (isUnclassified ? UNCLASSIFIED_CLASSIFICATION_LABEL : ""),
       classificationId: id,
-      classificationName:
-        id === UNCLASSIFIED_CLASSIFICATION_KEY
-          ? UNCLASSIFIED_CLASSIFICATION_LABEL
-          : group.name,
+      classificationName,
+      classificationPath,
       currentCount,
       previousCount,
       difference,

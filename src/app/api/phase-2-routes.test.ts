@@ -515,7 +515,10 @@ describe("Phase 2 API routes", () => {
               channel: "هاتف",
               region: "ياسمين",
               department: "بدر",
-              classification: { nameAr: "أحمد" },
+              classificationId: "cls_ahmad",
+              categoryId: "cat_1",
+              classification: { id: "cls_ahmad", nameAr: "أحمد" },
+              category: { id: "cat_1", nameAr: "فئة" },
             },
             {
               status: "CLOSED",
@@ -530,7 +533,10 @@ describe("Phase 2 API routes", () => {
               channel: "هاتف",
               region: "أحمد",
               department: "إبراهيم",
-              classification: { nameAr: "إبراهيم" },
+              classificationId: "cls_ibrahim",
+              categoryId: "cat_1",
+              classification: { id: "cls_ibrahim", nameAr: "إبراهيم" },
+              category: { id: "cat_1", nameAr: "فئة" },
             },
             {
               status: "OPEN",
@@ -545,7 +551,10 @@ describe("Phase 2 API routes", () => {
               channel: "هاتف",
               region: "أحمد",
               department: "بدر",
-              classification: { nameAr: "أحمد" },
+              classificationId: "cls_ahmad",
+              categoryId: "cat_1",
+              classification: { id: "cls_ahmad", nameAr: "أحمد" },
+              category: { id: "cat_1", nameAr: "فئة" },
             },
           ]),
         },
@@ -562,20 +571,20 @@ describe("Phase 2 API routes", () => {
     const body = await response.json();
 
     expect(response.status).toBe(200);
-    expect(body.crossTabs.classifications).toEqual(["إبراهيم", "أحمد"]);
+    expect(body.crossTabs.classifications).toEqual(["فئة / إبراهيم", "فئة / أحمد"]);
     expect(body.crossTabs.regions).toEqual(["أحمد", "ياسمين"]);
     expect(body.crossTabs.departments).toEqual(["إبراهيم", "بدر"]);
     expect(body.crossTabs.classificationByRegion).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ classification: "أحمد", group: "أحمد", count: 1 }),
-        expect.objectContaining({ classification: "أحمد", group: "ياسمين", count: 1 }),
-        expect.objectContaining({ classification: "إبراهيم", group: "أحمد", count: 1 }),
+        expect.objectContaining({ classification: "فئة / أحمد", group: "أحمد", count: 1 }),
+        expect.objectContaining({ classification: "فئة / أحمد", group: "ياسمين", count: 1 }),
+        expect.objectContaining({ classification: "فئة / إبراهيم", group: "أحمد", count: 1 }),
       ])
     );
     expect(body.crossTabs.classificationByDepartment).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ classification: "أحمد", group: "بدر", count: 2 }),
-        expect.objectContaining({ classification: "إبراهيم", group: "إبراهيم", count: 1 }),
+        expect.objectContaining({ classification: "فئة / أحمد", group: "بدر", count: 2 }),
+        expect.objectContaining({ classification: "فئة / إبراهيم", group: "إبراهيم", count: 1 }),
       ])
     );
     expect(body.anomalies.classifications[0]).toEqual(
@@ -591,7 +600,7 @@ describe("Phase 2 API routes", () => {
 
   it("creates a classification only under an active parent category", async () => {
     vi.resetModules();
-    const categoryFindFirst = vi.fn().mockResolvedValue({ id: "cat-1" });
+    const categoryFindFirst = vi.fn().mockResolvedValue({ id: "cat-1", nameAr: "فئة رئيسية" });
     const classificationCreate = vi.fn().mockResolvedValue({
       id: "cls-1",
       categoryId: "cat-1",
@@ -632,11 +641,44 @@ describe("Phase 2 API routes", () => {
     expect(body.nodeType).toBe("CLASSIFICATION");
     expect(categoryFindFirst).toHaveBeenCalledWith({
       where: { id: "cat-1", isDeleted: false, isActive: true },
-      select: { id: true },
+      select: { id: true, nameAr: true },
     });
     expect(classificationCreate).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({ categoryId: "cat-1" }),
     }));
+  });
+
+  it("rejects classification name equal to category name after Arabic normalization", async () => {
+    vi.resetModules();
+    const categoryFindFirst = vi.fn().mockResolvedValue({ id: "cat-1", nameAr: "الرعاية الصحية" });
+    const classificationCreate = vi.fn();
+    const tx = {
+      category: { findFirst: categoryFindFirst, create: vi.fn() },
+      classification: {
+        findMany: vi.fn().mockResolvedValue([]),
+        create: classificationCreate,
+        findFirst: vi.fn(),
+        update: vi.fn(),
+      },
+      auditLog: { create: vi.fn() },
+    };
+    vi.doMock("@/lib/db", () => ({
+      db: {
+        $transaction: async (fn: (client: typeof tx) => Promise<unknown>) => fn(tx),
+        ...tx,
+      },
+    }));
+
+    const { POST } = await import("./classifications/route");
+    const response = await POST(new NextRequest("http://localhost/api/classifications", {
+      method: "POST",
+      body: JSON.stringify({ name: "الرعاية  الصحيّة", categoryId: "cat-1" }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(422);
+    expect(body.error?.code ?? body.code).toBe("CLASSIFICATION_NAME_EQUALS_CATEGORY_NAME");
+    expect(classificationCreate).not.toHaveBeenCalled();
   });
 
   it("rejects missing or soft-deleted parent categories without partial writes", async () => {
@@ -704,7 +746,7 @@ describe("Phase 2 API routes", () => {
     expect(response.status).toBe(404);
     expect(categoryFindFirst).toHaveBeenCalledWith({
       where: { id: "soft-deleted-cat", isDeleted: false, isActive: true },
-      select: { id: true },
+      select: { id: true, nameAr: true },
     });
     expect(classificationCreate).not.toHaveBeenCalled();
   });
