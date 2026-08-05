@@ -57,6 +57,9 @@ describe("taxonomy restructure manifest round-trip", () => {
     });
     const onDisk = JSON.parse(readFileSync(manifestPath, "utf8"));
     expect(JSON.stringify(onDisk)).not.toContain("undefined");
+    expect(onDisk.schemaVersion).toBe(2);
+    expect(typeof onDisk.reactivationStateFingerprint).toBe("string");
+    expect(onDisk.reactivationStateFingerprint).toHaveLength(64);
     const { manifestHash, confirmationToken, ...rest } = onDisk;
     expect(computeManifestHash(rest)).toBe(manifestHash);
     expect(confirmationToken).toBe(
@@ -68,5 +71,6 @@ describe("taxonomy restructure manifest round-trip", () => {
     const loaded = readAndValidateManifest(manifestPath);
     expect(loaded.manifestHash).toBe(preview.manifestHash);
     expect(loaded.confirmationToken).toBe(preview.confirmationToken);
+    expect(loaded.schemaVersion).toBe(2);
   });
 });

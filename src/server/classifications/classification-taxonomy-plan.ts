@@ -1,4 +1,5 @@
 import { normalizeClassificationKeyword } from "@/lib/classifications/classification-keyword-normalizer";
+import { compareCodeUnits } from "./canonical-string-order";
 import { parseClassificationKeywords } from "./classification-keywords";
 import {
   type ClassificationTaxonomyProposal,
@@ -199,7 +200,59 @@ function registerCategoryReuse(
   targetName: string,
   categoryId: string
 ): void {
+  const prior = ctx.categoryReuseByTargetName.get(targetName);
+  if (prior && prior !== categoryId) {
+    // Shared targets are claimed once by claimCategoryReuseTargets / first owner.
+    return;
+  }
   ctx.categoryReuseByTargetName.set(targetName, categoryId);
+}
+
+/**
+ * Deterministic shared-target category reuse:
+ * 1. Explicit Category migration currentId for that target wins among explicit claims
+ *    (lexicographically smallest id via compareCodeUnits when several are explicit).
+ * 2. Else an already-registered reuse owner is kept.
+ * 3. Else the lexicographically smallest source category id among composite claimants.
+ */
+export function claimCategoryReuseTargets(ctx: RestructurePlanningContext): void {
+  type Claim = { categoryId: string; explicit: boolean };
+  const claimsByTarget = new Map<string, Claim[]>();
+
+  const pushClaim = (targetName: string, categoryId: string, explicit: boolean) => {
+    if (!targetName || !categoryId) return;
+    const list = claimsByTarget.get(targetName) ?? [];
+    list.push({ categoryId, explicit });
+    claimsByTarget.set(targetName, list);
+  };
+
+  for (const mig of ctx.proposal.currentEntityMigration) {
+    if (mig.entityType === "Category") {
+      const resolution = resolveExistingCategory(ctx, mig.currentId, mig.currentName);
+      if (resolution.status !== "FOUND") continue;
+      pushClaim(mig.target, resolution.category.id, Boolean(mig.currentId));
+      continue;
+    }
+    if (mig.entityType !== "Category+Classification") continue;
+    const target = splitTargetPath(mig.target);
+    const ids = parseDualId(mig.currentId);
+    const catNameHint = mig.currentName.split(" / ")[0] ?? "";
+    const cat = resolveCompositeCategory(ctx, ids.categoryId, catNameHint);
+    if (cat.status !== "FOUND") continue;
+    pushClaim(target.categoryName, cat.category.id, Boolean(ids.categoryId));
+  }
+
+  for (const [targetName, claims] of [...claimsByTarget.entries()].sort(([a], [b]) =>
+    compareCodeUnits(a, b)
+  )) {
+    if (ctx.categoryReuseByTargetName.has(targetName)) continue;
+    const explicitIds = [
+      ...new Set(claims.filter((c) => c.explicit).map((c) => c.categoryId)),
+    ].sort(compareCodeUnits);
+    const allIds = [...new Set(claims.map((c) => c.categoryId))].sort(compareCodeUnits);
+    const winner = explicitIds[0] ?? allIds[0];
+    if (winner) registerCategoryReuse(ctx, targetName, winner);
+  }
 }
 
 function ensureCategoryReactivation(
@@ -314,6 +367,12 @@ export function processCategoryMigration(
     };
   }
   const existing = resolution.category;
+  const priorReuse = ctx.categoryReuseByTargetName.get(mig.target);
+  if (priorReuse && priorReuse !== existing.id) {
+    // Another category already owns this target; classifications (if any) move
+    // separately and this source category is deactivated once emptied.
+    return { kind: "HANDLED" };
+  }
   registerCategoryReuse(ctx, mig.target, existing.id);
   ensureCategoryReactivation(ctx, existing, mig.target);
   const change = buildPlanChange({
@@ -332,6 +391,25 @@ export function processCategoryMigration(
     appendCategoryRename(ctx, change);
   }
   return { kind: "HANDLED" };
+}
+
+function resolveFinalCategoryNameForId(
+  ctx: RestructurePlanningContext,
+  categoryId: string,
+  fallbackName: string
+): string {
+  for (const [name, meta] of Object.entries(ctx.plan.finalCategoryTargets)) {
+    if (meta.reuseId === categoryId) return name;
+  }
+  const reuseEntries = [...ctx.categoryReuseByTargetName.entries()].sort(([a], [b]) =>
+    compareCodeUnits(a, b)
+  );
+  for (const [name, id] of reuseEntries) {
+    if (id === categoryId) return name;
+  }
+  const rename = ctx.plan.categoriesToRename.find((item) => item.currentId === categoryId);
+  if (rename) return rename.targetName;
+  return fallbackName;
 }
 
 export function processClassificationMigration(
@@ -354,7 +432,9 @@ export function processClassificationMigration(
   }
   const resolved = resolution.classification;
   const classificationName = target.classificationName || mig.target;
-  const categoryName = target.categoryName || resolved.categoryName;
+  const categoryName = target.categoryName
+    ? target.categoryName
+    : resolveFinalCategoryNameForId(ctx, resolved.categoryId, resolved.categoryName);
   const key = findProposedClassificationKey(ctx, categoryName, classificationName);
   registerClassificationReuse(ctx, key, resolved.id);
   ensureClassificationReactivation(ctx, resolved, classificationName, categoryName, key);
@@ -399,8 +479,15 @@ function planCompositeCategorySide(
     return;
   }
   const cat = catResolution.category;
+  const priorReuse = ctx.categoryReuseByTargetName.get(targetCategoryName);
+  if (priorReuse && priorReuse !== cat.id) {
+    // Target category already claimed by the deterministic reuse owner; keep this
+    // source category available for later deactivation after its classifications move.
+    return;
+  }
   registerCategoryReuse(ctx, targetCategoryName, cat.id);
   ensureCategoryReactivation(ctx, cat, targetCategoryName);
+  if (categoryAlreadyTracked(ctx, cat.id)) return;
   const change = buildPlanChange({
     currentId: cat.id,
     currentName: cat.nameAr,
@@ -470,6 +557,7 @@ export function processCompositeMigration(
 }
 
 export function processEntityMigrations(ctx: RestructurePlanningContext): void {
+  claimCategoryReuseTargets(ctx);
   for (const mig of ctx.proposal.currentEntityMigration) {
     let result: MigrationProcessingResult;
     if (mig.entityType === "Category") result = processCategoryMigration(ctx, mig);

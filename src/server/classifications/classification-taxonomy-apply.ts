@@ -12,6 +12,8 @@ import {
   RESTRUCTURE_RUN_STATUSES,
   createRestructureItemSequence,
   loadCurrentTaxonomy,
+  loadReactivationStateSnapshot,
+  computeReactivationStateFingerprint,
   readAndValidateManifest,
   type RestructureDb,
   type RestructureItemSequence,
@@ -29,12 +31,16 @@ export type RestructureExecutionCounters = {
   legacyComplaintConsistencyUpdateCount: number;
 };
 
+export type CurrentTaxonomy = Awaited<ReturnType<typeof loadCurrentTaxonomy>>;
+
 export type RestructureExecutionContext = {
   tx: Prisma.TransactionClient;
   runId: string;
   actor: string;
   plan: RestructurePlan;
-  categoryIdByName: Map<string, string>;
+  categoryIdByFinalName: Map<string, string>;
+  categoryIdByOriginalName: Map<string, string>;
+  categoryIdByTemporaryName: Map<string, string>;
   processedClassificationIds: Set<string>;
   counters: RestructureExecutionCounters;
   itemSequence: RestructureItemSequence;
@@ -98,7 +104,7 @@ function loadValidatedApplyManifest(manifestPath: string, confirm: string): Rest
 async function assertCurrentTaxonomyMatchesPreview(
   db: RestructureDb,
   manifest: RestructureManifest
-): Promise<Awaited<ReturnType<typeof loadCurrentTaxonomy>>> {
+): Promise<CurrentTaxonomy> {
   const current = await loadCurrentTaxonomy(db);
   if (current.fingerprint !== manifest.currentTaxonomyFingerprint) {
     throw new TaxonomyRestructureError(
@@ -109,6 +115,24 @@ async function assertCurrentTaxonomyMatchesPreview(
   return current;
 }
 
+async function assertReactivationStateMatchesPreview(
+  db: RestructureDb,
+  manifest: RestructureManifest
+): Promise<void> {
+  const live = await loadReactivationStateSnapshot(db, manifest.plan);
+  const actual = computeReactivationStateFingerprint(live);
+  if (actual === manifest.reactivationStateFingerprint) return;
+  throw new TaxonomyRestructureError(
+    RESTRUCTURE_ERROR_CODES.REACTIVATION_STATE_CHANGED_AFTER_PREVIEW,
+    "تغيرت حالة الكيانات المخطط لإعادة تفعيلها بعد المعاينة",
+    {
+      expectedFingerprintPrefix: manifest.reactivationStateFingerprint.slice(0, 12),
+      actualFingerprintPrefix: actual.slice(0, 12),
+      changedEntityCount: live.categories.length + live.classifications.length,
+    }
+  );
+}
+
 function tempCategoryName(runId: string, entityId: string): string {
   return `__taxonomy_tmp_category_${runId}_${entityId}`;
 }
@@ -117,68 +141,120 @@ function tempClassificationName(runId: string, entityId: string): string {
   return `__taxonomy_tmp_classification_${runId}_${entityId}`;
 }
 
-function assertNoRenameCollisions(
-  plan: RestructurePlan,
-  current: Awaited<ReturnType<typeof loadCurrentTaxonomy>>
-): void {
-  const finalCategoryNames = new Map<string, string>();
+function throwRenameCollision(message: string): never {
+  throw new TaxonomyRestructureError(RESTRUCTURE_ERROR_CODES.TAXONOMY_RENAME_COLLISION, message);
+}
+
+function buildFinalCategoryNameOwners(plan: RestructurePlan): Map<string, string> {
+  const owners = new Map<string, string>();
   for (const name of Object.keys(plan.finalCategoryTargets)) {
     const key = normalizeClassificationKeyword(name);
-    if (finalCategoryNames.has(key)) {
-      throw new TaxonomyRestructureError(
-        RESTRUCTURE_ERROR_CODES.TAXONOMY_RENAME_COLLISION,
-        "تكرار اسم فئة مستهدفة"
-      );
-    }
-    finalCategoryNames.set(key, name);
+    if (owners.has(key)) throwRenameCollision("تكرار اسم فئة مستهدفة");
+    owners.set(key, name);
   }
+  return owners;
+}
 
-  const finalPaths = new Map<string, string>();
-  for (const [clsKey, target] of Object.entries(plan.finalClassificationTargets)) {
-    const pathKey = `${normalizeClassificationKeyword(target.categoryName)}\0${normalizeClassificationKeyword(target.classificationName)}`;
-    if (finalPaths.has(pathKey)) {
-      throw new TaxonomyRestructureError(
-        RESTRUCTURE_ERROR_CODES.TAXONOMY_RENAME_COLLISION,
-        "تكرار مسار تصنيف مستهدف"
-      );
+function assertUniqueCategoryRenameTargets(plan: RestructurePlan): Map<string, string> {
+  const renameTargetOwners = new Map<string, string>();
+  for (const item of plan.categoriesToRename) {
+    const key = normalizeClassificationKeyword(item.targetName);
+    const owner = item.currentId ?? "";
+    const prior = renameTargetOwners.get(key);
+    if (prior !== undefined && prior !== owner) {
+      throwRenameCollision("تكرار إعادة تسمية فئات إلى نفس الاسم المستهدف");
     }
-    finalPaths.set(pathKey, clsKey);
+    renameTargetOwners.set(key, owner);
   }
+  return renameTargetOwners;
+}
 
-  const reusedCategoryIds = new Set(
+function reusedCategoryIdsFromPlan(plan: RestructurePlan): Set<string> {
+  return new Set(
     Object.values(plan.finalCategoryTargets)
       .map((t) => t.reuseId)
       .filter((id): id is string => Boolean(id))
   );
-  const reusedClassificationIds = new Set(
+}
+
+function reusedClassificationIdsFromPlan(plan: RestructurePlan): Set<string> {
+  return new Set(
     Object.values(plan.finalClassificationTargets)
       .map((t) => t.reuseId)
       .filter((id): id is string => Boolean(id))
   );
+}
 
+function assertCategoryCreatesDoNotCollide(
+  current: CurrentTaxonomy,
+  plan: RestructurePlan,
+  renameTargetOwners: Map<string, string>
+): void {
+  const reusedCategoryIds = reusedCategoryIdsFromPlan(plan);
   for (const create of plan.categoriesToCreate) {
     const targetNorm = normalizeClassificationKeyword(create.targetName);
-    const hasBlocker = current.categories.some(
+    if (renameTargetOwners.has(targetNorm)) {
+      throwRenameCollision("إنشاء فئة يصطدم بإعادة تسمية إلى نفس الاسم");
+    }
+    const hasActiveBlocker = current.categories.some(
       (c) =>
+        c.isActive &&
+        !c.isDeleted &&
         !reusedCategoryIds.has(c.id) &&
         normalizeClassificationKeyword(c.nameAr) === targetNorm
     );
-    if (hasBlocker) {
-      throw new TaxonomyRestructureError(
-        RESTRUCTURE_ERROR_CODES.TAXONOMY_RENAME_COLLISION,
-        "إنشاء فئة يصطدم باسم قائم"
-      );
-    }
+    if (hasActiveBlocker) throwRenameCollision("إنشاء فئة يصطدم باسم قائم");
   }
+}
 
+function assertFinalClassificationPathsUnique(plan: RestructurePlan): void {
+  const finalPaths = new Map<string, string>();
+  for (const [clsKey, target] of Object.entries(plan.finalClassificationTargets)) {
+    const pathKey = `${normalizeClassificationKeyword(target.categoryName)}\0${normalizeClassificationKeyword(target.classificationName)}`;
+    if (finalPaths.has(pathKey)) throwRenameCollision("تكرار مسار تصنيف مستهدف");
+    finalPaths.set(pathKey, clsKey);
+  }
+}
+
+function assertInactiveCategoryCreateCollisions(
+  current: CurrentTaxonomy,
+  plan: RestructurePlan
+): void {
+  const reusedCategoryIds = reusedCategoryIdsFromPlan(plan);
+  for (const create of plan.categoriesToCreate) {
+    const targetNorm = normalizeClassificationKeyword(create.targetName);
+    const hasInactiveBlocker = current.categories.some(
+      (c) =>
+        !c.isActive &&
+        !c.isDeleted &&
+        !reusedCategoryIds.has(c.id) &&
+        normalizeClassificationKeyword(c.nameAr) === targetNorm
+    );
+    if (hasInactiveBlocker) throwRenameCollision("إنشاء فئة يصطدم باسم قائم");
+  }
+}
+
+function resolveCreateTargetCategoryId(
+  current: CurrentTaxonomy,
+  plan: RestructurePlan,
+  targetCategory: string | null
+): string | undefined {
+  if (!targetCategory) return undefined;
+  const planned = plan.finalCategoryTargets[targetCategory]?.reuseId;
+  if (planned) return planned;
+  return current.categories.find(
+    (c) =>
+      normalizeClassificationKeyword(c.nameAr) === normalizeClassificationKeyword(targetCategory)
+  )?.id;
+}
+
+function assertInactiveClassificationCreateCollisions(
+  current: CurrentTaxonomy,
+  plan: RestructurePlan
+): void {
+  const reusedClassificationIds = reusedClassificationIdsFromPlan(plan);
   for (const create of plan.classificationsToCreate) {
-    const targetCatId =
-      plan.finalCategoryTargets[create.targetCategory ?? ""]?.reuseId ??
-      current.categories.find(
-        (c) =>
-          normalizeClassificationKeyword(c.nameAr) ===
-          normalizeClassificationKeyword(create.targetCategory ?? "")
-      )?.id;
+    const targetCatId = resolveCreateTargetCategoryId(current, plan, create.targetCategory);
     if (!targetCatId) continue;
     const nameNorm = normalizeClassificationKeyword(create.targetName);
     const hasBlocker = current.classifications.some(
@@ -187,13 +263,17 @@ function assertNoRenameCollisions(
         c.categoryId === targetCatId &&
         normalizeClassificationKeyword(c.nameAr) === nameNorm
     );
-    if (hasBlocker) {
-      throw new TaxonomyRestructureError(
-        RESTRUCTURE_ERROR_CODES.TAXONOMY_RENAME_COLLISION,
-        "إنشاء تصنيف يصطدم بمسار قائم"
-      );
-    }
+    if (hasBlocker) throwRenameCollision("إنشاء تصنيف يصطدم بمسار قائم");
   }
+}
+
+function assertNoRenameCollisions(current: CurrentTaxonomy, plan: RestructurePlan): void {
+  buildFinalCategoryNameOwners(plan);
+  const renameTargetOwners = assertUniqueCategoryRenameTargets(plan);
+  assertCategoryCreatesDoNotCollide(current, plan, renameTargetOwners);
+  assertFinalClassificationPathsUnique(plan);
+  assertInactiveCategoryCreateCollisions(current, plan);
+  assertInactiveClassificationCreateCollisions(current, plan);
 }
 
 async function createRestructureApplyRun(
@@ -236,13 +316,13 @@ async function writeRestructureStartedAudit(
 
 function registerKeptCategories(ctx: RestructureExecutionContext): void {
   for (const item of ctx.plan.categoriesToKeep) {
-    if (item.currentId) ctx.categoryIdByName.set(item.targetName, item.currentId);
+    if (item.currentId) ctx.categoryIdByFinalName.set(item.targetName, item.currentId);
   }
   for (const item of ctx.plan.categoriesToReactivate) {
-    if (item.currentId) ctx.categoryIdByName.set(item.targetName, item.currentId);
+    if (item.currentId) ctx.categoryIdByFinalName.set(item.targetName, item.currentId);
   }
   for (const [name, meta] of Object.entries(ctx.plan.finalCategoryTargets)) {
-    if (meta.reuseId) ctx.categoryIdByName.set(name, meta.reuseId);
+    if (meta.reuseId) ctx.categoryIdByFinalName.set(name, meta.reuseId);
   }
 }
 
@@ -254,7 +334,7 @@ async function applyCategoryReactivations(ctx: RestructureExecutionContext): Pro
       where: { id: item.currentId },
       data: { isActive: true },
     });
-    ctx.categoryIdByName.set(item.targetName, item.currentId);
+    ctx.categoryIdByFinalName.set(item.targetName, item.currentId);
     await recordItem(ctx, {
       entityType: "Category",
       action: "REACTIVATE",
@@ -302,15 +382,15 @@ async function stageCategoryTemporaryNames(ctx: RestructureExecutionContext): Pr
       where: { id: item.currentId },
       data: { nameAr: tempName },
     });
-    ctx.categoryIdByName.delete(before.nameAr);
-    ctx.categoryIdByName.set(tempName, item.currentId);
+    ctx.categoryIdByOriginalName.set(before.nameAr, item.currentId);
+    ctx.categoryIdByTemporaryName.set(tempName, item.currentId);
   }
 }
 
 async function applyCategoryCreates(ctx: RestructureExecutionContext): Promise<void> {
   for (const item of ctx.plan.categoriesToCreate) {
     const created = await ctx.tx.category.create({ data: { nameAr: item.targetName } });
-    ctx.categoryIdByName.set(item.targetName, created.id);
+    ctx.categoryIdByFinalName.set(item.targetName, created.id);
     ctx.counters.createdCount += 1;
     await recordItem(ctx, {
       entityType: "Category",
@@ -329,7 +409,7 @@ async function finalizeCategoryRenames(ctx: RestructureExecutionContext): Promis
       where: { id: item.currentId },
       data: { nameAr: item.targetName },
     });
-    ctx.categoryIdByName.set(item.targetName, item.currentId);
+    ctx.categoryIdByFinalName.set(item.targetName, item.currentId);
     ctx.counters.renamedCount += 1;
     await recordItem(ctx, {
       entityType: "Category",
@@ -343,13 +423,7 @@ async function finalizeCategoryRenames(ctx: RestructureExecutionContext): Promis
 
 async function applyClassificationCreates(ctx: RestructureExecutionContext): Promise<void> {
   for (const item of ctx.plan.classificationsToCreate) {
-    const categoryId = ctx.categoryIdByName.get(item.targetCategory ?? "");
-    if (!categoryId) {
-      throw new TaxonomyRestructureError(
-        RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID,
-        `فئة مفقودة لإنشاء التصنيف ${item.targetName}`
-      );
-    }
+    const categoryId = resolveTargetCategoryId(ctx, item.targetCategory);
     assertClassificationNameDiffersFromCategory(item.targetCategory ?? "", item.targetName);
     let keywords =
       item.classificationKey != null
@@ -383,14 +457,35 @@ function resolveTargetCategoryId(
   if (!targetCategory) {
     throw new TaxonomyRestructureError(RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID, "فئة هدف مفقودة");
   }
-  const id = ctx.categoryIdByName.get(targetCategory);
-  if (!id) {
-    throw new TaxonomyRestructureError(
-      RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID,
-      `فئة الهدف غير موجودة: ${targetCategory}`
-    );
+
+  const plannedReuseId = ctx.plan.finalCategoryTargets[targetCategory]?.reuseId;
+  if (plannedReuseId) {
+    ctx.categoryIdByFinalName.set(targetCategory, plannedReuseId);
+    return plannedReuseId;
   }
-  return id;
+
+  const finalId = ctx.categoryIdByFinalName.get(targetCategory);
+  if (finalId) return finalId;
+
+  throw new TaxonomyRestructureError(
+    RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID,
+    `فئة الهدف غير موجودة: ${targetCategory}`
+  );
+}
+
+/** Source/previous-state lookup only — never used for final targetCategory resolution. */
+export function resolveOriginalCategoryId(
+  ctx: Pick<
+    RestructureExecutionContext,
+    "categoryIdByOriginalName" | "categoryIdByTemporaryName"
+  >,
+  originalName: string | null | undefined
+): string | undefined {
+  if (!originalName) return undefined;
+  return (
+    ctx.categoryIdByOriginalName.get(originalName) ??
+    ctx.categoryIdByTemporaryName.get(originalName)
+  );
 }
 
 function classificationMutationItems(plan: RestructurePlan) {
@@ -606,7 +701,11 @@ async function executeRestructurePlan(input: {
         runId: input.runId,
         actor: input.actor,
         plan: input.plan,
-        categoryIdByName: new Map(input.currentCategories.map((c) => [c.nameAr, c.id])),
+        categoryIdByFinalName: new Map(),
+        categoryIdByOriginalName: new Map(
+          input.currentCategories.map((c) => [c.nameAr, c.id])
+        ),
+        categoryIdByTemporaryName: new Map(),
         processedClassificationIds: new Set(),
         counters,
         itemSequence: createRestructureItemSequence(),
@@ -706,7 +805,8 @@ export async function applyTaxonomyRestructure(
   const manifest = loadValidatedApplyManifest(input.manifestPath, input.confirm!);
   assertPlanIsApplicable(manifest.plan);
   const current = await assertCurrentTaxonomyMatchesPreview(db, manifest);
-  assertNoRenameCollisions(manifest.plan, current);
+  await assertReactivationStateMatchesPreview(db, manifest);
+  assertNoRenameCollisions(current, manifest.plan);
 
   const run = await createRestructureApplyRun(db, manifest, actor);
   await writeRestructureStartedAudit(db, run.id, actor, manifest);
