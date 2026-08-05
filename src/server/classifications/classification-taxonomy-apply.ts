@@ -158,12 +158,12 @@ function assertNoRenameCollisions(
 
   for (const create of plan.categoriesToCreate) {
     const targetNorm = normalizeClassificationKeyword(create.targetName);
-    const blocker = current.categories.find(
+    const hasBlocker = current.categories.some(
       (c) =>
         !reusedCategoryIds.has(c.id) &&
         normalizeClassificationKeyword(c.nameAr) === targetNorm
     );
-    if (blocker) {
+    if (hasBlocker) {
       throw new TaxonomyRestructureError(
         RESTRUCTURE_ERROR_CODES.TAXONOMY_RENAME_COLLISION,
         "إنشاء فئة يصطدم باسم قائم"
@@ -181,13 +181,13 @@ function assertNoRenameCollisions(
       )?.id;
     if (!targetCatId) continue;
     const nameNorm = normalizeClassificationKeyword(create.targetName);
-    const blocker = current.classifications.find(
+    const hasBlocker = current.classifications.some(
       (c) =>
         !reusedClassificationIds.has(c.id) &&
         c.categoryId === targetCatId &&
         normalizeClassificationKeyword(c.nameAr) === nameNorm
     );
-    if (blocker) {
+    if (hasBlocker) {
       throw new TaxonomyRestructureError(
         RESTRUCTURE_ERROR_CODES.TAXONOMY_RENAME_COLLISION,
         "إنشاء تصنيف يصطدم بمسار قائم"

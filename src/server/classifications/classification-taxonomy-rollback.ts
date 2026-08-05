@@ -279,12 +279,12 @@ function evaluateComplaintConsistencyRollback(
   if (typeof prev.categoryId !== "string") return null;
   const next = asRecord(item.nextStateJson);
   if (!next || typeof next.categoryId !== "string") return null;
-  const classificationId =
-    typeof prev.classificationId === "string"
-      ? prev.classificationId
-      : typeof next.classificationId === "string"
-        ? next.classificationId
-        : null;
+  let classificationId: string | null = null;
+  if (typeof prev.classificationId === "string") {
+    classificationId = prev.classificationId;
+  } else if (typeof next.classificationId === "string") {
+    classificationId = next.classificationId;
+  }
   if (!classificationId) return null;
   return {
     action: "RESTORE_COMPLAINT_CATEGORY",
