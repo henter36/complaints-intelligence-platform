@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { writeAuditLog, AUDIT_ACTOR_SYSTEM } from "@/server/audit/audit-log-service";
 import { normalizeClassificationKeyword } from "@/lib/classifications/classification-keyword-normalizer";
 import { parseClassificationKeywords } from "./classification-keywords";
@@ -15,6 +16,7 @@ import {
 import {
   RESTRUCTURE_OPERATIONS,
   RESTRUCTURE_RUN_STATUSES,
+  loadCurrentTaxonomy,
   type RestructureDb,
 } from "./classification-taxonomy-manifest";
 
@@ -24,15 +26,34 @@ type VerificationRun = NonNullable<
   Awaited<ReturnType<RestructureDb["classificationTaxonomyRestructureRun"]["findUnique"]>>
 >;
 
-/**
- * Legacy fallback when proposal/mapping are not provided to verify.
- * Prefer deriving counts from the proposal when available.
- */
-function legacyExpectedTaxonomyCountsFallback(): {
-  expectedCategoryCount: number;
-  expectedClassificationCount: number;
-} {
-  return { expectedCategoryCount: 11, expectedClassificationCount: 27 };
+function requireVerifyInputs(input: {
+  runId?: string;
+  proposalPath?: string;
+  mappingPath?: string;
+}): { runId: string; proposalPath: string; mappingPath: string } {
+  if (!input.runId) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.RUN_ID_REQUIRED,
+      "verify يتطلب --run-id"
+    );
+  }
+  if (!input.proposalPath) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.PROPOSAL_REQUIRED,
+      "verify يتطلب --proposal"
+    );
+  }
+  if (!input.mappingPath) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.MAPPING_REQUIRED,
+      "verify يتطلب --mapping"
+    );
+  }
+  return {
+    runId: input.runId,
+    proposalPath: input.proposalPath,
+    mappingPath: input.mappingPath,
+  };
 }
 
 function isRollbackTerminalOrActive(run: VerificationRun): boolean {
@@ -55,14 +76,12 @@ async function loadRestructureVerificationRun(
   return run;
 }
 
-function loadExpectedTaxonomyCounts(input: {
-  proposalPath?: string;
-  mappingPath?: string;
-}): { expectedCategoryCount: number; expectedClassificationCount: number; proposal: ClassificationTaxonomyProposal | null } {
-  if (!input.proposalPath || !input.mappingPath) {
-    return { ...legacyExpectedTaxonomyCountsFallback(), proposal: null };
-  }
-  const proposal = loadAndValidateProposal(input.proposalPath, input.mappingPath).proposal;
+function loadExpectedTaxonomyCounts(proposalPath: string, mappingPath: string): {
+  expectedCategoryCount: number;
+  expectedClassificationCount: number;
+  proposal: ClassificationTaxonomyProposal;
+} {
+  const proposal = loadAndValidateProposal(proposalPath, mappingPath).proposal;
   return {
     proposal,
     expectedCategoryCount: proposal.proposedTaxonomy.length,
@@ -93,12 +112,12 @@ function buildCountInvariants(
   return [
     {
       code: "ACTIVE_CATEGORY_COUNT",
-      ok: activeCategoryCount >= expectedCategoryCount,
+      ok: activeCategoryCount === expectedCategoryCount,
       detail: String(activeCategoryCount),
     },
     {
       code: "ACTIVE_CLASSIFICATION_COUNT",
-      ok: activeClassificationCount >= expectedClassificationCount,
+      ok: activeClassificationCount === expectedClassificationCount,
       detail: String(activeClassificationCount),
     },
   ];
@@ -119,17 +138,20 @@ function verifyCategoryClassificationNames(
   return { code: "NO_NAME_EQUALS_CATEGORY", ok: namingOk };
 }
 
-function verifyUniqueKeywords(
+function verifyKeywordInvariants(
   activeClassifications: Array<{ id: string; keywords: unknown }>
-): VerificationInvariant {
+): VerificationInvariant[] {
   const keywordOwner = new Map<string, string>();
   let keywordOk = true;
+  let parseFailureCount = 0;
   for (const cls of activeClassifications) {
     let kws: string[] = [];
     try {
       kws = parseClassificationKeywords(cls.keywords ?? []);
     } catch {
-      kws = [];
+      parseFailureCount += 1;
+      keywordOk = false;
+      continue;
     }
     for (const kw of kws) {
       const n = normalizeClassificationKeyword(kw);
@@ -138,7 +160,14 @@ function verifyUniqueKeywords(
       keywordOwner.set(n, cls.id);
     }
   }
-  return { code: "UNIQUE_KEYWORDS", ok: keywordOk };
+  return [
+    {
+      code: "KEYWORDS_PARSEABLE",
+      ok: parseFailureCount === 0,
+      detail: String(parseFailureCount),
+    },
+    { code: "UNIQUE_KEYWORDS", ok: keywordOk && parseFailureCount === 0 },
+  ];
 }
 
 function buildResolverCandidates(
@@ -189,26 +218,71 @@ function verifySourceDetailMappings(
   };
 }
 
-async function verifyComplaintCategoryConsistency(db: RestructureDb): Promise<{
-  invariant: VerificationInvariant;
-  classifiedCount: number;
-}> {
-  const classified = await db.complaint.findMany({
+async function countQuery(db: RestructureDb, query: Prisma.Sql): Promise<number> {
+  const rows = await db.$queryRaw<Array<{ count: bigint | number }>>(query);
+  return Number(rows[0]?.count ?? 0);
+}
+
+async function countClassifiedComplaints(db: RestructureDb): Promise<number> {
+  return db.complaint.count({
     where: { isDeleted: false, classificationId: { not: null } },
-    select: { categoryId: true, classification: { select: { categoryId: true } } },
   });
-  return {
-    classifiedCount: classified.length,
-    invariant: {
-      code: "CATEGORY_CLASSIFICATION_CONSISTENCY",
-      ok: classified.every((c) => c.classification && c.categoryId === c.classification.categoryId),
-      detail: String(classified.length),
-    },
-  };
 }
 
 async function countUnclassifiedComplaints(db: RestructureDb): Promise<number> {
   return db.complaint.count({ where: { isDeleted: false, classificationId: null } });
+}
+
+async function countCategoryClassificationMismatches(db: RestructureDb): Promise<number> {
+  return countQuery(
+    db,
+    Prisma.sql`
+      SELECT COUNT(*) AS count
+      FROM "Complaint" AS complaint
+      LEFT JOIN "Classification" AS classification
+        ON classification.id = complaint.classificationId
+      WHERE complaint.isDeleted = 0
+        AND complaint.classificationId IS NOT NULL
+        AND (
+          classification.id IS NULL
+          OR complaint.categoryId IS NULL
+          OR complaint.categoryId <> classification.categoryId
+        )
+    `
+  );
+}
+
+async function countInactiveClassificationReferences(db: RestructureDb): Promise<number> {
+  return countQuery(
+    db,
+    Prisma.sql`
+      SELECT COUNT(*) AS count
+      FROM "Complaint" AS complaint
+      INNER JOIN "Classification" AS classification
+        ON classification.id = complaint.classificationId
+      WHERE complaint.isDeleted = 0
+        AND complaint.classificationId IS NOT NULL
+        AND (classification.isActive = 0 OR classification.isDeleted = 1)
+    `
+  );
+}
+
+async function verifyComplaintCategoryConsistency(db: RestructureDb): Promise<{
+  invariant: VerificationInvariant;
+  classifiedCount: number;
+  mismatchedCount: number;
+}> {
+  const classifiedCount = await countClassifiedComplaints(db);
+  const mismatchedCount = await countCategoryClassificationMismatches(db);
+  return {
+    classifiedCount,
+    mismatchedCount,
+    invariant: {
+      code: "CATEGORY_CLASSIFICATION_CONSISTENCY",
+      ok: mismatchedCount === 0,
+      detail: `classified=${classifiedCount},mismatched=${mismatchedCount}`,
+    },
+  };
 }
 
 async function persistVerificationOutcome(input: {
@@ -260,60 +334,156 @@ function buildVerificationResult(input: {
   };
 }
 
-async function verifyRollbackOutcome(run: VerificationRun): Promise<VerificationInvariant[]> {
-  return [
+async function resolveOriginalApplyRun(
+  db: RestructureDb,
+  run: VerificationRun
+): Promise<VerificationRun> {
+  if (run.operation === RESTRUCTURE_OPERATIONS.ROLLBACK && run.rollbackOfRunId) {
+    const original = await db.classificationTaxonomyRestructureRun.findUnique({
+      where: { id: run.rollbackOfRunId },
+    });
+    if (!original) {
+      throw new TaxonomyRestructureError(
+        RESTRUCTURE_ERROR_CODES.RUN_NOT_FOUND,
+        "تشغيل Apply الأصلي غير موجود"
+      );
+    }
+    return original;
+  }
+  return run;
+}
+
+async function verifyRollbackOutcome(
+  db: RestructureDb,
+  run: VerificationRun
+): Promise<{
+  ok: boolean;
+  invariants: VerificationInvariant[];
+  activeCategoryCount: number;
+  activeClassificationCount: number;
+  unclassifiedCount: number;
+  classifiedCount: number;
+}> {
+  const original = await resolveOriginalApplyRun(db, run);
+  const live = await loadCurrentTaxonomy(db);
+  const activeCategories = live.categories.filter((c) => c.isActive);
+  const activeClassifications = live.classifications.filter((c) => c.isActive);
+  const unclassifiedCount = await countUnclassifiedComplaints(db);
+  const consistency = await verifyComplaintCategoryConsistency(db);
+  const inactiveRefs = await countInactiveClassificationReferences(db);
+
+  const rollbackRunId =
+    run.operation === RESTRUCTURE_OPERATIONS.ROLLBACK ? run.id : null;
+  const itemWhere = rollbackRunId
+    ? { runId: rollbackRunId }
+    : { runId: original.id, result: { in: ["ROLLED_BACK", "ROLLBACK_SKIPPED"] } };
+  const rollbackItems = await db.classificationTaxonomyRestructureItem.findMany({
+    where: itemWhere,
+    select: { result: true },
+  });
+  const rolledBackCount = rollbackItems.filter((i) => i.result === "ROLLED_BACK").length;
+  const skippedCount = rollbackItems.filter((i) => i.result === "ROLLBACK_SKIPPED").length;
+  const statusForRules =
+    run.operation === RESTRUCTURE_OPERATIONS.ROLLBACK ? run.status : original.status;
+
+  const fingerprintMatch = live.fingerprint === original.currentTaxonomyFingerprint;
+  const invariants: VerificationInvariant[] = [
     {
       code: "ROLLBACK_TERMINAL_STATE_PRESERVED",
-      ok: true,
-      detail: run.status,
+      ok: statusForRules !== RESTRUCTURE_RUN_STATUSES.ROLLING_BACK,
+      detail: statusForRules,
+    },
+    {
+      code: "ROLLBACK_TARGET_FINGERPRINT_MATCH",
+      ok:
+        statusForRules === RESTRUCTURE_RUN_STATUSES.PARTIALLY_ROLLED_BACK
+          ? true
+          : fingerprintMatch,
+      detail: fingerprintMatch ? "match" : "mismatch",
+    },
+    {
+      code: "ROLLBACK_ITEM_COUNTS_CONSISTENT",
+      ok: rolledBackCount + skippedCount === rollbackItems.length,
+      detail: `rolledBack=${rolledBackCount},skipped=${skippedCount}`,
+    },
+    {
+      code: "ROLLBACK_NO_SKIPS_FOR_FULL_STATUS",
+      ok:
+        statusForRules !== RESTRUCTURE_RUN_STATUSES.ROLLED_BACK || skippedCount === 0,
+      detail: String(skippedCount),
+    },
+    {
+      code: "ROLLBACK_HAS_SKIPS_FOR_PARTIAL_STATUS",
+      ok:
+        statusForRules !== RESTRUCTURE_RUN_STATUSES.PARTIALLY_ROLLED_BACK ||
+        skippedCount > 0,
+      detail: String(skippedCount),
+    },
+    consistency.invariant,
+    {
+      code: "CLASSIFIED_COMPLAINTS_REFERENCE_ACTIVE_CLASSIFICATIONS",
+      ok: inactiveRefs === 0,
+      detail: String(inactiveRefs),
     },
   ];
+
+  const ok =
+    statusForRules === RESTRUCTURE_RUN_STATUSES.ROLLED_BACK &&
+    invariants.every((i) => i.ok);
+
+  return {
+    ok,
+    invariants,
+    activeCategoryCount: activeCategories.length,
+    activeClassificationCount: activeClassifications.length,
+    unclassifiedCount,
+    classifiedCount: consistency.classifiedCount,
+  };
 }
 
 export async function verifyTaxonomyRestructure(
   db: RestructureDb,
   input: { runId: string; proposalPath?: string; mappingPath?: string }
 ) {
-  const run = await loadRestructureVerificationRun(db, input.runId);
+  const required = requireVerifyInputs(input);
+  const run = await loadRestructureVerificationRun(db, required.runId);
 
   if (isRollbackTerminalOrActive(run)) {
-    const invariants = await verifyRollbackOutcome(run);
-    const ok = invariants.every((i) => i.ok);
-    const status = await persistVerificationOutcome({ db, run, ok, mode: "rollback" });
+    const measured = await verifyRollbackOutcome(db, run);
+    const status = await persistVerificationOutcome({
+      db,
+      run,
+      ok: measured.ok,
+      mode: "rollback",
+    });
     await writeAuditLog(db, {
       action: "CLASSIFICATION_TAXONOMY_RESTRUCTURE_VERIFIED",
       entityType: "ClassificationTaxonomyRestructureRun",
       entityId: run.id,
       actor: AUDIT_ACTOR_SYSTEM,
-      metadata: { runId: run.id, verificationMode: "rollback", status, ok },
+      metadata: { runId: run.id, verificationMode: "rollback", status, ok: measured.ok },
     });
-    const unclassifiedCount = await countUnclassifiedComplaints(db);
     return buildVerificationResult({
       runId: run.id,
-      ok,
-      invariants,
-      activeCategoryCount: 0,
-      activeClassificationCount: 0,
-      unclassifiedCount,
-      classifiedCount: 0,
+      ok: measured.ok,
+      invariants: measured.invariants,
+      activeCategoryCount: measured.activeCategoryCount,
+      activeClassificationCount: measured.activeClassificationCount,
+      unclassifiedCount: measured.unclassifiedCount,
+      classifiedCount: measured.classifiedCount,
       status,
     });
   }
 
   const { expectedCategoryCount, expectedClassificationCount, proposal } =
-    loadExpectedTaxonomyCounts(input);
-  const { activeCategories, activeClassifications } = await loadActiveTaxonomyForVerification(db);
-
+    loadExpectedTaxonomyCounts(required.proposalPath, required.mappingPath);
+  const { activeCategories, activeClassifications } =
+    await loadActiveTaxonomyForVerification(db);
+  const live = await loadCurrentTaxonomy(db);
   const consistency = await verifyComplaintCategoryConsistency(db);
   const unclassifiedCount = await countUnclassifiedComplaints(db);
-  const mappingInvariant = proposal
-    ? [
-        verifySourceDetailMappings(
-          proposal,
-          buildResolverCandidates(activeClassifications)
-        ),
-      ]
-    : [];
+  const inactiveRefs = await countInactiveClassificationReferences(db);
+
   const invariants: VerificationInvariant[] = [
     ...buildCountInvariants(
       activeCategories.length,
@@ -322,9 +492,19 @@ export async function verifyTaxonomyRestructure(
       expectedClassificationCount
     ),
     verifyCategoryClassificationNames(activeClassifications),
-    verifyUniqueKeywords(activeClassifications),
-    ...mappingInvariant,
+    ...verifyKeywordInvariants(activeClassifications),
+    verifySourceDetailMappings(proposal, buildResolverCandidates(activeClassifications)),
     consistency.invariant,
+    {
+      code: "TARGET_TAXONOMY_FINGERPRINT_MATCH",
+      ok: live.fingerprint === run.targetTaxonomyFingerprint,
+      detail: live.fingerprint === run.targetTaxonomyFingerprint ? "match" : "mismatch",
+    },
+    {
+      code: "CLASSIFIED_COMPLAINTS_REFERENCE_ACTIVE_CLASSIFICATIONS",
+      ok: inactiveRefs === 0,
+      detail: String(inactiveRefs),
+    },
     { code: "UNCLASSIFIED_PRESENT", ok: true, detail: String(unclassifiedCount) },
   ];
 

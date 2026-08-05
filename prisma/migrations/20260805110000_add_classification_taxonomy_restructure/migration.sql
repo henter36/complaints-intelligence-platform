@@ -18,6 +18,8 @@ CREATE TABLE "ClassificationTaxonomyRestructureRun" (
     "deactivatedCount" INTEGER NOT NULL DEFAULT 0,
     "keywordChangeCount" INTEGER NOT NULL DEFAULT 0,
     "legacyComplaintConsistencyUpdateCount" INTEGER NOT NULL DEFAULT 0,
+    "rolledBackCount" INTEGER NOT NULL DEFAULT 0,
+    "skippedCount" INTEGER NOT NULL DEFAULT 0,
     "failureCode" TEXT,
     "failureMessage" TEXT,
     "rollbackOfRunId" TEXT,

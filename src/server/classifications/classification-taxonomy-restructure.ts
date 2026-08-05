@@ -21,6 +21,7 @@ export {
   RESTRUCTURE_OPERATIONS,
   RESTRUCTURE_RUN_STATUSES,
   computeTaxonomyFingerprint,
+  computeTaxonomyShapeFingerprint,
   loadCurrentTaxonomy,
   computeManifestHash,
   writeManifestAtomically,
@@ -36,10 +37,11 @@ export {
   type LoadedClassification,
   type RestructureItemSequence,
 } from "./classification-taxonomy-manifest";
-export { buildRestructurePlan } from "./classification-taxonomy-plan";
+export { buildRestructurePlan, assertPlanIsApplicable } from "./classification-taxonomy-plan";
 export { applyTaxonomyRestructure } from "./classification-taxonomy-apply";
 export { verifyTaxonomyRestructure } from "./classification-taxonomy-verify";
 export { rollbackTaxonomyRestructure } from "./classification-taxonomy-rollback";
+export { rollbackExitCode } from "./restructure-cli-runtime";
 
 export async function previewTaxonomyRestructure(
   db: RestructureDb,

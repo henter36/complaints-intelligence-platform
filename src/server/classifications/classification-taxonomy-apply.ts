@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { writeAuditLog, AUDIT_ACTOR_SYSTEM } from "@/server/audit/audit-log-service";
+import { normalizeClassificationKeyword } from "@/lib/classifications/classification-keyword-normalizer";
 import { assertClassificationNameDiffersFromCategory } from "./classification-management-service";
 import {
   RESTRUCTURE_ERROR_CODES,
@@ -17,6 +18,7 @@ import {
   type RestructureManifest,
   type RestructurePlan,
 } from "./classification-taxonomy-manifest";
+import { assertPlanIsApplicable } from "./classification-taxonomy-plan";
 
 export type RestructureExecutionCounters = {
   createdCount: number;
@@ -107,6 +109,93 @@ async function assertCurrentTaxonomyMatchesPreview(
   return current;
 }
 
+function tempCategoryName(runId: string, entityId: string): string {
+  return `__taxonomy_tmp_category_${runId}_${entityId}`;
+}
+
+function tempClassificationName(runId: string, entityId: string): string {
+  return `__taxonomy_tmp_classification_${runId}_${entityId}`;
+}
+
+function assertNoRenameCollisions(
+  plan: RestructurePlan,
+  current: Awaited<ReturnType<typeof loadCurrentTaxonomy>>
+): void {
+  const finalCategoryNames = new Map<string, string>();
+  for (const name of Object.keys(plan.finalCategoryTargets)) {
+    const key = normalizeClassificationKeyword(name);
+    if (finalCategoryNames.has(key)) {
+      throw new TaxonomyRestructureError(
+        RESTRUCTURE_ERROR_CODES.TAXONOMY_RENAME_COLLISION,
+        "تكرار اسم فئة مستهدفة"
+      );
+    }
+    finalCategoryNames.set(key, name);
+  }
+
+  const finalPaths = new Map<string, string>();
+  for (const [clsKey, target] of Object.entries(plan.finalClassificationTargets)) {
+    const pathKey = `${normalizeClassificationKeyword(target.categoryName)}\0${normalizeClassificationKeyword(target.classificationName)}`;
+    if (finalPaths.has(pathKey)) {
+      throw new TaxonomyRestructureError(
+        RESTRUCTURE_ERROR_CODES.TAXONOMY_RENAME_COLLISION,
+        "تكرار مسار تصنيف مستهدف"
+      );
+    }
+    finalPaths.set(pathKey, clsKey);
+  }
+
+  const reusedCategoryIds = new Set(
+    Object.values(plan.finalCategoryTargets)
+      .map((t) => t.reuseId)
+      .filter((id): id is string => Boolean(id))
+  );
+  const reusedClassificationIds = new Set(
+    Object.values(plan.finalClassificationTargets)
+      .map((t) => t.reuseId)
+      .filter((id): id is string => Boolean(id))
+  );
+
+  for (const create of plan.categoriesToCreate) {
+    const targetNorm = normalizeClassificationKeyword(create.targetName);
+    const blocker = current.categories.find(
+      (c) =>
+        !reusedCategoryIds.has(c.id) &&
+        normalizeClassificationKeyword(c.nameAr) === targetNorm
+    );
+    if (blocker) {
+      throw new TaxonomyRestructureError(
+        RESTRUCTURE_ERROR_CODES.TAXONOMY_RENAME_COLLISION,
+        "إنشاء فئة يصطدم باسم قائم"
+      );
+    }
+  }
+
+  for (const create of plan.classificationsToCreate) {
+    const targetCatId =
+      plan.finalCategoryTargets[create.targetCategory ?? ""]?.reuseId ??
+      current.categories.find(
+        (c) =>
+          normalizeClassificationKeyword(c.nameAr) ===
+          normalizeClassificationKeyword(create.targetCategory ?? "")
+      )?.id;
+    if (!targetCatId) continue;
+    const nameNorm = normalizeClassificationKeyword(create.targetName);
+    const blocker = current.classifications.find(
+      (c) =>
+        !reusedClassificationIds.has(c.id) &&
+        c.categoryId === targetCatId &&
+        normalizeClassificationKeyword(c.nameAr) === nameNorm
+    );
+    if (blocker) {
+      throw new TaxonomyRestructureError(
+        RESTRUCTURE_ERROR_CODES.TAXONOMY_RENAME_COLLISION,
+        "إنشاء تصنيف يصطدم بمسار قائم"
+      );
+    }
+  }
+}
+
 async function createRestructureApplyRun(
   db: RestructureDb,
   manifest: RestructureManifest,
@@ -145,6 +234,29 @@ async function writeRestructureStartedAudit(
   });
 }
 
+function registerKeptCategories(ctx: RestructureExecutionContext): void {
+  for (const item of ctx.plan.categoriesToKeep) {
+    if (item.currentId) ctx.categoryIdByName.set(item.targetName, item.currentId);
+  }
+  for (const [name, meta] of Object.entries(ctx.plan.finalCategoryTargets)) {
+    if (meta.reuseId) ctx.categoryIdByName.set(name, meta.reuseId);
+  }
+}
+
+async function stageCategoryTemporaryNames(ctx: RestructureExecutionContext): Promise<void> {
+  for (const item of ctx.plan.categoriesToRename) {
+    if (!item.currentId) continue;
+    const before = await ctx.tx.category.findUniqueOrThrow({ where: { id: item.currentId } });
+    const tempName = tempCategoryName(ctx.runId, item.currentId);
+    await ctx.tx.category.update({
+      where: { id: item.currentId },
+      data: { nameAr: tempName },
+    });
+    ctx.categoryIdByName.delete(before.nameAr);
+    ctx.categoryIdByName.set(tempName, item.currentId);
+  }
+}
+
 async function applyCategoryCreates(ctx: RestructureExecutionContext): Promise<void> {
   for (const item of ctx.plan.categoriesToCreate) {
     const created = await ctx.tx.category.create({ data: { nameAr: item.targetName } });
@@ -159,33 +271,23 @@ async function applyCategoryCreates(ctx: RestructureExecutionContext): Promise<v
   }
 }
 
-async function applyCategoryRenames(ctx: RestructureExecutionContext): Promise<void> {
+async function finalizeCategoryRenames(ctx: RestructureExecutionContext): Promise<void> {
   for (const item of ctx.plan.categoriesToRename) {
     if (!item.currentId) continue;
-    const before = await ctx.tx.category.findUniqueOrThrow({ where: { id: item.currentId } });
+    const beforeName = item.currentName;
     await ctx.tx.category.update({
       where: { id: item.currentId },
       data: { nameAr: item.targetName },
     });
-    ctx.categoryIdByName.delete(before.nameAr);
     ctx.categoryIdByName.set(item.targetName, item.currentId);
     ctx.counters.renamedCount += 1;
     await recordItem(ctx, {
       entityType: "Category",
       action: "RENAME",
       entityId: item.currentId,
-      previousStateJson: { nameAr: before.nameAr },
+      previousStateJson: { nameAr: beforeName },
       nextStateJson: { nameAr: item.targetName },
     });
-  }
-}
-
-function registerKeptCategories(ctx: RestructureExecutionContext): void {
-  for (const item of ctx.plan.categoriesToKeep) {
-    if (item.currentId) ctx.categoryIdByName.set(item.targetName, item.currentId);
-  }
-  for (const [name, meta] of Object.entries(ctx.plan.finalCategoryTargets)) {
-    if (meta.reuseId) ctx.categoryIdByName.set(name, meta.reuseId);
   }
 }
 
@@ -241,16 +343,76 @@ function resolveTargetCategoryId(
   return id;
 }
 
-async function applyClassificationMovesAndRenames(ctx: RestructureExecutionContext): Promise<void> {
-  const renameOrMove = [
-    ...ctx.plan.classificationsToMove,
-    ...ctx.plan.classificationsToRename,
-    ...ctx.plan.classificationsToSplit,
+function classificationMutationItems(plan: RestructurePlan) {
+  return [
+    ...plan.classificationsToMove,
+    ...plan.classificationsToRename,
+    ...plan.classificationsToSplit,
   ];
-  for (const item of renameOrMove) {
+}
+
+async function stageClassificationTemporaryNames(ctx: RestructureExecutionContext): Promise<void> {
+  for (const item of classificationMutationItems(ctx.plan)) {
+    if (!item.currentId || ctx.processedClassificationIds.has(item.currentId)) continue;
+    await ctx.tx.classification.update({
+      where: { id: item.currentId },
+      data: { nameAr: tempClassificationName(ctx.runId, item.currentId) },
+    });
+  }
+}
+
+async function applyComplaintConsistencyForMove(
+  ctx: RestructureExecutionContext,
+  classificationId: string,
+  previousCategoryId: string,
+  targetCategoryId: string
+): Promise<void> {
+  const affected = await ctx.tx.complaint.findMany({
+    where: {
+      isDeleted: false,
+      classificationId,
+      categoryId: { not: targetCategoryId },
+    },
+    select: { id: true, categoryId: true, classificationId: true },
+  });
+  for (const complaint of affected) {
+    await ctx.tx.complaint.updateMany({
+      where: {
+        id: complaint.id,
+        isDeleted: false,
+        classificationId,
+        categoryId: complaint.categoryId,
+      },
+      data: { categoryId: targetCategoryId },
+    });
+    ctx.counters.legacyComplaintConsistencyUpdateCount += 1;
+    await recordItem(ctx, {
+      entityType: "Complaint",
+      action: "CATEGORY_CONSISTENCY",
+      entityId: complaint.id,
+      previousStateJson: {
+        categoryId: complaint.categoryId ?? previousCategoryId,
+        classificationId,
+      },
+      nextStateJson: {
+        categoryId: targetCategoryId,
+        classificationId,
+      },
+    });
+  }
+}
+
+async function finalizeClassificationMovesAndRenames(
+  ctx: RestructureExecutionContext
+): Promise<void> {
+  for (const item of classificationMutationItems(ctx.plan)) {
     if (!item.currentId || ctx.processedClassificationIds.has(item.currentId)) continue;
     ctx.processedClassificationIds.add(item.currentId);
-    const before = await ctx.tx.classification.findUniqueOrThrow({ where: { id: item.currentId } });
+    const before = await ctx.tx.classification.findUniqueOrThrow({
+      where: { id: item.currentId },
+    });
+    const previousName = item.currentName;
+    const previousCategoryId = before.categoryId;
     const targetCategoryId = resolveTargetCategoryId(ctx, item.targetCategory);
     assertClassificationNameDiffersFromCategory(item.targetCategory ?? "", item.targetName);
     const keywords =
@@ -265,31 +427,25 @@ async function applyClassificationMovesAndRenames(ctx: RestructureExecutionConte
         ...(keywords ? { keywords } : {}),
       },
     });
-    if (before.categoryId !== targetCategoryId) {
+    if (previousCategoryId !== targetCategoryId) {
       ctx.counters.movedCount += 1;
-      const updated = await ctx.tx.complaint.updateMany({
-        where: { isDeleted: false, classificationId: item.currentId },
-        data: { categoryId: targetCategoryId },
-      });
-      ctx.counters.legacyComplaintConsistencyUpdateCount += updated.count;
-      await recordItem(ctx, {
-        entityType: "Complaint",
-        action: "CATEGORY_CONSISTENCY",
-        entityId: item.currentId,
-        previousStateJson: { categoryId: before.categoryId },
-        nextStateJson: { categoryId: targetCategoryId, updatedCount: updated.count },
-      });
+      await applyComplaintConsistencyForMove(
+        ctx,
+        item.currentId,
+        previousCategoryId,
+        targetCategoryId
+      );
     } else {
       ctx.counters.renamedCount += 1;
     }
     if (keywords) ctx.counters.keywordChangeCount += 1;
     await recordItem(ctx, {
       entityType: "Classification",
-      action: before.categoryId !== targetCategoryId ? "MOVE_AND_RENAME" : "RENAME",
+      action: previousCategoryId !== targetCategoryId ? "MOVE_AND_RENAME" : "RENAME",
       entityId: item.currentId,
       previousStateJson: {
-        nameAr: before.nameAr,
-        categoryId: before.categoryId,
+        nameAr: previousName,
+        categoryId: previousCategoryId,
         keywords: before.keywords as Prisma.InputJsonValue,
       },
       nextStateJson: {
@@ -305,8 +461,13 @@ async function applyRemainingKeywordUpdates(ctx: RestructureExecutionContext): P
   for (const [key, keywords] of Object.entries(ctx.plan.finalKeywordsByKey)) {
     const target = ctx.plan.finalClassificationTargets[key];
     if (!target?.reuseId || ctx.processedClassificationIds.has(target.reuseId)) continue;
-    const before = await ctx.tx.classification.findUniqueOrThrow({ where: { id: target.reuseId } });
-    await ctx.tx.classification.update({ where: { id: target.reuseId }, data: { keywords } });
+    const before = await ctx.tx.classification.findUniqueOrThrow({
+      where: { id: target.reuseId },
+    });
+    await ctx.tx.classification.update({
+      where: { id: target.reuseId },
+      data: { keywords },
+    });
     ctx.counters.keywordChangeCount += 1;
     await recordItem(ctx, {
       entityType: "Classification",
@@ -321,7 +482,9 @@ async function applyRemainingKeywordUpdates(ctx: RestructureExecutionContext): P
 async function applyClassificationDeactivations(ctx: RestructureExecutionContext): Promise<void> {
   for (const item of ctx.plan.classificationsToDeactivate) {
     if (!item.currentId) continue;
-    const before = await ctx.tx.classification.findUniqueOrThrow({ where: { id: item.currentId } });
+    const before = await ctx.tx.classification.findUniqueOrThrow({
+      where: { id: item.currentId },
+    });
     if (!before.isActive) continue;
     await ctx.tx.classification.update({
       where: { id: item.currentId },
@@ -356,12 +519,21 @@ async function applyCategoryDeactivations(ctx: RestructureExecutionContext): Pro
 }
 
 async function assertComplaintCategoryConsistency(ctx: RestructureExecutionContext): Promise<void> {
-  const bad = await ctx.tx.complaint.findMany({
-    where: { isDeleted: false, classificationId: { not: null } },
-    select: { categoryId: true, classification: { select: { categoryId: true } } },
-  });
-  for (const c of bad) {
-    if (c.classification && c.categoryId === c.classification.categoryId) continue;
+  const rows = await ctx.tx.$queryRaw<Array<{ count: bigint | number }>>`
+    SELECT COUNT(*) AS count
+    FROM "Complaint" AS complaint
+    LEFT JOIN "Classification" AS classification
+      ON classification.id = complaint.classificationId
+    WHERE complaint.isDeleted = 0
+      AND complaint.classificationId IS NOT NULL
+      AND (
+        classification.id IS NULL
+        OR complaint.categoryId IS NULL
+        OR complaint.categoryId <> classification.categoryId
+      )
+  `;
+  const mismatched = Number(rows[0]?.count ?? 0);
+  if (mismatched > 0) {
     throw new TaxonomyRestructureError(
       RESTRUCTURE_ERROR_CODES.CATEGORY_CLASSIFICATION_MISMATCH,
       "اختلاف categoryId عن classification.categoryId بعد التطبيق"
@@ -389,11 +561,14 @@ async function executeRestructurePlan(input: {
         counters,
         itemSequence: createRestructureItemSequence(),
       };
-      await applyCategoryCreates(ctx);
-      await applyCategoryRenames(ctx);
       registerKeptCategories(ctx);
+      await stageCategoryTemporaryNames(ctx);
+      await applyCategoryCreates(ctx);
+      await finalizeCategoryRenames(ctx);
+      registerKeptCategories(ctx);
+      await stageClassificationTemporaryNames(ctx);
       await applyClassificationCreates(ctx);
-      await applyClassificationMovesAndRenames(ctx);
+      await finalizeClassificationMovesAndRenames(ctx);
       await applyRemainingKeywordUpdates(ctx);
       await applyClassificationDeactivations(ctx);
       await applyCategoryDeactivations(ctx);
@@ -449,7 +624,6 @@ async function finalizeFailedRestructureRun(input: {
     input.error instanceof Error ? input.error.message.slice(0, 200) : "UNEXPECTED_ERROR";
   const code =
     input.error instanceof TaxonomyRestructureError ? input.error.code : "APPLY_FAILED";
-  // Transaction rolled back → committed mutation counters are zero.
   const counters = createEmptyExecutionCounters();
   await input.db.classificationTaxonomyRestructureRun.update({
     where: { id: input.runId },
@@ -478,7 +652,10 @@ export async function applyTaxonomyRestructure(
   validateApplyRequest(input.confirm);
   const actor = input.actor ?? AUDIT_ACTOR_SYSTEM;
   const manifest = loadValidatedApplyManifest(input.manifestPath, input.confirm!);
+  assertPlanIsApplicable(manifest.plan);
   const current = await assertCurrentTaxonomyMatchesPreview(db, manifest);
+  assertNoRenameCollisions(manifest.plan, current);
+
   const run = await createRestructureApplyRun(db, manifest, actor);
   await writeRestructureStartedAudit(db, run.id, actor, manifest);
 

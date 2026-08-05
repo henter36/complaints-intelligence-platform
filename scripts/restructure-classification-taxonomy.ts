@@ -6,6 +6,7 @@
 
 import { PrismaClient } from "@prisma/client";
 import {
+  RESTRUCTURE_ERROR_CODES,
   TaxonomyRestructureError,
   applyTaxonomyRestructure,
   previewTaxonomyRestructure,
@@ -16,6 +17,7 @@ import {
   dispatchRestructureMode,
   formatRestructureCliError,
   handleUnhandledCliFailure,
+  rollbackExitCode,
   type RestructureCliOptions,
 } from "../src/server/classifications/restructure-cli-runtime";
 
@@ -46,10 +48,22 @@ export function parseCliOptions(argv: string[] = process.argv): RestructureCliOp
 }
 
 async function runDryRunMode(options: RestructureCliOptions): Promise<number> {
-  if (!options.proposal || !options.mapping || !options.manifest) {
+  if (!options.proposal) {
     throw new TaxonomyRestructureError(
-      "PROPOSAL_REQUIRED",
-      "dry-run يتطلب --proposal و --mapping و --manifest"
+      RESTRUCTURE_ERROR_CODES.PROPOSAL_REQUIRED,
+      "dry-run يتطلب --proposal"
+    );
+  }
+  if (!options.mapping) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.MAPPING_REQUIRED,
+      "dry-run يتطلب --mapping"
+    );
+  }
+  if (!options.manifest) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.MANIFEST_REQUIRED,
+      "dry-run يتطلب --manifest"
     );
   }
   const result = await previewTaxonomyRestructure(prisma, {
@@ -64,7 +78,10 @@ async function runDryRunMode(options: RestructureCliOptions): Promise<number> {
 
 async function runApplyMode(options: RestructureCliOptions): Promise<number> {
   if (!options.manifest) {
-    throw new TaxonomyRestructureError("MANIFEST_REQUIRED", "apply يتطلب --manifest");
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.MANIFEST_REQUIRED,
+      "apply يتطلب --manifest"
+    );
   }
   const result = await applyTaxonomyRestructure(prisma, {
     manifestPath: options.manifest,
@@ -77,12 +94,27 @@ async function runApplyMode(options: RestructureCliOptions): Promise<number> {
 
 async function runVerifyMode(options: RestructureCliOptions): Promise<number> {
   if (!options.runId) {
-    throw new TaxonomyRestructureError("RUN_NOT_FOUND", "verify يتطلب --run-id");
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.RUN_ID_REQUIRED,
+      "verify يتطلب --run-id"
+    );
+  }
+  if (!options.proposal) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.PROPOSAL_REQUIRED,
+      "verify يتطلب --proposal"
+    );
+  }
+  if (!options.mapping) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.MAPPING_REQUIRED,
+      "verify يتطلب --mapping"
+    );
   }
   const result = await verifyTaxonomyRestructure(prisma, {
     runId: options.runId,
-    proposalPath: options.proposal ?? undefined,
-    mappingPath: options.mapping ?? undefined,
+    proposalPath: options.proposal,
+    mappingPath: options.mapping,
   });
   safePrint(result);
   return result.ok ? 0 : 1;
@@ -90,7 +122,10 @@ async function runVerifyMode(options: RestructureCliOptions): Promise<number> {
 
 async function runRollbackMode(options: RestructureCliOptions): Promise<number> {
   if (!options.runId) {
-    throw new TaxonomyRestructureError("RUN_NOT_FOUND", "rollback يتطلب --run-id");
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.RUN_ID_REQUIRED,
+      "rollback يتطلب --run-id"
+    );
   }
   const result = await rollbackTaxonomyRestructure(prisma, {
     runId: options.runId,
@@ -98,7 +133,7 @@ async function runRollbackMode(options: RestructureCliOptions): Promise<number> 
     actor: options.actor,
   });
   safePrint(result);
-  return result.status === "ROLLED_BACK" || result.status === "PARTIALLY_ROLLED_BACK" ? 0 : 1;
+  return rollbackExitCode(result.status);
 }
 
 async function dispatchMode(options: RestructureCliOptions): Promise<number> {

@@ -720,6 +720,8 @@ model ClassificationTaxonomyRestructureRun {
   deactivatedCount                Int      @default(0)
   keywordChangeCount              Int      @default(0)
   legacyComplaintConsistencyUpdateCount Int @default(0)
+  rolledBackCount                 Int      @default(0)
+  skippedCount                    Int      @default(0)
   failureCode                     String?
   failureMessage                  String?
   rollbackOfRunId                 String?

@@ -8,7 +8,7 @@ import {
   splitTargetPath,
 } from "./classification-taxonomy-proposal";
 import {
-  computeTaxonomyFingerprint,
+  computeTaxonomyShapeFingerprint,
   emptyPlan,
   loadCurrentTaxonomy,
   type LoadedCategory,
@@ -17,6 +17,10 @@ import {
   type RestructureDb,
   type RestructurePlan,
 } from "./classification-taxonomy-manifest";
+import {
+  RESTRUCTURE_ERROR_CODES,
+  TaxonomyRestructureError,
+} from "./classification-taxonomy-proposal";
 
 export type CurrentTaxonomy = Awaited<ReturnType<typeof loadCurrentTaxonomy>>;
 
@@ -131,18 +135,48 @@ function resolveExistingCategory(
   );
 }
 
-function resolveExistingClassification(
+export type ClassificationResolution =
+  | { status: "FOUND"; classification: LoadedClassification }
+  | { status: "MISSING" }
+  | { status: "AMBIGUOUS"; matches: LoadedClassification[] };
+
+export function resolveExistingClassification(
   ctx: RestructurePlanningContext,
   currentId: string,
-  currentName: string
-): LoadedClassification | undefined {
-  const byId = ctx.classificationsById.get(currentId);
-  if (byId) return byId;
-  const normalized = normalizeClassificationKeyword(currentName);
-  for (const cls of ctx.classificationsById.values()) {
-    if (cls.isActive && normalizeClassificationKeyword(cls.nameAr) === normalized) return cls;
+  currentName: string,
+  categoryHint?: string | null
+): ClassificationResolution {
+  if (currentId) {
+    const byId = ctx.classificationsById.get(currentId);
+    if (byId) return { status: "FOUND", classification: byId };
   }
-  return undefined;
+  const normalized = normalizeClassificationKeyword(currentName);
+  if (!normalized) return { status: "MISSING" };
+  const categoryNorm = categoryHint
+    ? normalizeClassificationKeyword(categoryHint)
+    : null;
+  const matches = [...ctx.classificationsById.values()].filter((cls) => {
+    if (!cls.isActive) return false;
+    if (normalizeClassificationKeyword(cls.nameAr) !== normalized) return false;
+    if (!categoryNorm) return true;
+    return normalizeClassificationKeyword(cls.categoryName) === categoryNorm;
+  });
+  if (matches.length === 1) return { status: "FOUND", classification: matches[0]! };
+  if (matches.length === 0) return { status: "MISSING" };
+  return { status: "AMBIGUOUS", matches };
+}
+
+function resolutionConflictLabel(
+  currentName: string,
+  resolution: ClassificationResolution
+): string {
+  if (resolution.status === "MISSING") {
+    return `تصنيف الترحيل غير موجود: ${currentName}`;
+  }
+  if (resolution.status === "AMBIGUOUS") {
+    return `تصنيف الترحيل غامض بالاسم: ${currentName}`;
+  }
+  return currentName;
 }
 
 function registerCategoryReuse(
@@ -229,11 +263,21 @@ export function processClassificationMigration(
   ctx: RestructurePlanningContext,
   mig: EntityMigration
 ): MigrationProcessingResult {
-  const resolved = resolveExistingClassification(ctx, mig.currentId, mig.currentName);
-  if (!resolved) {
-    return { kind: "MISSING", conflict: `تصنيف الترحيل غير موجود: ${mig.currentName}` };
-  }
   const target = splitTargetPath(mig.target);
+  const categoryHint = target.categoryName || null;
+  const resolution = resolveExistingClassification(
+    ctx,
+    mig.currentId,
+    mig.currentName,
+    categoryHint
+  );
+  if (resolution.status !== "FOUND") {
+    return {
+      kind: "MISSING",
+      conflict: resolutionConflictLabel(mig.currentName, resolution),
+    };
+  }
+  const resolved = resolution.classification;
   const classificationName = target.classificationName || mig.target;
   const categoryName = target.categoryName || resolved.categoryName;
   const key = findProposedClassificationKey(ctx, categoryName, classificationName);
@@ -310,13 +354,17 @@ export function processCompositeMigration(
   const cat = resolveCompositeCategory(ctx, ids.categoryId, catNameHint);
   planCompositeCategorySide(ctx, mig, cat, target.categoryName);
 
-  const cls =
-    (ids.classificationId ? ctx.classificationsById.get(ids.classificationId) : undefined) ??
-    resolveExistingClassification(ctx, "", clsNameHint);
-  if (!cls) {
-    ctx.plan.namingConflicts.push(`تصنيف مركب غير موجود: ${mig.currentName}`);
+  const byId = ids.classificationId
+    ? ctx.classificationsById.get(ids.classificationId)
+    : undefined;
+  const resolution = byId
+    ? ({ status: "FOUND", classification: byId } as const)
+    : resolveExistingClassification(ctx, "", clsNameHint, catNameHint);
+  if (resolution.status !== "FOUND") {
+    ctx.plan.namingConflicts.push(resolutionConflictLabel(mig.currentName, resolution));
     return { kind: "HANDLED" };
   }
+  const cls = resolution.classification;
 
   const key = findProposedClassificationKey(ctx, target.categoryName, target.classificationName);
   registerClassificationReuse(ctx, key, cls.id);
@@ -516,6 +564,12 @@ export function planCategoryDeactivations(ctx: RestructurePlanningContext): void
   const reused = new Set(ctx.categoryReuseByTargetName.values());
   for (const cat of ctx.current.categories.filter((c) => c.isActive)) {
     if (reused.has(cat.id)) continue;
+    if (cat.complaintCount > 0) {
+      ctx.plan.namingConflicts.push(
+        `${RESTRUCTURE_ERROR_CODES.CATEGORY_WITH_COMPLAINTS_CANNOT_BE_DEACTIVATED}:${cat.id}`
+      );
+      continue;
+    }
     ctx.plan.categoriesToDeactivate.push(
       buildPlanChange({
         currentId: cat.id,
@@ -534,6 +588,12 @@ export function planCategoryDeactivations(ctx: RestructurePlanningContext): void
 export function planClassificationDeactivations(ctx: RestructurePlanningContext): void {
   for (const cls of ctx.current.classifications.filter((c) => c.isActive)) {
     if (ctx.reusedClassificationIds.has(cls.id)) continue;
+    if (cls.complaintCount > 0) {
+      ctx.plan.namingConflicts.push(
+        `${RESTRUCTURE_ERROR_CODES.CLASSIFICATION_WITH_COMPLAINTS_CANNOT_BE_DEACTIVATED}:${cls.id}`
+      );
+      continue;
+    }
     ctx.plan.classificationsToDeactivate.push(
       buildPlanChange({
         currentId: cls.id,
@@ -579,27 +639,24 @@ export async function planComplaintConsistencyRepairs(
 }
 
 export function buildTargetTaxonomySnapshot(ctx: RestructurePlanningContext): {
-  targetCats: Array<{ id: string; nameAr: string; isActive: boolean; isDeleted: boolean }>;
+  targetCats: Array<{ nameAr: string; isActive: boolean; isDeleted: boolean }>;
   targetCls: Array<{
-    id: string;
     nameAr: string;
-    categoryId: string;
+    categoryName: string;
     keywords: string[];
     isActive: boolean;
     isDeleted: boolean;
   }>;
 } {
-  const targetCats = ctx.proposal.proposedTaxonomy.map((c, i) => ({
-    id: ctx.categoryReuseByTargetName.get(c.category) ?? `new-cat-${i}`,
+  const targetCats = ctx.proposal.proposedTaxonomy.map((c) => ({
     nameAr: c.category,
     isActive: true,
     isDeleted: false,
   }));
-  const targetCls = ctx.proposal.proposedTaxonomy.flatMap((cat, ci) =>
-    cat.classifications.map((cls, i) => ({
-      id: ctx.classificationReuseByKey.get(cls.classificationKey) ?? `new-cls-${ci}-${i}`,
+  const targetCls = ctx.proposal.proposedTaxonomy.flatMap((cat) =>
+    cat.classifications.map((cls) => ({
       nameAr: cls.classification,
-      categoryId: ctx.categoryReuseByTargetName.get(cls.category) ?? `new-cat-${ci}`,
+      categoryName: cls.category,
       keywords: cls.sourceDetails,
       isActive: true,
       isDeleted: false,
@@ -617,8 +674,23 @@ export function finalizeRestructurePlan(ctx: RestructurePlanningContext): {
   return {
     plan: ctx.plan,
     currentFingerprint: ctx.current.fingerprint,
-    targetFingerprint: computeTaxonomyFingerprint(targetCats, targetCls),
+    targetFingerprint: computeTaxonomyShapeFingerprint(targetCats, targetCls),
   };
+}
+
+export function assertPlanIsApplicable(plan: RestructurePlan): void {
+  const blockers = [
+    ...plan.namingConflicts,
+    ...plan.keywordConflicts,
+    ...plan.duplicateProposedKeys,
+    ...plan.missingSourceDetailMappings,
+  ];
+  if (blockers.length === 0) return;
+  throw new TaxonomyRestructureError(
+    RESTRUCTURE_ERROR_CODES.PLAN_NOT_APPLICABLE,
+    "الخطة تحتوي تعارضات تمنع التطبيق",
+    { blockerCount: blockers.length }
+  );
 }
 
 export async function buildRestructurePlan(

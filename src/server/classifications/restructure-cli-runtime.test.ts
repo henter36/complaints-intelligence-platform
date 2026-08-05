@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
-import { TaxonomyRestructureError } from "./classification-taxonomy-proposal";
+import { join } from "node:path";
+import { TaxonomyRestructureError, RESTRUCTURE_ERROR_CODES } from "./classification-taxonomy-proposal";
 import {
   dispatchRestructureMode,
   formatRestructureCliError,
   handleUnhandledCliFailure,
+  rollbackExitCode,
   type RestructureCliOptions,
 } from "./restructure-cli-runtime";
+import { RESTRUCTURE_RUN_STATUSES } from "./classification-taxonomy-manifest";
 
 function baseOptions(overrides: Partial<RestructureCliOptions> = {}): RestructureCliOptions {
   return {
@@ -50,7 +53,7 @@ describe("restructure CLI runtime", () => {
     expect(calls).toEqual(["dry-run", "apply", "verify", "rollback"]);
   });
 
-  it("rejects unsupported modes", async () => {
+  it("rejects unsupported modes with MODE_UNSUPPORTED", async () => {
     await expect(
       dispatchRestructureMode(baseOptions({ mode: "explode" }), {
         dryRun: async () => 0,
@@ -58,7 +61,13 @@ describe("restructure CLI runtime", () => {
         verify: async () => 0,
         rollback: async () => 0,
       })
-    ).rejects.toMatchObject({ code: "MANIFEST_INVALID" });
+    ).rejects.toMatchObject({ code: RESTRUCTURE_ERROR_CODES.MODE_UNSUPPORTED });
+  });
+
+  it("maps rollback statuses to exit codes", () => {
+    expect(rollbackExitCode(RESTRUCTURE_RUN_STATUSES.ROLLED_BACK)).toBe(0);
+    expect(rollbackExitCode(RESTRUCTURE_RUN_STATUSES.PARTIALLY_ROLLED_BACK)).toBe(2);
+    expect(rollbackExitCode(RESTRUCTURE_RUN_STATUSES.FAILED)).toBe(1);
   });
 
   it("handles disconnect-style rejection with safe output and exitCode 1", async () => {
@@ -95,10 +104,10 @@ describe("restructure CLI runtime", () => {
 
   it("formats TaxonomyRestructureError without stack", () => {
     const formatted = formatRestructureCliError(
-      new TaxonomyRestructureError("PROPOSAL_REQUIRED", "proposal required")
+      new TaxonomyRestructureError(RESTRUCTURE_ERROR_CODES.PROPOSAL_REQUIRED, "proposal required")
     );
     expect(formatted).toEqual({
-      code: "PROPOSAL_REQUIRED",
+      code: RESTRUCTURE_ERROR_CODES.PROPOSAL_REQUIRED,
       message: "proposal required",
       details: undefined,
     });
@@ -106,9 +115,19 @@ describe("restructure CLI runtime", () => {
     handleUnhandledCliFailure(new Error("x".repeat(500) + " DATABASE_URL=secret"), {
       print: (value) => {
         expect(JSON.stringify(value)).not.toContain("DATABASE_URL");
-        expect((value as { error: { message: string } }).error.message.length).toBeLessThanOrEqual(200);
+        expect((value as { error: { message: string } }).error.message.length).toBeLessThanOrEqual(
+          200
+        );
       },
       setExitCode: () => undefined,
     });
+  });
+
+  it("exports error codes used by CLI validation", () => {
+    expect(RESTRUCTURE_ERROR_CODES.RUN_ID_REQUIRED).toBe("RUN_ID_REQUIRED");
+    expect(RESTRUCTURE_ERROR_CODES.MODE_UNSUPPORTED).toBe("MODE_UNSUPPORTED");
+    expect(RESTRUCTURE_ERROR_CODES.MAPPING_REQUIRED).toBe("MAPPING_REQUIRED");
+    expect(RESTRUCTURE_ERROR_CODES.MANIFEST_REQUIRED).toBe("MANIFEST_REQUIRED");
+    expect(join("a", "b")).toContain("a");
   });
 });

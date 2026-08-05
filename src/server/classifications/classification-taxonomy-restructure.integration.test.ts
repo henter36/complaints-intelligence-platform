@@ -404,9 +404,15 @@ describe("classification taxonomy restructure integration", () => {
         sequence: 1,
         entityType: "Complaint",
         action: "CATEGORY_CONSISTENCY",
-        entityId: classification.id,
-        previousStateJson: { categoryId: fromCategory.id },
-        nextStateJson: { categoryId: toCategory.id, updatedCount: 1 },
+        entityId: complaint.id,
+        previousStateJson: {
+          categoryId: fromCategory.id,
+          classificationId: classification.id,
+        },
+        nextStateJson: {
+          categoryId: toCategory.id,
+          classificationId: classification.id,
+        },
         result: "APPLIED",
         createdAt: sameCreatedAt,
       },

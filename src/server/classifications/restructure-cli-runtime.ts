@@ -1,4 +1,8 @@
-import { TaxonomyRestructureError } from "./classification-taxonomy-proposal";
+import {
+  RESTRUCTURE_ERROR_CODES,
+  TaxonomyRestructureError,
+} from "./classification-taxonomy-proposal";
+import { RESTRUCTURE_RUN_STATUSES } from "./classification-taxonomy-manifest";
 
 export type RestructureCliOptions = {
   mode: string;
@@ -38,6 +42,12 @@ export function handleUnhandledCliFailure(
   options.setExitCode(1);
 }
 
+export function rollbackExitCode(status: string): number {
+  if (status === RESTRUCTURE_RUN_STATUSES.ROLLED_BACK) return 0;
+  if (status === RESTRUCTURE_RUN_STATUSES.PARTIALLY_ROLLED_BACK) return 2;
+  return 1;
+}
+
 export type RestructureModeHandlers = {
   dryRun: (options: RestructureCliOptions) => Promise<number>;
   apply: (options: RestructureCliOptions) => Promise<number>;
@@ -60,7 +70,7 @@ export async function dispatchRestructureMode(
       return handlers.rollback(options);
     default:
       throw new TaxonomyRestructureError(
-        "MANIFEST_INVALID",
+        RESTRUCTURE_ERROR_CODES.MODE_UNSUPPORTED,
         `وضع غير مدعوم: ${options.mode}`
       );
   }

@@ -181,6 +181,7 @@ export function computeTaxonomyFingerprint(
     "id" | "nameAr" | "categoryId" | "keywords" | "isActive" | "isDeleted"
   >[]
 ): string {
+  // Legacy ID-sorted fingerprint retained for callers that still need entity ids.
   const catPayload = [...categories]
     .map((c) => ({ id: c.id, nameAr: c.nameAr, isActive: c.isActive, isDeleted: c.isDeleted }))
     .sort((a, b) => compareCodeUnits(a.id, b.id));
@@ -205,6 +206,59 @@ export function computeTaxonomyFingerprint(
       };
     })
     .sort((a, b) => compareCodeUnits(a.id, b.id));
+  return sha256(stableStringify({ categories: catPayload, classifications: clsPayload }));
+}
+
+/**
+ * Shape fingerprint for taxonomy restructure: comparable across create/reuse
+ * without depending on cuid values.
+ */
+export function computeTaxonomyShapeFingerprint(
+  categories: readonly {
+    nameAr: string;
+    isActive: boolean;
+    isDeleted?: boolean;
+  }[],
+  classifications: readonly {
+    nameAr: string;
+    categoryName: string;
+    keywords: unknown;
+    isActive: boolean;
+    isDeleted?: boolean;
+  }[]
+): string {
+  const catPayload = [...categories]
+    .map((c) => ({
+      nameNormalized: normalizeClassificationKeyword(c.nameAr),
+      isActive: c.isActive,
+      isDeleted: c.isDeleted ?? false,
+    }))
+    .sort((a, b) => compareCodeUnits(a.nameNormalized, b.nameNormalized));
+
+  const clsPayload = [...classifications]
+    .map((c) => {
+      let keywords: string[] = [];
+      try {
+        keywords = parseClassificationKeywords(c.keywords ?? []);
+      } catch {
+        keywords = [];
+      }
+      const normalizedKeywords = [
+        ...new Set(keywords.map((k) => normalizeClassificationKeyword(k)).filter(Boolean)),
+      ].sort(compareCodeUnits);
+      return {
+        nameNormalized: normalizeClassificationKeyword(c.nameAr),
+        categoryNormalized: normalizeClassificationKeyword(c.categoryName),
+        isActive: c.isActive,
+        isDeleted: c.isDeleted ?? false,
+        normalizedKeywords,
+      };
+    })
+    .sort((a, b) => {
+      const byCat = compareCodeUnits(a.categoryNormalized, b.categoryNormalized);
+      return byCat !== 0 ? byCat : compareCodeUnits(a.nameNormalized, b.nameNormalized);
+    });
+
   return sha256(stableStringify({ categories: catPayload, classifications: clsPayload }));
 }
 
@@ -258,7 +312,16 @@ export async function loadCurrentTaxonomy(db: RestructureDb) {
   return {
     categories: loadedCats,
     classifications: loadedCls,
-    fingerprint: computeTaxonomyFingerprint(loadedCats, loadedCls),
+    fingerprint: computeTaxonomyShapeFingerprint(
+      loadedCats,
+      loadedCls.map((c) => ({
+        nameAr: c.nameAr,
+        categoryName: c.categoryName,
+        keywords: c.keywords,
+        isActive: c.isActive,
+        isDeleted: c.isDeleted,
+      }))
+    ),
   };
 }
 

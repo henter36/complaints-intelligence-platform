@@ -40,11 +40,20 @@ type RollbackItemDecision =
     }
   | {
       action: "RESTORE_COMPLAINT_CATEGORY";
-      entityId: string;
+      complaintId: string;
+      classificationId: string;
       previousCategoryId: string;
-      appliedCategoryId?: string;
+      appliedCategoryId: string;
     }
   | { action: "SKIP"; reason: string; entityId?: string | null };
+
+const NON_ROLLBACKABLE_STATUSES = new Set<string>([
+  RESTRUCTURE_RUN_STATUSES.FAILED,
+  RESTRUCTURE_RUN_STATUSES.APPLYING,
+  RESTRUCTURE_RUN_STATUSES.ROLLING_BACK,
+  RESTRUCTURE_RUN_STATUSES.ROLLED_BACK,
+  RESTRUCTURE_RUN_STATUSES.PARTIALLY_ROLLED_BACK,
+]);
 
 function asRecord(value: Prisma.JsonValue | null): Record<string, unknown> | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -70,8 +79,32 @@ async function loadOriginalRestructureRun(db: RestructureDb, runId: string) {
   return original;
 }
 
+function assertRollbackAllowed(original: {
+  operation: string;
+  status: string;
+}): void {
+  if (original.operation === RESTRUCTURE_OPERATIONS.ROLLBACK) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.ROLLBACK_NOT_ALLOWED,
+      "لا يمكن التراجع عن تشغيل تراجع"
+    );
+  }
+  if (NON_ROLLBACKABLE_STATUSES.has(original.status)) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.ROLLBACK_NOT_ALLOWED,
+      `حالة التشغيل لا تسمح بالتراجع: ${original.status}`
+    );
+  }
+}
+
 function assertRollbackConfirmation(
-  original: { id: string; manifestHash: string; createdCount: number; renamedCount: number; movedCount: number },
+  original: {
+    id: string;
+    manifestHash: string;
+    createdCount: number;
+    renamedCount: number;
+    movedCount: number;
+  },
   confirm: string
 ): void {
   const appliedOps = original.createdCount + original.renamedCount + original.movedCount;
@@ -107,29 +140,31 @@ async function createRollbackRun(
       manifestHash: original.manifestHash,
       actor,
       rollbackOfRunId: original.id,
+      createdCount: 0,
+      renamedCount: 0,
+      movedCount: 0,
+      rolledBackCount: 0,
+      skippedCount: 0,
     },
   });
 }
 
-async function loadAppliedRestructureItems(db: RestructureDb, originalRunId: string): Promise<AppliedItem[]> {
+async function loadAppliedRestructureItems(
+  db: RestructureDb,
+  originalRunId: string
+): Promise<AppliedItem[]> {
   return db.classificationTaxonomyRestructureItem.findMany({
     where: { runId: originalRunId, result: "APPLIED" },
     orderBy: [{ sequence: "desc" }, { id: "desc" }],
   });
 }
 
-function optionalStringMatches(
-  expected: unknown,
-  actual: string | undefined
-): boolean {
+function optionalStringMatches(expected: unknown, actual: string | undefined): boolean {
   if (typeof expected !== "string") return true;
   return actual === expected;
 }
 
-function optionalBooleanMatches(
-  expected: unknown,
-  actual: boolean | undefined
-): boolean {
+function optionalBooleanMatches(expected: unknown, actual: boolean | undefined): boolean {
   if (typeof expected !== "boolean") return true;
   return actual === expected;
 }
@@ -243,12 +278,20 @@ function evaluateComplaintConsistencyRollback(
   if (item.action !== "CATEGORY_CONSISTENCY" || !item.entityId || !prev) return null;
   if (typeof prev.categoryId !== "string") return null;
   const next = asRecord(item.nextStateJson);
+  if (!next || typeof next.categoryId !== "string") return null;
+  const classificationId =
+    typeof prev.classificationId === "string"
+      ? prev.classificationId
+      : typeof next.classificationId === "string"
+        ? next.classificationId
+        : null;
+  if (!classificationId) return null;
   return {
     action: "RESTORE_COMPLAINT_CATEGORY",
-    entityId: item.entityId,
+    complaintId: item.entityId,
+    classificationId,
     previousCategoryId: prev.categoryId,
-    appliedCategoryId:
-      next && typeof next.categoryId === "string" ? next.categoryId : undefined,
+    appliedCategoryId: next.categoryId,
   };
 }
 
@@ -267,6 +310,37 @@ async function evaluateRollbackItem(
       entityId: item.entityId,
     }
   );
+}
+
+function tempRollbackCategoryName(runId: string, entityId: string): string {
+  return `__taxonomy_tmp_rb_category_${runId}_${entityId}`;
+}
+
+function tempRollbackClassificationName(runId: string, entityId: string): string {
+  return `__taxonomy_tmp_rb_classification_${runId}_${entityId}`;
+}
+
+async function stageRollbackTemporaryNames(
+  tx: Prisma.TransactionClient,
+  rollbackRunId: string,
+  decisions: RollbackItemDecision[]
+): Promise<void> {
+  for (const decision of decisions) {
+    if (decision.action === "RESTORE_CATEGORY") {
+      await tx.category.update({
+        where: { id: decision.entityId },
+        data: { nameAr: tempRollbackCategoryName(rollbackRunId, decision.entityId) },
+      });
+    } else if (
+      decision.action === "RESTORE_CLASSIFICATION" &&
+      typeof decision.previous.nameAr === "string"
+    ) {
+      await tx.classification.update({
+        where: { id: decision.entityId },
+        data: { nameAr: tempRollbackClassificationName(rollbackRunId, decision.entityId) },
+      });
+    }
+  }
 }
 
 async function processRollbackItem(
@@ -314,66 +388,21 @@ async function processRollbackItem(
         },
       });
       return "ROLLED_BACK";
-    case "RESTORE_COMPLAINT_CATEGORY":
-      await tx.complaint.updateMany({
+    case "RESTORE_COMPLAINT_CATEGORY": {
+      const updated = await tx.complaint.updateMany({
         where: {
-          classificationId: decision.entityId,
+          id: decision.complaintId,
           isDeleted: false,
-          ...(decision.appliedCategoryId
-            ? { categoryId: decision.appliedCategoryId }
-            : {}),
+          classificationId: decision.classificationId,
+          categoryId: decision.appliedCategoryId,
         },
         data: { categoryId: decision.previousCategoryId },
       });
-      return "ROLLED_BACK";
+      return updated.count === 1 ? "ROLLED_BACK" : "SKIPPED";
+    }
     case "SKIP":
       return "SKIPPED";
   }
-}
-
-async function executeRollbackTransaction(input: {
-  db: RestructureDb;
-  items: AppliedItem[];
-  rollbackRunId: string;
-}): Promise<{ rolledBack: number; skipped: number; skipReasons: string[] }> {
-  return input.db.$transaction(
-    async (tx) => {
-      let rolledBack = 0;
-      let skipped = 0;
-      const skipReasons: string[] = [];
-      const itemSequence = createRestructureItemSequence();
-      for (const item of input.items) {
-        const decision = await evaluateRollbackItem(tx, item);
-        const result = await processRollbackItem(tx, decision);
-        if (result === "ROLLED_BACK") {
-          rolledBack += 1;
-          await tx.classificationTaxonomyRestructureItem.update({
-            where: { id: item.id },
-            data: { result: "ROLLED_BACK" },
-          });
-          await recordRollbackItem(tx, input.rollbackRunId, itemSequence, item, "ROLLED_BACK");
-        } else {
-          skipped += 1;
-          const reason = decision.action === "SKIP" ? decision.reason : "SKIPPED";
-          skipReasons.push(reason);
-          await tx.classificationTaxonomyRestructureItem.update({
-            where: { id: item.id },
-            data: { result: "ROLLBACK_SKIPPED", skipReason: reason },
-          });
-          await recordRollbackItem(
-            tx,
-            input.rollbackRunId,
-            itemSequence,
-            item,
-            "ROLLBACK_SKIPPED",
-            reason
-          );
-        }
-      }
-      return { rolledBack, skipped, skipReasons };
-    },
-    { timeout: 180_000 }
-  );
 }
 
 async function recordRollbackItem(
@@ -399,6 +428,65 @@ async function recordRollbackItem(
   });
 }
 
+async function executeRollbackTransaction(input: {
+  db: RestructureDb;
+  items: AppliedItem[];
+  rollbackRunId: string;
+}): Promise<{ rolledBack: number; skipped: number; skipReasons: string[] }> {
+  return input.db.$transaction(
+    async (tx) => {
+      let rolledBack = 0;
+      let skipped = 0;
+      const skipReasons: string[] = [];
+      const itemSequence = createRestructureItemSequence();
+      const evaluated: Array<{ item: AppliedItem; decision: RollbackItemDecision }> = [];
+      for (const item of input.items) {
+        evaluated.push({ item, decision: await evaluateRollbackItem(tx, item) });
+      }
+      await stageRollbackTemporaryNames(
+        tx,
+        input.rollbackRunId,
+        evaluated.map((entry) => entry.decision)
+      );
+      for (const { item, decision } of evaluated) {
+        let result = await processRollbackItem(tx, decision);
+        let reason = decision.action === "SKIP" ? decision.reason : "SKIPPED";
+        if (
+          decision.action === "RESTORE_COMPLAINT_CATEGORY" &&
+          result === "SKIPPED"
+        ) {
+          reason = "COMPLAINT_CHANGED_AFTER_APPLY";
+        }
+        if (result === "ROLLED_BACK") {
+          rolledBack += 1;
+          await tx.classificationTaxonomyRestructureItem.update({
+            where: { id: item.id },
+            data: { result: "ROLLED_BACK" },
+          });
+          await recordRollbackItem(tx, input.rollbackRunId, itemSequence, item, "ROLLED_BACK");
+        } else {
+          skipped += 1;
+          skipReasons.push(reason);
+          await tx.classificationTaxonomyRestructureItem.update({
+            where: { id: item.id },
+            data: { result: "ROLLBACK_SKIPPED", skipReason: reason },
+          });
+          await recordRollbackItem(
+            tx,
+            input.rollbackRunId,
+            itemSequence,
+            item,
+            "ROLLBACK_SKIPPED",
+            reason
+          );
+        }
+      }
+      return { rolledBack, skipped, skipReasons };
+    },
+    { timeout: 180_000 }
+  );
+}
+
 function resolveRollbackRunStatus(skipped: number): string {
   return skipped > 0
     ? RESTRUCTURE_RUN_STATUSES.PARTIALLY_ROLLED_BACK
@@ -418,13 +506,20 @@ async function finalizeRollbackRun(input: {
     data: {
       status: input.status,
       completedAt: new Date(),
-      createdCount: input.rolledBack,
-      renamedCount: input.skipped,
+      createdCount: 0,
+      renamedCount: 0,
+      movedCount: 0,
+      rolledBackCount: input.rolledBack,
+      skippedCount: input.skipped,
     },
   });
   await input.db.classificationTaxonomyRestructureRun.update({
     where: { id: input.originalRunId },
-    data: { status: input.status },
+    data: {
+      status: input.status,
+      rolledBackCount: input.rolledBack,
+      skippedCount: input.skipped,
+    },
   });
 }
 
@@ -447,26 +542,9 @@ async function writeRollbackAudit(input: {
       originalRunId: input.originalRunId,
       rolledBack: input.rolledBack,
       skipped: input.skipped,
-      skipReasons: input.skipReasons,
+      skipReasonCodes: [...new Set(input.skipReasons)],
     },
   });
-}
-
-function buildRollbackResult(input: {
-  rollbackRunId: string;
-  originalRunId: string;
-  status: string;
-  rolledBack: number;
-  skipped: number;
-}) {
-  return {
-    mode: "rollback" as const,
-    runId: input.rollbackRunId,
-    originalRunId: input.originalRunId,
-    status: input.status,
-    rolledBack: input.rolledBack,
-    skipped: input.skipped,
-  };
 }
 
 export async function rollbackTaxonomyRestructure(
@@ -476,6 +554,7 @@ export async function rollbackTaxonomyRestructure(
   validateRollbackRequest(input.confirm);
   const actor = input.actor ?? AUDIT_ACTOR_SYSTEM;
   const original = await loadOriginalRestructureRun(db, input.runId);
+  assertRollbackAllowed(original);
   assertRollbackConfirmation(original, input.confirm!);
   const rollbackRun = await createRollbackRun(db, original, actor);
   const items = await loadAppliedRestructureItems(db, original.id);
@@ -502,11 +581,12 @@ export async function rollbackTaxonomyRestructure(
     skipped: outcome.skipped,
     skipReasons: outcome.skipReasons,
   });
-  return buildRollbackResult({
-    rollbackRunId: rollbackRun.id,
+  return {
+    mode: "rollback" as const,
+    runId: rollbackRun.id,
     originalRunId: original.id,
     status,
     rolledBack: outcome.rolledBack,
     skipped: outcome.skipped,
-  });
+  };
 }
