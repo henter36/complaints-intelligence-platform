@@ -111,6 +111,10 @@ describe("central complaint query service", () => {
     expect(parseComplaintQuery(query(`status=${legacyReopened}`)).status).toBe("OPEN");
   });
 
+  it("rejects unsupported complaint statuses", () => {
+    expect(() => parseComplaintQuery(query("status=ARCHIVED"))).toThrow("status is not supported");
+  });
+
   it("builds freshness bucket where clauses with shared bounds", () => {
     const now = new Date("2026-08-05T12:00:00.000Z");
     const day = 24 * 60 * 60 * 1000;
