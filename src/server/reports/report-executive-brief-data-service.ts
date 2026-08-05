@@ -40,7 +40,15 @@ import type {
   ContinuityRow,
   ExecutiveEntityRow,
 } from "@/lib/reports/report-contract";
-import { normalizeRegionName } from "@/lib/reports/region-normalization";
+import {
+  classificationKey,
+  UNCLASSIFIED_CLASSIFICATION_KEY,
+  UNCLASSIFIED_CLASSIFICATION_LABEL,
+} from "@/lib/reports/classification-keys";
+import {
+  displayRegionName,
+  normalizeRegionName,
+} from "@/lib/reports/region-normalization";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TOP_CLASSIFICATIONS_LIMIT = 8;
@@ -220,9 +228,11 @@ async function fetchAllTimeRegions(): Promise<string[]> {
     by: ["region"],
     where: { isDeleted: false },
   });
-  return groups
-    .map((g) => normalizeRegionName(g.region))
-    .filter((name, index, values) => values.indexOf(name) === index)
+  const keys = [
+    ...new Set(groups.map((g) => normalizeRegionName(g.region))),
+  ];
+  return keys
+    .map((key) => displayRegionName(key))
     .sort((a, b) => a.localeCompare(b, "ar"));
 }
 
@@ -234,41 +244,66 @@ function directionLabel(current: number, previous: number): string {
   return "= دون تغير";
 }
 
+/**
+ * Merge region-change rows by canonical key so alias variants never create
+ * duplicate buckets or double-count the same complaints.
+ */
+function accumulateCanonicalRegionChanges(
+  rows: ComparisonResult["regionChanges"]
+): Map<string, { currentCount: number; previousCount: number }> {
+  const map = new Map<string, { currentCount: number; previousCount: number }>();
+  for (const row of rows) {
+    const key = normalizeRegionName(row.regionName);
+    const existing = map.get(key) ?? { currentCount: 0, previousCount: 0 };
+    existing.currentCount += row.currentCount;
+    existing.previousCount += row.previousCount;
+    map.set(key, existing);
+  }
+  return map;
+}
+
 function buildAllRegionsTable(
   allTimeRegions: string[],
   comparison: ComparisonResult,
   currentDistributions: ComplaintGroupMetrics[]
 ): RegionReferenceRow[] {
-  const changeMap = new Map(
-    comparison.regionChanges.map((row) => [normalizeRegionName(row.regionName), row])
-  );
+  const changeMap = accumulateCanonicalRegionChanges(comparison.regionChanges);
   const metricsMap = new Map(
     currentDistributions.map((g) => [normalizeRegionName(g.name), g])
   );
 
-  return allTimeRegions.map((regionName) => {
-    const change = changeMap.get(regionName);
-    const metrics = metricsMap.get(regionName);
-    const currentCount = change?.currentCount ?? 0;
-    const previousCount = change?.previousCount ?? 0;
-    const difference = currentCount - previousCount;
-    return {
-      regionName,
-      currentCount,
-      previousCount,
-      difference,
-      changeRate: computeChangeRate(currentCount, previousCount),
-      complianceRate: metrics?.complianceRate ?? null,
-      averageResolutionDays:
-        (metrics?.averageResolutionEligibleCount ?? 0) > 0
-          ? roundRate(metrics!.averageResolutionDays)
-          : null,
-      openCount: metrics?.open ?? 0,
-      closedCount: metrics?.closed ?? 0,
-      currentlyLate: metrics?.currentlyLate ?? 0,
-      direction: directionLabel(currentCount, previousCount),
-    };
-  });
+  const regionKeys = new Set<string>([
+    ...allTimeRegions.map((name) => normalizeRegionName(name)),
+    ...changeMap.keys(),
+  ]);
+
+  const rows: RegionReferenceRow[] = [...regionKeys]
+    .map((key) => {
+      const change = changeMap.get(key);
+      const metrics = metricsMap.get(key);
+      const currentCount = change?.currentCount ?? 0;
+      const previousCount = change?.previousCount ?? 0;
+      const difference = currentCount - previousCount;
+      return {
+        regionName: displayRegionName(key),
+        currentCount,
+        previousCount,
+        difference,
+        changeRate: computeChangeRate(currentCount, previousCount),
+        complianceRate: metrics?.complianceRate ?? null,
+        averageResolutionDays:
+          (metrics?.averageResolutionEligibleCount ?? 0) > 0
+            ? roundRate(metrics!.averageResolutionDays)
+            : null,
+        openCount: metrics?.open ?? 0,
+        closedCount: metrics?.closed ?? 0,
+        currentlyLate: metrics?.currentlyLate ?? 0,
+        direction: directionLabel(currentCount, previousCount),
+      };
+    })
+    .sort((a, b) => a.regionName.localeCompare(b.regionName, "ar"));
+
+  return rows;
 }
 
 function buildEntityRows(
@@ -366,23 +401,37 @@ function buildNotes(result: ComplaintKpiResult, comparison: ComparisonResult): s
 // Top classifications
 // ---------------------------------------------------------------------------
 
-function buildTopClassifications(
+export function buildTopClassifications(
   currentDistributions: ComplaintGroupMetrics[],
   previousDistributions: ComplaintGroupMetrics[],
   currentTotal: number,
   limit: number = TOP_CLASSIFICATIONS_LIMIT
 ): ClassificationBriefRow[] {
+  const toRowKey = (group: ComplaintGroupMetrics): string => {
+    if (group.id) return group.id;
+    // Null id + unclassified display name → shared sentinel for open/late join.
+    if (group.name === UNCLASSIFIED_CLASSIFICATION_LABEL) {
+      return UNCLASSIFIED_CLASSIFICATION_KEY;
+    }
+    // Rare name-only groups (tests / legacy) keep a stable non-Arabic-sentinel key.
+    return group.name;
+  };
+
   const prevMap = new Map(
-    previousDistributions.map((g) => [g.id ?? g.name, g.total])
+    previousDistributions.map((g) => [toRowKey(g), g.total])
   );
 
   return currentDistributions.slice(0, limit).map((group) => {
     const currentCount = group.total;
-    const previousCount = prevMap.get(group.id ?? group.name) ?? 0;
+    const id = toRowKey(group);
+    const previousCount = prevMap.get(id) ?? 0;
     const difference = currentCount - previousCount;
     return {
-      classificationId: group.id ?? group.name,
-      classificationName: group.name,
+      classificationId: id,
+      classificationName:
+        id === UNCLASSIFIED_CLASSIFICATION_KEY
+          ? UNCLASSIFIED_CLASSIFICATION_LABEL
+          : group.name,
       currentCount,
       previousCount,
       difference,
@@ -1278,7 +1327,7 @@ async function fetchClassificationOpenLate(
       effectiveClosedAt !== null && effectiveClosedAt.getTime() < periodEndMs;
     if (closedBeforeEnd) continue;
 
-    const key = c.classificationId ?? "__unclassified__";
+    const key = classificationKey(c.classificationId);
     if (!result[key]) result[key] = { openAtEnd: 0, lateAtEnd: 0 };
     result[key].openAtEnd++;
     const slaDeadlineMs = effectiveMs + COMPLAINT_SLA_DURATION_MS;

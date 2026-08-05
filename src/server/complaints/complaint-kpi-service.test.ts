@@ -96,7 +96,11 @@ describe("complaint KPI service", () => {
     const result = await getComplaintKpis(new URLSearchParams(), new Date("2026-07-31T00:00:00Z"));
 
     expect(result.distributions.byClassification).toHaveLength(1);
-    expect(result.distributions.byClassification[0]).toMatchObject({ name: "غير مصنف", id: null, total: 2 });
+    expect(result.distributions.byClassification[0]).toMatchObject({
+      name: "غير مصنف",
+      id: null,
+      total: 2,
+    });
   });
 
   it("keeps drill-down ids on grouped metrics", async () => {

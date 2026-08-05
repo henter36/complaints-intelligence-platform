@@ -17,6 +17,7 @@ import {
   isComplaintAffectingMonthlyTrend,
   dedupeTrendComplaintsById,
   buildMonthlyTrendPrimaryWhere,
+  buildTopClassifications,
   MONTHLY_WINDOW_SIZE,
   ARABIC_MONTH_NAMES,
 } from "./report-executive-brief-data-service";
@@ -24,7 +25,17 @@ import { ComplaintStatus } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
 import type { ReportFilters } from "./report-definition-service";
 import type { ComparisonResult, DeptClassPeriodCount, PeriodRange } from "./report-comparison";
-import type { ComplaintKpiResult } from "@/server/complaints/complaint-kpi-service";
+import type { ComplaintGroupMetrics, ComplaintKpiResult } from "@/server/complaints/complaint-kpi-service";
+import {
+  UNCLASSIFIED_CLASSIFICATION_KEY,
+  UNCLASSIFIED_CLASSIFICATION_LABEL,
+} from "@/lib/reports/classification-keys";
+import { assertRegionalReconciliation } from "@/lib/reports/region-normalization";
+import {
+  sumClassificationOpenLate,
+  sumRegionReferenceRows,
+  reconcileClassificationOpenLate,
+} from "./report-reconciliation";
 
 // ---------------------------------------------------------------------------
 // Hoist mocks so they are available before module imports are processed.
@@ -1903,5 +1914,182 @@ describe("MonthlyComplaintTrendPoint contract (no MonthlyStockFlowPoint alias)",
     expect(dataService).not.toMatch(/MonthlyStockFlowPoint/);
     expect(contract).toContain("MonthlyComplaintTrendPoint");
     expect(dataService).toContain("monthlyStockFlow: MonthlyComplaintTrendPoint[]");
+  });
+});
+
+describe("classification + region reconciliation", () => {
+  it("keys unclassified by sentinel and joins open/late stock", () => {
+    const current: ComplaintGroupMetrics[] = [
+      {
+        name: UNCLASSIFIED_CLASSIFICATION_LABEL,
+        id: null,
+        count: 8,
+        total: 8,
+        open: 5,
+        closed: 3,
+        currentlyLate: 5,
+        closedLate: 0,
+        withinDueDate: 0,
+        complianceRate: null,
+        averageResolutionDays: 0,
+        averageResolutionEligibleCount: 0,
+        slaEligibleCount: 0,
+        closedWithoutTrustedDateCount: 0,
+        highPriorityOpen: 0,
+        unclassified: 8,
+      },
+      {
+        name: "نقل",
+        id: "c-transfer",
+        count: 2,
+        total: 2,
+        open: 1,
+        closed: 1,
+        currentlyLate: 1,
+        closedLate: 0,
+        withinDueDate: 1,
+        complianceRate: 100,
+        averageResolutionDays: 2,
+        averageResolutionEligibleCount: 1,
+        slaEligibleCount: 1,
+        closedWithoutTrustedDateCount: 0,
+        highPriorityOpen: 0,
+        unclassified: 0,
+      },
+    ];
+    const rows = buildTopClassifications(current, [], 10);
+    expect(rows).toHaveLength(2);
+    const unclassified = rows.find((r) => r.classificationName === "غير مصنف")!;
+    expect(unclassified.classificationId).toBe(UNCLASSIFIED_CLASSIFICATION_KEY);
+    expect(unclassified.currentCount).toBe(8);
+
+    const openLate = {
+      [UNCLASSIFIED_CLASSIFICATION_KEY]: { openAtEnd: 5, lateAtEnd: 5 },
+      "c-transfer": { openAtEnd: 1, lateAtEnd: 1 },
+    };
+    const enriched = reconcileClassificationOpenLate(rows, openLate);
+    expect(enriched.find((r) => r.classificationId === UNCLASSIFIED_CLASSIFICATION_KEY)?.openAtEnd).toBe(5);
+    expect(enriched.find((r) => r.classificationId === "c-transfer")?.openAtEnd).toBe(1);
+    const totals = sumClassificationOpenLate(enriched);
+    expect(totals.openAtEnd).toBe(6);
+    expect(totals.lateAtEnd).toBe(6);
+    expect(rows.reduce((s, r) => s + r.currentCount, 0)).toBe(10);
+
+    // Regression: Arabic display name must never be the join key.
+    const wrongKeyMap: Record<string, { openAtEnd: number; lateAtEnd: number }> = {
+      "غير مصنف": { openAtEnd: 163, lateAtEnd: 163 },
+    };
+    expect(Object.prototype.hasOwnProperty.call(openLate, "غير مصنف")).toBe(false);
+    expect(
+      reconcileClassificationOpenLate(rows, wrongKeyMap)
+        .find((r) => r.classificationId === UNCLASSIFIED_CLASSIFICATION_KEY)?.openAtEnd
+    ).toBe(0);
+  });
+
+  it("reconciles regional sums with comparison totals after alias collapse", async () => {
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
+    const sums = sumRegionReferenceRows(data.allRegions);
+    assertRegionalReconciliation({
+      currentRows: data.allRegions,
+      previousRows: data.allRegions,
+      currentTotal: 100,
+      previousTotal: 80,
+    });
+    expect(sums.current).toBe(100);
+    expect(sums.previous).toBe(80);
+    expect(sums.difference).toBe(20);
+  });
+
+  it("keeps open/late classification totals aligned with overall open/late when rows cover all volume", () => {
+    const rows = buildTopClassifications(
+      [
+        {
+          name: "غير مصنف",
+          id: null,
+          count: 9192,
+          total: 9192,
+          open: 163,
+          closed: 0,
+          currentlyLate: 163,
+          closedLate: 0,
+          withinDueDate: 0,
+          complianceRate: null,
+          averageResolutionDays: 0,
+          averageResolutionEligibleCount: 0,
+          slaEligibleCount: 0,
+          closedWithoutTrustedDateCount: 0,
+          highPriorityOpen: 0,
+          unclassified: 9192,
+        },
+        {
+          name: "أ",
+          id: "a",
+          count: 10,
+          total: 10,
+          open: 1,
+          closed: 0,
+          currentlyLate: 1,
+          closedLate: 0,
+          withinDueDate: 0,
+          complianceRate: null,
+          averageResolutionDays: 0,
+          averageResolutionEligibleCount: 0,
+          slaEligibleCount: 0,
+          closedWithoutTrustedDateCount: 0,
+          highPriorityOpen: 0,
+          unclassified: 0,
+        },
+        {
+          name: "ب",
+          id: "b",
+          count: 10,
+          total: 10,
+          open: 1,
+          closed: 0,
+          currentlyLate: 1,
+          closedLate: 0,
+          withinDueDate: 0,
+          complianceRate: null,
+          averageResolutionDays: 0,
+          averageResolutionEligibleCount: 0,
+          slaEligibleCount: 0,
+          closedWithoutTrustedDateCount: 0,
+          highPriorityOpen: 0,
+          unclassified: 0,
+        },
+        {
+          name: "ج",
+          id: "c",
+          count: 10,
+          total: 10,
+          open: 1,
+          closed: 0,
+          currentlyLate: 1,
+          closedLate: 0,
+          withinDueDate: 0,
+          complianceRate: null,
+          averageResolutionDays: 0,
+          averageResolutionEligibleCount: 0,
+          slaEligibleCount: 0,
+          closedWithoutTrustedDateCount: 0,
+          highPriorityOpen: 0,
+          unclassified: 0,
+        },
+      ],
+      [],
+      9222
+    );
+    expect(rows.reduce((s, r) => s + r.currentCount, 0)).toBe(9222);
+    const enriched = reconcileClassificationOpenLate(rows, {
+      [UNCLASSIFIED_CLASSIFICATION_KEY]: { openAtEnd: 163, lateAtEnd: 163 },
+      a: { openAtEnd: 1, lateAtEnd: 1 },
+      b: { openAtEnd: 1, lateAtEnd: 1 },
+      c: { openAtEnd: 1, lateAtEnd: 1 },
+    });
+    const totals = sumClassificationOpenLate(enriched);
+    expect(totals.openAtEnd).toBe(166);
+    expect(totals.lateAtEnd).toBe(166);
+    expect(enriched.find((r) => r.classificationId === UNCLASSIFIED_CLASSIFICATION_KEY)?.openAtEnd).not.toBe(0);
+    expect(enriched.find((r) => r.classificationId === UNCLASSIFIED_CLASSIFICATION_KEY)?.openAtEnd).not.toBe(68);
   });
 });

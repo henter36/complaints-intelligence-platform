@@ -532,27 +532,51 @@ describe("buildComparisonResult — currentTotal and previousTotal", () => {
   });
 
   it("previousTotal counts complaints that have no region (null region)", async () => {
-    // previousTotal comes directly from previous.length, so it always
-    // reflects the raw DB query count — even for complaints with null region.
-    // (normalizeRegionName(null) maps to "غير محدد" which also appears in
-    // regionChanges, but previousTotal is correct regardless.)
     const { buildComparisonResult } = await loadModule();
     mockPeriods(
       [row({ region: R_RIYADH })],
       [
-        row({ region: null }),    // no region → normalised to "غير محدد"
-        row({ region: null }),    // no region → normalised to "غير محدد"
+        row({ region: null }),
+        row({ region: null }),
         row({ region: R_RIYADH }),
       ]
     );
     const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
-    // Raw count includes all 3 complaints.
     expect(result.previousTotal).toBe(3);
-    // regionChanges groups by normalised name, so "غير محدد" carries 2.
     const regionChangesSum = result.regionChanges.reduce((s, r) => s + r.previousCount, 0);
-    // Both derivations agree because null maps to a name; previousTotal is
-    // the authoritative source and must equal the raw count.
     expect(regionChangesSum).toBe(result.previousTotal!);
+    expect(result.regionChanges.find((r) => r.regionName === "غير محدد")?.previousCount).toBe(2);
+  });
+
+  it("collapses eastern/makkah aliases so previous regional sum matches previousTotal", async () => {
+    const { buildComparisonResult } = await loadModule();
+    mockPeriods(
+      [
+        row({ region: "المنطقة الشرقية" }),
+        row({ region: "الشرقية" }),
+        row({ region: "منطقة مكة المكرمة" }),
+        row({ region: "مكة المكرمة" }),
+      ],
+      [
+        row({ region: "الشرقية" }),
+        row({ region: "المنطقة الشرقية" }),
+        row({ region: "مكة" }),
+        row({ region: "منطقة مكة المكرمة" }),
+        row({ region: "مكة المكرمة" }),
+      ]
+    );
+    const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
+    expect(result.currentTotal).toBe(4);
+    expect(result.previousTotal).toBe(5);
+    const eastern = result.regionChanges.find((r) => r.regionName === "المنطقة الشرقية")!;
+    const makkah = result.regionChanges.find((r) => r.regionName === "منطقة مكة المكرمة")!;
+    expect(eastern.currentCount).toBe(2);
+    expect(eastern.previousCount).toBe(2);
+    expect(makkah.currentCount).toBe(2);
+    expect(makkah.previousCount).toBe(3);
+    expect(result.regionChanges).toHaveLength(2);
+    expect(result.regionChanges.reduce((s, r) => s + r.previousCount, 0)).toBe(5);
+    expect(result.regionChanges.reduce((s, r) => s + r.difference, 0)).toBe(-1);
   });
 
   it("distinguishes an empty previous period from an unavailable comparison period", async () => {

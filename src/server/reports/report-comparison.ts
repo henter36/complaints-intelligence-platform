@@ -2,7 +2,11 @@ import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { buildComplaintWhere, parseComplaintQuery } from "@/server/complaints/complaint-query-service";
 import { buildComplaintQueryParams, type ReportFilters } from "./report-definition-service";
-import { normalizeRegionName } from "@/lib/reports/region-normalization";
+import {
+  assertRegionalReconciliation,
+  displayRegionName,
+  normalizeRegionName,
+} from "@/lib/reports/region-normalization";
 import { comparisonHalfOpenPeriod } from "@/lib/reports/period-range";
 import type { ComparisonMode } from "@/lib/reports/report-contract";
 
@@ -179,7 +183,7 @@ function complaintDay(complaint: ComparisonComplaint): string {
   return dayKey(complaint.complaintDate ?? complaint.receivedAt);
 }
 
-function regionName(complaint: ComparisonComplaint): string {
+function regionCanonicalKey(complaint: ComparisonComplaint): string {
   return normalizeRegionName(complaint.region);
 }
 
@@ -247,8 +251,8 @@ function buildRegionTrend(
 function countByRegion(complaints: ComparisonComplaint[]): Map<string, number> {
   const map = new Map<string, number>();
   for (const complaint of complaints) {
-    const name = regionName(complaint);
-    map.set(name, (map.get(name) ?? 0) + 1);
+    const key = regionCanonicalKey(complaint);
+    map.set(key, (map.get(key) ?? 0) + 1);
   }
   return map;
 }
@@ -288,15 +292,15 @@ function buildRegionChanges(
 ): RegionChangeRow[] {
   const currentCounts = countByRegion(current);
   const previousCounts = countByRegion(previous);
-  const regionNames = new Set<string>([...currentCounts.keys(), ...previousCounts.keys()]);
+  const regionKeys = new Set<string>([...currentCounts.keys(), ...previousCounts.keys()]);
 
   const rows: RegionChangeRow[] = [];
-  for (const name of regionNames) {
-    const currentCount = currentCounts.get(name) ?? 0;
-    const previousCount = previousCounts.get(name) ?? 0;
+  for (const key of regionKeys) {
+    const currentCount = currentCounts.get(key) ?? 0;
+    const previousCount = previousCounts.get(key) ?? 0;
     const difference = currentCount - previousCount;
     rows.push({
-      regionName: name,
+      regionName: displayRegionName(key),
       currentCount,
       previousCount,
       difference,
@@ -305,7 +309,14 @@ function buildRegionChanges(
     });
   }
 
-  return rows.sort(compareRegionChangeRows);
+  const sorted = rows.sort(compareRegionChangeRows);
+  assertRegionalReconciliation({
+    currentRows: sorted,
+    previousRows: sorted,
+    currentTotal: current.length,
+    previousTotal: previous.length,
+  });
+  return sorted;
 }
 
 // ---------------------------------------------------------------------------
@@ -329,7 +340,7 @@ function accumulateRegionSubjects(
   field: "currentCount" | "previousCount"
 ): void {
   for (const complaint of complaints) {
-    const region = regionName(complaint);
+    const region = displayRegionName(regionCanonicalKey(complaint));
     const subject = subjectName(complaint);
     const key = regionSubjectKey(region, subject);
     const existing = map.get(key) ?? {

@@ -6,7 +6,11 @@ import {
   type ComplaintSlaMetrics,
 } from "./complaint-sla-metrics";
 import { buildComplaintSlaTiming, resolveComplaintEffectiveClosedAt } from "./complaint-sla-timing";
-import { normalizeRegionName } from "@/lib/reports/region-normalization";
+import {
+  classificationDisplayName,
+  UNCLASSIFIED_CLASSIFICATION_LABEL,
+} from "@/lib/reports/classification-keys";
+import { displayRegionName, normalizeRegionName } from "@/lib/reports/region-normalization";
 import { previousInclusivePeriod } from "@/lib/reports/period-range";
 import type { ComparisonMode } from "@/lib/reports/report-contract";
 import {
@@ -22,7 +26,6 @@ import {
 } from "./status";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-const UNCLASSIFIED_LABEL = "غير مصنف";
 const UNSPECIFIED_LABEL = "غير محدد";
 
 const kpiSelect = {
@@ -531,16 +534,18 @@ function negativeWhenHigher(key: string): boolean {
 
 function buildDistributions(complaints: KpiComplaint[], now: Date): ComplaintDistributions {
   return {
-    byRegion: groupMetrics(complaints, now, (complaint) => ({ name: normalizeRegionName(complaint.region) })),
+    byRegion: groupMetrics(complaints, now, (complaint) => ({
+      name: displayRegionName(normalizeRegionName(complaint.region)),
+    })),
     byFacility: groupMetrics(complaints, now, (complaint) => ({ name: complaint.facility ?? UNSPECIFIED_LABEL })),
     byDepartment: groupMetrics(complaints, now, (complaint) => ({ name: complaint.department ?? UNSPECIFIED_LABEL })),
     byClassification: groupMetrics(complaints, now, (complaint) => ({
       id: complaint.classification?.id ?? null,
-      name: complaint.classification?.nameAr ?? UNCLASSIFIED_LABEL,
+      name: classificationDisplayName(complaint.classification?.nameAr),
     })),
     byCategory: groupMetrics(complaints, now, (complaint) => ({
       id: complaint.category?.id ?? null,
-      name: complaint.category?.nameAr ?? UNCLASSIFIED_LABEL,
+      name: complaint.category?.nameAr ?? UNCLASSIFIED_CLASSIFICATION_LABEL,
     })),
     byChannel: groupMetrics(complaints, now, (complaint) => ({ name: complaint.channel ?? UNSPECIFIED_LABEL })),
     byStatus: groupCount(complaints, (complaint) => complaint.status),
@@ -556,7 +561,7 @@ function buildDistributions(complaints: KpiComplaint[], now: Date): ComplaintDis
 function buildRegionPriorityBreakdown(complaints: KpiComplaint[]): RegionPriorityBreakdownRow[] {
   const map = new Map<string, RegionPriorityBreakdownRow>();
   for (const c of complaints) {
-    const region = normalizeRegionName(c.region);
+    const region = displayRegionName(normalizeRegionName(c.region));
     const row = map.get(region) ?? { region, critical: 0, high: 0, medium: 0, low: 0, unknown: 0, total: 0 };
     if (c.priority === ComplaintPriority.CRITICAL) row.critical++;
     else if (c.priority === ComplaintPriority.HIGH) row.high++;
@@ -672,7 +677,7 @@ function buildClassificationCrossTab(
 ): CrossTabRow[] {
   const map = new Map<string, CrossTabRow>();
   for (const complaint of complaints) {
-    const classification = complaint.classification?.nameAr ?? UNCLASSIFIED_LABEL;
+    const classification = complaint.classification?.nameAr ?? UNCLASSIFIED_CLASSIFICATION_LABEL;
     const classificationId = complaint.classification?.id ?? null;
     const group = groupName(complaint);
     const key = `${classificationId ?? classification}:${group}`;

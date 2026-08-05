@@ -14,9 +14,11 @@ import {
   resolveChartGeometry,
   fitLegendLabel,
   MIN_PLOT_HEIGHT,
+  CHART_LEGEND_GAP,
 } from "./report-chart-service";
 import type { ReportChartSection } from "./report-data-service";
 import { REPORT_DESIGN_TOKENS } from "@/lib/reports/design-tokens";
+import sharp from "sharp";
 
 const ASSETS_DIR = path.join(process.cwd(), "src/server/reports/assets");
 const DANGER = REPORT_DESIGN_TOKENS.colors.danger;
@@ -461,12 +463,18 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
     for (const width of [500, 320]) {
       const legend = drawChartLegend(items, { width, top: 10, columns: 2, fontSize: 11 });
       expect(legend.labelBoxes).toHaveLength(4);
-      expect(legend.svg).toContain("text-anchor=\"end\"");
+      expect(legend.svg).toContain('text-anchor="middle"');
+      expect(legend.svg).not.toContain('text-anchor="end"');
       expect(legend.svg).toContain("الواردة");
       for (const box of legend.labelBoxes) {
         expect(box.measuredWidth).toBeLessThanOrEqual(box.availableWidth + 0.01);
         expect(box.truncated).toBe(false);
-        expect(box.right - box.left).toBeLessThanOrEqual(box.availableWidth + 0.01);
+        expect(box.left).toBeGreaterThanOrEqual(box.labelLeft - 0.01);
+        expect(box.right).toBeLessThanOrEqual(box.labelRight + 0.01);
+        expect(box.right + box.legendGap).toBeLessThanOrEqual(box.swatchLeft + 0.01);
+        expect(box.legendGap).toBe(CHART_LEGEND_GAP);
+        expect(box.right).toBeLessThanOrEqual(width);
+        expect(box.left).toBeGreaterThanOrEqual(0);
       }
       for (let i = 0; i < legend.labelBoxes.length; i++) {
         for (let j = i + 1; j < legend.labelBoxes.length; j++) {
@@ -477,6 +485,43 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
         }
       }
     }
+  });
+
+  it("region legend uses short names and middle text anchors", async () => {
+    const section: ReportChartSection = {
+      id: "v2-region-bar",
+      kind: "chart",
+      chartType: "bar",
+      title: "مقارنة المناطق",
+      series: [
+        { name: "الحالية", points: [{ x: "الرياض", y: 40 }, { x: "جدة", y: 30 }] },
+        { name: "السابقة", points: [{ x: "الرياض", y: 30 }, { x: "جدة", y: 35 }] },
+      ],
+    };
+    const svg = buildChartSvg(section, 800, 280);
+    expect(svg).toContain("الحالية");
+    expect(svg).toContain("السابقة");
+    expect(svg).not.toContain("شكاوى الفترة الحالية");
+    expect(svg).not.toContain('text-anchor="end"');
+    expect(svg).toContain('text-anchor="middle"');
+
+    const legend = drawChartLegend(
+      [
+        { name: "الحالية", style: { color: PRIMARY, dash: "0", width: 2, mark: "bar" } },
+        { name: "السابقة", style: { color: GOLD, dash: "0", width: 2, mark: "bar" } },
+      ],
+      { width: 800, top: 10, columns: 2 }
+    );
+    for (const box of legend.labelBoxes) {
+      expect(box.left).toBeGreaterThanOrEqual(box.labelLeft - 0.01);
+      expect(box.right).toBeLessThanOrEqual(box.labelRight + 0.01);
+      expect(box.right + CHART_LEGEND_GAP).toBeLessThanOrEqual(box.swatchLeft + 0.01);
+    }
+
+    configureReportFontconfig();
+    const png = await sharp(Buffer.from(svg)).png().toBuffer();
+    expect(png.length).toBeGreaterThan(100);
+    expect(png.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
   });
 
   it("resolveChartGeometry keeps plotTop < plotBottom with min plot height", () => {
@@ -629,15 +674,14 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
       chartType: "bar",
       title: "مقارنة المناطق",
       series: [
-        { name: "شكاوى الفترة الحالية", points: [{ x: "الرياض", y: 40 }, { x: "جدة", y: 30 }] },
-        { name: "الفترة السابقة", points: [{ x: "الرياض", y: 30 }, { x: "جدة", y: 35 }] },
+        { name: "الحالية", points: [{ x: "الرياض", y: 40 }, { x: "جدة", y: 30 }] },
+        { name: "السابقة", points: [{ x: "الرياض", y: 30 }, { x: "جدة", y: 35 }] },
       ],
     };
     const svg = buildChartSvg(section, 800, 280);
-    expect(svg).toContain("شكاوى الفترة الحالية");
-    expect(svg).toContain("الفترة السابقة");
-    // Legend sits above plot (y positions of legend text < plot bottom labels)
-    const legendY = [...svg.matchAll(/font-size="11"[^>]*>(?:شكاوى|الفترة)/g)];
-    expect(legendY.length).toBeGreaterThan(0);
+    expect(svg).toContain("الحالية");
+    expect(svg).toContain("السابقة");
+    expect(svg).toContain('text-anchor="middle"');
+    expect(svg).not.toContain('text-anchor="end"');
   });
 });

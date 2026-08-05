@@ -335,6 +335,11 @@ export type ChartLegendLabelBox = {
   renderedName: string;
   fontSize: number;
   truncated: boolean;
+  /** Independent label-zone bounds (exclusive of swatch). */
+  labelLeft: number;
+  labelRight: number;
+  swatchLeft: number;
+  legendGap: number;
 };
 
 export type ChartLegendLayout = {
@@ -343,9 +348,13 @@ export type ChartLegendLayout = {
   labelBoxes: ChartLegendLabelBox[];
 };
 
+/** Gap between the independent label zone and swatch zone in each legend cell. */
+export const CHART_LEGEND_GAP = 14;
+
 /**
  * Shared legend renderer: reserved band outside the plot, 2×2 grid when narrow.
- * Each cell is split into [label zone][gap ≥ 10][swatch zone] so marks never overlap text.
+ * Each cell is split into [label zone][gap][swatch zone] so marks never overlap text.
+ * Arabic labels use text-anchor="middle" centered in the label zone (not end-anchored).
  */
 export function drawChartLegend(
   items: readonly LegendItem[],
@@ -367,11 +376,18 @@ export function drawChartLegend(
   const rows = Math.max(1, Math.ceil(items.length / columns));
   const rowH = 24;
   const swatchZoneWidth = 28;
-  const legendGap = 14;
+  const legendGap = CHART_LEGEND_GAP;
   const swatchW = 22;
   const swatchH = 9;
   const colGap = 14;
-  const usable = options.width - paddingX * 2;
+  // Short legends (e.g. region الحالية/السابقة) pack to the inline-start (right in RTL)
+  // so middle-anchored labels stay near their swatches instead of floating in a wide cell.
+  const packedWidth =
+    items.length <= 2
+      ? Math.min(options.width, paddingX * 2 + columns * 150)
+      : options.width;
+  const packOffset = Math.max(0, options.width - packedWidth);
+  const usable = packedWidth - paddingX * 2;
   const colW = usable / columns;
 
   const parts: string[] = [];
@@ -382,7 +398,7 @@ export function drawChartLegend(
     const col = index % columns;
     // RTL reading order: column 0 is the rightmost cell
     const rtlCol = columns - 1 - col;
-    const cellLeft = paddingX + rtlCol * colW;
+    const cellLeft = packOffset + paddingX + rtlCol * colW;
     const cellRight = cellLeft + colW - colGap;
     const cy = options.top + row * rowH + rowH / 2;
 
@@ -413,17 +429,19 @@ export function drawChartLegend(
       );
     }
 
-    // Label stays in [labelLeft, labelRight]; swatch zone is exclusive.
-    // Do not attach clip-path="url(#…)" to Arabic <text>: librsvg drops those glyphs.
-    // Clipping is enforced by fitLegendLabel + the reserved text zone width.
+    // Center the label in its own zone. Do not use text-anchor="end" for Arabic
+    // legend text — librsvg/PDF embedding does not keep end-anchored glyphs inside
+    // the computed box. Do not attach clip-path (librsvg drops Arabic glyphs).
+    const labelCenterX = (labelLeft + labelRight) / 2;
+    const measuredLeft = labelCenterX - fitted.measuredWidth / 2;
+    const measuredRight = labelCenterX + fitted.measuredWidth / 2;
     parts.push(
-      `<text x="${labelRight.toFixed(1)}" y="${(cy + fitted.fontSize * 0.35).toFixed(1)}" text-anchor="end" font-size="${fitted.fontSize}" fill="${COLORS.primary}" direction="rtl" unicode-bidi="plaintext">${escapeXml(fitted.text)}</text>`
+      `<text x="${labelCenterX.toFixed(1)}" y="${(cy + fitted.fontSize * 0.35).toFixed(1)}" text-anchor="middle" font-size="${fitted.fontSize}" fill="${COLORS.primary}" direction="rtl" unicode-bidi="plaintext">${escapeXml(fitted.text)}</text>`
     );
 
-    const measuredLeft = Math.max(labelLeft, labelRight - fitted.measuredWidth);
     labelBoxes.push({
       left: measuredLeft,
-      right: labelRight,
+      right: measuredRight,
       top: cy - rowH / 2,
       bottom: cy + rowH / 2,
       availableWidth: availableLabelWidth,
@@ -432,6 +450,10 @@ export function drawChartLegend(
       renderedName: fitted.text,
       fontSize: fitted.fontSize,
       truncated: fitted.truncated,
+      labelLeft,
+      labelRight,
+      swatchLeft,
+      legendGap,
     });
   });
 

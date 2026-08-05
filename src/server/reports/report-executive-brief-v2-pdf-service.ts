@@ -1217,9 +1217,9 @@ async function renderPage3(ctx: V2Context): Promise<void> {
   // ── Region comparison chart ──────────────────────────────────────────────
   y = drawSectionTitle(doc, "مقارنة المناطق", margin, y, contentWidth);
   const currentPts = regions.map((r) => ({ x: stripPrefix(r.regionName), y: r.currentCount }));
-  const series = [{ name: "شكاوى الفترة الحالية", points: currentPts }];
+  const series = [{ name: "الحالية", points: currentPts }];
   if (hasPrev) {
-    series.push({ name: "الفترة السابقة", points: regions.map((r) => ({ x: stripPrefix(r.regionName), y: r.previousCount })) });
+    series.push({ name: "السابقة", points: regions.map((r) => ({ x: stripPrefix(r.regionName), y: r.previousCount })) });
   }
   const chartH = 280;
   try {

@@ -17,6 +17,7 @@ import {
 } from "./report-executive-brief-v2-pdf-service";
 import { preparePdfText } from "./arabic-pdf-text";
 import { REPORT_DESIGN_TOKENS } from "@/lib/reports/design-tokens";
+import { UNCLASSIFIED_CLASSIFICATION_KEY } from "@/lib/reports/classification-keys";
 
 const DANGER = REPORT_DESIGN_TOKENS.colors.danger;
 
@@ -44,6 +45,15 @@ function makeV2Brief(overrides: Partial<ExecutiveBriefV2Data> = {}): ExecutiveBr
     topClassifications: [
       { classificationId: "c1", classificationName: "نقل", currentCount: 30, previousCount: 25, difference: 5, changeRate: 20, shareOfTotal: 30 },
       { classificationId: "c2", classificationName: "علاج", currentCount: 20, previousCount: 0, difference: 20, changeRate: null, shareOfTotal: 20 },
+      {
+        classificationId: UNCLASSIFIED_CLASSIFICATION_KEY,
+        classificationName: "غير مصنف",
+        currentCount: 50,
+        previousCount: 40,
+        difference: 10,
+        changeRate: 25,
+        shareOfTotal: 50,
+      },
     ],
     comparativeTimeline: {
       current: { label: "الحالية", points: [{ relativeDay: 1, count: 10 }] },
@@ -64,6 +74,7 @@ function makeV2Brief(overrides: Partial<ExecutiveBriefV2Data> = {}): ExecutiveBr
     classificationOpenLate: {
       c1: { openAtEnd: 12, lateAtEnd: 3 },
       c2: { openAtEnd: 4, lateAtEnd: 1 },
+      [UNCLASSIFIED_CLASSIFICATION_KEY]: { openAtEnd: 163, lateAtEnd: 163 },
     },
     ...overrides,
   };
