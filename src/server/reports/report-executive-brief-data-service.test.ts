@@ -20,6 +20,7 @@ import {
   MONTHLY_WINDOW_SIZE,
   ARABIC_MONTH_NAMES,
 } from "./report-executive-brief-data-service";
+import { ComplaintStatus } from "@prisma/client";
 import type { ReportFilters } from "./report-definition-service";
 import type { ComparisonResult, DeptClassPeriodCount, PeriodRange } from "./report-comparison";
 import type { ComplaintKpiResult } from "@/server/complaints/complaint-kpi-service";
@@ -1519,19 +1520,38 @@ describe("aggregateMonthlyComplaintTrend", () => {
     maxMonths: 13,
   });
 
+  const OPEN = ComplaintStatus.OPEN;
+  const CLOSED = ComplaintStatus.CLOSED;
+
+  function trend(partial: {
+    complaintDate: Date | null;
+    receivedAt: Date;
+    closedAt: Date | null;
+    status?: ComplaintStatus;
+    lastUpdatedAt?: Date | null;
+  }) {
+    return {
+      status: partial.status ?? OPEN,
+      complaintDate: partial.complaintDate,
+      receivedAt: partial.receivedAt,
+      closedAt: partial.closedAt,
+      lastUpdatedAt: partial.lastUpdatedAt ?? null,
+    };
+  }
+
   it("receivedCount uses complaintDate ?? receivedAt", () => {
     const points = aggregateMonthlyComplaintTrend(
       [
-        {
+        trend({
           complaintDate: new Date("2026-07-10T00:00:00.000Z"),
           receivedAt: new Date("2026-01-01T00:00:00.000Z"),
           closedAt: null,
-        },
-        {
+        }),
+        trend({
           complaintDate: null,
           receivedAt: new Date("2026-08-02T00:00:00.000Z"),
           closedAt: null,
-        },
+        }),
       ],
       buckets
     );
@@ -1543,36 +1563,53 @@ describe("aggregateMonthlyComplaintTrend", () => {
     const created = new Date("2026-07-01T00:00:00.000Z");
     const points = aggregateMonthlyComplaintTrend(
       [
-        // trusted close in July
-        {
+        trend({
+          status: CLOSED,
           complaintDate: created,
           receivedAt: created,
           closedAt: new Date("2026-07-05T00:00:00.000Z"),
-        },
-        // closedAt before creation → not trusted
-        {
+        }),
+        trend({
+          status: CLOSED,
           complaintDate: created,
           receivedAt: created,
           closedAt: new Date("2026-06-01T00:00:00.000Z"),
-        },
-        // missing closedAt
-        { complaintDate: created, receivedAt: created, closedAt: null },
+        }),
+        trend({ status: CLOSED, complaintDate: created, receivedAt: created, closedAt: null }),
       ],
       buckets
     );
     expect(points.find((p) => p.monthKey === "2026-07")?.closedDuringMonthCount).toBe(1);
   });
 
+  it("uses lastUpdatedAt as closedDuringMonth when closedAt is missing", () => {
+    const created = new Date("2026-07-01T00:00:00.000Z");
+    const points = aggregateMonthlyComplaintTrend(
+      [
+        trend({
+          status: CLOSED,
+          complaintDate: created,
+          receivedAt: created,
+          closedAt: null,
+          lastUpdatedAt: new Date("2026-07-08T00:00:00.000Z"),
+        }),
+      ],
+      buckets
+    );
+    expect(points.find((p) => p.monthKey === "2026-07")?.closedDuringMonthCount).toBe(1);
+    expect(points.find((p) => p.monthKey === "2026-07")?.openAtMonthEndCount).toBe(0);
+  });
+
   it("openAtMonthEndCount rebuilds historic balance", () => {
     const created = new Date("2026-07-01T00:00:00.000Z");
     const points = aggregateMonthlyComplaintTrend(
       [
-        // Open through Jul; closed in Aug → open at Jul end, not Aug end
-        {
+        trend({
+          status: CLOSED,
           complaintDate: created,
           receivedAt: created,
           closedAt: new Date("2026-08-10T00:00:00.000Z"),
-        },
+        }),
       ],
       buckets
     );
@@ -1581,53 +1618,47 @@ describe("aggregateMonthlyComplaintTrend", () => {
   });
 
   it("lateAtMonthEndCount uses a 7-day deadline; exact boundary is not late", () => {
-    // Created Jul 1 00:00 — deadline Jul 8 00:00
-    // Month end Aug 1 00:00 exclusive for July → endMs = Aug 1
-    // For July: Aug 1 > Jul 8 → late
     const created = new Date("2026-07-01T00:00:00.000Z");
-    // Created 6 days before Aug month start so at Jul end may not be late
-    // At exact 7 days: deadline = created + 7d; late when endMs > deadline
-    // Create at Jul 25: deadline Aug 1. endMs for July = Aug 1. endMs > deadline is false.
     const exact7 = new Date("2026-07-25T00:00:00.000Z");
-    const lateOne = new Date("2026-07-20T00:00:00.000Z"); // deadline Jul 27, end Aug 1 → late
+    const lateOne = new Date("2026-07-20T00:00:00.000Z");
 
     const points = aggregateMonthlyComplaintTrend(
       [
-        { complaintDate: exact7, receivedAt: exact7, closedAt: null },
-        { complaintDate: lateOne, receivedAt: lateOne, closedAt: null },
-        { complaintDate: created, receivedAt: created, closedAt: null },
+        trend({ complaintDate: exact7, receivedAt: exact7, closedAt: null }),
+        trend({ complaintDate: lateOne, receivedAt: lateOne, closedAt: null }),
+        trend({ complaintDate: created, receivedAt: created, closedAt: null }),
       ],
       buckets
     );
     const july = points.find((p) => p.monthKey === "2026-07")!;
     expect(july.openAtMonthEndCount).toBe(3);
-    // exact7 not late; lateOne late; created late
     expect(july.lateAtMonthEndCount).toBe(2);
   });
 
   it("keeps zero months inside the window", () => {
     const points = aggregateMonthlyComplaintTrend(
       [
-        {
+        trend({
           complaintDate: new Date("2026-07-05T00:00:00.000Z"),
           receivedAt: new Date("2026-07-05T00:00:00.000Z"),
           closedAt: null,
-        },
+        }),
       ],
       buckets
     );
-    // August present with zero received
     const aug = points.find((p) => p.monthKey === "2026-08");
     expect(aug).toBeDefined();
     expect(aug!.receivedCount).toBe(0);
   });
 
-  it("resolveTrustedClosedAt rejects dates before creation", () => {
+  it("resolveTrustedClosedAt rejects dates before creation without lastUpdatedAt", () => {
     expect(
       resolveTrustedClosedAt({
+        status: CLOSED,
         complaintDate: new Date("2026-07-10T00:00:00.000Z"),
         receivedAt: new Date("2026-07-10T00:00:00.000Z"),
         closedAt: new Date("2026-07-01T00:00:00.000Z"),
+        lastUpdatedAt: null,
       })
     ).toBeNull();
   });
@@ -1640,15 +1671,36 @@ describe("aggregateMonthlyComplaintTrend", () => {
 describe("isComplaintAffectingMonthlyTrend — candidate filter", () => {
   const windowFrom = new Date("2025-08-01T00:00:00.000Z");
   const windowToExclusive = new Date("2026-09-01T00:00:00.000Z");
+  const OPEN = ComplaintStatus.OPEN;
+  const CLOSED = ComplaintStatus.CLOSED;
+
+  function row(partial: {
+    complaintDate: Date | null;
+    receivedAt: Date;
+    closedAt: Date | null;
+    status?: ComplaintStatus;
+    lastUpdatedAt?: Date | null;
+    id?: string;
+  }) {
+    return {
+      id: partial.id,
+      status: partial.status ?? OPEN,
+      complaintDate: partial.complaintDate,
+      receivedAt: partial.receivedAt,
+      closedAt: partial.closedAt,
+      lastUpdatedAt: partial.lastUpdatedAt ?? null,
+    };
+  }
 
   it("excludes created-and-closed fully before windowFrom", () => {
     expect(
       isComplaintAffectingMonthlyTrend(
-        {
+        row({
+          status: CLOSED,
           complaintDate: new Date("2024-01-01T00:00:00.000Z"),
           receivedAt: new Date("2024-01-01T00:00:00.000Z"),
           closedAt: new Date("2024-02-01T00:00:00.000Z"),
-        },
+        }),
         windowFrom,
         windowToExclusive
       )
@@ -1658,11 +1710,11 @@ describe("isComplaintAffectingMonthlyTrend — candidate filter", () => {
   it("includes open carry-in (created before window, closedAt null)", () => {
     expect(
       isComplaintAffectingMonthlyTrend(
-        {
+        row({
           complaintDate: new Date("2024-06-01T00:00:00.000Z"),
           receivedAt: new Date("2024-06-01T00:00:00.000Z"),
           closedAt: null,
-        },
+        }),
         windowFrom,
         windowToExclusive
       )
@@ -1672,11 +1724,12 @@ describe("isComplaintAffectingMonthlyTrend — candidate filter", () => {
   it("includes closed inside the window with creation before window", () => {
     expect(
       isComplaintAffectingMonthlyTrend(
-        {
+        row({
+          status: CLOSED,
           complaintDate: new Date("2024-06-01T00:00:00.000Z"),
           receivedAt: new Date("2024-06-01T00:00:00.000Z"),
           closedAt: new Date("2025-09-15T00:00:00.000Z"),
-        },
+        }),
         windowFrom,
         windowToExclusive
       )
@@ -1686,11 +1739,11 @@ describe("isComplaintAffectingMonthlyTrend — candidate filter", () => {
   it("includes created inside the window", () => {
     expect(
       isComplaintAffectingMonthlyTrend(
-        {
+        row({
           complaintDate: new Date("2026-01-10T00:00:00.000Z"),
           receivedAt: new Date("2026-01-10T00:00:00.000Z"),
           closedAt: null,
-        },
+        }),
         windowFrom,
         windowToExclusive
       )
@@ -1700,11 +1753,11 @@ describe("isComplaintAffectingMonthlyTrend — candidate filter", () => {
   it("excludes created at/after windowToExclusive", () => {
     expect(
       isComplaintAffectingMonthlyTrend(
-        {
+        row({
           complaintDate: new Date("2026-09-01T00:00:00.000Z"),
           receivedAt: new Date("2026-09-01T00:00:00.000Z"),
           closedAt: null,
-        },
+        }),
         windowFrom,
         windowToExclusive
       )
@@ -1714,11 +1767,12 @@ describe("isComplaintAffectingMonthlyTrend — candidate filter", () => {
   it("keeps untrusted closedAt (closed before create) as affecting open stock", () => {
     expect(
       isComplaintAffectingMonthlyTrend(
-        {
+        row({
+          status: CLOSED,
           complaintDate: new Date("2024-01-15T00:00:00.000Z"),
           receivedAt: new Date("2024-01-15T00:00:00.000Z"),
           closedAt: new Date("2023-12-01T00:00:00.000Z"),
-        },
+        }),
         windowFrom,
         windowToExclusive
       )
@@ -1726,37 +1780,39 @@ describe("isComplaintAffectingMonthlyTrend — candidate filter", () => {
   });
 
   it("does not grow kept set with old trusted-closed history", () => {
-    const pool = Array.from({ length: 500 }, (_, i) => ({
-      id: `old-${i}`,
-      complaintDate: new Date("2020-01-01T00:00:00.000Z"),
-      receivedAt: new Date("2020-01-01T00:00:00.000Z"),
-      closedAt: new Date("2020-02-01T00:00:00.000Z"),
-    }));
-    // one open carry-in + one in-window + one close-in-window
+    const pool = Array.from({ length: 500 }, (_, i) =>
+      row({
+        id: `old-${i}`,
+        status: CLOSED,
+        complaintDate: new Date("2020-01-01T00:00:00.000Z"),
+        receivedAt: new Date("2020-01-01T00:00:00.000Z"),
+        closedAt: new Date("2020-02-01T00:00:00.000Z"),
+      })
+    );
     pool.push(
-      {
+      row({
         id: "open-carry",
         complaintDate: new Date("2024-01-01T00:00:00.000Z"),
         receivedAt: new Date("2024-01-01T00:00:00.000Z"),
-        closedAt: null as unknown as Date,
-      },
-      {
+        closedAt: null,
+      }),
+      row({
         id: "in-window",
         complaintDate: new Date("2026-01-05T00:00:00.000Z"),
         receivedAt: new Date("2026-01-05T00:00:00.000Z"),
-        closedAt: null as unknown as Date,
-      },
-      {
+        closedAt: null,
+      }),
+      row({
         id: "close-in-window",
+        status: CLOSED,
         complaintDate: new Date("2024-03-01T00:00:00.000Z"),
         receivedAt: new Date("2024-03-01T00:00:00.000Z"),
         closedAt: new Date("2025-10-01T00:00:00.000Z"),
-      }
+      })
     );
     const kept = pool.filter((c) =>
       isComplaintAffectingMonthlyTrend(c, windowFrom, windowToExclusive)
     );
-    // Unbounded historical load would keep 503; candidate filter should keep 3 only
     expect(kept).toHaveLength(3);
     expect(kept.map((c) => c.id).sort()).toEqual([
       "close-in-window",
@@ -1769,21 +1825,27 @@ describe("isComplaintAffectingMonthlyTrend — candidate filter", () => {
     const rows = dedupeTrendComplaintsById([
       {
         id: "a",
+        status: OPEN,
         complaintDate: null,
         receivedAt: new Date("2026-01-01T00:00:00.000Z"),
         closedAt: null,
+        lastUpdatedAt: null,
       },
       {
         id: "a",
+        status: OPEN,
         complaintDate: new Date("2026-01-02T00:00:00.000Z"),
         receivedAt: new Date("2026-01-01T00:00:00.000Z"),
         closedAt: null,
+        lastUpdatedAt: null,
       },
       {
         id: "b",
+        status: OPEN,
         complaintDate: null,
         receivedAt: new Date("2026-01-03T00:00:00.000Z"),
         closedAt: null,
+        lastUpdatedAt: null,
       },
     ]);
     expect(rows).toHaveLength(2);

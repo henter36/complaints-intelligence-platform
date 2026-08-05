@@ -39,19 +39,33 @@ describe("applyOperationalImportSemantics", () => {
     );
   });
 
-  it("does NOT derive closedAt from sourceUpdatedAt — stores sourceUpdatedAt independently", () => {
+  it("derives closedAt from lastUpdatedAt (sourceUpdatedAt) for closed rows without closedAt", () => {
     const sourceUpdatedAt = new Date("2026-07-01T10:30:00.000Z");
     const result = applyOperationalImportSemantics({
       status: ComplaintStatus.CLOSED,
       sourceUpdatedAt,
     });
 
-    expect(result.row.closedAt).toBeUndefined();
+    expect(result.row.closedAt?.toISOString()).toBe(sourceUpdatedAt.toISOString());
     expect(result.row.sourceUpdatedAt?.toISOString()).toBe(sourceUpdatedAt.toISOString());
-    expect(result.warnings).toHaveLength(0);
+    expect(result.derived).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "CLOSED_AT_DERIVED_FROM_LAST_UPDATED_AT" }),
+      ])
+    );
+  });
+
+  it("does not derive closedAt from lastUpdatedAt for open complaints", () => {
+    const sourceUpdatedAt = new Date("2026-07-01T10:30:00.000Z");
+    const result = applyOperationalImportSemantics({
+      status: ComplaintStatus.OPEN,
+      sourceUpdatedAt,
+    });
+
+    expect(result.row.closedAt).toBeUndefined();
     expect(result.derived).not.toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ code: "CLOSED_AT_DERIVED_FROM_SOURCE_UPDATED_AT" }),
+        expect.objectContaining({ code: "CLOSED_AT_DERIVED_FROM_LAST_UPDATED_AT" }),
       ])
     );
   });
@@ -66,9 +80,14 @@ describe("applyOperationalImportSemantics", () => {
 
     expect(result.row.closedAt?.toISOString()).toBe(explicitClosedAt.toISOString());
     expect(result.warnings).toHaveLength(0);
+    expect(result.derived).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "CLOSED_AT_DERIVED_FROM_LAST_UPDATED_AT" }),
+      ])
+    );
   });
 
-  it("produces no warnings when a closed complaint has no closedAt — that is a row-validation concern", () => {
+  it("produces no warnings when a closed complaint has no closedAt and no lastUpdatedAt", () => {
     const closed = applyOperationalImportSemantics({ status: ComplaintStatus.CLOSED });
     const open = applyOperationalImportSemantics({ status: ComplaintStatus.OPEN });
 

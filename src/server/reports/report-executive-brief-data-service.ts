@@ -12,10 +12,12 @@
  *  - Two count/groupBy calls for net-backlog-flow (FULL_ANALYTICAL only).
  */
 
+import type { ComplaintGroupMetrics, ComplaintKpiResult } from "@/server/complaints/complaint-kpi-service";
+import { COMPLAINT_SLA_DURATION_MS, resolveComplaintEffectiveClosedAt } from "@/server/complaints/complaint-sla-timing";
+import type { ComplaintSlaSnapshot } from "@/server/complaints/complaint-sla-timing";
+import { ComplaintStatus } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
-import { COMPLAINT_SLA_DURATION_MS } from "@/server/complaints/complaint-sla-timing";
-import type { ComplaintGroupMetrics, ComplaintKpiResult } from "@/server/complaints/complaint-kpi-service";
 import { buildComplaintWhere, parseComplaintQuery } from "@/server/complaints/complaint-query-service";
 import type { DeptClassPeriodCount, ComparisonResult, PeriodRange } from "./report-comparison";
 import { buildComplaintQueryParams, type ReportFilters } from "./report-definition-service";
@@ -811,24 +813,47 @@ export async function buildFullAnalyticalData(
 
 type TrendComplaint = {
   id?: string;
+  status: ComplaintStatus;
   complaintDate: Date | null;
   receivedAt: Date;
   closedAt: Date | null;
+  /** Mapped from Complaint.sourceUpdatedAt — last-update closure fallback. */
+  lastUpdatedAt: Date | null;
 };
 
 const TREND_COMPLAINT_SELECT = {
   id: true,
+  status: true,
   complaintDate: true,
   receivedAt: true,
   closedAt: true,
+  sourceUpdatedAt: true,
 } as const;
+
+function toTrendComplaint(row: {
+  id: string;
+  status: ComplaintStatus;
+  complaintDate: Date | null;
+  receivedAt: Date;
+  closedAt: Date | null;
+  sourceUpdatedAt: Date | null;
+}): TrendComplaint & { id: string } {
+  return {
+    id: row.id,
+    status: row.status,
+    complaintDate: row.complaintDate,
+    receivedAt: row.receivedAt,
+    closedAt: row.closedAt,
+    lastUpdatedAt: row.sourceUpdatedAt,
+  };
+}
 
 /**
  * Logical eligibility for monthly stock/flow chart points.
- * trustedClosedAt is null when closedAt is missing or precedes creation.
+ * Uses effective closed date (closedAt, else lastUpdatedAt for closed statuses).
  */
 export function isComplaintAffectingMonthlyTrend(
-  complaint: Pick<TrendComplaint, "complaintDate" | "receivedAt" | "closedAt">,
+  complaint: TrendComplaint,
   windowFrom: Date,
   windowToExclusive: Date
 ): boolean {
@@ -837,9 +862,9 @@ export function isComplaintAffectingMonthlyTrend(
   const createdMs = createdAt.getTime();
   if (createdMs >= windowToExclusive.getTime()) return false;
   if (createdMs >= windowFrom.getTime()) return true;
-  const trustedClosedAt = resolveTrustedClosedAt(complaint);
-  if (trustedClosedAt === null) return true;
-  return trustedClosedAt.getTime() >= windowFrom.getTime();
+  const effectiveClosedAt = resolveTrustedClosedAt(complaint);
+  if (effectiveClosedAt === null) return true;
+  return effectiveClosedAt.getTime() >= windowFrom.getTime();
 }
 
 export function dedupeTrendComplaintsById(
@@ -855,7 +880,7 @@ export function dedupeTrendComplaintsById(
 /**
  * Prisma where for the main candidate set of the monthly trend chart.
  * Intentionally broader than trustedClosedAt semantics: closedAt before creation
- * (untrusted) may still need a secondary fetch.
+ * or lastUpdatedAt fallbacks may still need a secondary fetch / post-filter.
  */
 export function buildMonthlyTrendPrimaryWhere(
   baseWhere: Prisma.ComplaintWhereInput,
@@ -876,10 +901,12 @@ export function buildMonthlyTrendPrimaryWhere(
           // Created inside the history window → can contribute receivedCount.
           { complaintDate: { gte: windowFrom } },
           { complaintDate: null, receivedAt: { gte: windowFrom } },
-          // No closedAt → may be open stock carried into the window.
+          // No closedAt → may be open stock or closed via lastUpdatedAt.
           { closedAt: null },
           // closedAt on/after window start → may close during a chart month.
           { closedAt: { gte: windowFrom } },
+          // last-update fallback may close during the window when closedAt is absent/untrusted.
+          { sourceUpdatedAt: { gte: windowFrom } },
         ],
       },
     ],
@@ -896,16 +923,20 @@ function resolveTrendCreatedAt(complaint: Pick<TrendComplaint, "complaintDate" |
 }
 
 /**
- * Trusted closure timestamp for month assignment.
- * Status alone is never enough — closedAt must be present and not before creation.
+ * Effective closure for month assignment via the central SLA resolver.
+ * Status alone never rebuilds historic stock — the effective date does.
  */
 export function resolveTrustedClosedAt(
-  complaint: Pick<TrendComplaint, "complaintDate" | "receivedAt" | "closedAt">
+  complaint: TrendComplaint
 ): Date | null {
-  const createdAt = resolveTrendCreatedAt(complaint);
-  if (!createdAt || !isValidTrendDate(complaint.closedAt)) return null;
-  if (complaint.closedAt.getTime() < createdAt.getTime()) return null;
-  return complaint.closedAt;
+  const snapshot: ComplaintSlaSnapshot = {
+    status: complaint.status,
+    complaintDate: complaint.complaintDate,
+    receivedAt: complaint.receivedAt,
+    closedAt: complaint.closedAt,
+    lastUpdatedAt: complaint.lastUpdatedAt,
+  };
+  return resolveComplaintEffectiveClosedAt(snapshot);
 }
 
 function nonDateComplaintWhere(filters: ReportFilters, now: Date): Prisma.ComplaintWhereInput {
@@ -1068,9 +1099,10 @@ async function fetchEarliestAvailableComplaintDate(
 }
 
 /**
- * Secondary probe: complaints with closedAt before creation (untrusted),
+ * Secondary probe: complaints with closedAt before creation (untrusted closedAt),
  * opened before windowFrom. Primary where cannot express closedAt < createdAt.
  * Parameterized raw SQL keeps this set tiny vs loading entire closed history.
+ * lastUpdatedAt (sourceUpdatedAt) may still yield an effective close after mapping.
  */
 async function fetchUntrustedClosedBeforeWindow(
   baseWhere: Prisma.ComplaintWhereInput,
@@ -1104,7 +1136,7 @@ async function fetchUntrustedClosedBeforeWindow(
       },
       select: TREND_COMPLAINT_SELECT,
     });
-    collected.push(...rows);
+    collected.push(...rows.map(toTrendComplaint));
   }
   return collected;
 }
@@ -1114,10 +1146,11 @@ async function fetchMonthlyTrendComplaints(
   windowFrom: Date,
   windowToExclusive: Date
 ): Promise<TrendComplaint[]> {
-  const primary = await db.complaint.findMany({
+  const primaryRows = await db.complaint.findMany({
     where: buildMonthlyTrendPrimaryWhere(baseWhere, windowFrom, windowToExclusive),
     select: TREND_COMPLAINT_SELECT,
   });
+  const primary = primaryRows.map(toTrendComplaint);
 
   const untrusted = await fetchUntrustedClosedBeforeWindow(
     baseWhere,
@@ -1209,9 +1242,11 @@ async function fetchClassificationOpenLate(
     where: { ...baseWhere, isDeleted: false },
     select: {
       classificationId: true,
+      status: true,
       complaintDate: true,
       receivedAt: true,
       closedAt: true,
+      sourceUpdatedAt: true,
     },
   });
 
@@ -1221,14 +1256,22 @@ async function fetchClassificationOpenLate(
     const effectiveMs = (c.complaintDate ?? c.receivedAt).getTime();
     if (effectiveMs >= periodEndMs) continue;
 
-    const closedBeforeEnd = c.closedAt && c.closedAt.getTime() < periodEndMs;
+    const effectiveClosedAt = resolveComplaintEffectiveClosedAt({
+      status: c.status,
+      complaintDate: c.complaintDate,
+      receivedAt: c.receivedAt,
+      closedAt: c.closedAt,
+      lastUpdatedAt: c.sourceUpdatedAt,
+    });
+    const closedBeforeEnd =
+      effectiveClosedAt !== null && effectiveClosedAt.getTime() < periodEndMs;
     if (closedBeforeEnd) continue;
 
     const key = c.classificationId ?? "__unclassified__";
     if (!result[key]) result[key] = { openAtEnd: 0, lateAtEnd: 0 };
     result[key].openAtEnd++;
     const slaDeadlineMs = effectiveMs + COMPLAINT_SLA_DURATION_MS;
-    if (slaDeadlineMs < periodEndMs) result[key].lateAtEnd++;
+    if (periodEndMs > slaDeadlineMs) result[key].lateAtEnd++;
   }
 
   return result;

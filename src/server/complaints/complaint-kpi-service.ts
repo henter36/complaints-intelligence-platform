@@ -5,7 +5,7 @@ import {
   buildComplaintSlaMetrics,
   type ComplaintSlaMetrics,
 } from "./complaint-sla-metrics";
-import { buildComplaintSlaTiming } from "./complaint-sla-timing";
+import { buildComplaintSlaTiming, resolveComplaintEffectiveClosedAt } from "./complaint-sla-timing";
 import { normalizeRegionName } from "@/lib/reports/region-normalization";
 import { previousInclusivePeriod } from "@/lib/reports/period-range";
 import type { ComparisonMode } from "@/lib/reports/report-contract";
@@ -34,6 +34,7 @@ const kpiSelect = {
   receivedAt: true,
   dueDate: true,
   closedAt: true,
+  sourceUpdatedAt: true,
   firstActionAt: true,
   processingStartedAt: true,
   delayReason: true,
@@ -322,13 +323,19 @@ function buildKpiResult(
     .filter((complaint) => complaint.firstActionAt)
     .map((complaint) => hoursBetween(complaint.complaintDate ?? complaint.receivedAt, complaint.firstActionAt!));
   const processingHours = current
-    .filter((complaint) => complaint.processingStartedAt && complaint.closedAt)
-    .map((complaint) => hoursBetween(complaint.processingStartedAt!, complaint.closedAt!));
+    .filter((complaint) => {
+      if (!complaint.processingStartedAt) return false;
+      return resolveComplaintEffectiveClosedAt(toSlaSnapshot(complaint)) !== null;
+    })
+    .map((complaint) => {
+      const closedAt = resolveComplaintEffectiveClosedAt(toSlaSnapshot(complaint))!;
+      return hoursBetween(complaint.processingStartedAt!, closedAt);
+    });
   const satisfaction = current.flatMap((complaint) =>
     complaint.beneficiarySatisfaction === null ? [] : [complaint.beneficiarySatisfaction]
   );
   const overdueNoActionCount = current.filter((complaint) =>
-    buildComplaintSlaTiming(complaint, now).isCurrentlyLate && !complaint.firstActionAt
+    buildComplaintSlaTiming(toSlaSnapshot(complaint), now).isCurrentlyLate && !complaint.firstActionAt
   ).length;
 
   return {
@@ -386,7 +393,7 @@ function buildKpiResult(
         complaint.priority === ComplaintPriority.CRITICAL || complaint.severity === ComplaintPriority.CRITICAL
       ).length,
       lateCritical: current.filter((complaint) =>
-        buildComplaintSlaTiming(complaint, now).isCurrentlyLate
+        buildComplaintSlaTiming(toSlaSnapshot(complaint), now).isCurrentlyLate
         && (complaint.priority === ComplaintPriority.CRITICAL || complaint.severity === ComplaintPriority.CRITICAL)
       ).length,
       missingFields: current.filter((complaint) => !complaint.region || !complaint.department || !complaint.classificationId).length,
@@ -404,6 +411,7 @@ function toSlaSnapshot(c: KpiComplaint) {
     complaintDate: c.complaintDate,
     receivedAt: c.receivedAt,
     closedAt: c.closedAt,
+    lastUpdatedAt: c.sourceUpdatedAt ?? null,
   };
 }
 

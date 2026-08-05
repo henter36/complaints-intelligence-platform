@@ -17,6 +17,7 @@ function complaint(
     complaintDate: createdAt,
     receivedAt: createdAt,
     closedAt: null,
+    lastUpdatedAt: null,
     ...overrides,
   };
 }

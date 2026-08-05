@@ -356,8 +356,7 @@ export type ChartLegendLayout = {
 
 /**
  * Shared legend renderer: reserved band outside the plot, 2×2 grid when narrow.
- * Layout uses LTR coordinates: [label ···][swatch] so the stroke never crosses text.
- * Labels are measured via estimateTextWidth and fitted/truncated to the cell.
+ * Each cell is split into [label zone][gap ≥ 10][swatch zone] so marks never overlap text.
  */
 export function drawChartLegend(
   items: readonly LegendItem[],
@@ -378,9 +377,10 @@ export function drawChartLegend(
   );
   const rows = Math.max(1, Math.ceil(items.length / columns));
   const rowH = 24;
+  const swatchZoneWidth = 28;
+  const legendGap = 14;
   const swatchW = 22;
   const swatchH = 9;
-  const gap = 8;
   const colGap = 14;
   const usable = options.width - paddingX * 2;
   const colW = usable / columns;
@@ -397,11 +397,11 @@ export function drawChartLegend(
     const cellRight = cellLeft + colW - colGap;
     const cy = options.top + row * rowH + rowH / 2;
 
-    // Swatch on the far right of the cell; Arabic label expands leftward from it.
     const swatchRight = cellRight - 2;
-    const swatchLeft = swatchRight - swatchW;
-    const textX = swatchLeft - gap; // trailing edge of label (text-anchor end)
-    const availableLabelWidth = Math.max(8, textX - cellLeft - 3);
+    const swatchLeft = swatchRight - swatchZoneWidth;
+    const labelLeft = cellLeft + 4;
+    const labelRight = swatchLeft - legendGap;
+    const availableLabelWidth = Math.max(0, labelRight - labelLeft);
     const fitted = fitLegendLabel(
       item.name,
       availableLabelWidth,
@@ -409,28 +409,31 @@ export function drawChartLegend(
       minFontSize
     );
 
+    const markLeft = swatchRight - swatchW;
     if (item.style.mark === "bar") {
       parts.push(
-        `<rect x="${swatchLeft.toFixed(1)}" y="${(cy - swatchH / 2).toFixed(1)}" width="${swatchW}" height="${swatchH}" rx="1.5" fill="${item.style.color}"/>`
+        `<rect x="${markLeft.toFixed(1)}" y="${(cy - swatchH / 2).toFixed(1)}" width="${swatchW}" height="${swatchH}" rx="1.5" fill="${item.style.color}"/>`
       );
     } else {
       const dashAttr = item.style.dash && item.style.dash !== "0"
         ? ` stroke-dasharray="${item.style.dash}"`
         : "";
       parts.push(
-        `<line x1="${swatchLeft.toFixed(1)}" y1="${cy.toFixed(1)}" x2="${swatchRight.toFixed(1)}" y2="${cy.toFixed(1)}" stroke="${item.style.color}" stroke-width="${item.style.width}"${dashAttr}/>`,
-        `<circle cx="${((swatchLeft + swatchRight) / 2).toFixed(1)}" cy="${cy.toFixed(1)}" r="2.5" fill="${COLORS.white}" stroke="${item.style.color}" stroke-width="1.4"/>`
+        `<line x1="${markLeft.toFixed(1)}" y1="${cy.toFixed(1)}" x2="${swatchRight.toFixed(1)}" y2="${cy.toFixed(1)}" stroke="${item.style.color}" stroke-width="${item.style.width}"${dashAttr}/>`,
+        `<circle cx="${((markLeft + swatchRight) / 2).toFixed(1)}" cy="${cy.toFixed(1)}" r="2.5" fill="${COLORS.white}" stroke="${item.style.color}" stroke-width="1.4"/>`
       );
     }
 
+    // Label stays in [labelLeft, labelRight]; swatch zone is exclusive.
+    // Do not attach clip-path="url(#…)" to Arabic <text>: librsvg drops those glyphs.
+    // Clipping is enforced by fitLegendLabel + the reserved text zone width.
     parts.push(
-      `<text x="${textX.toFixed(1)}" y="${(cy + fitted.fontSize * 0.35).toFixed(1)}" text-anchor="end" font-size="${fitted.fontSize}" fill="${COLORS.primary}" direction="rtl" unicode-bidi="plaintext">${escapeXml(fitted.text)}</text>`
+      `<text x="${labelRight.toFixed(1)}" y="${(cy + fitted.fontSize * 0.35).toFixed(1)}" text-anchor="end" font-size="${fitted.fontSize}" fill="${COLORS.primary}" direction="rtl" unicode-bidi="plaintext">${escapeXml(fitted.text)}</text>`
     );
 
-    const labelRight = textX;
-    const labelLeft = textX - fitted.measuredWidth;
+    const measuredLeft = Math.max(labelLeft, labelRight - fitted.measuredWidth);
     labelBoxes.push({
-      left: labelLeft,
+      left: measuredLeft,
       right: labelRight,
       top: cy - rowH / 2,
       bottom: cy + rowH / 2,

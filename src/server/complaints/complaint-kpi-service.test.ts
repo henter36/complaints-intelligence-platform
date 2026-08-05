@@ -24,6 +24,7 @@ function complaint(overrides: Record<string, unknown> = {}) {
     receivedAt: new Date("2026-07-01T00:00:00Z"),
     dueDate: null,
     closedAt: null,
+    sourceUpdatedAt: null,
     firstActionAt: null,
     processingStartedAt: null,
     delayReason: null,

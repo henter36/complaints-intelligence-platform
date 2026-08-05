@@ -316,11 +316,15 @@ export function drawKpiValue(
   const isUnavailable = options.isUnavailable ?? valueText === REPORT_UNAVAILABLE;
   const maxFont = options.maxFontSize ?? (isUnavailable ? 14 : 22);
   const minFont = options.minFontSize ?? (isUnavailable ? 10 : 11);
-  const fontSize = fitTextToBox(doc, valueText, width - 8, maxFont, minFont, "Bold");
+  const pad = 6;
+  const innerWidth = Math.max(8, width - pad * 2);
+  const fontSize = fitTextToBox(doc, valueText, innerWidth, maxFont, minFont, "Bold");
   doc.font("Bold").fontSize(fontSize).fillColor(COLORS.primary);
   const textH = Math.min(height, fontSize + 4);
-  doc.text(preparePdfText(valueText), x + 4, y + Math.max(0, (height - textH) / 2), {
-    width: width - 8,
+  // Pure numeric displays skip Arabic token reorder so thousand separators stay intact.
+  const drawn = /[\u0600-\u06FF]/.test(valueText) ? preparePdfText(valueText) : valueText;
+  doc.text(drawn, x + pad, y + Math.max(0, (height - textH) / 2), {
+    width: innerWidth,
     height: textH,
     align: "center",
     wordSpacing: WORD_SPACING,
@@ -527,17 +531,45 @@ function drawBulletBox(options: DrawBulletBoxOptions): void {
 
 // ── Info box (ℹ methodology note) ─────────────────────────────────────────────
 
-function drawInfoBox(doc: PDFKit.PDFDocument, text: string, x: number, y: number, width: number): number {
+export function drawInfoBox(
+  doc: PDFKit.PDFDocument,
+  text: string,
+  x: number,
+  y: number,
+  width: number,
+  options: { fontSize?: number } = {}
+): number {
   const r = REPORT_DESIGN_TOKENS.card.radius;
-  const fontSize = REPORT_DESIGN_TOKENS.fontSize.body;
-  const innerW = width - 48;
-  const textH = doc.heightOfString(preparePdfText(text), { width: innerW });
-  const boxH = Math.max(46, textH + 20);
+  const fontSize = options.fontSize ?? REPORT_DESIGN_TOKENS.fontSize.body;
+  const iconZoneWidth = 42;
+  const padX = 6;
+  const padY = 10;
+  const textWidth = Math.max(40, width - iconZoneWidth - padX);
+  const preparedText = preparePdfText(text);
+
+  doc.font("Body").fontSize(fontSize);
+  const textOptions = {
+    width: textWidth,
+    align: "right" as const,
+    wordSpacing: WORD_SPACING,
+    lineGap: 1,
+  };
+  const textH = doc.heightOfString(preparedText, textOptions);
+  const boxH = Math.max(46, textH + padY * 2);
+
   doc.roundedRect(x, y, width, boxH, r).fillAndStroke(COLORS.background, COLORS.border);
   drawIcon(doc, "info", x + 24, y + boxH / 2, 16);
+
+  const textX = x + iconZoneWidth;
+  const textY = y + padY;
   doc.font("Body").fontSize(fontSize).fillColor(COLORS.neutral).text(
-    preparePdfText(text), x + 42, y + (boxH - textH) / 2,
-    { width: innerW, align: "right", wordSpacing: WORD_SPACING }
+    preparedText,
+    textX,
+    textY,
+    {
+      ...textOptions,
+      height: Math.max(fontSize + 2, boxH - padY * 2),
+    }
   );
   resetInk(doc);
   return y + boxH;
@@ -592,20 +624,15 @@ function renderCoverPage(ctx: V2Context): void {
 
   // Comparison text
   const comparison = getComparisonModeDescription(data.comparisonMode, data.previousPeriod);
+  const comparisonY = periodY + 34;
+  const comparisonOpts = { width: contentWidth, align: "center" as const, wordSpacing: WORD_SPACING };
   doc.font("Body").fontSize(13).fillColor(COLORS.neutral).text(
-    preparePdfText(comparison), margin, periodY + 34,
-    { width: contentWidth, align: "center", wordSpacing: WORD_SPACING }
+    preparePdfText(comparison), margin, comparisonY, comparisonOpts
   );
+  const comparisonH = doc.heightOfString(preparePdfText(comparison), comparisonOpts);
 
-  // Policy note
-  const policyNote = "تعتمد شكاوى الفترة على تاريخ إنشاء الشكوى، بينما تشمل مؤشرات المفتوحة والمتأخرة جميع الحالات غير المغلقة حتى نهاية الفترة ولو أُنشئت قبل بداية الفترة.";
-  doc.font("Body").fontSize(11).fillColor(COLORS.neutral).text(
-    preparePdfText(policyNote), margin, periodY + 66,
-    { width: contentWidth, align: "center", wordSpacing: WORD_SPACING }
-  );
-
-  // 3 KPI cards on cover
-  const cardY = periodY + 130;
+  // 3 KPI cards on cover — sit just below the comparison line (no policy note gap).
+  const cardY = comparisonY + comparisonH + 18;
   const cardGap = 18;
   const cardW = (contentWidth - cardGap * 2) / 3;
   const cardH = 180;
@@ -1002,34 +1029,36 @@ async function renderPage2(ctx: V2Context): Promise<void> {
       || p.lateAtMonthEndCount > 0
   );
 
-  const notesH = 120;
+  // Use remaining page space for the chart (notes / methodology boxes removed).
+  const availableForChart = Math.floor(layout.pageSize[1] - layout.margin - 26 - y - 8);
   const chartHeight = Math.min(
-    380,
-    Math.max(280, Math.floor(layout.pageSize[1] - layout.margin - 26 - notesH - y))
+    520,
+    Math.max(320, availableForChart)
   );
 
   if (hasFlow) {
     try {
       // Single Y-axis combo chart — system total is intentionally excluded.
+      // Legend uses short series names; month-end meaning stays in the data.
       const monthlyChartSeries = [
         {
-          name: "واردة",
+          name: "الواردة",
           renderAs: "bar" as const,
           points: flow.map((p) => ({ x: p.monthLabel, y: p.receivedCount })),
         },
         {
-          name: "مغلقة",
+          name: "المغلقة",
           renderAs: "bar" as const,
           points: flow.map((p) => ({ x: p.monthLabel, y: p.closedDuringMonthCount })),
         },
         {
-          name: "مفتوحة نهاية الشهر",
+          name: "المفتوحة",
           renderAs: "line" as const,
           dash: "0",
           points: flow.map((p) => ({ x: p.monthLabel, y: p.openAtMonthEndCount })),
         },
         {
-          name: "متأخرة نهاية الشهر",
+          name: "المتأخرة",
           renderAs: "line" as const,
           dash: "6,4",
           points: flow.map((p) => ({ x: p.monthLabel, y: p.lateAtMonthEndCount })),
@@ -1048,26 +1077,6 @@ async function renderPage2(ctx: V2Context): Promise<void> {
       warnings.push(`تعذر رسم مخطط الاتجاه الزمني: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  y += chartHeight + 8;
-
-  // Info methodology box — full available history, not limited to report period start
-  const infoText =
-    "يعرض الاتجاه الشهري كامل البيانات المتاحة حتى نهاية التقرير، بحد أقصى 13 شهرًا. تمثل الأعمدة الشكاوى الواردة والمغلقة خلال كل شهر، وتمثل الخطوط رصيد الشكاوى المفتوحة والمتأخرة في نهاية الشهر.";
-  y = drawInfoBox(doc, infoText, margin, y, contentWidth) + 8;
-
-  // Notes
-  const noteLines = (brief.notes ?? []).slice(0, 5);
-  const notesBoxH = Math.max(notesH, 28 + noteLines.length * 22);
-  drawBulletBox({
-    doc,
-    title: "ملاحظات",
-    icon: "clipboard",
-    points: noteLines,
-    x: margin,
-    y,
-    width: contentWidth,
-    height: notesBoxH,
-  });
 }
 
 // ── Page 3: Regions ───────────────────────────────────────────────────────────
@@ -1283,7 +1292,7 @@ async function renderPage3(ctx: V2Context): Promise<void> {
 
   drawInfoBox(
     doc,
-    "يعرض الجدول الفرق العددي ونسبة التغير بين الفترتين، مع الموضوع صاحب أكبر تغير مطلق داخل كل منطقة. عندما تكون قيمة الفترة السابقة صفراً تظهر الحالة «جديد» بدلاً من نسبة غير معرفة.",
+    "يعرض الجدول التغير بين الفترتين حسب المنطقة، وتظهر «جديد» عند عدم وجود قيمة سابقة.",
     margin,
     y,
     contentWidth
@@ -1381,16 +1390,18 @@ function renderPage4(ctx: V2Context): void {
   });
   y += gap;
 
-  // ── Conclusions (full-width) ──────────────────────────────────────────────
+  // ── Conclusions (full-width) — data-quality notes are intentionally not rendered in V2 ──
   const lineH = 22;
   const boxHdrH = 30;
   const conclusions = (brief.conclusions ?? []).slice(0, 5);
-  const notes = (brief.notes ?? []).slice(0, 5);
   const availableH = layout.pageSize[1] - layout.margin * 2 - 26 - y;
-  const eachBoxH = Math.max(boxHdrH + lineH + 12, Math.min(
-    boxHdrH + 12 + Math.max(conclusions.length, 1) * lineH,
-    Math.floor(availableH * 0.48)
-  ));
+  const conclusionsBoxH = Math.max(
+    boxHdrH + lineH + 12,
+    Math.min(
+      boxHdrH + 12 + Math.max(conclusions.length, 1) * lineH,
+      availableH
+    )
+  );
 
   drawBulletBox({
     doc,
@@ -1400,23 +1411,7 @@ function renderPage4(ctx: V2Context): void {
     x: margin,
     y,
     width: contentWidth,
-    height: eachBoxH,
-  });
-  y += eachBoxH + gap;
-
-  const notesBoxH = Math.max(boxHdrH + lineH + 12, Math.min(
-    boxHdrH + 12 + Math.max(notes.length, 1) * lineH,
-    layout.pageSize[1] - layout.margin * 2 - 26 - y
-  ));
-  drawBulletBox({
-    doc,
-    title: "ملاحظات جودة البيانات وتأثيرها على المؤشرات",
-    icon: "database",
-    points: notes,
-    x: margin,
-    y,
-    width: contentWidth,
-    height: notesBoxH,
+    height: conclusionsBoxH,
   });
 }
 

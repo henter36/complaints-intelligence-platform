@@ -294,13 +294,21 @@ describe("renderExecutiveBriefV2Pdf", () => {
     }
   });
 
-  it("renders table headers, regions, classifications, departments, and box titles", async () => {
+  it("renders table headers without deleted note section titles", async () => {
     const textSpy = vi.spyOn(PDFDocument.prototype, "text");
     try {
-      const result = await renderExecutiveBriefV2Pdf(makeV2Report());
+      const result = await renderExecutiveBriefV2Pdf(
+        makeV2Report({
+          briefData: makeV2Brief({
+            notes: [
+              "تعتمد شكاوى الفترة على تاريخ إنشاء الشكوى، بينما تشمل مؤشرات المفتوحة والمتأخرة جميع الحالات غير المغلقة حتى نهاية الفترة ولو أُنشئت قبل بداية الفترة.",
+              "ملاحظة جودة بيانات تجريبية.",
+            ],
+          }),
+        })
+      );
       expect(countPageObjects(result.buffer)).toBe(4);
       const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
-      // preparePdfText reorders RTL tokens; assert stable Arabic substrings that still appear.
       for (const token of [
         "المنطقة",
         "الحالية",
@@ -311,7 +319,6 @@ describe("renderExecutiveBriefV2Pdf", () => {
         "التصنيف",
         "الإدارة",
         "الاستنتاجات",
-        "ملاحظات",
         "استنتاج",
         "المتابعة",
         "نقل",
@@ -319,6 +326,26 @@ describe("renderExecutiveBriefV2Pdf", () => {
         expect(joined).toContain(token);
       }
       expect(joined).not.toContain("[object Object]");
+      expect(joined).not.toContain(preparePdfText("ملاحظات جودة البيانات وتأثيرها على المؤشرات"));
+      expect(joined).not.toContain("ملاحظات جودة البيانات وتأثيرها على المؤشرات");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("does not render the long cover policy note", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    const policyNote =
+      "تعتمد شكاوى الفترة على تاريخ إنشاء الشكوى، بينما تشمل مؤشرات المفتوحة والمتأخرة جميع الحالات غير المغلقة حتى نهاية الفترة ولو أُنشئت قبل بداية الفترة.";
+    try {
+      await renderExecutiveBriefV2Pdf(
+        makeV2Report({
+          briefData: makeV2Brief({ notes: [policyNote] }),
+        })
+      );
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(joined).not.toContain(preparePdfText(policyNote));
+      expect(joined).not.toContain(policyNote);
     } finally {
       textSpy.mockRestore();
     }
@@ -377,10 +404,10 @@ describe("V2 monthly chart contract + KPI packing", () => {
       expect(allY).not.toContain(16993);
       const names = section.series.map((s) => s.name);
       expect(names).toEqual([
-        "واردة",
-        "مغلقة",
-        "مفتوحة نهاية الشهر",
-        "متأخرة نهاية الشهر",
+        "الواردة",
+        "المغلقة",
+        "المفتوحة",
+        "المتأخرة",
       ]);
     } finally {
       pngSpy.mockRestore();
@@ -409,15 +436,21 @@ describe("V2 monthly chart contract + KPI packing", () => {
     expect(countPageObjects(result.buffer)).toBe(4);
   });
 
-  it("drops months after report.to before chart render and keeps caption", async () => {
+  it("drops months after report.to before chart render without page-2 notes boxes", async () => {
     const chartService = await import("./report-chart-service");
     const pngSpy = vi.spyOn(chartService, "renderLineChartPng").mockResolvedValue(Buffer.from("png"));
     const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    const roundedSpy = vi.spyOn(PDFDocument.prototype, "roundedRect");
+    const deletedMethodology =
+      "يعرض الاتجاه الشهري كامل البيانات المتاحة حتى نهاية التقرير، بحد أقصى 13 شهرًا. تمثل الأعمدة الشكاوى الواردة والمغلقة خلال كل شهر، وتمثل الخطوط رصيد الشكاوى المفتوحة والمتأخرة في نهاية الشهر.";
+    const policyNote =
+      "تعتمد شكاوى الفترة على تاريخ إنشاء الشكوى، بينما تشمل مؤشرات المفتوحة والمتأخرة جميع الحالات غير المغلقة حتى نهاية الفترة ولو أُنشئت قبل بداية الفترة.";
     try {
       const result = await renderExecutiveBriefV2Pdf(
         makeV2Report({
           period: { from: "2026-07-05", to: "2026-08-04" },
           briefData: makeV2Brief({
+            notes: [policyNote, "ملاحظة جودة بيانات تجريبية."],
             monthlyStockFlow: [
               {
                 monthKey: "2026-07",
@@ -449,6 +482,7 @@ describe("V2 monthly chart contract + KPI packing", () => {
       );
 
       expect(result.warnings).toContain("تم تجاهل نقاط زمنية تتجاوز نهاية فترة التقرير.");
+      expect(countPageObjects(result.buffer)).toBe(4);
 
       const flowCall = pngSpy.mock.calls.find(
         (call) => (call[0] as { id?: string }).id === "v2-monthly-flow"
@@ -465,13 +499,21 @@ describe("V2 monthly chart contract + KPI packing", () => {
       }
 
       const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
-      const infoText =
-        "يعرض الاتجاه الشهري كامل البيانات المتاحة حتى نهاية التقرير، بحد أقصى 13 شهرًا. تمثل الأعمدة الشكاوى الواردة والمغلقة خلال كل شهر، وتمثل الخطوط رصيد الشكاوى المفتوحة والمتأخرة في نهاية الشهر.";
-      // PDF layer receives RTL token reorder via preparePdfText
-      expect(joined).toContain(preparePdfText(infoText));
+      expect(joined).not.toContain(preparePdfText(deletedMethodology));
+      expect(joined).not.toContain(preparePdfText(policyNote));
+      // Page 2 must not draw the notes bullet-box title (prepared RTL form).
+      expect(joined).not.toContain(preparePdfText("ملاحظات"));
+      expect(joined).not.toContain(preparePdfText("ملاحظات جودة البيانات وتأثيرها على المؤشرات"));
+      // Page 3 info box stays short and present
+      expect(joined).toContain(
+        preparePdfText("يعرض الجدول التغير بين الفترتين حسب المنطقة، وتظهر «جديد» عند عدم وجود قيمة سابقة.")
+      );
+      // No empty replacement box forced for deleted notes (roundedRect still used by KPIs)
+      expect(roundedSpy.mock.calls.length).toBeGreaterThan(0);
     } finally {
       pngSpy.mockRestore();
       textSpy.mockRestore();
+      roundedSpy.mockRestore();
     }
   });
 

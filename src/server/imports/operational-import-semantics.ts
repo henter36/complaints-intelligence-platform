@@ -68,7 +68,33 @@ function applyClosedAtRule(
       source: "status",
     });
     delete row.closedAt;
+    return;
   }
+
+  if (!isClosedComplaintStatus(status)) {
+    return;
+  }
+
+  // Closed rows: prefer explicit closedAt; otherwise derive from last update (sourceUpdatedAt).
+  if (row.closedAt instanceof Date && Number.isFinite(row.closedAt.getTime())) {
+    return;
+  }
+
+  const lastUpdatedAt = row.sourceUpdatedAt;
+  if (!(lastUpdatedAt instanceof Date) || !Number.isFinite(lastUpdatedAt.getTime())) {
+    return;
+  }
+
+  row.closedAt = new Date(lastUpdatedAt.getTime());
+  derived.push({
+    field: "closedAt",
+    code: "CLOSED_AT_DERIVED_FROM_LAST_UPDATED_AT",
+    message: "تم اعتماد تاريخ آخر تحديث كتاريخ إغلاق لأن الشكوى مغلقة بلا تاريخ إغلاق.",
+    level: "derived",
+    originalValue: "",
+    usedValue: row.closedAt.toISOString(),
+    source: "sourceUpdatedAt",
+  });
 }
 
 export function applyOperationalImportSemantics(

@@ -508,7 +508,7 @@ describe("operational workbook parsing and normalization", () => {
     expect(result.derived.some((d) => d.code === "SUBJECT_DERIVED_FROM_SOURCE_DETAIL")).toBe(true);
   });
 
-  it("maps آخر تحديث في to sourceUpdatedAt without deriving closedAt", () => {
+  it("maps آخر تحديث في to sourceUpdatedAt and derives closedAt for closed rows", () => {
     const { mapping } = matchComplaintColumns([
       "رقم الشكوى", "تاريخ التسجيل", "الوصف", "الحالة", "آخر تحديث في",
     ]);
@@ -526,8 +526,8 @@ describe("operational workbook parsing and normalization", () => {
     }, mapping);
 
     expect(result.normalized.sourceUpdatedAt?.toISOString().startsWith("2026-08-01")).toBe(true);
-    expect(result.normalized.closedAt).toBeUndefined();
-    expect(result.derived.some((d) => d.code === "CLOSED_AT_DERIVED_FROM_SOURCE_UPDATED_AT")).toBe(false);
+    expect(result.normalized.closedAt?.toISOString().startsWith("2026-08-01")).toBe(true);
+    expect(result.derived.some((d) => d.code === "CLOSED_AT_DERIVED_FROM_LAST_UPDATED_AT")).toBe(true);
     expect(result.warnings.some((w) => w.code === "CLOSED_STATUS_WITHOUT_SOURCE_UPDATED_AT")).toBe(false);
   });
 

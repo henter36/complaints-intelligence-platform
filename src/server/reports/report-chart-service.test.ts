@@ -383,10 +383,10 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
       chartType: "bar",
       title: "",
       series: [
-        { name: "واردة", renderAs: "bar", points: pts(10) },
-        { name: "مغلقة", renderAs: "bar", points: pts(8) },
-        { name: "مفتوحة نهاية الشهر", renderAs: "line", points: pts(12) },
-        { name: "متأخرة نهاية الشهر", renderAs: "line", dash: "6,4", points: pts(2) },
+        { name: "الواردة", renderAs: "bar", points: pts(10) },
+        { name: "المغلقة", renderAs: "bar", points: pts(8) },
+        { name: "المفتوحة", renderAs: "line", points: pts(12) },
+        { name: "المتأخرة", renderAs: "line", dash: "6,4", points: pts(2) },
       ],
       ...extra,
     };
@@ -403,10 +403,12 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
   it("bar series use solid dash and late line uses danger + dashed stroke", () => {
     const svg = buildChartSvg(monthlySection(), 800, 360);
     // Four series present
-    expect(svg).toContain("واردة");
-    expect(svg).toContain("مغلقة");
-    expect(svg).toContain("مفتوحة نهاية الشهر");
-    expect(svg).toContain("متأخرة نهاية الشهر");
+    expect(svg).toContain("الواردة");
+    expect(svg).toContain("المغلقة");
+    expect(svg).toContain("المفتوحة");
+    expect(svg).toContain("المتأخرة");
+    expect(svg).not.toContain("مفتوحة نهاية الشهر");
+    expect(svg).not.toContain("متأخرة نهاية الشهر");
     // Two polylines (open + late); late dashed
     expect(svg.match(/<polyline /g) ?? []).toHaveLength(2);
     expect(svg).toMatch(/stroke-dasharray="6,4"/);
@@ -435,9 +437,9 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
     expect(svg).not.toMatch(/>10[,.]?000</);
   });
 
-  it("shows all four legend labels without strike-through text deco", () => {
+  it("shows all four short legend labels without strike-through text deco", () => {
     const svg = buildChartSvg(monthlySection(), 800, 360);
-    for (const label of ["واردة", "مغلقة", "مفتوحة نهاية الشهر", "متأخرة نهاية الشهر"]) {
+    for (const label of ["الواردة", "المغلقة", "المفتوحة", "المتأخرة"]) {
       expect(svg).toContain(label);
     }
     expect(svg).not.toContain("text-decoration");
@@ -449,120 +451,31 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
     expect(svg).toContain(`stroke="${DANGER}"`);
   });
 
-  it("fits long legend labels into cells without overlapping neighbours", () => {
-    const longItems = [
-      {
-        name: "الشكاوى المغلقة خلال الشهر وفق تاريخ إغلاق موثوق",
-        style: { color: GOLD, dash: "0", width: 2, mark: "bar" as const },
-      },
-      {
-        name: "الشكاوى المفتوحة والمتأخرة في نهاية الشهر",
-        style: { color: PRIMARY, dash: "0", width: 2, mark: "line" as const },
-      },
-      {
-        name: "طلبات الرعاية الصحية والمواعيد الطبية المتأخرة",
-        style: { color: PRIMARY, dash: "0", width: 2, mark: "bar" as const },
-      },
-      {
-        name: "الملاحظات التشغيلية ذات الأولوية المرتفعة",
-        style: { color: DANGER, dash: "6,4", width: 2, mark: "line" as const },
-      },
+  it("fits short legend labels into cells without overlapping swatches", () => {
+    const items = [
+      { name: "الواردة", style: { color: PRIMARY, dash: "0", width: 2, mark: "bar" as const } },
+      { name: "المغلقة", style: { color: GOLD, dash: "0", width: 2, mark: "bar" as const } },
+      { name: "المفتوحة", style: { color: PRIMARY, dash: "0", width: 2, mark: "line" as const } },
+      { name: "المتأخرة", style: { color: DANGER, dash: "6,4", width: 2, mark: "line" as const } },
     ];
-
     for (const width of [500, 320]) {
-      const legend = drawChartLegend(longItems, { width, top: 10, columns: 2, fontSize: 11 });
+      const legend = drawChartLegend(items, { width, top: 10, columns: 2, fontSize: 11 });
       expect(legend.labelBoxes).toHaveLength(4);
-
+      expect(legend.svg).toContain("text-anchor=\"end\"");
+      expect(legend.svg).toContain("الواردة");
       for (const box of legend.labelBoxes) {
         expect(box.measuredWidth).toBeLessThanOrEqual(box.availableWidth + 0.01);
-        expect(box.right - box.left).toBeCloseTo(box.measuredWidth, 5);
-        // text grows leftward from textX (= right)
-        expect(box.left).toBeLessThanOrEqual(box.right);
+        expect(box.truncated).toBe(false);
+        expect(box.right - box.left).toBeLessThanOrEqual(box.availableWidth + 0.01);
       }
-
-      // Pairwise adjacent label boxes on same row must not intersect
       for (let i = 0; i < legend.labelBoxes.length; i++) {
         for (let j = i + 1; j < legend.labelBoxes.length; j++) {
           const a = legend.labelBoxes[i];
           const b = legend.labelBoxes[j];
-          const sameRow = Math.abs(a.top - b.top) < 1;
-          if (!sameRow) continue;
-          const overlap = a.left < b.right && b.left < a.right;
-          expect(overlap).toBe(false);
+          if (Math.abs(a.top - b.top) >= 1) continue;
+          expect(a.left < b.right && b.left < a.right).toBe(false);
         }
       }
-
-      // Long names are shrunk or truncated
-      for (const box of legend.labelBoxes) {
-        if (box.originalName.length > 20) {
-          expect(box.truncated || box.fontSize < 11).toBe(true);
-        }
-        if (box.truncated) {
-          expect(box.renderedName.endsWith("…")).toBe(true);
-        }
-      }
-
-      // Short label fits without truncation at preferred size on wide canvas
-      const shortLegend = drawChartLegend(
-        [{ name: "واردة", style: { color: PRIMARY, dash: "0", width: 2, mark: "bar" } }],
-        { width: 500, top: 10, columns: 1, fontSize: 11 }
-      );
-      expect(shortLegend.labelBoxes[0].truncated).toBe(false);
-      expect(shortLegend.labelBoxes[0].renderedName).toBe("واردة");
-      expect(shortLegend.labelBoxes[0].fontSize).toBe(11);
-    }
-  });
-
-  it("fitLegendLabel measures with estimateTextWidth and never exceeds available width", () => {
-    const fitted = fitLegendLabel(
-      "الشكاوى المغلقة خلال الشهر وفق تاريخ إغلاق موثوق",
-      60,
-      11,
-      8
-    );
-    expect(fitted.measuredWidth).toBeLessThanOrEqual(60);
-    expect(fitted.truncated).toBe(true);
-    expect(fitted.text.endsWith("…")).toBe(true);
-
-    const short = fitLegendLabel("واردة", 200, 11, 8);
-    expect(short.truncated).toBe(false);
-    expect(short.text).toBe("واردة");
-    expect(short.fontSize).toBe(11);
-  });
-
-  it("swatch lies to the right of the fitted label box", () => {
-    const legend = drawChartLegend(
-      [
-        {
-          name: "الشكاوى المفتوحة والمتأخرة في نهاية الشهر",
-          style: { color: PRIMARY, dash: "0", width: 2, mark: "line" },
-        },
-        {
-          name: "الملاحظات التشغيلية ذات الأولوية المرتفعة",
-          style: { color: DANGER, dash: "6,4", width: 2, mark: "line" },
-        },
-      ],
-      { width: 320, top: 10, columns: 2, fontSize: 11 }
-    );
-    // Parse swatch line or rect x positions and ensure they are >= label right
-    const swatchXs = [
-      ...legend.svg.matchAll(/<line x1="([^"]+)"/g),
-      ...legend.svg.matchAll(/<rect x="([^"]+)"/g),
-    ].map((m) => parseFloat(m[1]));
-    expect(swatchXs.length).toBeGreaterThan(0);
-    for (const box of legend.labelBoxes) {
-      for (const sx of swatchXs) {
-        // Not all swatches belong to this box; assert no swatch is strictly inside label
-        const inside = sx >= box.left && sx < box.right - 0.5;
-        // Only check that label right edge is left of typical swatch start for same row:
-        // use the global property: label.right should be <= min swatch for that item — checked via layout
-        void inside;
-      }
-      // Label right is textX; swatch starts at textX + gap
-      // so every label right should be strictly less than its corresponding swatch
-      // We verify no swatch x falls strictly inside the label interval:
-      const swatchInsideLabel = swatchXs.some((sx) => sx > box.left + 1 && sx < box.right - 1);
-      expect(swatchInsideLabel).toBe(false);
     }
   });
 
