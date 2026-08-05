@@ -19,6 +19,8 @@ export const REPAIR_ERROR_CODES = {
   REPAIR_CONFIRMATION_INVALID: "REPAIR_CONFIRMATION_INVALID",
   REPAIR_MIGRATION_STATE_UNSAFE: "REPAIR_MIGRATION_STATE_UNSAFE",
   REPAIR_DATABASE_REQUIRED: "REPAIR_DATABASE_REQUIRED",
+  REPAIR_FOREIGN_KEY_VIOLATION: "REPAIR_FOREIGN_KEY_VIOLATION",
+  REPAIR_FOREIGN_KEYS_STATE: "REPAIR_FOREIGN_KEYS_STATE",
 } as const;
 
 export class TaxonomyMigrationRepairError extends Error {
@@ -86,7 +88,28 @@ export type RepairApplyReport = {
   migrationChecksumUpdated: boolean;
 };
 
+export type SqliteIndexListRow = {
+  seq: number;
+  name: string;
+  unique: number;
+  origin: string;
+  partial: number;
+};
+
+export type SqliteIndexInfoRow = {
+  seqno: number;
+  cid: number;
+  name: string | null;
+};
+
 type ColumnInfo = { name: string };
+
+type TableInspection = {
+  exists: boolean;
+  columns: string[];
+  missingColumns: string[];
+  rowCount: number;
+};
 
 const REQUIRED_RUN_COLUMNS = [
   "id",
@@ -169,12 +192,24 @@ const LEGACY_ITEM_BASE_COLUMNS = [
   "updatedAt",
 ] as const;
 
+const RUN_SEQUENCE_UNIQUE_COLUMNS = ["runId", "sequence"] as const;
+
 function sha256Hex(value: string | Buffer): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
 function sha256File(path: string): string {
   return sha256Hex(readFileSync(path));
+}
+
+function quoteIdent(identifier: string): string {
+  if (!/^[A-Za-z_]\w*$/.test(identifier)) {
+    throw new TaxonomyMigrationRepairError(
+      REPAIR_ERROR_CODES.REPAIR_UNKNOWN_SCHEMA,
+      "اسم SQLite غير صالح"
+    );
+  }
+  return `"${identifier}"`;
 }
 
 export function resolveSqliteDatabasePath(databaseUrl: string): string {
@@ -205,7 +240,7 @@ function openDb(dbPath: string): DatabaseSync {
 }
 
 function listColumns(db: DatabaseSync, table: string): ColumnInfo[] {
-  return db.prepare(`PRAGMA table_info(${JSON.stringify(table)})`).all() as ColumnInfo[];
+  return db.prepare(`PRAGMA table_info(${quoteIdent(table)})`).all() as ColumnInfo[];
 }
 
 function tableExists(db: DatabaseSync, table: string): boolean {
@@ -215,17 +250,34 @@ function tableExists(db: DatabaseSync, table: string): boolean {
   return Boolean(row);
 }
 
-function hasUniqueRunSequenceIndex(db: DatabaseSync): boolean {
+export function listTableIndexes(db: DatabaseSync, tableName: string): SqliteIndexListRow[] {
+  return db.prepare(`PRAGMA index_list(${quoteIdent(tableName)})`).all() as SqliteIndexListRow[];
+}
+
+export function listIndexColumns(db: DatabaseSync, indexName: string): string[] {
   const rows = db
-    .prepare(
-      `SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'ClassificationTaxonomyRestructureItem'`
-    )
-    .all() as Array<{ name: string; sql: string | null }>;
-  return rows.some(
-    (r) =>
-      r.name === "ClassificationTaxonomyRestructureItem_runId_sequence_key" ||
-      (r.sql ?? "").includes('"runId", "sequence"') ||
-      (r.sql ?? "").includes("runId, sequence")
+    .prepare(`PRAGMA index_info(${quoteIdent(indexName)})`)
+    .all() as SqliteIndexInfoRow[];
+  return [...rows]
+    .sort((a, b) => a.seqno - b.seqno)
+    .map((row) => row.name)
+    .filter((name): name is string => typeof name === "string" && name.length > 0);
+}
+
+export function isExactUniqueIndex(
+  db: DatabaseSync,
+  index: SqliteIndexListRow,
+  expectedColumns: readonly string[]
+): boolean {
+  if (index.unique !== 1 || index.partial !== 0) return false;
+  const columns = listIndexColumns(db, index.name);
+  if (columns.length !== expectedColumns.length) return false;
+  return expectedColumns.every((column, idx) => columns[idx] === column);
+}
+
+export function hasUniqueRunSequenceIndex(db: DatabaseSync): boolean {
+  return listTableIndexes(db, "ClassificationTaxonomyRestructureItem").some((index) =>
+    isExactUniqueIndex(db, index, RUN_SEQUENCE_UNIQUE_COLUMNS)
   );
 }
 
@@ -268,7 +320,7 @@ function readMigrationRecord(db: DatabaseSync): {
   };
 }
 
-function classifySchemaState(input: {
+export function classifySchemaState(input: {
   runExists: boolean;
   itemExists: boolean;
   runColumns: string[];
@@ -320,6 +372,162 @@ function buildConfirmationToken(payload: {
   return `REPAIR-${digest.slice(0, 12).toUpperCase()}`;
 }
 
+function countTableRows(db: DatabaseSync, tableName: string, exists: boolean): number {
+  if (!exists) return 0;
+  return Number(
+    (db.prepare(`SELECT COUNT(*) AS c FROM ${quoteIdent(tableName)}`).get() as { c: number }).c
+  );
+}
+
+function inspectTable(
+  db: DatabaseSync,
+  tableName: string,
+  requiredColumns: readonly string[]
+): TableInspection {
+  const exists = tableExists(db, tableName);
+  const columns = exists ? listColumns(db, tableName).map((c) => c.name) : [];
+  return {
+    exists,
+    columns,
+    missingColumns: requiredColumns.filter((c) => !columns.includes(c)),
+    rowCount: countTableRows(db, tableName, exists),
+  };
+}
+
+function readStatusDistribution(
+  db: DatabaseSync,
+  runTableExists: boolean
+): Record<string, number> {
+  if (!runTableExists) return {};
+  const statusDistribution: Record<string, number> = {};
+  const rows = db
+    .prepare(
+      `SELECT status, COUNT(*) AS c FROM "ClassificationTaxonomyRestructureRun" GROUP BY status ORDER BY status`
+    )
+    .all() as Array<{ status: string; c: number }>;
+  for (const row of rows) statusDistribution[row.status] = Number(row.c);
+  return statusDistribution;
+}
+
+function readSequenceDiagnostics(
+  db: DatabaseSync,
+  itemTable: TableInspection
+): {
+  maxSequenceByRunPrefix: Array<{ runIdPrefix: string; maxSequence: number | null }>;
+  nullSequenceCount: number;
+  duplicateSequenceGroups: number;
+} {
+  if (!itemTable.exists || !itemTable.columns.includes("sequence")) {
+    return { maxSequenceByRunPrefix: [], nullSequenceCount: 0, duplicateSequenceGroups: 0 };
+  }
+
+  const maxSequenceByRunPrefix = (
+    db
+      .prepare(
+        `SELECT runId, MAX(sequence) AS maxSequence
+         FROM "ClassificationTaxonomyRestructureItem"
+         GROUP BY runId
+         ORDER BY runId`
+      )
+      .all() as Array<{ runId: string; maxSequence: number | null }>
+  ).map((row) => ({
+    runIdPrefix: row.runId.slice(0, 8),
+    maxSequence: row.maxSequence,
+  }));
+
+  const nullSequenceCount = Number(
+    (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM "ClassificationTaxonomyRestructureItem" WHERE sequence IS NULL`
+        )
+        .get() as { c: number }
+    ).c
+  );
+  const duplicateSequenceGroups = Number(
+    (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM (
+             SELECT runId, sequence, COUNT(*) AS n
+             FROM "ClassificationTaxonomyRestructureItem"
+             GROUP BY runId, sequence
+             HAVING n > 1
+           )`
+        )
+        .get() as { c: number }
+    ).c
+  );
+
+  return { maxSequenceByRunPrefix, nullSequenceCount, duplicateSequenceGroups };
+}
+
+function inspectMigrationRecord(
+  db: DatabaseSync,
+  cwd?: string
+): RepairInspectReport["migration"] {
+  const migration = readMigrationRecord(db);
+  const filePath = migrationFilePath(cwd);
+  const fileChecksum = existsSync(filePath) ? sha256File(filePath) : null;
+  return {
+    name: TAXONOMY_RESTRUCTURE_MIGRATION_NAME,
+    recorded: migration.recorded,
+    finished: migration.finished,
+    rolledBack: migration.rolledBack,
+    checksumMatchesFile:
+      fileChecksum && migration.checksum ? migration.checksum === fileChecksum : null,
+    recordedChecksumPrefix: migration.checksum?.slice(0, 12) ?? null,
+    fileChecksumPrefix: fileChecksum?.slice(0, 12) ?? null,
+  };
+}
+
+function buildRepairInspectReport(
+  db: DatabaseSync,
+  dbPath: string,
+  cwd?: string
+): RepairInspectReport {
+  const runTable = inspectTable(db, "ClassificationTaxonomyRestructureRun", REQUIRED_RUN_COLUMNS);
+  const itemTable = inspectTable(
+    db,
+    "ClassificationTaxonomyRestructureItem",
+    REQUIRED_ITEM_COLUMNS
+  );
+  const hasUnique = itemTable.exists ? hasUniqueRunSequenceIndex(db) : false;
+  const schemaState = classifySchemaState({
+    runExists: runTable.exists,
+    itemExists: itemTable.exists,
+    runColumns: runTable.columns,
+    itemColumns: itemTable.columns,
+    hasUnique,
+  });
+  const sequenceDiagnostics = readSequenceDiagnostics(db, itemTable);
+
+  return {
+    mode: "inspect",
+    databaseProvider: "sqlite",
+    schemaState,
+    actionRequired: schemaState === "LEGACY_MISSING_COLUMNS",
+    confirmationToken: buildConfirmationToken({
+      dbPath,
+      schemaState,
+      runColumns: runTable.columns,
+      itemColumns: itemTable.columns,
+      runs: runTable.rowCount,
+      items: itemTable.rowCount,
+    }),
+    runTable,
+    itemTable: {
+      ...itemTable,
+      hasRunSequenceUnique: hasUnique,
+      duplicateSequenceGroups: sequenceDiagnostics.duplicateSequenceGroups,
+      nullSequenceCount: sequenceDiagnostics.nullSequenceCount,
+    },
+    migration: inspectMigrationRecord(db, cwd),
+    statusDistribution: readStatusDistribution(db, runTable.exists),
+    maxSequenceByRunPrefix: sequenceDiagnostics.maxSequenceByRunPrefix,
+  };
+}
+
 export function inspectTaxonomyMigrationRepair(input: {
   databaseUrl: string;
   cwd?: string;
@@ -327,139 +535,7 @@ export function inspectTaxonomyMigrationRepair(input: {
   const dbPath = resolveSqliteDatabasePath(input.databaseUrl);
   const db = openDb(dbPath);
   try {
-    const runExists = tableExists(db, "ClassificationTaxonomyRestructureRun");
-    const itemExists = tableExists(db, "ClassificationTaxonomyRestructureItem");
-    const runColumns = runExists
-      ? listColumns(db, "ClassificationTaxonomyRestructureRun").map((c) => c.name)
-      : [];
-    const itemColumns = itemExists
-      ? listColumns(db, "ClassificationTaxonomyRestructureItem").map((c) => c.name)
-      : [];
-    const hasUnique = itemExists ? hasUniqueRunSequenceIndex(db) : false;
-    const schemaState = classifySchemaState({
-      runExists,
-      itemExists,
-      runColumns,
-      itemColumns,
-      hasUnique,
-    });
-
-    const runs = runExists
-      ? Number(
-          (db.prepare(`SELECT COUNT(*) AS c FROM "ClassificationTaxonomyRestructureRun"`).get() as { c: number })
-            .c
-        )
-      : 0;
-    const items = itemExists
-      ? Number(
-          (db.prepare(`SELECT COUNT(*) AS c FROM "ClassificationTaxonomyRestructureItem"`).get() as { c: number })
-            .c
-        )
-      : 0;
-
-    const statusDistribution: Record<string, number> = {};
-    if (runExists) {
-      const rows = db
-        .prepare(
-          `SELECT status, COUNT(*) AS c FROM "ClassificationTaxonomyRestructureRun" GROUP BY status ORDER BY status`
-        )
-        .all() as Array<{ status: string; c: number }>;
-      for (const row of rows) statusDistribution[row.status] = Number(row.c);
-    }
-
-    const maxSequenceByRunPrefix: RepairInspectReport["maxSequenceByRunPrefix"] = [];
-    if (itemExists && itemColumns.includes("sequence")) {
-      const rows = db
-        .prepare(
-          `SELECT runId, MAX(sequence) AS maxSequence
-           FROM "ClassificationTaxonomyRestructureItem"
-           GROUP BY runId
-           ORDER BY runId`
-        )
-        .all() as Array<{ runId: string; maxSequence: number | null }>;
-      for (const row of rows) {
-        maxSequenceByRunPrefix.push({
-          runIdPrefix: row.runId.slice(0, 8),
-          maxSequence: row.maxSequence,
-        });
-      }
-    }
-
-    let nullSequenceCount = 0;
-    let duplicateSequenceGroups = 0;
-    if (itemExists && itemColumns.includes("sequence")) {
-      nullSequenceCount = Number(
-        (
-          db
-            .prepare(
-              `SELECT COUNT(*) AS c FROM "ClassificationTaxonomyRestructureItem" WHERE sequence IS NULL`
-            )
-            .get() as { c: number }
-        ).c
-      );
-      duplicateSequenceGroups = Number(
-        (
-          db
-            .prepare(
-              `SELECT COUNT(*) AS c FROM (
-                 SELECT runId, sequence, COUNT(*) AS n
-                 FROM "ClassificationTaxonomyRestructureItem"
-                 GROUP BY runId, sequence
-                 HAVING n > 1
-               )`
-            )
-            .get() as { c: number }
-        ).c
-      );
-    }
-
-    const migration = readMigrationRecord(db);
-    const filePath = migrationFilePath(input.cwd);
-    const fileChecksum = existsSync(filePath) ? sha256File(filePath) : null;
-
-    const confirmationToken = buildConfirmationToken({
-      dbPath,
-      schemaState,
-      runColumns,
-      itemColumns,
-      runs,
-      items,
-    });
-
-    return {
-      mode: "inspect",
-      databaseProvider: "sqlite",
-      schemaState,
-      actionRequired: schemaState === "LEGACY_MISSING_COLUMNS",
-      confirmationToken,
-      runTable: {
-        exists: runExists,
-        columns: runColumns,
-        missingColumns: REQUIRED_RUN_COLUMNS.filter((c) => !runColumns.includes(c)),
-        rowCount: runs,
-      },
-      itemTable: {
-        exists: itemExists,
-        columns: itemColumns,
-        missingColumns: REQUIRED_ITEM_COLUMNS.filter((c) => !itemColumns.includes(c)),
-        rowCount: items,
-        hasRunSequenceUnique: hasUnique,
-        duplicateSequenceGroups,
-        nullSequenceCount,
-      },
-      migration: {
-        name: TAXONOMY_RESTRUCTURE_MIGRATION_NAME,
-        recorded: migration.recorded,
-        finished: migration.finished,
-        rolledBack: migration.rolledBack,
-        checksumMatchesFile:
-          fileChecksum && migration.checksum ? migration.checksum === fileChecksum : null,
-        recordedChecksumPrefix: migration.checksum?.slice(0, 12) ?? null,
-        fileChecksumPrefix: fileChecksum?.slice(0, 12) ?? null,
-      },
-      statusDistribution,
-      maxSequenceByRunPrefix,
-    };
+    return buildRepairInspectReport(db, dbPath, input.cwd);
   } finally {
     db.close();
   }
@@ -485,12 +561,78 @@ function assertBackupValid(backupPath: string, dbPath: string): void {
       "مسار النسخة الاحتياطية يطابق قاعدة البيانات الحالية"
     );
   }
-  const backupSize = statSync(absolute).size;
-  if (backupSize <= 0) {
+  if (statSync(absolute).size <= 0) {
     throw new TaxonomyMigrationRepairError(
       REPAIR_ERROR_CODES.REPAIR_BACKUP_INVALID,
       "ملف النسخة الاحتياطية فارغ"
     );
+  }
+}
+
+function readForeignKeysEnabled(db: DatabaseSync): boolean {
+  const row = db.prepare("PRAGMA foreign_keys").get() as { foreign_keys: number };
+  return Number(row.foreign_keys) === 1;
+}
+
+function setForeignKeysEnabled(db: DatabaseSync, enabled: boolean): void {
+  db.exec(`PRAGMA foreign_keys = ${enabled ? "ON" : "OFF"}`);
+}
+
+function assertForeignKeysState(db: DatabaseSync, expected: boolean): void {
+  if (readForeignKeysEnabled(db) !== expected) {
+    throw new TaxonomyMigrationRepairError(
+      REPAIR_ERROR_CODES.REPAIR_FOREIGN_KEYS_STATE,
+      "تعذر ضبط حالة foreign_keys"
+    );
+  }
+}
+
+function assertNoForeignKeyViolations(db: DatabaseSync): void {
+  const violations = db.prepare("PRAGMA foreign_key_check").all();
+  if (violations.length > 0) {
+    throw new TaxonomyMigrationRepairError(
+      REPAIR_ERROR_CODES.REPAIR_FOREIGN_KEY_VIOLATION,
+      "فشل فحص المفاتيح الأجنبية بعد الإصلاح",
+      { violationCount: violations.length }
+    );
+  }
+}
+
+function rollbackQuietly(db: DatabaseSync): void {
+  try {
+    db.exec("ROLLBACK");
+  } catch {
+    // ignore when no active transaction
+  }
+}
+
+function dropTempItemTableIfPresent(db: DatabaseSync): void {
+  if (tableExists(db, "new_ClassificationTaxonomyRestructureItem")) {
+    db.exec(`DROP TABLE "new_ClassificationTaxonomyRestructureItem"`);
+  }
+}
+
+function runRepairTransaction<T>(db: DatabaseSync, operation: () => T): T {
+  const wasEnabled = readForeignKeysEnabled(db);
+  setForeignKeysEnabled(db, false);
+  assertForeignKeysState(db, false);
+
+  let transactionStarted = false;
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    transactionStarted = true;
+    const result = operation();
+    assertNoForeignKeyViolations(db);
+    db.exec("COMMIT");
+    transactionStarted = false;
+    return result;
+  } catch (error) {
+    if (transactionStarted) rollbackQuietly(db);
+    dropTempItemTableIfPresent(db);
+    throw error;
+  } finally {
+    setForeignKeysEnabled(db, wasEnabled);
+    assertForeignKeysState(db, wasEnabled);
   }
 }
 
@@ -508,9 +650,8 @@ function addRunColumnsIfMissing(db: DatabaseSync, columns: string[]): void {
 }
 
 function rebuildItemTableWithSequence(db: DatabaseSync): number {
-  const before = Number(
-    (db.prepare(`SELECT COUNT(*) AS c FROM "ClassificationTaxonomyRestructureItem"`).get() as { c: number }).c
-  );
+  const before = countTableRows(db, "ClassificationTaxonomyRestructureItem", true);
+  dropTempItemTableIfPresent(db);
   db.exec(`
     CREATE TABLE "new_ClassificationTaxonomyRestructureItem" (
       "id" TEXT NOT NULL PRIMARY KEY,
@@ -579,9 +720,7 @@ function rebuildItemTableWithSequence(db: DatabaseSync): number {
   db.exec(
     `CREATE UNIQUE INDEX "ClassificationTaxonomyRestructureItem_runId_sequence_key" ON "ClassificationTaxonomyRestructureItem"("runId", "sequence")`
   );
-  const after = Number(
-    (db.prepare(`SELECT COUNT(*) AS c FROM "ClassificationTaxonomyRestructureItem"`).get() as { c: number }).c
-  );
+  const after = countTableRows(db, "ClassificationTaxonomyRestructureItem", true);
   if (after !== before) {
     throw new TaxonomyMigrationRepairError(
       REPAIR_ERROR_CODES.REPAIR_UNKNOWN_SCHEMA,
@@ -605,6 +744,143 @@ function syncMigrationChecksum(db: DatabaseSync, cwd?: string): boolean {
   return true;
 }
 
+function validateRepairApplyRequest(input: {
+  inspect: RepairInspectReport;
+  confirm?: string;
+  backupPath?: string;
+  dbPath: string;
+}): void {
+  if (!input.confirm) {
+    throw new TaxonomyMigrationRepairError(
+      REPAIR_ERROR_CODES.REPAIR_CONFIRMATION_REQUIRED,
+      "Apply يتطلب --confirm"
+    );
+  }
+  if (input.confirm !== input.inspect.confirmationToken) {
+    throw new TaxonomyMigrationRepairError(
+      REPAIR_ERROR_CODES.REPAIR_CONFIRMATION_INVALID,
+      "رمز تأكيد الإصلاح غير صحيح"
+    );
+  }
+  assertBackupValid(input.backupPath ?? "", input.dbPath);
+  if (
+    input.inspect.migration.recorded &&
+    (!input.inspect.migration.finished || input.inspect.migration.rolledBack)
+  ) {
+    throw new TaxonomyMigrationRepairError(
+      REPAIR_ERROR_CODES.REPAIR_MIGRATION_STATE_UNSAFE,
+      "حالة migration غير آمنة للإصلاح"
+    );
+  }
+  if (
+    input.inspect.schemaState === "UNKNOWN_SCHEMA" ||
+    input.inspect.schemaState === "MISSING_TABLES"
+  ) {
+    throw new TaxonomyMigrationRepairError(
+      REPAIR_ERROR_CODES.REPAIR_UNKNOWN_SCHEMA,
+      "بنية الجداول غير معروفة أو ناقصة بشكل غير متوقع",
+      { schemaState: input.inspect.schemaState }
+    );
+  }
+}
+
+function buildRepairApplyReport(input: {
+  schemaStateBefore: RepairSchemaState;
+  after: RepairInspectReport;
+  changed: boolean;
+  runsBefore: number;
+  itemsBefore: number;
+  sequencesAssigned: number;
+  migrationChecksumUpdated: boolean;
+}): RepairApplyReport {
+  return {
+    mode: "apply",
+    schemaStateBefore: input.schemaStateBefore,
+    schemaStateAfter: input.after.schemaState,
+    changed: input.changed,
+    runsBefore: input.runsBefore,
+    runsAfter: input.after.runTable.rowCount,
+    itemsBefore: input.itemsBefore,
+    itemsAfter: input.after.itemTable.rowCount,
+    sequencesAssigned: input.sequencesAssigned,
+    uniqueIndexPresent: input.after.itemTable.hasRunSequenceUnique,
+    migrationChecksumUpdated: input.migrationChecksumUpdated,
+  };
+}
+
+function verifyRepairOutcome(input: {
+  databaseUrl: string;
+  cwd?: string;
+  runsBefore: number;
+  itemsBefore: number;
+}): RepairInspectReport {
+  const after = inspectTaxonomyMigrationRepair({
+    databaseUrl: input.databaseUrl,
+    cwd: input.cwd,
+  });
+  if (after.schemaState !== "NO_ACTION_REQUIRED") {
+    throw new TaxonomyMigrationRepairError(
+      REPAIR_ERROR_CODES.REPAIR_UNKNOWN_SCHEMA,
+      "فشل التحقق بعد الإصلاح"
+    );
+  }
+  if (
+    after.runTable.rowCount !== input.runsBefore ||
+    after.itemTable.rowCount !== input.itemsBefore
+  ) {
+    throw new TaxonomyMigrationRepairError(
+      REPAIR_ERROR_CODES.REPAIR_UNKNOWN_SCHEMA,
+      "عدد السجلات تغير بعد الإصلاح"
+    );
+  }
+  if (!after.itemTable.hasRunSequenceUnique) {
+    throw new TaxonomyMigrationRepairError(
+      REPAIR_ERROR_CODES.REPAIR_UNKNOWN_SCHEMA,
+      "القيد الفريد runId+sequence غير موجود بعد الإصلاح"
+    );
+  }
+  return after;
+}
+
+function handleNoActionRequired(input: {
+  db: DatabaseSync;
+  inspect: RepairInspectReport;
+  databaseUrl: string;
+  cwd?: string;
+}): RepairApplyReport {
+  const migrationChecksumUpdated = syncMigrationChecksum(input.db, input.cwd);
+  const after = inspectTaxonomyMigrationRepair({
+    databaseUrl: input.databaseUrl,
+    cwd: input.cwd,
+  });
+  return buildRepairApplyReport({
+    schemaStateBefore: input.inspect.schemaState,
+    after,
+    changed: migrationChecksumUpdated,
+    runsBefore: input.inspect.runTable.rowCount,
+    itemsBefore: input.inspect.itemTable.rowCount,
+    sequencesAssigned: 0,
+    migrationChecksumUpdated,
+  });
+}
+
+function performLegacySchemaRepair(
+  db: DatabaseSync,
+  cwd?: string
+): { sequencesAssigned: number; migrationChecksumUpdated: boolean } {
+  let sequencesAssigned = 0;
+  const migrationChecksumUpdated = runRepairTransaction(db, () => {
+    const runColumns = listColumns(db, "ClassificationTaxonomyRestructureRun").map((c) => c.name);
+    const itemColumns = listColumns(db, "ClassificationTaxonomyRestructureItem").map((c) => c.name);
+    addRunColumnsIfMissing(db, runColumns);
+    if (!itemColumns.includes("sequence") || !hasUniqueRunSequenceIndex(db)) {
+      sequencesAssigned = rebuildItemTableWithSequence(db);
+    }
+    return syncMigrationChecksum(db, cwd);
+  });
+  return { sequencesAssigned, migrationChecksumUpdated };
+}
+
 export function applyTaxonomyMigrationRepair(input: {
   databaseUrl: string;
   confirm?: string;
@@ -615,119 +891,53 @@ export function applyTaxonomyMigrationRepair(input: {
     databaseUrl: input.databaseUrl,
     cwd: input.cwd,
   });
-  if (!input.confirm) {
-    throw new TaxonomyMigrationRepairError(
-      REPAIR_ERROR_CODES.REPAIR_CONFIRMATION_REQUIRED,
-      "Apply يتطلب --confirm"
-    );
-  }
-  if (input.confirm !== inspect.confirmationToken) {
-    throw new TaxonomyMigrationRepairError(
-      REPAIR_ERROR_CODES.REPAIR_CONFIRMATION_INVALID,
-      "رمز تأكيد الإصلاح غير صحيح"
-    );
-  }
-
   const dbPath = resolveSqliteDatabasePath(input.databaseUrl);
-  assertBackupValid(input.backupPath ?? "", dbPath);
-
-  if (inspect.migration.recorded && (!inspect.migration.finished || inspect.migration.rolledBack)) {
-    throw new TaxonomyMigrationRepairError(
-      REPAIR_ERROR_CODES.REPAIR_MIGRATION_STATE_UNSAFE,
-      "حالة migration غير آمنة للإصلاح"
-    );
-  }
-
-  if (inspect.schemaState === "UNKNOWN_SCHEMA" || inspect.schemaState === "MISSING_TABLES") {
-    throw new TaxonomyMigrationRepairError(
-      REPAIR_ERROR_CODES.REPAIR_UNKNOWN_SCHEMA,
-      "بنية الجداول غير معروفة أو ناقصة بشكل غير متوقع",
-      { schemaState: inspect.schemaState }
-    );
-  }
+  validateRepairApplyRequest({
+    inspect,
+    confirm: input.confirm,
+    backupPath: input.backupPath,
+    dbPath,
+  });
 
   const db = openDb(dbPath);
   try {
-    const runsBefore = inspect.runTable.rowCount;
-    const itemsBefore = inspect.itemTable.rowCount;
-    let sequencesAssigned = 0;
-    let changed = false;
-    let migrationChecksumUpdated = false;
-
     if (inspect.schemaState === "NO_ACTION_REQUIRED") {
-      migrationChecksumUpdated = syncMigrationChecksum(db, input.cwd);
-      const after = inspectTaxonomyMigrationRepair({
+      return handleNoActionRequired({
+        db,
+        inspect,
         databaseUrl: input.databaseUrl,
         cwd: input.cwd,
       });
-      return {
-        mode: "apply",
-        schemaStateBefore: inspect.schemaState,
-        schemaStateAfter: after.schemaState,
-        changed: migrationChecksumUpdated,
-        runsBefore,
-        runsAfter: after.runTable.rowCount,
-        itemsBefore,
-        itemsAfter: after.itemTable.rowCount,
-        sequencesAssigned: 0,
-        uniqueIndexPresent: after.itemTable.hasRunSequenceUnique,
-        migrationChecksumUpdated,
-      };
     }
 
-    db.exec("BEGIN");
-    try {
-      db.exec("PRAGMA foreign_keys = OFF");
-      const runColumns = listColumns(db, "ClassificationTaxonomyRestructureRun").map((c) => c.name);
-      const itemColumns = listColumns(db, "ClassificationTaxonomyRestructureItem").map((c) => c.name);
-      addRunColumnsIfMissing(db, runColumns);
-      if (!itemColumns.includes("sequence") || !hasUniqueRunSequenceIndex(db)) {
-        sequencesAssigned = rebuildItemTableWithSequence(db);
-      }
-      migrationChecksumUpdated = syncMigrationChecksum(db, input.cwd);
-      db.exec("PRAGMA foreign_keys = ON");
-      db.exec("COMMIT");
-      changed = true;
-    } catch (error) {
-      try {
-        db.exec("ROLLBACK");
-      } catch {
-        // ignore rollback errors
-      }
-      throw error;
-    }
-
-    const after = inspectTaxonomyMigrationRepair({
+    const { sequencesAssigned, migrationChecksumUpdated } = performLegacySchemaRepair(
+      db,
+      input.cwd
+    );
+    const after = verifyRepairOutcome({
       databaseUrl: input.databaseUrl,
       cwd: input.cwd,
+      runsBefore: inspect.runTable.rowCount,
+      itemsBefore: inspect.itemTable.rowCount,
     });
-    if (after.schemaState !== "NO_ACTION_REQUIRED") {
-      throw new TaxonomyMigrationRepairError(
-        REPAIR_ERROR_CODES.REPAIR_UNKNOWN_SCHEMA,
-        "فشل التحقق بعد الإصلاح"
-      );
-    }
-    if (after.runTable.rowCount !== runsBefore || after.itemTable.rowCount !== itemsBefore) {
-      throw new TaxonomyMigrationRepairError(
-        REPAIR_ERROR_CODES.REPAIR_UNKNOWN_SCHEMA,
-        "عدد السجلات تغير بعد الإصلاح"
-      );
-    }
-
-    return {
-      mode: "apply",
+    return buildRepairApplyReport({
       schemaStateBefore: inspect.schemaState,
-      schemaStateAfter: after.schemaState,
-      changed,
-      runsBefore,
-      runsAfter: after.runTable.rowCount,
-      itemsBefore,
-      itemsAfter: after.itemTable.rowCount,
+      after,
+      changed: true,
+      runsBefore: inspect.runTable.rowCount,
+      itemsBefore: inspect.itemTable.rowCount,
       sequencesAssigned,
-      uniqueIndexPresent: after.itemTable.hasRunSequenceUnique,
       migrationChecksumUpdated,
-    };
+    });
   } finally {
     db.close();
   }
 }
+
+export const __repairTestUtils = {
+  readForeignKeysEnabled,
+  setForeignKeysEnabled,
+  assertForeignKeysState,
+  runRepairTransaction,
+  quoteIdent,
+};
