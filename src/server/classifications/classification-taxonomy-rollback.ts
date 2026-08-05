@@ -114,6 +114,49 @@ async function loadAppliedRestructureItems(db: RestructureDb, originalRunId: str
   });
 }
 
+function optionalStringMatches(
+  expected: unknown,
+  actual: string | undefined
+): boolean {
+  if (typeof expected !== "string") return true;
+  return actual === expected;
+}
+
+function optionalBooleanMatches(
+  expected: unknown,
+  actual: boolean | undefined
+): boolean {
+  if (typeof expected !== "boolean") return true;
+  return actual === expected;
+}
+
+async function categoryMatchesNextState(
+  tx: Prisma.TransactionClient,
+  entityId: string,
+  next: Record<string, unknown>
+): Promise<boolean> {
+  const current = await tx.category.findUnique({ where: { id: entityId } });
+  if (!current) return false;
+  return (
+    optionalStringMatches(next.nameAr, current.nameAr) &&
+    optionalBooleanMatches(next.isActive, current.isActive)
+  );
+}
+
+async function classificationMatchesNextState(
+  tx: Prisma.TransactionClient,
+  entityId: string,
+  next: Record<string, unknown>
+): Promise<boolean> {
+  const current = await tx.classification.findUnique({ where: { id: entityId } });
+  if (!current) return false;
+  return (
+    optionalStringMatches(next.nameAr, current.nameAr) &&
+    optionalStringMatches(next.categoryId, current.categoryId) &&
+    optionalBooleanMatches(next.isActive, current.isActive)
+  );
+}
+
 async function entityMatchesNextState(
   tx: Prisma.TransactionClient,
   item: AppliedItem
@@ -121,19 +164,10 @@ async function entityMatchesNextState(
   const next = asRecord(item.nextStateJson);
   if (!item.entityId || !next) return true;
   if (item.entityType === "Category") {
-    const current = await tx.category.findUnique({ where: { id: item.entityId } });
-    if (!current) return false;
-    if (typeof next.nameAr === "string" && current.nameAr !== next.nameAr) return false;
-    if (typeof next.isActive === "boolean" && current.isActive !== next.isActive) return false;
-    return true;
+    return categoryMatchesNextState(tx, item.entityId, next);
   }
   if (item.entityType === "Classification") {
-    const current = await tx.classification.findUnique({ where: { id: item.entityId } });
-    if (!current) return false;
-    if (typeof next.nameAr === "string" && current.nameAr !== next.nameAr) return false;
-    if (typeof next.categoryId === "string" && current.categoryId !== next.categoryId) return false;
-    if (typeof next.isActive === "boolean" && current.isActive !== next.isActive) return false;
-    return true;
+    return classificationMatchesNextState(tx, item.entityId, next);
   }
   return true;
 }

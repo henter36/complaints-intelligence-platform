@@ -164,39 +164,38 @@ function registerClassificationReuse(
   ctx.classificationKeyByReuseId.set(classificationId, key);
 }
 
-function appendCategoryPlanChange(
-  ctx: RestructurePlanningContext,
-  change: PlanChange,
-  keep: boolean
-): void {
-  if (keep) ctx.plan.categoriesToKeep.push(change);
-  else ctx.plan.categoriesToRename.push(change);
+function appendCategoryKeep(ctx: RestructurePlanningContext, change: PlanChange): void {
+  ctx.plan.categoriesToKeep.push(change);
 }
 
-function appendClassificationMoveOrRename(
-  ctx: RestructurePlanningContext,
-  change: PlanChange,
-  mode: "MOVE" | "SPLIT" | "RENAME"
-): void {
-  if (mode === "MOVE") {
-    ctx.plan.classificationsToMove.push(change);
-    if (change.affectedExistingComplaintCount > 0) {
-      ctx.plan.complaintsRequiringCategoryConsistencyUpdate.push({ ...change });
-      ctx.plan.legacyComplaintsAffected.push({ ...change });
-    }
-    return;
-  }
-  if (mode === "SPLIT") {
-    ctx.plan.classificationsToSplit.push(change);
-    if (change.affectedExistingComplaintCount > 0) {
-      ctx.plan.legacyComplaintsAffected.push({ ...change });
-    }
-    return;
-  }
+function appendCategoryRename(ctx: RestructurePlanningContext, change: PlanChange): void {
+  ctx.plan.categoriesToRename.push(change);
+}
+
+function appendLegacyComplaintTrack(ctx: RestructurePlanningContext, change: PlanChange): void {
+  if (change.affectedExistingComplaintCount <= 0) return;
+  ctx.plan.legacyComplaintsAffected.push({ ...change });
+}
+
+function appendMoveComplaintTracks(ctx: RestructurePlanningContext, change: PlanChange): void {
+  if (change.affectedExistingComplaintCount <= 0) return;
+  ctx.plan.legacyComplaintsAffected.push({ ...change });
+  ctx.plan.complaintsRequiringCategoryConsistencyUpdate.push({ ...change });
+}
+
+function appendClassificationMove(ctx: RestructurePlanningContext, change: PlanChange): void {
+  ctx.plan.classificationsToMove.push(change);
+  appendMoveComplaintTracks(ctx, change);
+}
+
+function appendClassificationSplit(ctx: RestructurePlanningContext, change: PlanChange): void {
+  ctx.plan.classificationsToSplit.push(change);
+  appendLegacyComplaintTrack(ctx, change);
+}
+
+function appendClassificationRename(ctx: RestructurePlanningContext, change: PlanChange): void {
   ctx.plan.classificationsToRename.push(change);
-  if (change.affectedExistingComplaintCount > 0) {
-    ctx.plan.legacyComplaintsAffected.push({ ...change });
-  }
+  appendLegacyComplaintTrack(ctx, change);
 }
 
 export function processCategoryMigration(
@@ -218,7 +217,11 @@ export function processCategoryMigration(
     reason: mig.details,
     affectedExistingComplaintCount: existing.complaintCount,
   });
-  appendCategoryPlanChange(ctx, change, mig.action === "KEEP" && existing.nameAr === mig.target);
+  if (mig.action === "KEEP" && existing.nameAr === mig.target) {
+    appendCategoryKeep(ctx, change);
+  } else {
+    appendCategoryRename(ctx, change);
+  }
   return { kind: "HANDLED" };
 }
 
@@ -251,9 +254,9 @@ export function processClassificationMigration(
     affectedExistingComplaintCount: resolved.complaintCount,
     classificationKey: key ?? undefined,
   });
-  if (isMove) appendClassificationMoveOrRename(ctx, change, "MOVE");
-  else if (mig.action.includes("SPLIT")) appendClassificationMoveOrRename(ctx, change, "SPLIT");
-  else appendClassificationMoveOrRename(ctx, change, "RENAME");
+  if (isMove) appendClassificationMove(ctx, change);
+  else if (mig.action.includes("SPLIT")) appendClassificationSplit(ctx, change);
+  else appendClassificationRename(ctx, change);
   return { kind: "HANDLED" };
 }
 
@@ -289,7 +292,11 @@ function planCompositeCategorySide(
     reason: mig.details,
     affectedExistingComplaintCount: cat.complaintCount,
   });
-  appendCategoryPlanChange(ctx, change, cat.nameAr === targetCategoryName);
+  if (cat.nameAr === targetCategoryName) {
+    appendCategoryKeep(ctx, change);
+  } else {
+    appendCategoryRename(ctx, change);
+  }
 }
 
 export function processCompositeMigration(
@@ -327,7 +334,8 @@ export function processCompositeMigration(
     affectedExistingComplaintCount: cls.complaintCount,
     classificationKey: key ?? undefined,
   });
-  appendClassificationMoveOrRename(ctx, change, moveNeeded ? "MOVE" : "RENAME");
+  if (moveNeeded) appendClassificationMove(ctx, change);
+  else appendClassificationRename(ctx, change);
   return { kind: "HANDLED" };
 }
 
@@ -419,53 +427,77 @@ export function ensureProposedClassifications(ctx: RestructurePlanningContext): 
   }
 }
 
+function parseActiveClassificationKeywords(keywords: unknown): string[] {
+  try {
+    return parseClassificationKeywords(keywords ?? []);
+  } catch {
+    return [];
+  }
+}
+
+function planKeywordRemovals(
+  ctx: RestructurePlanningContext,
+  cls: LoadedClassification,
+  currentKeywords: string[],
+  targetNorm: Set<string>,
+  proposed: ProposedClassification | undefined
+): void {
+  for (const kw of currentKeywords) {
+    if (targetNorm.has(normalizeClassificationKeyword(kw))) continue;
+    ctx.plan.keywordsToRemove.push(
+      buildPlanChange({
+        currentId: cls.id,
+        currentName: cls.nameAr,
+        targetName: proposed?.classification ?? "",
+        currentCategory: cls.categoryName,
+        targetCategory: proposed?.category ?? null,
+        action: "KEYWORD_REMOVE",
+        reason: "إزالة كلمة",
+        affectedExistingComplaintCount: 0,
+        keywords: [kw],
+      })
+    );
+  }
+}
+
+function planKeywordAdditions(
+  ctx: RestructurePlanningContext,
+  cls: LoadedClassification,
+  targetKeywords: string[],
+  currentNorm: Set<string>,
+  proposed: ProposedClassification | undefined,
+  reusedKey: string | undefined
+): void {
+  for (const kw of targetKeywords) {
+    if (currentNorm.has(normalizeClassificationKeyword(kw))) continue;
+    ctx.plan.keywordsToAdd.push(
+      buildPlanChange({
+        currentId: cls.id,
+        currentName: cls.nameAr,
+        targetName: proposed?.classification ?? "",
+        currentCategory: cls.categoryName,
+        targetCategory: proposed?.category ?? null,
+        action: "KEYWORD_ADD",
+        reason: "إضافة كلمة",
+        affectedExistingComplaintCount: 0,
+        keywords: [kw],
+        classificationKey: reusedKey,
+      })
+    );
+  }
+}
+
 export function planClassificationKeywordChanges(ctx: RestructurePlanningContext): void {
   for (const cls of ctx.current.classifications.filter((c) => c.isActive)) {
-    let currentKeywords: string[] = [];
-    try {
-      currentKeywords = parseClassificationKeywords(cls.keywords ?? []);
-    } catch {
-      currentKeywords = [];
-    }
+    const currentKeywords = parseActiveClassificationKeywords(cls.keywords);
     const reusedKey = ctx.classificationKeyByReuseId.get(cls.id);
     let targetKeywords = reusedKey ? ctx.plan.finalKeywordsByKey[reusedKey] : undefined;
     targetKeywords ??= [];
     const currentNorm = new Set(currentKeywords.map((k) => normalizeClassificationKeyword(k)));
     const targetNorm = new Set(targetKeywords.map((k) => normalizeClassificationKeyword(k)));
     const proposed = reusedKey ? ctx.proposedClassificationsByKey.get(reusedKey) : undefined;
-    for (const kw of currentKeywords) {
-      if (targetNorm.has(normalizeClassificationKeyword(kw))) continue;
-      ctx.plan.keywordsToRemove.push(
-        buildPlanChange({
-          currentId: cls.id,
-          currentName: cls.nameAr,
-          targetName: proposed?.classification ?? "",
-          currentCategory: cls.categoryName,
-          targetCategory: proposed?.category ?? null,
-          action: "KEYWORD_REMOVE",
-          reason: "إزالة كلمة",
-          affectedExistingComplaintCount: 0,
-          keywords: [kw],
-        })
-      );
-    }
-    for (const kw of targetKeywords) {
-      if (currentNorm.has(normalizeClassificationKeyword(kw))) continue;
-      ctx.plan.keywordsToAdd.push(
-        buildPlanChange({
-          currentId: cls.id,
-          currentName: cls.nameAr,
-          targetName: proposed?.classification ?? "",
-          currentCategory: cls.categoryName,
-          targetCategory: proposed?.category ?? null,
-          action: "KEYWORD_ADD",
-          reason: "إضافة كلمة",
-          affectedExistingComplaintCount: 0,
-          keywords: [kw],
-          classificationKey: reusedKey,
-        })
-      );
-    }
+    planKeywordRemovals(ctx, cls, currentKeywords, targetNorm, proposed);
+    planKeywordAdditions(ctx, cls, targetKeywords, currentNorm, proposed, reusedKey);
   }
 }
 
