@@ -77,31 +77,54 @@ async function writeApplyManifest(
   const client = db();
   const current = await loadCurrentTaxonomy(client);
   const plan = { ...emptyPlan(), ...planOverrides };
-  const targetCats = current.categories
-    .filter((c) => c.isActive && !c.isDeleted)
-    .map((c) => {
-      const rename = plan.categoriesToRename.find((r) => r.currentId === c.id);
-      return {
-        nameAr: rename?.targetName ?? c.nameAr,
-        isActive: true,
-        isDeleted: false,
-      };
-    });
-  const targetCls = current.classifications
-    .filter((c) => c.isActive && !c.isDeleted)
-    .map((c) => {
-      const mutation = [
-        ...plan.classificationsToRename,
-        ...plan.classificationsToMove,
-      ].find((r) => r.currentId === c.id);
-      return {
-        nameAr: mutation?.targetName ?? c.nameAr,
-        categoryName: mutation?.targetCategory ?? c.categoryName,
-        keywords: c.keywords,
-        isActive: true,
-        isDeleted: false,
-      };
-    });
+  const deactivatedCategoryIds = new Set(
+    plan.categoriesToDeactivate.map((c) => c.currentId).filter(Boolean)
+  );
+  const deactivatedClassificationIds = new Set(
+    plan.classificationsToDeactivate.map((c) => c.currentId).filter(Boolean)
+  );
+  const targetCats = [
+    ...current.categories
+      .filter((c) => c.isActive && !c.isDeleted && !deactivatedCategoryIds.has(c.id))
+      .map((c) => {
+        const rename = plan.categoriesToRename.find((r) => r.currentId === c.id);
+        return {
+          nameAr: rename?.targetName ?? c.nameAr,
+          isActive: true,
+          isDeleted: false,
+        };
+      }),
+    ...plan.categoriesToCreate.map((c) => ({
+      nameAr: c.targetName,
+      isActive: true,
+      isDeleted: false,
+    })),
+  ];
+  const targetCls = [
+    ...current.classifications
+      .filter((c) => c.isActive && !c.isDeleted && !deactivatedClassificationIds.has(c.id))
+      .map((c) => {
+        const mutation = [
+          ...plan.classificationsToRename,
+          ...plan.classificationsToMove,
+          ...plan.classificationsToSplit,
+        ].find((r) => r.currentId === c.id);
+        return {
+          nameAr: mutation?.targetName ?? c.nameAr,
+          categoryName: mutation?.targetCategory ?? c.categoryName,
+          keywords: c.keywords,
+          isActive: true,
+          isDeleted: false,
+        };
+      }),
+    ...plan.classificationsToCreate.map((c) => ({
+      nameAr: c.targetName,
+      categoryName: c.targetCategory ?? "",
+      keywords: c.keywords ?? [],
+      isActive: true,
+      isDeleted: false,
+    })),
+  ];
   const withoutHash: Omit<RestructureManifest, "manifestHash" | "confirmationToken"> = {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -509,5 +532,288 @@ describe("taxonomy apply rename cycles and collisions", () => {
     expect(
       (await client.complaint.findUniqueOrThrow({ where: { id: postApply.id } })).categoryId
     ).toBe(to.id);
+  }, 60_000);
+
+  it("merges two categories into one shared target, verifies, and restores fingerprint on rollback", async () => {
+    const client = db();
+    await resetTaxonomy();
+    const catA = await client.category.create({ data: { nameAr: "اعتداء-اختبار" } });
+    const catB = await client.category.create({ data: { nameAr: "ممنوعات-اختبار" } });
+    const clsA = await client.classification.create({
+      data: { categoryId: catA.id, nameAr: "عنف", keywords: ["اعتداء"] },
+    });
+    const clsB = await client.classification.create({
+      data: { categoryId: catB.id, nameAr: "ممنوع", keywords: ["ممنوعات"] },
+    });
+    const before = await loadCurrentTaxonomy(client);
+
+    const plan = emptyPlan();
+    plan.categoriesToRename = [
+      renameChange({
+        currentId: catA.id,
+        currentName: "اعتداء-اختبار",
+        targetName: "الأمن والسلامة",
+      }),
+    ];
+    plan.categoriesToDeactivate = [
+      renameChange({
+        currentId: catB.id,
+        currentName: "ممنوعات-اختبار",
+        targetName: "ممنوعات-اختبار",
+        action: "DEACTIVATE",
+      }),
+    ];
+    plan.classificationsToMove = [
+      renameChange({
+        currentId: clsA.id,
+        currentName: "عنف",
+        targetName: "الاعتداء والعنف",
+        currentCategory: "اعتداء-اختبار",
+        targetCategory: "الأمن والسلامة",
+        action: "MOVE_AND_RENAME",
+      }),
+      renameChange({
+        currentId: clsB.id,
+        currentName: "ممنوع",
+        targetName: "بلاغات الممنوعات",
+        currentCategory: "ممنوعات-اختبار",
+        targetCategory: "الأمن والسلامة",
+        action: "MOVE_AND_RENAME",
+      }),
+    ];
+    plan.finalCategoryTargets = { "الأمن والسلامة": { reuseId: catA.id } };
+    plan.finalClassificationTargets = {
+      "الأمن والسلامة::الاعتداء والعنف": {
+        categoryName: "الأمن والسلامة",
+        classificationName: "الاعتداء والعنف",
+        reuseId: clsA.id,
+      },
+      "الأمن والسلامة::بلاغات الممنوعات": {
+        categoryName: "الأمن والسلامة",
+        classificationName: "بلاغات الممنوعات",
+        reuseId: clsB.id,
+      },
+    };
+    const path = join(tempDir!, "shared-merge.json");
+    const { manifest } = await writeApplyManifest(plan, path);
+    const applied = await applyTaxonomyRestructure(client, {
+      manifestPath: path,
+      confirm: manifest.confirmationToken,
+      actor: "test",
+    });
+    expect(applied.status).toBe("APPLIED");
+    expect((await client.category.findUniqueOrThrow({ where: { id: catA.id } })).nameAr).toBe(
+      "الأمن والسلامة"
+    );
+    expect((await client.category.findUniqueOrThrow({ where: { id: catB.id } })).isActive).toBe(
+      false
+    );
+    expect(
+      (await client.classification.findUniqueOrThrow({ where: { id: clsA.id } })).categoryId
+    ).toBe(catA.id);
+    expect(
+      (await client.classification.findUniqueOrThrow({ where: { id: clsB.id } })).categoryId
+    ).toBe(catA.id);
+    const afterApply = await loadCurrentTaxonomy(client);
+    expect(afterApply.fingerprint).toBe(manifest.targetTaxonomyFingerprint);
+
+    const rolled = await rollbackTaxonomyRestructure(client, {
+      runId: applied.runId,
+      confirm: applied.rollbackToken,
+      actor: "test",
+    });
+    expect(rolled.status).toBe("ROLLED_BACK");
+    expect(rolled.skipped).toBe(0);
+    const afterRollback = await loadCurrentTaxonomy(client);
+    expect(afterRollback.fingerprint).toBe(before.fingerprint);
+    expect((await client.category.findUniqueOrThrow({ where: { id: catA.id } })).nameAr).toBe(
+      "اعتداء-اختبار"
+    );
+    expect((await client.category.findUniqueOrThrow({ where: { id: catB.id } })).nameAr).toBe(
+      "ممنوعات-اختبار"
+    );
+    expect((await client.category.findUniqueOrThrow({ where: { id: catB.id } })).isActive).toBe(
+      true
+    );
+    expect(
+      (await client.classification.findUniqueOrThrow({ where: { id: clsB.id } })).categoryId
+    ).toBe(catB.id);
+  }, 60_000);
+
+  it("applies SPLIT into a category renamed in the same transaction", async () => {
+    const client = db();
+    await resetTaxonomy();
+    const cat = await client.category.create({ data: { nameAr: "اجراءات المعاملة" } });
+    const cls = await client.classification.create({
+      data: {
+        categoryId: cat.id,
+        nameAr: "اجراءات المعاملة",
+        keywords: ["استفسار عن معاملة", "انتهاء محكومية"],
+      },
+    });
+    const plan = emptyPlan();
+    plan.categoriesToRename = [
+      renameChange({
+        currentId: cat.id,
+        currentName: "اجراءات المعاملة",
+        targetName: "الإجراءات العدلية والإفراج",
+      }),
+    ];
+    plan.classificationsToSplit = [
+      renameChange({
+        currentId: cls.id,
+        currentName: "اجراءات المعاملة",
+        targetName: "متابعة المعاملات",
+        currentCategory: "اجراءات المعاملة",
+        targetCategory: "الإجراءات العدلية والإفراج",
+        action: "SPLIT",
+      }),
+    ];
+    plan.classificationsToCreate = [
+      renameChange({
+        currentId: "",
+        currentName: "",
+        targetName: "انتهاء المحكومية والإفراج",
+        currentCategory: null,
+        targetCategory: "الإجراءات العدلية والإفراج",
+        action: "CREATE",
+      }),
+    ];
+    plan.finalCategoryTargets = {
+      "الإجراءات العدلية والإفراج": { reuseId: cat.id },
+    };
+    plan.finalClassificationTargets = {
+      "الإجراءات العدلية والإفراج::متابعة المعاملات": {
+        categoryName: "الإجراءات العدلية والإفراج",
+        classificationName: "متابعة المعاملات",
+        reuseId: cls.id,
+      },
+      "الإجراءات العدلية والإفراج::انتهاء المحكومية والإفراج": {
+        categoryName: "الإجراءات العدلية والإفراج",
+        classificationName: "انتهاء المحكومية والإفراج",
+        reuseId: null,
+      },
+    };
+    const path = join(tempDir!, "split-after-rename.json");
+    const { manifest } = await writeApplyManifest(plan, path);
+    const applied = await applyTaxonomyRestructure(client, {
+      manifestPath: path,
+      confirm: manifest.confirmationToken,
+      actor: "test",
+    });
+    expect(applied.status).toBe("APPLIED");
+    expect(await client.category.count({ where: { isActive: true } })).toBe(1);
+    expect((await client.category.findUniqueOrThrow({ where: { id: cat.id } })).nameAr).toBe(
+      "الإجراءات العدلية والإفراج"
+    );
+    expect((await client.classification.findUniqueOrThrow({ where: { id: cls.id } })).nameAr).toBe(
+      "متابعة المعاملات"
+    );
+    expect(
+      (await client.classification.findUniqueOrThrow({ where: { id: cls.id } })).categoryId
+    ).toBe(cat.id);
+    const created = await client.classification.findFirstOrThrow({
+      where: { nameAr: "انتهاء المحكومية والإفراج", isActive: true },
+    });
+    expect(created.categoryId).toBe(cat.id);
+
+    const rolled = await rollbackTaxonomyRestructure(client, {
+      runId: applied.runId,
+      confirm: applied.rollbackToken,
+      actor: "test",
+    });
+    expect(rolled.status).toBe("ROLLED_BACK");
+    expect(rolled.skipped).toBe(0);
+    expect((await client.category.findUniqueOrThrow({ where: { id: cat.id } })).nameAr).toBe(
+      "اجراءات المعاملة"
+    );
+    expect((await client.classification.findUniqueOrThrow({ where: { id: cls.id } })).nameAr).toBe(
+      "اجراءات المعاملة"
+    );
+  }, 60_000);
+
+  it("documents preview changeCount vs applied structural counters and rollback token binding", async () => {
+    const client = db();
+    await resetTaxonomy();
+    const cat = await client.category.create({ data: { nameAr: "فئة-عد" } });
+    const cls = await client.classification.create({
+      data: { categoryId: cat.id, nameAr: "تصنيف-عد", keywords: ["قديم"] },
+    });
+    const plan = emptyPlan();
+    plan.categoriesToRename = [
+      renameChange({ currentId: cat.id, currentName: "فئة-عد", targetName: "فئة-جديدة" }),
+    ];
+    plan.classificationsToRename = [
+      renameChange({
+        currentId: cls.id,
+        currentName: "تصنيف-عد",
+        targetName: "تصنيف-جديد",
+        currentCategory: "فئة-عد",
+        targetCategory: "فئة-جديدة",
+      }),
+    ];
+    plan.keywordsToAdd = [
+      renameChange({
+        currentId: cls.id,
+        currentName: "تصنيف-عد",
+        targetName: "تصنيف-جديد",
+        currentCategory: "فئة-عد",
+        targetCategory: "فئة-جديدة",
+        action: "KEYWORD_ADD",
+      }),
+    ];
+    plan.keywordsToRemove = [
+      renameChange({
+        currentId: cls.id,
+        currentName: "تصنيف-عد",
+        targetName: "تصنيف-جديد",
+        currentCategory: "فئة-عد",
+        targetCategory: "فئة-جديدة",
+        action: "KEYWORD_REMOVE",
+      }),
+    ];
+    plan.finalCategoryTargets = { "فئة-جديدة": { reuseId: cat.id } };
+    plan.finalClassificationTargets = {
+      "فئة-جديدة::تصنيف-جديد": {
+        categoryName: "فئة-جديدة",
+        classificationName: "تصنيف-جديد",
+        reuseId: cls.id,
+      },
+    };
+    plan.finalKeywordsByKey = { COUNT_KEY: ["جديد"] };
+    plan.classificationsToRename[0]!.classificationKey = "COUNT_KEY";
+    plan.keywordsToAdd[0]!.classificationKey = "COUNT_KEY";
+    plan.keywordsToAdd[0]!.keywords = ["جديد"];
+    plan.keywordsToRemove[0]!.classificationKey = "COUNT_KEY";
+    plan.keywordsToRemove[0]!.keywords = ["قديم"];
+
+    const path = join(tempDir!, "counts.json");
+    const { manifest } = await writeApplyManifest(plan, path);
+    // confirmationToken embeds plan changeCount (structural + keyword + consistency preview),
+    // not KEEP. Applied item rows may differ when keyword ops collapse into rename items.
+    expect(manifest.confirmationToken.startsWith(`RESTRUCTURE-${manifest.totals.changeCount}-`)).toBe(
+      true
+    );
+    const applied = await applyTaxonomyRestructure(client, {
+      manifestPath: path,
+      confirm: manifest.confirmationToken,
+      actor: "test",
+    });
+    const items = await client.classificationTaxonomyRestructureItem.count({
+      where: { runId: applied.runId },
+    });
+    const structural = applied.createdCount + applied.renamedCount + applied.movedCount;
+    expect(applied.rollbackToken.startsWith(`ROLLBACK-${structural}-`)).toBe(true);
+    // rollbackToken binds create+rename+move only; keyword/reactivate/deactivate items are
+    // still sequenced and fully rolled back. Safety comes from manifestHash in the token hash.
+    expect(items).toBeGreaterThanOrEqual(structural);
+    const rolled = await rollbackTaxonomyRestructure(client, {
+      runId: applied.runId,
+      confirm: applied.rollbackToken,
+      actor: "test",
+    });
+    expect(rolled.status).toBe("ROLLED_BACK");
+    expect(rolled.skipped).toBe(0);
+    expect(rolled.rolledBack).toBe(items);
   }, 60_000);
 });

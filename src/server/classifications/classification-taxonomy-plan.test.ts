@@ -10,6 +10,8 @@ import {
   createPlanningContext,
   ensureProposedCategories,
   ensureProposedClassifications,
+  indexProposedTaxonomy,
+  processEntityMigrations,
   resolveExistingCategory,
   resolveExistingClassification,
 } from "./classification-taxonomy-plan";
@@ -388,5 +390,262 @@ describe("ensureProposedClassifications planning", () => {
     ctx.classificationReuseByKey.set("STAFF_CONDUCT", "react1");
     ensureProposedClassifications(ctx);
     expect(ctx.plan.classificationsToReactivate).toHaveLength(before);
+  });
+});
+
+describe("shared target category migrations", () => {
+  function buildSharedTargetProposal(migrationsReversed = false) {
+    const proposal = loadAndValidateProposal(PROPOSAL, MAPPING).proposal;
+    const migrations = [
+      {
+        entityType: "Category+Classification" as const,
+        currentId: "cat_b / cls_b",
+        currentName: "مصدر ب / فرعي ب",
+        target: "هدف مشترك / فرعي ب",
+        action: "MOVE_AND_RENAME",
+        details: "second",
+      },
+      {
+        entityType: "Category+Classification" as const,
+        currentId: "cat_a / cls_a",
+        currentName: "مصدر أ / فرعي أ",
+        target: "هدف مشترك / فرعي أ",
+        action: "MOVE_AND_RENAME",
+        details: "first",
+      },
+    ];
+    proposal.currentEntityMigration = migrationsReversed ? migrations : [...migrations].reverse();
+    proposal.proposedTaxonomy = [
+      {
+        category: "هدف مشترك",
+        projectedCount: 2,
+        classifications: [
+          {
+            category: "هدف مشترك",
+            classification: "فرعي أ",
+            classificationKey: "SHARED_A",
+            sourceDetails: ["أ"],
+            mappedCount: 1,
+            legacyPreservedCount: 0,
+            projectedCount: 1,
+          },
+          {
+            category: "هدف مشترك",
+            classification: "فرعي ب",
+            classificationKey: "SHARED_B",
+            sourceDetails: ["ب"],
+            mappedCount: 1,
+            legacyPreservedCount: 0,
+            projectedCount: 1,
+          },
+        ],
+      },
+    ];
+    return proposal;
+  }
+
+  function buildSharedCurrent() {
+    return {
+      categories: [
+        {
+          id: "cat_a",
+          nameAr: "مصدر أ",
+          isActive: true,
+          isDeleted: false,
+          complaintCount: 0,
+        },
+        {
+          id: "cat_b",
+          nameAr: "مصدر ب",
+          isActive: true,
+          isDeleted: false,
+          complaintCount: 0,
+        },
+      ],
+      classifications: [
+        {
+          id: "cls_a",
+          nameAr: "فرعي أ",
+          categoryId: "cat_a",
+          categoryName: "مصدر أ",
+          keywords: [],
+          isActive: true,
+          isDeleted: false,
+          complaintCount: 0,
+        },
+        {
+          id: "cls_b",
+          nameAr: "فرعي ب",
+          categoryId: "cat_b",
+          categoryName: "مصدر ب",
+          keywords: [],
+          isActive: true,
+          isDeleted: false,
+          complaintCount: 0,
+        },
+      ],
+      fingerprint: "f",
+    };
+  }
+
+  it("does not rename two source categories onto the same target name", () => {
+    const proposal = buildSharedTargetProposal(false);
+    const ctx = createPlanningContext(buildSharedCurrent(), proposal);
+    indexProposedTaxonomy(ctx);
+    processEntityMigrations(ctx);
+    const renamesToShared = ctx.plan.categoriesToRename.filter(
+      (c) => c.targetName === "هدف مشترك"
+    );
+    expect(renamesToShared).toHaveLength(1);
+    expect(renamesToShared[0]?.currentId).toBe("cat_a");
+    expect(ctx.categoryReuseByTargetName.get("هدف مشترك")).toBe("cat_a");
+    expect(ctx.plan.classificationsToMove.map((m) => m.currentId).sort()).toEqual([
+      "cls_a",
+      "cls_b",
+    ]);
+  });
+
+  it("picks the lexicographically smallest category id regardless of migration order", () => {
+    const proposal = buildSharedTargetProposal(true);
+    const ctx = createPlanningContext(buildSharedCurrent(), proposal);
+    indexProposedTaxonomy(ctx);
+    processEntityMigrations(ctx);
+    expect(ctx.categoryReuseByTargetName.get("هدف مشترك")).toBe("cat_a");
+    expect(
+      ctx.plan.categoriesToRename.filter((c) => c.targetName === "هدف مشترك")
+    ).toHaveLength(1);
+    expect(ctx.plan.categoriesToRename[0]?.currentId).toBe("cat_a");
+  });
+
+  it("resolves SPLIT classification target through the renamed category identity", () => {
+    const proposal = loadAndValidateProposal(PROPOSAL, MAPPING).proposal;
+    proposal.currentEntityMigration = [
+      {
+        entityType: "Category",
+        currentId: "cat_old",
+        currentName: "اسم قديم",
+        target: "اسم نهائي",
+        action: "RENAME",
+        details: "rename parent",
+      },
+      {
+        entityType: "Classification",
+        currentId: "cls_split",
+        currentName: "تصنيف مجزأ",
+        target: "تصنيف مجزأ",
+        action: "SPLIT",
+        details: "split keeps classification under renamed category",
+      },
+    ];
+    proposal.proposedTaxonomy = [
+      {
+        category: "اسم نهائي",
+        projectedCount: 1,
+        classifications: [
+          {
+            category: "اسم نهائي",
+            classification: "تصنيف مجزأ",
+            classificationKey: "SPLIT_KEY",
+            sourceDetails: ["كلمة"],
+            mappedCount: 1,
+            legacyPreservedCount: 0,
+            projectedCount: 1,
+          },
+        ],
+      },
+    ];
+    const current = {
+      categories: [
+        {
+          id: "cat_old",
+          nameAr: "اسم قديم",
+          isActive: true,
+          isDeleted: false,
+          complaintCount: 0,
+        },
+      ],
+      classifications: [
+        {
+          id: "cls_split",
+          nameAr: "تصنيف مجزأ",
+          categoryId: "cat_old",
+          categoryName: "اسم قديم",
+          keywords: ["كلمة"],
+          isActive: true,
+          isDeleted: false,
+          complaintCount: 0,
+        },
+      ],
+      fingerprint: "f",
+    };
+    const ctx = createPlanningContext(current, proposal);
+    indexProposedTaxonomy(ctx);
+    processEntityMigrations(ctx);
+    expect(ctx.plan.categoriesToRename).toEqual([
+      expect.objectContaining({ currentId: "cat_old", targetName: "اسم نهائي" }),
+    ]);
+    expect(ctx.plan.classificationsToSplit).toEqual([
+      expect.objectContaining({
+        currentId: "cls_split",
+        targetCategory: "اسم نهائي",
+        targetName: "تصنيف مجزأ",
+      }),
+    ]);
+    expect(ctx.plan.categoriesToCreate).toHaveLength(0);
+  });
+});
+
+describe("operational shape fingerprint active-only contract", () => {
+  const activeCat = { nameAr: "الرعاية الصحية", isActive: true, isDeleted: false };
+  const activeCls = {
+    nameAr: "المواعيد",
+    categoryName: "الرعاية الصحية",
+    keywords: ["موعد"],
+    isActive: true,
+    isDeleted: false,
+  };
+
+  it("ignores inactive categories and classifications", () => {
+    const base = computeTaxonomyShapeFingerprint([activeCat], [activeCls]);
+    expect(
+      computeTaxonomyShapeFingerprint(
+        [activeCat, { nameAr: "غير نشطة", isActive: false, isDeleted: false }],
+        [activeCls]
+      )
+    ).toBe(base);
+    expect(
+      computeTaxonomyShapeFingerprint(
+        [activeCat],
+        [
+          activeCls,
+          {
+            nameAr: "تصنيف معطل",
+            categoryName: "الرعاية الصحية",
+            keywords: ["x"],
+            isActive: false,
+            isDeleted: false,
+          },
+        ]
+      )
+    ).toBe(base);
+  });
+
+  it("changes when active names or keywords change", () => {
+    const base = computeTaxonomyShapeFingerprint([activeCat], [activeCls]);
+    expect(
+      computeTaxonomyShapeFingerprint([{ ...activeCat, nameAr: "اسم آخر" }], [activeCls])
+    ).not.toBe(base);
+    expect(
+      computeTaxonomyShapeFingerprint(
+        [activeCat],
+        [{ ...activeCls, nameAr: "تصنيف آخر" }]
+      )
+    ).not.toBe(base);
+    expect(
+      computeTaxonomyShapeFingerprint(
+        [activeCat],
+        [{ ...activeCls, keywords: ["كلمة مختلفة"] }]
+      )
+    ).not.toBe(base);
   });
 });

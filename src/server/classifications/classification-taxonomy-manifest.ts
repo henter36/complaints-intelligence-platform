@@ -218,8 +218,9 @@ export function computeTaxonomyFingerprint(
 }
 
 /**
- * Shape fingerprint for taxonomy restructure: comparable across create/reuse
- * without depending on cuid values.
+ * Operational shape fingerprint for taxonomy restructure.
+ * Represents the active dictionary only (non-deleted + active categories/classifications).
+ * Inactive leftovers from soft-deactivated CREATE rollbacks must not affect this hash.
  */
 export function computeTaxonomyShapeFingerprint(
   categories: readonly {
@@ -235,15 +236,20 @@ export function computeTaxonomyShapeFingerprint(
     isDeleted?: boolean;
   }[]
 ): string {
-  const catPayload = [...categories]
+  const activeCategories = categories.filter((c) => c.isActive && !(c.isDeleted ?? false));
+  const activeClassifications = classifications.filter(
+    (c) => c.isActive && !(c.isDeleted ?? false)
+  );
+
+  const catPayload = activeCategories
     .map((c) => ({
       nameNormalized: normalizeClassificationKeyword(c.nameAr),
-      isActive: c.isActive,
-      isDeleted: c.isDeleted ?? false,
+      isActive: true,
+      isDeleted: false,
     }))
     .sort((a, b) => compareCodeUnits(a.nameNormalized, b.nameNormalized));
 
-  const clsPayload = [...classifications]
+  const clsPayload = activeClassifications
     .map((c) => {
       let keywords: string[] = [];
       try {
@@ -257,8 +263,8 @@ export function computeTaxonomyShapeFingerprint(
       return {
         nameNormalized: normalizeClassificationKeyword(c.nameAr),
         categoryNormalized: normalizeClassificationKeyword(c.categoryName),
-        isActive: c.isActive,
-        isDeleted: c.isDeleted ?? false,
+        isActive: true,
+        isDeleted: false,
         normalizedKeywords,
       };
     })
@@ -321,14 +327,16 @@ export async function loadCurrentTaxonomy(db: RestructureDb) {
     categories: loadedCats,
     classifications: loadedCls,
     fingerprint: computeTaxonomyShapeFingerprint(
-      loadedCats,
-      loadedCls.map((c) => ({
-        nameAr: c.nameAr,
-        categoryName: c.categoryName,
-        keywords: c.keywords,
-        isActive: c.isActive,
-        isDeleted: c.isDeleted,
-      }))
+      loadedCats.filter((c) => c.isActive && !c.isDeleted),
+      loadedCls
+        .filter((c) => c.isActive && !c.isDeleted)
+        .map((c) => ({
+          nameAr: c.nameAr,
+          categoryName: c.categoryName,
+          keywords: c.keywords,
+          isActive: c.isActive,
+          isDeleted: c.isDeleted,
+        }))
     ),
   };
 }

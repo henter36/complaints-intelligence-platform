@@ -133,6 +133,20 @@ function assertNoRenameCollisions(
     finalCategoryNames.set(key, name);
   }
 
+  const renameTargetOwners = new Map<string, string>();
+  for (const item of plan.categoriesToRename) {
+    const key = normalizeClassificationKeyword(item.targetName);
+    const owner = item.currentId ?? "";
+    const prior = renameTargetOwners.get(key);
+    if (prior !== undefined && prior !== owner) {
+      throw new TaxonomyRestructureError(
+        RESTRUCTURE_ERROR_CODES.TAXONOMY_RENAME_COLLISION,
+        "تكرار إعادة تسمية فئات إلى نفس الاسم المستهدف"
+      );
+    }
+    renameTargetOwners.set(key, owner);
+  }
+
   const finalPaths = new Map<string, string>();
   for (const [clsKey, target] of Object.entries(plan.finalClassificationTargets)) {
     const pathKey = `${normalizeClassificationKeyword(target.categoryName)}\0${normalizeClassificationKeyword(target.classificationName)}`;
@@ -158,6 +172,12 @@ function assertNoRenameCollisions(
 
   for (const create of plan.categoriesToCreate) {
     const targetNorm = normalizeClassificationKeyword(create.targetName);
+    if (renameTargetOwners.has(targetNorm)) {
+      throw new TaxonomyRestructureError(
+        RESTRUCTURE_ERROR_CODES.TAXONOMY_RENAME_COLLISION,
+        "إنشاء فئة يصطدم بإعادة تسمية إلى نفس الاسم"
+      );
+    }
     const hasBlocker = current.categories.some(
       (c) =>
         !reusedCategoryIds.has(c.id) &&
@@ -302,7 +322,9 @@ async function stageCategoryTemporaryNames(ctx: RestructureExecutionContext): Pr
       where: { id: item.currentId },
       data: { nameAr: tempName },
     });
-    ctx.categoryIdByName.delete(before.nameAr);
+    // Keep the original name resolvable for classification plan rows that still
+    // reference the pre-rename category label within this transaction.
+    ctx.categoryIdByName.set(before.nameAr, item.currentId);
     ctx.categoryIdByName.set(tempName, item.currentId);
   }
 }
@@ -383,14 +405,17 @@ function resolveTargetCategoryId(
   if (!targetCategory) {
     throw new TaxonomyRestructureError(RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID, "فئة هدف مفقودة");
   }
-  const id = ctx.categoryIdByName.get(targetCategory);
-  if (!id) {
-    throw new TaxonomyRestructureError(
-      RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID,
-      `فئة الهدف غير موجودة: ${targetCategory}`
-    );
+  const fromName = ctx.categoryIdByName.get(targetCategory);
+  if (fromName) return fromName;
+  const reuseId = ctx.plan.finalCategoryTargets[targetCategory]?.reuseId;
+  if (reuseId) {
+    ctx.categoryIdByName.set(targetCategory, reuseId);
+    return reuseId;
   }
-  return id;
+  throw new TaxonomyRestructureError(
+    RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID,
+    `فئة الهدف غير موجودة: ${targetCategory}`
+  );
 }
 
 function classificationMutationItems(plan: RestructurePlan) {
