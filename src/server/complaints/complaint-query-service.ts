@@ -254,11 +254,16 @@ function addAnd(where: Prisma.ComplaintWhereInput, condition: Prisma.ComplaintWh
   where.AND = Array.isArray(current) ? [...current, condition] : [current, condition];
 }
 
+/** Calendar `YYYY-MM-DD` values parse as UTC midnight; inclusive `to` must cover that whole day. */
+function startOfNextUtcDay(date: Date): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1));
+}
+
 function dateRange(from?: Date, to?: Date): Prisma.DateTimeNullableFilter | undefined {
   if (!from && !to) return undefined;
   return {
     ...(from ? { gte: from } : {}),
-    ...(to ? { lte: to } : {}),
+    ...(to ? { lt: startOfNextUtcDay(to) } : {}),
   };
 }
 
