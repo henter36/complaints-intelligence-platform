@@ -35,6 +35,7 @@ import {
   evaluateComparison,
   type ComparisonState,
 } from "@/lib/analytics/comparison-evaluation";
+import { OperationalAnalyticsPanel } from "@/components/screens/operational-analytics-panel";
 
 // ---------- Comparison helpers ----------
 
@@ -434,6 +435,9 @@ export function Analytics() {
           </TabsTrigger>
           <TabsTrigger value="patterns" className="gap-1.5">
             <Activity className="h-4 w-4" /> كشف الأنماط
+          </TabsTrigger>
+          <TabsTrigger value="operational" className="gap-1.5">
+            <Filter className="h-4 w-4" /> تشغيلي
           </TabsTrigger>
         </TabsList>
 
@@ -1243,6 +1247,15 @@ export function Analytics() {
               </Card>
             </>
           )}
+        </TabsContent>
+
+        <TabsContent value="operational" className="mt-4 space-y-4">
+          <OperationalAnalyticsPanel
+            from={from}
+            to={to}
+            regionId={regionId}
+            departmentId={departmentId}
+          />
         </TabsContent>
       </Tabs>
     </div>

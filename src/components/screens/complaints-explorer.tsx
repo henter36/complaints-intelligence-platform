@@ -90,6 +90,11 @@ interface FiltersResponse {
   locations: { id: string; name: string }[];
   classifications: ClassificationOption[];
   channels: string[];
+  sourceOrigins?: { id: string; name: string }[];
+  sourceStatuses?: { id: string; name: string }[];
+  sourceActionStatuses?: { id: string; name: string }[];
+  wingCodes?: { id: string; name: string }[];
+  dataFreshnessBuckets?: { id: string; name: string }[];
 }
 
 interface Complaint {
@@ -163,6 +168,11 @@ export interface FilterState {
   severity: string;
   from: string;
   to: string;
+  sourceOrigin: string;
+  sourceStatus: string;
+  sourceActionStatus: string;
+  wingCode: string;
+  dataFreshnessBucket: string;
   isLate: boolean;
   isRepeated: boolean;
   isValidated: boolean;
@@ -181,6 +191,11 @@ const DEFAULT_FILTERS: FilterState = {
   severity: "",
   from: "",
   to: "",
+  sourceOrigin: "",
+  sourceStatus: "",
+  sourceActionStatus: "",
+  wingCode: "",
+  dataFreshnessBucket: "",
   isLate: false,
   isRepeated: false,
   isValidated: false,
@@ -306,6 +321,11 @@ function initialFilterState(): FilterState {
     severity: params.get("severity") ?? "",
     from: params.get("from") ?? "",
     to: params.get("to") ?? "",
+    sourceOrigin: params.get("sourceOrigin") ?? "",
+    sourceStatus: params.get("sourceStatus") ?? "",
+    sourceActionStatus: params.get("sourceActionStatus") ?? "",
+    wingCode: params.get("wingCode") ?? "",
+    dataFreshnessBucket: params.get("dataFreshnessBucket") ?? "",
     isLate: params.get("isLate") === "true",
     isRepeated: params.get("isRepeated") === "true",
     isValidated: params.get("isValidated") === "true",
@@ -344,23 +364,44 @@ export function buildComplaintQuery(
   const params = new URLSearchParams();
   if (page !== undefined) params.set("page", String(page));
   params.set("pageSize", String(PAGE_SIZE));
-  if (filters.search) params.set("search", filters.search);
-  if (filters.regionId) params.set("regionId", filters.regionId);
-  if (filters.departmentId) params.set("departmentId", filters.departmentId);
-  if (filters.classificationId) params.set("classificationId", filters.classificationId);
-  if (filters.channel) params.set("channel", filters.channel);
-  if (filters.status) params.set("status", filters.status);
-  if (filters.priority) params.set("priority", filters.priority);
-  if (filters.severity) params.set("severity", filters.severity);
-  if (filters.from) params.set("from", filters.from);
-  if (filters.to) params.set("to", filters.to);
-  if (filters.isLate) params.set("isLate", "true");
-  if (filters.isRepeated) params.set("isRepeated", "true");
-  if (filters.isValidated) params.set("isValidated", "true");
-  if (filters.aiAnalyzed) params.set("aiAnalyzed", "true");
+  appendDefinedParams(params, {
+    search: filters.search,
+    regionId: filters.regionId,
+    departmentId: filters.departmentId,
+    classificationId: filters.classificationId,
+    channel: filters.channel,
+    status: filters.status,
+    priority: filters.priority,
+    severity: filters.severity,
+    from: filters.from,
+    to: filters.to,
+    sourceOrigin: filters.sourceOrigin,
+    sourceStatus: filters.sourceStatus,
+    sourceActionStatus: filters.sourceActionStatus,
+    wingCode: filters.wingCode,
+    dataFreshnessBucket: filters.dataFreshnessBucket,
+  });
+  appendFlagParams(params, {
+    isLate: filters.isLate,
+    isRepeated: filters.isRepeated,
+    isValidated: filters.isValidated,
+    aiAnalyzed: filters.aiAnalyzed,
+  });
   params.set("sortBy", sortBy);
   params.set("sortOrder", sortOrder);
   return params;
+}
+
+function appendDefinedParams(params: URLSearchParams, values: Record<string, string>): void {
+  for (const [key, value] of Object.entries(values)) {
+    if (value) params.set(key, value);
+  }
+}
+
+function appendFlagParams(params: URLSearchParams, flags: Record<string, boolean>): void {
+  for (const [key, value] of Object.entries(flags)) {
+    if (value) params.set(key, "true");
+  }
 }
 
 export function extractFileName(disposition: string | null): string | null {
@@ -506,6 +547,31 @@ function SectionTitle({
 }
 
 // ===================== Main Component =====================
+export function countActiveFilters(filters: FilterState): number {
+  const textKeys: Array<keyof FilterState> = [
+    "search",
+    "regionId",
+    "departmentId",
+    "classificationId",
+    "channel",
+    "status",
+    "priority",
+    "severity",
+    "from",
+    "to",
+    "sourceOrigin",
+    "sourceStatus",
+    "sourceActionStatus",
+    "wingCode",
+    "dataFreshnessBucket",
+  ];
+  const flagKeys: Array<keyof FilterState> = ["isLate", "isRepeated", "isValidated"];
+  return (
+    textKeys.filter((key) => Boolean(filters[key])).length +
+    flagKeys.filter((key) => filters[key] === true).length
+  );
+}
+
 export function ComplaintsExplorer() {
   const [filters, setFilters] = useState<FilterState>(initialFilterState);
   const [appliedFilters, setAppliedFilters] = useState<FilterState>(initialFilterState);
@@ -597,23 +663,10 @@ export function ComplaintsExplorer() {
     window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
   }, [appliedFilters, sortBy, sortOrder, page]);
 
-  const activeFilterCount = useMemo(() => {
-    let count = 0;
-    if (appliedFilters.search) count++;
-    if (appliedFilters.regionId) count++;
-    if (appliedFilters.departmentId) count++;
-    if (appliedFilters.classificationId) count++;
-    if (appliedFilters.channel) count++;
-    if (appliedFilters.status) count++;
-    if (appliedFilters.priority) count++;
-    if (appliedFilters.severity) count++;
-    if (appliedFilters.from) count++;
-    if (appliedFilters.to) count++;
-    if (appliedFilters.isLate) count++;
-    if (appliedFilters.isRepeated) count++;
-    if (appliedFilters.isValidated) count++;
-    return count;
-  }, [appliedFilters]);
+  const activeFilterCount = useMemo(
+    () => countActiveFilters(appliedFilters),
+    [appliedFilters]
+  );
 
   const applyFilters = useCallback(() => {
     setAppliedFilters(filters);
@@ -924,6 +977,111 @@ export function ComplaintsExplorer() {
                       {filterOptions?.channels.map((ch) => (
                         <SelectItem key={ch} value={ch}>
                           {ch}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">مصدر الورود</Label>
+                  <Select
+                    value={filters.sourceOrigin || "all"}
+                    onValueChange={(v) =>
+                      setFilters((f) => ({ ...f, sourceOrigin: v === "all" ? "" : v }))
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="كل المصادر" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">كل المصادر</SelectItem>
+                      {(filterOptions?.sourceOrigins ?? []).map((opt) => (
+                        <SelectItem key={opt.id} value={opt.id}>{opt.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">الحالة المصدرية</Label>
+                  <Select
+                    value={filters.sourceStatus || "all"}
+                    onValueChange={(v) =>
+                      setFilters((f) => ({ ...f, sourceStatus: v === "all" ? "" : v }))
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="كل الحالات المصدرية" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">كل الحالات المصدرية</SelectItem>
+                      {(filterOptions?.sourceStatuses ?? []).map((opt) => (
+                        <SelectItem key={opt.id} value={opt.id}>{opt.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">حالة الإجراء المصدرية</Label>
+                  <Select
+                    value={filters.sourceActionStatus || "all"}
+                    onValueChange={(v) =>
+                      setFilters((f) => ({ ...f, sourceActionStatus: v === "all" ? "" : v }))
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="كل حالات الإجراء" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">كل حالات الإجراء</SelectItem>
+                      {(filterOptions?.sourceActionStatuses ?? []).map((opt) => (
+                        <SelectItem key={opt.id} value={opt.id}>{opt.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">الجناح</Label>
+                  <Select
+                    value={filters.wingCode || "all"}
+                    onValueChange={(v) =>
+                      setFilters((f) => ({ ...f, wingCode: v === "all" ? "" : v }))
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="كل الأجنحة" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">كل الأجنحة</SelectItem>
+                      {(filterOptions?.wingCodes ?? []).slice(0, 100).map((opt) => (
+                        <SelectItem key={opt.id} value={opt.id}>{opt.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">حداثة البيانات</Label>
+                  <Select
+                    value={filters.dataFreshnessBucket || "all"}
+                    onValueChange={(value) =>
+                      setFilters((current) => ({
+                        ...current,
+                        dataFreshnessBucket: value === "all" ? "" : value,
+                      }))
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="كل مستويات الحداثة" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">كل مستويات الحداثة</SelectItem>
+                      {(filterOptions?.dataFreshnessBuckets ?? []).map((opt) => (
+                        <SelectItem key={opt.id} value={opt.id}>
+                          {opt.name}
                         </SelectItem>
                       ))}
                     </SelectContent>
