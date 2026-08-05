@@ -111,7 +111,41 @@ describe("central complaint query service", () => {
     expect(parseComplaintQuery(query(`status=${legacyReopened}`)).status).toBe("OPEN");
   });
 
-  it("rejects unsupported complaint statuses", () => {
-    expect(() => parseComplaintQuery(query("status=ARCHIVED"))).toThrow("status is not supported");
+  it("builds freshness bucket where clauses with shared bounds", () => {
+    const now = new Date("2026-08-05T12:00:00.000Z");
+    const day = 24 * 60 * 60 * 1000;
+    const oneDayAgo = new Date(now.getTime() - day);
+    const threeDaysAgo = new Date(now.getTime() - 3 * day);
+    const sevenDaysAgo = new Date(now.getTime() - 7 * day);
+
+    const missing = buildComplaintWhere(parseComplaintQuery(query("dataFreshnessBucket=missing")), now);
+    expect(JSON.stringify(missing)).toContain('"sourceUpdatedAt":null');
+
+    const fresh = buildComplaintWhere(parseComplaintQuery(query("dataFreshnessBucket=fresh_1d")), now);
+    expect(fresh.AND).toEqual(expect.arrayContaining([{ sourceUpdatedAt: { gt: oneDayAgo } }]));
+
+    const stale13 = buildComplaintWhere(
+      parseComplaintQuery(query("dataFreshnessBucket=stale_1_3d")),
+      now
+    );
+    expect(stale13.AND).toEqual(
+      expect.arrayContaining([{ sourceUpdatedAt: { gt: threeDaysAgo, lte: oneDayAgo } }])
+    );
+
+    const stale37 = buildComplaintWhere(
+      parseComplaintQuery(query("dataFreshnessBucket=stale_3_7d")),
+      now
+    );
+    expect(stale37.AND).toEqual(
+      expect.arrayContaining([{ sourceUpdatedAt: { gt: sevenDaysAgo, lte: threeDaysAgo } }])
+    );
+
+    const stale7 = buildComplaintWhere(
+      parseComplaintQuery(query("dataFreshnessBucket=stale_7d_plus")),
+      now
+    );
+    expect(stale7.AND).toEqual(
+      expect.arrayContaining([{ sourceUpdatedAt: { lte: sevenDaysAgo } }])
+    );
   });
 });

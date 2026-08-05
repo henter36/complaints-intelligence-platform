@@ -25,6 +25,26 @@ type Props = Readonly<{
   departmentId: string;
 }>;
 
+export type ApiErrorPayload = {
+  error?: {
+    code?: string;
+    message?: string;
+  };
+};
+
+export async function readJsonResponse<T>(response: Response): Promise<T> {
+  const payload = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    const errorPayload = payload as ApiErrorPayload | null;
+    throw new Error(
+      errorPayload?.error?.message ?? `Request failed with status ${response.status}`
+    );
+  }
+
+  return payload as T;
+}
+
 function drillDownHref(base: URLSearchParams, extra: Record<string, string>): string {
   const params = new URLSearchParams(base);
   for (const [key, value] of Object.entries(extra)) {
@@ -37,6 +57,8 @@ function drillDownHref(base: URLSearchParams, extra: Record<string, string>): st
 export function OperationalAnalyticsPanel({ from, to, regionId, departmentId }: Props) {
   const [data, setData] = useState<OperationalAnalyticsSummary | null>(null);
   const [loading, setLoading] = useState(true);
+  const [analyticsError, setAnalyticsError] = useState<string | null>(null);
+  const [filtersError, setFiltersError] = useState<string | null>(null);
   const [sourceOrigin, setSourceOrigin] = useState("all");
   const [sourceStatus, setSourceStatus] = useState("all");
   const [sourceActionStatus, setSourceActionStatus] = useState("all");
@@ -57,8 +79,16 @@ export function OperationalAnalyticsPanel({ from, to, regionId, departmentId }: 
     const controller = new AbortController();
     (async () => {
       try {
+        setFiltersError(null);
         const res = await fetch("/api/filters", { signal: controller.signal });
-        const json = await res.json();
+        const json = await readJsonResponse<{
+          sourceOrigins?: FilterOption[];
+          sourceStatuses?: FilterOption[];
+          sourceActionStatuses?: FilterOption[];
+          wingCodes?: FilterOption[];
+          channels?: string[];
+          dataFreshnessBuckets?: FilterOption[];
+        }>(res);
         if (!controller.signal.aborted) {
           setOptions({
             sourceOrigins: json.sourceOrigins ?? [],
@@ -70,7 +100,9 @@ export function OperationalAnalyticsPanel({ from, to, regionId, departmentId }: 
           });
         }
       } catch (e) {
-        if (!isAbortError(e)) console.error(e);
+        if (isAbortError(e) || controller.signal.aborted) return;
+        setFiltersError("تعذر تحميل خيارات الفلاتر.");
+        console.error("Failed to load filter options");
       }
     })();
     return () => controller.abort();
@@ -107,14 +139,22 @@ export function OperationalAnalyticsPanel({ from, to, regionId, departmentId }: 
       const requestId = requestRef.current + 1;
       requestRef.current = requestId;
       setLoading(true);
+      setAnalyticsError(null);
       try {
         const res = await fetch(`/api/analytics/operational?${buildParams()}`, { signal });
-        const json = await res.json();
+        const json = await readJsonResponse<OperationalAnalyticsSummary>(res);
         if (!signal?.aborted && requestRef.current === requestId) {
           setData(json);
+          setAnalyticsError(null);
         }
       } catch (e) {
-        if (!isAbortError(e)) console.error(e);
+        if (isAbortError(e) || signal?.aborted) return;
+        if (requestRef.current === requestId) {
+          setData(null);
+          setAnalyticsError(
+            e instanceof Error ? e.message : "تعذر تحميل التحليلات التشغيلية."
+          );
+        }
       } finally {
         if (!signal?.aborted && requestRef.current === requestId) setLoading(false);
       }
@@ -132,8 +172,28 @@ export function OperationalAnalyticsPanel({ from, to, regionId, departmentId }: 
     return () => controller.abort();
   }, [load]);
 
-  if (loading && !data) {
+  if (loading && !data && !analyticsError) {
     return <Skeleton className="h-64 w-full" />;
+  }
+
+  if (analyticsError && !data) {
+    return (
+      <Card>
+        <CardContent className="flex flex-col items-start gap-3 py-8">
+          <p className="text-sm text-muted-foreground">{analyticsError}</p>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              void load();
+            }}
+          >
+            إعادة المحاولة
+          </Button>
+        </CardContent>
+      </Card>
+    );
   }
 
   if (!data) {
@@ -150,6 +210,19 @@ export function OperationalAnalyticsPanel({ from, to, regionId, departmentId }: 
 
   return (
     <div className="space-y-4">
+      {filtersError ? (
+        <p className="text-sm text-destructive" role="alert">
+          {filtersError}
+        </p>
+      ) : null}
+      {analyticsError ? (
+        <div className="flex items-center gap-3 text-sm text-destructive" role="alert">
+          <span>{analyticsError}</span>
+          <Button type="button" variant="outline" size="sm" onClick={() => void load()}>
+            إعادة المحاولة
+          </Button>
+        </div>
+      ) : null}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="text-base">فلاتر تشغيلية</CardTitle>

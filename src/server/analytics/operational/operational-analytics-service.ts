@@ -10,6 +10,11 @@ import {
   OPEN_COMPLAINT_STATUSES,
 } from "@/server/complaints/status";
 import {
+  DAY_MS,
+  FRESHNESS_BUCKET_LABELS,
+  resolveFreshnessBucket,
+} from "@/server/analytics/operational/operational-freshness";
+import {
   DATA_FRESHNESS_BUCKETS,
   OPERATIONAL_UNSPECIFIED,
   OPERATIONAL_UNSPECIFIED_LABEL,
@@ -23,7 +28,6 @@ import {
   type WingOperationalMetrics,
 } from "./operational-analytics-types";
 
-const DAY_MS = 24 * 60 * 60 * 1000;
 const LONG_ACTION_TAKEN_CHARS = 80;
 const RARE_SHARE_THRESHOLD = 0.01;
 const RIYADH_TZ = "Asia/Riyadh";
@@ -78,25 +82,7 @@ export function formatInstantInRiyadh(value: Date | null): string | null {
   }).format(value);
 }
 
-export function resolveFreshnessBucket(
-  sourceUpdatedAt: Date | null,
-  now: Date
-): DataFreshnessBucket {
-  if (!sourceUpdatedAt) return "missing";
-  const ageMs = now.getTime() - sourceUpdatedAt.getTime();
-  if (ageMs < DAY_MS) return "fresh_1d";
-  if (ageMs < 3 * DAY_MS) return "stale_1_3d";
-  if (ageMs < 7 * DAY_MS) return "stale_3_7d";
-  return "stale_7d_plus";
-}
-
-export const FRESHNESS_BUCKET_LABELS: Record<DataFreshnessBucket, string> = {
-  fresh_1d: "خلال يوم",
-  stale_1_3d: "1–3 أيام",
-  stale_3_7d: "3–7 أيام",
-  stale_7d_plus: "أكثر من 7 أيام",
-  missing: "بلا تاريخ تحديث",
-};
+export { resolveFreshnessBucket, FRESHNESS_BUCKET_LABELS, DAY_MS } from "./operational-freshness";
 
 function emptyStringOrNull(value: string | null | undefined): boolean {
   return value == null || value.trim() === "";
@@ -658,8 +644,7 @@ export async function getOperationalAnalytics(
   options: { now?: Date; includeStaffActors?: boolean } = {}
 ): Promise<OperationalAnalyticsSummary> {
   const now = options.now ?? new Date();
-  const includeStaffActors =
-    options.includeStaffActors === true || params.get("includeStaffActors") === "true";
+  const includeStaffActors = options.includeStaffActors === true;
 
   const query = parseComplaintQuery(params);
   const where = buildComplaintWhere(query, now);

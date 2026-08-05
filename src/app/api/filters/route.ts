@@ -62,6 +62,8 @@ export async function GET(req: NextRequest) {
         where: { isDeleted: false, wingCode: { not: null } },
         select: { wingCode: true },
         distinct: ["wingCode"],
+        orderBy: { wingCode: "asc" },
+        take: 500,
       }),
     ]);
 
@@ -110,8 +112,7 @@ export async function GET(req: NextRequest) {
         unspecified,
         ...wingCodes
           .flatMap((r) => (r.wingCode?.trim() ? [optionFromName(r.wingCode.trim())] : []))
-          .sort((a, b) => compareArabicLabels(a.name, b.name))
-          .slice(0, 500),
+          .sort((a, b) => compareArabicLabels(a.name, b.name)),
       ],
       dataFreshnessBuckets: [
         { id: "fresh_1d", name: "خلال يوم" },

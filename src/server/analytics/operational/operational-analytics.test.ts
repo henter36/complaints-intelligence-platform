@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import { ComplaintStatus } from "@prisma/client";
 import {
   buildComplaintWhere,
@@ -7,6 +7,7 @@ import {
 import {
   buildFreshness,
   formatInstantInRiyadh,
+  getOperationalAnalytics,
   normalizeActionTakenKey,
   resolveFreshnessBucket,
 } from "@/server/analytics/operational/operational-analytics-service";
@@ -15,6 +16,10 @@ import {
   OPERATIONAL_UNSPECIFIED,
 } from "@/server/analytics/operational/operational-analytics-types";
 import {
+  matchesFreshnessBucketWhere,
+  freshnessBucketWhere,
+} from "@/server/analytics/operational/operational-freshness";
+import {
   detectOperationalTextPatterns,
   iterTextSignalSources,
 } from "@/server/analytics/operational/operational-text-signals";
@@ -22,6 +27,20 @@ import { REPORT_DEFINITIONS } from "@/server/reports/report-definition-service";
 import { ReportType } from "@prisma/client";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+
+const dbMocks = vi.hoisted(() => ({
+  findMany: vi.fn(),
+  groupBy: vi.fn(),
+}));
+
+vi.mock("@/lib/db", () => ({
+  db: {
+    complaint: {
+      findMany: dbMocks.findMany,
+      groupBy: dbMocks.groupBy,
+    },
+  },
+}));
 
 function q(query: string) {
   return new URLSearchParams(query);
@@ -225,6 +244,50 @@ describe("freshness buckets and Riyadh display", () => {
       }))
     ).toEqual(inputSnapshots);
   });
+
+  it("keeps resolveFreshnessBucket and drill-down where in object parity", () => {
+    const samples: Array<Date | null> = [
+      new Date(now.getTime() + 60 * 60 * 1000),
+      now,
+      new Date(now.getTime() - (DAY_MS - 1000)),
+      new Date(now.getTime() - DAY_MS),
+      new Date(now.getTime() - 2 * DAY_MS),
+      new Date(now.getTime() - 3 * DAY_MS),
+      new Date(now.getTime() - 6 * DAY_MS),
+      new Date(now.getTime() - 7 * DAY_MS),
+      new Date(now.getTime() - 8 * DAY_MS),
+      null,
+    ];
+
+    for (const sample of samples) {
+      const bucket = resolveFreshnessBucket(sample, now);
+      expect(matchesFreshnessBucketWhere(sample, bucket, now)).toBe(true);
+
+      for (const other of DATA_FRESHNESS_BUCKETS) {
+        if (other === bucket) continue;
+        expect(matchesFreshnessBucketWhere(sample, other, now)).toBe(false);
+      }
+
+      const where = buildComplaintWhere(
+        parseComplaintQuery(new URLSearchParams({ dataFreshnessBucket: bucket })),
+        now
+      );
+      const expected = freshnessBucketWhere(bucket, now);
+      expect(where.AND).toEqual(expect.arrayContaining([expected]));
+    }
+  });
+
+  it("matches metric bucket counts to drill-down membership", () => {
+    const rows = createFreshnessFixtureRows();
+    const metrics = buildFreshness(rows, now);
+    for (const bucket of DATA_FRESHNESS_BUCKETS) {
+      const metricCount = metrics.buckets.find((b) => b.bucket === bucket)?.count ?? -1;
+      const drillDownCount = rows.filter((row) =>
+        matchesFreshnessBucketWhere(row.sourceUpdatedAt, bucket, now)
+      ).length;
+      expect(drillDownCount).toBe(metricCount);
+    }
+  });
 });
 
 describe("operational text signal sources", () => {
@@ -253,6 +316,111 @@ describe("operational text signal sources", () => {
     expect(
       findings.some((f) => f.source === "ACTION_DESCRIPTION" && f.code === "INCOMPLETE_ACTION")
     ).toBe(true);
+  });
+
+  it("does not flag ordinary closures as CLOSURE_WITHOUT_TREATMENT", () => {
+    const negatives = [
+      "أُغلق الطلب بعد المعالجة.",
+      "تم الإغلاق بعد تنفيذ الإجراء.",
+      "أغلق المستخدم الشكوى بعد حلها.",
+      "تاريخ الإغلاق مسجل.",
+    ];
+    for (const text of negatives) {
+      const findings = detectOperationalTextPatterns({
+        description: text,
+        sourceDetail: null,
+        actionDescription: null,
+      });
+      expect(findings.some((f) => f.code === "CLOSURE_WITHOUT_TREATMENT")).toBe(false);
+    }
+  });
+
+  it("flags closure without treatment and administrative closure", () => {
+    const positives = [
+      "تم الإغلاق دون معالجة.",
+      "أُغلق دون إجراء.",
+      "إغلاق إداري.",
+      "تم الاغلاق دون حل.",
+      "تـــم الإغــلاق دون مُعالجة",
+    ];
+    for (const text of positives) {
+      const findings = detectOperationalTextPatterns({
+        description: text,
+        sourceDetail: null,
+        actionDescription: null,
+      });
+      expect(findings.some((f) => f.code === "CLOSURE_WITHOUT_TREATMENT")).toBe(true);
+      expect(findings.find((f) => f.code === "CLOSURE_WITHOUT_TREATMENT")?.label).toBe(
+        "إغلاق دون معالجة واضحة"
+      );
+    }
+  });
+});
+
+describe("staff actor privacy gating", () => {
+  beforeEach(() => {
+    dbMocks.findMany.mockReset();
+    dbMocks.groupBy.mockReset();
+    dbMocks.groupBy.mockResolvedValue([]);
+  });
+
+  function staffRow() {
+    return {
+      id: "c1",
+      status: ComplaintStatus.CLOSED,
+      channel: "الهاتف",
+      sourceOrigin: "منصة",
+      sourceStatus: "مغلقة",
+      sourceActionStatus: "منتهية",
+      wingCode: "1",
+      actionTaken: "تم",
+      actionDescription: null,
+      resolution: "حل",
+      sourceUpdatedAt: FRESHNESS_NOW,
+      sourceModifiedAt: FRESHNESS_NOW,
+      sourceClosedBy: "AhmedAli",
+      sourceUpdatedBy: "SaraNasser",
+      complaintDate: FRESHNESS_NOW,
+      receivedAt: FRESHNESS_NOW,
+      dueDate: null,
+      closedAt: FRESHNESS_NOW,
+      classification: { nameAr: "مواعيد" },
+    };
+  }
+
+  it("ignores includeStaffActors query param when options are false", async () => {
+    dbMocks.findMany.mockResolvedValue([staffRow()]);
+    const summary = await getOperationalAnalytics(
+      new URLSearchParams("includeStaffActors=true"),
+      { includeStaffActors: false, now: FRESHNESS_NOW }
+    );
+    expect(summary.staffActors.enabled).toBe(false);
+    expect(JSON.stringify(summary)).not.toContain("AhmedAli");
+    expect(JSON.stringify(summary)).not.toContain("SaraNasser");
+  });
+
+  it("keeps staff disabled when query param is true without options", async () => {
+    dbMocks.findMany.mockResolvedValue([staffRow()]);
+    const summary = await getOperationalAnalytics(
+      new URLSearchParams("includeStaffActors=true"),
+      { now: FRESHNESS_NOW }
+    );
+    expect(summary.staffActors.enabled).toBe(false);
+  });
+
+  it("enables masked staff metrics only when options.includeStaffActors is true", async () => {
+    dbMocks.findMany.mockResolvedValue([staffRow()]);
+    const summary = await getOperationalAnalytics(new URLSearchParams(), {
+      includeStaffActors: true,
+      now: FRESHNESS_NOW,
+    });
+    expect(summary.staffActors.enabled).toBe(true);
+    if (summary.staffActors.enabled) {
+      expect(summary.staffActors.closers?.[0]?.maskedId).toMatch(/^A\*\*\*i$/);
+      expect(summary.staffActors.updaters?.[0]?.maskedId).toMatch(/^S\*\*\*r$/);
+    }
+    expect(JSON.stringify(summary)).not.toContain("AhmedAli");
+    expect(JSON.stringify(summary)).not.toContain("SaraNasser");
   });
 });
 

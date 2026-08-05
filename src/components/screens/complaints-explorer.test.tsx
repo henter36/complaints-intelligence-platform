@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import {
   buildComplaintQuery,
+  ComplaintsExplorer,
+  countActiveFilters,
   downloadComplaintExport,
   extractFileName,
   normalizeApiComplaintStatus,
@@ -34,6 +38,7 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   document.body.innerHTML = "";
+  window.history.replaceState(null, "", "/");
 });
 
 describe("complaints explorer helpers", () => {
@@ -73,22 +78,36 @@ describe("complaints explorer helpers", () => {
     expect(exportQuery.get("sourceOrigin")).toBe("الجهاز الرئيسي");
     expect(exportQuery.get("sourceStatus")).toBe("مغلقة");
     expect(exportQuery.get("wingCode")).toBe("3");
+    expect(exportQuery.get("dataFreshnessBucket")).toBe("fresh_1d");
     expect(exportQuery.get("channel")).toBe("الهاتف");
     expect(exportQuery.get("sortBy")).toBe("receivedDate");
     expect(exportQuery.get("sortOrder")).toBe("desc");
     expect(exportQuery.get("aiAnalyzed")).toBe("true");
   });
 
+  it("counts dataFreshnessBucket in active filters and allows clearing it alone", () => {
+    const withFreshness = { ...baseFilters };
+    const withoutFreshness = { ...baseFilters, dataFreshnessBucket: "" };
+    expect(countActiveFilters(withFreshness)).toBe(countActiveFilters(withoutFreshness) + 1);
+
+    const cleared = buildComplaintQuery(withoutFreshness, "receivedDate", "desc");
+    expect(cleared.get("dataFreshnessBucket")).toBeNull();
+  });
+
   it("extracts attachment file names", () => {
-    expect(extractFileName('attachment; filename="complaints-2026-07-30.csv"')).toBe("complaints-2026-07-30.csv");
+    expect(extractFileName('attachment; filename="complaints-2026-07-30.csv"')).toBe(
+      "complaints-2026-07-30.csv"
+    );
     expect(extractFileName(null)).toBeNull();
   });
 
   it("downloads successful exports as blobs without navigating away", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response("id\n1\n", {
-      status: 200,
-      headers: { "content-disposition": 'attachment; filename="complaints.csv"' },
-    }));
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response("id\n1\n", {
+        status: 200,
+        headers: { "content-disposition": 'attachment; filename="complaints.csv"' },
+      })
+    );
     const createObjectURL = vi.fn().mockReturnValue("blob:test");
     const revokeObjectURL = vi.fn();
     const click = vi.fn();
@@ -97,7 +116,10 @@ describe("complaints explorer helpers", () => {
     vi.stubGlobal("fetch", fetchMock);
     vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
     vi.spyOn(document, "createElement").mockImplementation((tagName: string) => {
-      const element = document.createElementNS("http://www.w3.org/1999/xhtml", tagName) as HTMLAnchorElement;
+      const element = document.createElementNS(
+        "http://www.w3.org/1999/xhtml",
+        tagName
+      ) as HTMLAnchorElement;
       if (tagName === "a") element.click = click;
       return element;
     });
@@ -113,10 +135,15 @@ describe("complaints explorer helpers", () => {
 
   it("surfaces export failures without changing window location", async () => {
     const originalLocation = window.location.href;
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json(
-      { error: { message: "عدد نتائج التصدير يتجاوز الحد المسموح" } },
-      { status: 422 }
-    )));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        Response.json(
+          { error: { message: "عدد نتائج التصدير يتجاوز الحد المسموح" } },
+          { status: 422 }
+        )
+      )
+    );
 
     await expect(downloadComplaintExport(baseFilters, "receivedDate", "desc")).rejects.toThrow(
       "عدد نتائج التصدير يتجاوز الحد المسموح"
@@ -129,6 +156,83 @@ describe("complaints explorer helpers", () => {
 
     await expect(downloadComplaintExport(baseFilters, "receivedDate", "desc")).rejects.toThrow(
       "تعذر تصدير الشكاوى"
+    );
+  });
+});
+
+describe("complaints explorer dataFreshnessBucket UI", () => {
+  it("shows dataFreshnessBucket from URL in advanced filters", async () => {
+    window.history.replaceState(null, "", "/?dataFreshnessBucket=stale_3_7d");
+    const user = userEvent.setup();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.includes("/api/filters")) {
+          return Response.json({
+            regions: [],
+            departments: [],
+            facilities: [],
+            locations: [],
+            categories: [],
+            classifications: [],
+            statuses: [],
+            priorities: [],
+            channels: [],
+            sourceOrigins: [],
+            sourceStatuses: [],
+            sourceActionStatuses: [],
+            wingCodes: [],
+            dataFreshnessBuckets: [
+              { id: "fresh_1d", name: "خلال يوم" },
+              { id: "stale_1_3d", name: "1–3 أيام" },
+              { id: "stale_3_7d", name: "3–7 أيام" },
+              { id: "stale_7d_plus", name: "أكثر من 7 أيام" },
+              { id: "missing", name: "بلا تاريخ تحديث" },
+            ],
+          });
+        }
+        return Response.json({
+          items: [],
+          pagination: { total: 0, totalPages: 0, page: 1, pageSize: 25 },
+        });
+      })
+    );
+
+    render(<ComplaintsExplorer />);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /فلاتر متقدمة/ })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /فلاتر متقدمة/ }));
+    expect(screen.getByText("حداثة البيانات")).toBeInTheDocument();
+
+    const freshnessLabel = screen.getByText("حداثة البيانات");
+    const freshnessField = freshnessLabel.closest("div");
+    const freshnessTrigger = freshnessField?.querySelector('[role="combobox"]');
+    expect(freshnessTrigger).toHaveTextContent("3–7 أيام");
+    expect(screen.getByRole("button", { name: /فلاتر متقدمة/ })).toHaveTextContent("1");
+  });
+
+  it("updates and clears dataFreshnessBucket in query helpers without resetting other filters", () => {
+    const updated = buildComplaintQuery(
+      { ...baseFilters, dataFreshnessBucket: "stale_7d_plus" },
+      "receivedDate",
+      "desc"
+    );
+    expect(updated.get("dataFreshnessBucket")).toBe("stale_7d_plus");
+    expect(updated.get("sourceOrigin")).toBe("الجهاز الرئيسي");
+
+    const cleared = buildComplaintQuery(
+      { ...baseFilters, dataFreshnessBucket: "" },
+      "receivedDate",
+      "desc"
+    );
+    expect(cleared.get("dataFreshnessBucket")).toBeNull();
+    expect(cleared.get("wingCode")).toBe("3");
+    expect(countActiveFilters({ ...baseFilters, dataFreshnessBucket: "" })).toBe(
+      countActiveFilters(baseFilters) - 1
     );
   });
 });

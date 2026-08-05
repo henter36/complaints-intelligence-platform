@@ -1,6 +1,7 @@
 import { ComplaintPriority, ComplaintStatus, type Prisma } from "@prisma/client";
 import { z } from "zod";
 import { db } from "@/lib/db";
+import { freshnessBucketWhere } from "@/server/analytics/operational/operational-freshness";
 import { buildComplaintTiming, type ComplaintTimingSnapshot } from "./complaint-timing";
 import {
   CLOSED_COMPLAINT_STATUSES,
@@ -332,7 +333,6 @@ function applyDateFilters(where: Prisma.ComplaintWhereInput, query: ComplaintQue
 }
 
 const OPERATIONAL_UNSPECIFIED = "__UNSPECIFIED__";
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 function applyOperationalScalarFilters(
   where: Prisma.ComplaintWhereInput,
@@ -388,33 +388,6 @@ function applyCategoricalOrUnspecified(
     return;
   }
   where[field] = value;
-}
-
-function freshnessBucketWhere(
-  bucket: NonNullable<ComplaintQuery["dataFreshnessBucket"]>,
-  now: Date
-): Prisma.ComplaintWhereInput {
-  if (bucket === "missing") return { sourceUpdatedAt: null };
-  if (bucket === "fresh_1d") {
-    return { sourceUpdatedAt: { gte: new Date(now.getTime() - DAY_MS), lt: now } };
-  }
-  if (bucket === "stale_1_3d") {
-    return {
-      sourceUpdatedAt: {
-        gte: new Date(now.getTime() - 3 * DAY_MS),
-        lt: new Date(now.getTime() - DAY_MS),
-      },
-    };
-  }
-  if (bucket === "stale_3_7d") {
-    return {
-      sourceUpdatedAt: {
-        gte: new Date(now.getTime() - 7 * DAY_MS),
-        lt: new Date(now.getTime() - 3 * DAY_MS),
-      },
-    };
-  }
-  return { sourceUpdatedAt: { lt: new Date(now.getTime() - 7 * DAY_MS) } };
 }
 
 function applyTextSearch(where: Prisma.ComplaintWhereInput, search?: string): void {

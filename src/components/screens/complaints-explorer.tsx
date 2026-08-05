@@ -547,6 +547,31 @@ function SectionTitle({
 }
 
 // ===================== Main Component =====================
+export function countActiveFilters(filters: FilterState): number {
+  const textKeys: Array<keyof FilterState> = [
+    "search",
+    "regionId",
+    "departmentId",
+    "classificationId",
+    "channel",
+    "status",
+    "priority",
+    "severity",
+    "from",
+    "to",
+    "sourceOrigin",
+    "sourceStatus",
+    "sourceActionStatus",
+    "wingCode",
+    "dataFreshnessBucket",
+  ];
+  const flagKeys: Array<keyof FilterState> = ["isLate", "isRepeated", "isValidated"];
+  return (
+    textKeys.filter((key) => Boolean(filters[key])).length +
+    flagKeys.filter((key) => filters[key] === true).length
+  );
+}
+
 export function ComplaintsExplorer() {
   const [filters, setFilters] = useState<FilterState>(initialFilterState);
   const [appliedFilters, setAppliedFilters] = useState<FilterState>(initialFilterState);
@@ -638,30 +663,10 @@ export function ComplaintsExplorer() {
     window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
   }, [appliedFilters, sortBy, sortOrder, page]);
 
-  const activeFilterCount = useMemo(() => {
-    const textKeys: Array<keyof FilterState> = [
-      "search",
-      "regionId",
-      "departmentId",
-      "classificationId",
-      "channel",
-      "status",
-      "priority",
-      "severity",
-      "from",
-      "to",
-      "sourceOrigin",
-      "sourceStatus",
-      "sourceActionStatus",
-      "wingCode",
-      "dataFreshnessBucket",
-    ];
-    const flagKeys: Array<keyof FilterState> = ["isLate", "isRepeated", "isValidated"];
-    return (
-      textKeys.filter((key) => Boolean(appliedFilters[key])).length +
-      flagKeys.filter((key) => appliedFilters[key] === true).length
-    );
-  }, [appliedFilters]);
+  const activeFilterCount = useMemo(
+    () => countActiveFilters(appliedFilters),
+    [appliedFilters]
+  );
 
   const applyFilters = useCallback(() => {
     setAppliedFilters(filters);
@@ -1053,6 +1058,31 @@ export function ComplaintsExplorer() {
                       <SelectItem value="all">كل الأجنحة</SelectItem>
                       {(filterOptions?.wingCodes ?? []).slice(0, 100).map((opt) => (
                         <SelectItem key={opt.id} value={opt.id}>{opt.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">حداثة البيانات</Label>
+                  <Select
+                    value={filters.dataFreshnessBucket || "all"}
+                    onValueChange={(value) =>
+                      setFilters((current) => ({
+                        ...current,
+                        dataFreshnessBucket: value === "all" ? "" : value,
+                      }))
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="كل مستويات الحداثة" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">كل مستويات الحداثة</SelectItem>
+                      {(filterOptions?.dataFreshnessBuckets ?? []).map((opt) => (
+                        <SelectItem key={opt.id} value={opt.id}>
+                          {opt.name}
+                        </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
