@@ -70,12 +70,18 @@ function toFiltersSnapshot(filters: AnalysisFilters): Record<string, unknown> {
 
 // ─── Where clause builder ────────────────────────────────────────────────────
 
-function buildComplaintWhere(filters: AnalysisFilters): Record<string, unknown> {
+/** Calendar `YYYY-MM-DD` values parse as UTC midnight; inclusive `dateTo` must cover that whole day. */
+function startOfNextUtcDay(date: Date): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1));
+}
+
+/** Exported for unit tests — mirrors complaint-query inclusive end-date semantics. */
+export function buildAiAnalysisComplaintWhere(filters: AnalysisFilters): Record<string, unknown> {
   const where: Record<string, unknown> = { isDeleted: false };
   if (filters.dateFrom || filters.dateTo) {
     const dateFilter: Record<string, Date> = {};
     if (filters.dateFrom) dateFilter.gte = new Date(filters.dateFrom);
-    if (filters.dateTo) dateFilter.lte = new Date(filters.dateTo);
+    if (filters.dateTo) dateFilter.lt = startOfNextUtcDay(new Date(filters.dateTo));
     where.complaintDate = dateFilter;
   }
   if (filters.department) where.department = filters.department;
@@ -86,6 +92,10 @@ function buildComplaintWhere(filters: AnalysisFilters): Record<string, unknown> 
     where.classification = { is: { nameAr: filters.classification } };
   }
   return where;
+}
+
+function buildComplaintWhere(filters: AnalysisFilters): Record<string, unknown> {
+  return buildAiAnalysisComplaintWhere(filters);
 }
 
 // ─── Prompt helpers ──────────────────────────────────────────────────────────
