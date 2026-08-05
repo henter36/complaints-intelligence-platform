@@ -2,15 +2,15 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PrismaClient, ComplaintStatus, ComplaintPriority } from "@prisma/client";
+import { PrismaClient, ComplaintStatus, ComplaintPriority, Prisma } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   applyTaxonomyRestructure,
   previewTaxonomyRestructure,
   rollbackTaxonomyRestructure,
   verifyTaxonomyRestructure,
-  TaxonomyRestructureError,
   RESTRUCTURE_ERROR_CODES,
+  buildRollbackToken,
 } from "./classification-taxonomy-restructure";
 import { resolveSourceDetailClassification } from "./source-detail-classification-resolver";
 import { createClassification, ClassificationManagementError } from "./classification-management-service";
@@ -139,7 +139,7 @@ async function seedLegacyTaxonomy() {
 }
 
 describe("classification taxonomy restructure integration", () => {
-  it("dry-run → apply → verify → rollback preserves ids and does not classify unclassified", async () => {
+  it("dry-run → apply → verify → full rollback preserves ids and ordering", async () => {
     const client = db();
     const seed = await seedLegacyTaxonomy();
     const manifestPath = join(tempDir!, "manifest.json");
@@ -161,7 +161,6 @@ describe("classification taxonomy restructure integration", () => {
     expect(preview.planSummary.classificationsToMove.some((c) => c.includes("السلوك المهني"))).toBe(true);
     expect(existsSync(manifestPath)).toBe(true);
 
-    // Dry-run must not write taxonomy changes.
     expect(await client.category.count()).toBe(categoryCountBefore);
     expect(await client.classification.count()).toBe(classificationCountBefore);
     expect(await client.classificationTaxonomyRestructureRun.count()).toBe(0);
@@ -173,6 +172,16 @@ describe("classification taxonomy restructure integration", () => {
     });
     expect(applied.status).toBe("APPLIED");
     expect(applied.runId).toBeTruthy();
+
+    const applyItems = await client.classificationTaxonomyRestructureItem.findMany({
+      where: { runId: applied.runId },
+      orderBy: { sequence: "asc" },
+    });
+    expect(applyItems.length).toBeGreaterThan(1);
+    expect(applyItems.map((i) => i.sequence)).toEqual(
+      Array.from({ length: applyItems.length }, (_, i) => i + 1)
+    );
+    expect(new Set(applyItems.map((i) => i.sequence)).size).toBe(applyItems.length);
 
     const renamed = await client.classification.findUniqueOrThrow({
       where: { id: seed.appointments.id },
@@ -242,7 +251,6 @@ describe("classification taxonomy restructure integration", () => {
     });
     expect(verified.ok).toBe(true);
 
-    // Fingerprint gate after preview mutation.
     await client.category.create({ data: { nameAr: `فئة دخيلة-${crypto.randomUUID().slice(0, 6)}` } });
     await expect(
       applyTaxonomyRestructure(client, {
@@ -254,8 +262,13 @@ describe("classification taxonomy restructure integration", () => {
       code: RESTRUCTURE_ERROR_CODES.CLASSIFICATION_TAXONOMY_CHANGED_AFTER_PREVIEW,
     });
 
-    // Fresh seed for rollback path (re-preview/apply after intrusion).
     const seed2 = await seedLegacyTaxonomy();
+    const createdCategoryIdsBefore = new Set(
+      (await client.category.findMany({ select: { id: true } })).map((c) => c.id)
+    );
+    const createdClassificationIdsBefore = new Set(
+      (await client.classification.findMany({ select: { id: true } })).map((c) => c.id)
+    );
     const manifest2 = join(tempDir!, "manifest-2.json");
     const preview2 = await previewTaxonomyRestructure(client, {
       proposalPath: PROPOSAL,
@@ -268,17 +281,291 @@ describe("classification taxonomy restructure integration", () => {
       confirm: preview2.confirmationToken,
       actor: "test-actor",
     });
+
+    const applyItems2 = await client.classificationTaxonomyRestructureItem.findMany({
+      where: { runId: applied2.runId },
+      orderBy: { sequence: "asc" },
+    });
+    const sameCreatedAt = new Date("2026-01-01T00:00:00.000Z");
+    await client.classificationTaxonomyRestructureItem.updateMany({
+      where: { runId: applied2.runId },
+      data: { createdAt: sameCreatedAt },
+    });
+    const afterStamp = await client.classificationTaxonomyRestructureItem.findMany({
+      where: { runId: applied2.runId },
+      orderBy: [{ sequence: "desc" }, { id: "desc" }],
+    });
+    expect(afterStamp.every((i) => i.createdAt.getTime() === sameCreatedAt.getTime())).toBe(true);
+    expect(afterStamp.map((i) => i.sequence)).toEqual(
+      [...applyItems2].reverse().map((i) => i.sequence)
+    );
+
     const rolled = await rollbackTaxonomyRestructure(client, {
       runId: applied2.runId,
       confirm: applied2.rollbackToken,
       actor: "test-actor",
     });
-    expect(["ROLLED_BACK", "PARTIALLY_ROLLED_BACK"]).toContain(rolled.status);
+    expect(rolled.status).toBe("ROLLED_BACK");
+    expect(rolled.skipped).toBe(0);
+    expect(rolled.rolledBack).toBeGreaterThan(0);
 
     const appointmentsAfter = await client.classification.findUniqueOrThrow({
       where: { id: seed2.appointments.id },
     });
     expect(appointmentsAfter.nameAr).toBe("المواعيد");
+    expect(appointmentsAfter.keywords).toEqual(["عدم خروجه لموعد"]);
+
+    const conductAfter = await client.classification.findUniqueOrThrow({
+      where: { id: seed2.conduct.id },
+    });
+    expect(conductAfter.nameAr).toBe("السلوك المهني");
+    expect(conductAfter.categoryId).toBe(seed2.services.id);
+    expect(conductAfter.keywords).toEqual(["سوء التعامل"]);
+
+    const conductComplaintAfter = await client.complaint.findUniqueOrThrow({
+      where: { id: seed2.classifiedConduct.id },
+      include: { classification: true },
+    });
+    expect(conductComplaintAfter.categoryId).toBe(seed2.services.id);
+    expect(conductComplaintAfter.categoryId).toBe(conductComplaintAfter.classification?.categoryId);
+
+    const createdCategories = await client.category.findMany({
+      where: { id: { notIn: [...createdCategoryIdsBefore] } },
+    });
+    for (const cat of createdCategories) {
+      expect(cat.isActive).toBe(false);
+    }
+    const createdClassifications = await client.classification.findMany({
+      where: { id: { notIn: [...createdClassificationIdsBefore] } },
+    });
+    for (const cls of createdClassifications) {
+      expect(cls.isActive).toBe(false);
+    }
+
+    const classified = await client.complaint.findMany({
+      where: { isDeleted: false, classificationId: { not: null } },
+      include: { classification: true },
+    });
+    for (const complaint of classified) {
+      expect(complaint.categoryId).toBe(complaint.classification?.categoryId);
+    }
+  }, 90_000);
+
+  it("rolls back MOVE_AND_RENAME after CATEGORY_CONSISTENCY when sequences dictate order", async () => {
+    const client = db();
+    await seedLegacyTaxonomy();
+    const fromCategory = await client.category.create({
+      data: { nameAr: `من-${crypto.randomUUID().slice(0, 6)}` },
+    });
+    const toCategory = await client.category.create({
+      data: { nameAr: `إلى-${crypto.randomUUID().slice(0, 6)}` },
+    });
+    const classification = await client.classification.create({
+      data: {
+        categoryId: fromCategory.id,
+        nameAr: `تصنيف-منقول-${crypto.randomUUID().slice(0, 6)}`,
+        keywords: ["كلمة قديمة"],
+      },
+    });
+    const complaint = await client.complaint.create({
+      data: {
+        subject: "نقل",
+        description: "legacy",
+        status: ComplaintStatus.NEW,
+        priority: ComplaintPriority.MEDIUM,
+        channel: "OTHER",
+        region: "الرياض",
+        categoryId: toCategory.id,
+        classificationId: classification.id,
+        receivedAt: new Date("2026-01-04T00:00:00Z"),
+      },
+    });
+
+    const run = await client.classificationTaxonomyRestructureRun.create({
+      data: {
+        operation: "APPLY",
+        status: "APPLIED",
+        proposalHash: "p",
+        mappingHash: "m",
+        currentTaxonomyFingerprint: "c",
+        targetTaxonomyFingerprint: "t",
+        manifestHash: "h".repeat(64),
+        actor: "test",
+        createdCount: 0,
+        renamedCount: 1,
+        movedCount: 1,
+      },
+    });
+
+    const sameCreatedAt = new Date("2026-02-02T00:00:00.000Z");
+    await client.classificationTaxonomyRestructureItem.create({
+      data: {
+        runId: run.id,
+        sequence: 1,
+        entityType: "Complaint",
+        action: "CATEGORY_CONSISTENCY",
+        entityId: classification.id,
+        previousStateJson: { categoryId: fromCategory.id },
+        nextStateJson: { categoryId: toCategory.id, updatedCount: 1 },
+        result: "APPLIED",
+        createdAt: sameCreatedAt,
+      },
+    });
+    await client.classificationTaxonomyRestructureItem.create({
+      data: {
+        runId: run.id,
+        sequence: 2,
+        entityType: "Classification",
+        action: "MOVE_AND_RENAME",
+        entityId: classification.id,
+        previousStateJson: {
+          nameAr: "اسم قديم",
+          categoryId: fromCategory.id,
+          keywords: ["كلمة قديمة"],
+        },
+        nextStateJson: {
+          nameAr: classification.nameAr,
+          categoryId: toCategory.id,
+          keywords: ["كلمة جديدة"],
+        },
+        result: "APPLIED",
+        createdAt: sameCreatedAt,
+      },
+    });
+
+    await client.classification.update({
+      where: { id: classification.id },
+      data: {
+        nameAr: classification.nameAr,
+        categoryId: toCategory.id,
+        keywords: ["كلمة جديدة"],
+      },
+    });
+
+    const ordered = await client.classificationTaxonomyRestructureItem.findMany({
+      where: { runId: run.id, result: "APPLIED" },
+      orderBy: [{ sequence: "desc" }, { id: "desc" }],
+    });
+    expect(ordered.map((i) => i.action)).toEqual(["MOVE_AND_RENAME", "CATEGORY_CONSISTENCY"]);
+
+    const confirm = buildRollbackToken(run.id, run.manifestHash, 2);
+    const rolled = await rollbackTaxonomyRestructure(client, {
+      runId: run.id,
+      confirm,
+      actor: "test-actor",
+    });
+    expect(rolled.status).toBe("ROLLED_BACK");
+    expect(rolled.skipped).toBe(0);
+
+    const classificationAfter = await client.classification.findUniqueOrThrow({
+      where: { id: classification.id },
+    });
+    expect(classificationAfter.categoryId).toBe(fromCategory.id);
+    expect(classificationAfter.nameAr).toBe("اسم قديم");
+    expect(classificationAfter.keywords).toEqual(["كلمة قديمة"]);
+
+    const complaintAfter = await client.complaint.findUniqueOrThrow({
+      where: { id: complaint.id },
+      include: { classification: true },
+    });
+    expect(complaintAfter.categoryId).toBe(fromCategory.id);
+    expect(complaintAfter.categoryId).toBe(complaintAfter.classification?.categoryId);
+  }, 60_000);
+
+  it("assigns independent sequences per run and rejects duplicates", async () => {
+    const client = db();
+    await seedLegacyTaxonomy();
+    const manifestPath = join(tempDir!, "manifest-seq.json");
+    const preview = await previewTaxonomyRestructure(client, {
+      proposalPath: PROPOSAL,
+      mappingPath: MAPPING,
+      manifestPath,
+      overwrite: true,
+    });
+    const applied = await applyTaxonomyRestructure(client, {
+      manifestPath,
+      confirm: preview.confirmationToken,
+      actor: "test-actor",
+    });
+
+    const items = await client.classificationTaxonomyRestructureItem.findMany({
+      where: { runId: applied.runId },
+      orderBy: { sequence: "asc" },
+    });
+    expect(items[0]?.sequence).toBe(1);
+    expect(items.at(-1)?.sequence).toBe(items.length);
+
+    await seedLegacyTaxonomy();
+    const manifestB = join(tempDir!, "manifest-seq-b.json");
+    const previewB = await previewTaxonomyRestructure(client, {
+      proposalPath: PROPOSAL,
+      mappingPath: MAPPING,
+      manifestPath: manifestB,
+      overwrite: true,
+    });
+    const appliedB = await applyTaxonomyRestructure(client, {
+      manifestPath: manifestB,
+      confirm: previewB.confirmationToken,
+      actor: "test-actor",
+    });
+    const itemsB = await client.classificationTaxonomyRestructureItem.findMany({
+      where: { runId: appliedB.runId },
+      orderBy: { sequence: "asc" },
+    });
+    expect(itemsB[0]?.sequence).toBe(1);
+
+    await expect(
+      client.classificationTaxonomyRestructureItem.create({
+        data: {
+          runId: appliedB.runId,
+          sequence: 1,
+          entityType: "Category",
+          action: "CREATE",
+          result: "APPLIED",
+        },
+      })
+    ).rejects.toBeInstanceOf(Prisma.PrismaClientKnownRequestError);
+  }, 90_000);
+
+  it("partial rollback skips entities changed after apply", async () => {
+    const client = db();
+    const seed = await seedLegacyTaxonomy();
+    const manifestPath = join(tempDir!, "manifest-partial.json");
+    const preview = await previewTaxonomyRestructure(client, {
+      proposalPath: PROPOSAL,
+      mappingPath: MAPPING,
+      manifestPath,
+      overwrite: true,
+    });
+    const applied = await applyTaxonomyRestructure(client, {
+      manifestPath,
+      confirm: preview.confirmationToken,
+      actor: "test-actor",
+    });
+
+    await client.classification.update({
+      where: { id: seed.appointments.id },
+      data: { nameAr: "تعديل يدوي بعد التطبيق" },
+    });
+
+    const rolled = await rollbackTaxonomyRestructure(client, {
+      runId: applied.runId,
+      confirm: applied.rollbackToken,
+      actor: "test-actor",
+    });
+    expect(rolled.status).toBe("PARTIALLY_ROLLED_BACK");
+    expect(rolled.skipped).toBeGreaterThan(0);
+
+    const appointments = await client.classification.findUniqueOrThrow({
+      where: { id: seed.appointments.id },
+    });
+    expect(appointments.nameAr).toBe("تعديل يدوي بعد التطبيق");
+
+    const skipped = await client.classificationTaxonomyRestructureItem.findMany({
+      where: { runId: applied.runId, result: "ROLLBACK_SKIPPED" },
+    });
+    expect(skipped.length).toBeGreaterThan(0);
+    expect(skipped.every((i) => i.skipReason === "ENTITY_CHANGED_AFTER_APPLY")).toBe(true);
   }, 90_000);
 
   it("rejects creating a classification named like its category", async () => {

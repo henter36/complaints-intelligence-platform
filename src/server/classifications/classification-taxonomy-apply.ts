@@ -9,9 +9,11 @@ import {
 import {
   RESTRUCTURE_OPERATIONS,
   RESTRUCTURE_RUN_STATUSES,
+  createRestructureItemSequence,
   loadCurrentTaxonomy,
   readAndValidateManifest,
   type RestructureDb,
+  type RestructureItemSequence,
   type RestructureManifest,
   type RestructurePlan,
 } from "./classification-taxonomy-manifest";
@@ -33,6 +35,7 @@ export type RestructureExecutionContext = {
   categoryIdByName: Map<string, string>;
   processedClassificationIds: Set<string>;
   counters: RestructureExecutionCounters;
+  itemSequence: RestructureItemSequence;
 };
 
 function createEmptyExecutionCounters(): RestructureExecutionCounters {
@@ -47,8 +50,7 @@ function createEmptyExecutionCounters(): RestructureExecutionCounters {
 }
 
 async function recordItem(
-  tx: Prisma.TransactionClient,
-  runId: string,
+  ctx: RestructureExecutionContext,
   input: {
     entityType: string;
     action: string;
@@ -57,9 +59,10 @@ async function recordItem(
     nextStateJson?: Prisma.InputJsonValue;
   }
 ): Promise<void> {
-  await tx.classificationTaxonomyRestructureItem.create({
+  await ctx.tx.classificationTaxonomyRestructureItem.create({
     data: {
-      runId,
+      runId: ctx.runId,
+      sequence: ctx.itemSequence.next(),
       entityType: input.entityType,
       action: input.action,
       entityId: input.entityId ?? null,
@@ -147,7 +150,7 @@ async function applyCategoryCreates(ctx: RestructureExecutionContext): Promise<v
     const created = await ctx.tx.category.create({ data: { nameAr: item.targetName } });
     ctx.categoryIdByName.set(item.targetName, created.id);
     ctx.counters.createdCount += 1;
-    await recordItem(ctx.tx, ctx.runId, {
+    await recordItem(ctx, {
       entityType: "Category",
       action: "CREATE",
       entityId: created.id,
@@ -167,7 +170,7 @@ async function applyCategoryRenames(ctx: RestructureExecutionContext): Promise<v
     ctx.categoryIdByName.delete(before.nameAr);
     ctx.categoryIdByName.set(item.targetName, item.currentId);
     ctx.counters.renamedCount += 1;
-    await recordItem(ctx.tx, ctx.runId, {
+    await recordItem(ctx, {
       entityType: "Category",
       action: "RENAME",
       entityId: item.currentId,
@@ -207,7 +210,7 @@ async function applyClassificationCreates(ctx: RestructureExecutionContext): Pro
     });
     ctx.counters.createdCount += 1;
     if (keywords.length > 0) ctx.counters.keywordChangeCount += 1;
-    await recordItem(ctx.tx, ctx.runId, {
+    await recordItem(ctx, {
       entityType: "Classification",
       action: "CREATE",
       entityId: created.id,
@@ -269,7 +272,7 @@ async function applyClassificationMovesAndRenames(ctx: RestructureExecutionConte
         data: { categoryId: targetCategoryId },
       });
       ctx.counters.legacyComplaintConsistencyUpdateCount += updated.count;
-      await recordItem(ctx.tx, ctx.runId, {
+      await recordItem(ctx, {
         entityType: "Complaint",
         action: "CATEGORY_CONSISTENCY",
         entityId: item.currentId,
@@ -280,7 +283,7 @@ async function applyClassificationMovesAndRenames(ctx: RestructureExecutionConte
       ctx.counters.renamedCount += 1;
     }
     if (keywords) ctx.counters.keywordChangeCount += 1;
-    await recordItem(ctx.tx, ctx.runId, {
+    await recordItem(ctx, {
       entityType: "Classification",
       action: before.categoryId !== targetCategoryId ? "MOVE_AND_RENAME" : "RENAME",
       entityId: item.currentId,
@@ -305,7 +308,7 @@ async function applyRemainingKeywordUpdates(ctx: RestructureExecutionContext): P
     const before = await ctx.tx.classification.findUniqueOrThrow({ where: { id: target.reuseId } });
     await ctx.tx.classification.update({ where: { id: target.reuseId }, data: { keywords } });
     ctx.counters.keywordChangeCount += 1;
-    await recordItem(ctx.tx, ctx.runId, {
+    await recordItem(ctx, {
       entityType: "Classification",
       action: "KEYWORDS",
       entityId: target.reuseId,
@@ -325,7 +328,7 @@ async function applyClassificationDeactivations(ctx: RestructureExecutionContext
       data: { isActive: false },
     });
     ctx.counters.deactivatedCount += 1;
-    await recordItem(ctx.tx, ctx.runId, {
+    await recordItem(ctx, {
       entityType: "Classification",
       action: "DEACTIVATE",
       entityId: item.currentId,
@@ -342,7 +345,7 @@ async function applyCategoryDeactivations(ctx: RestructureExecutionContext): Pro
     if (!before.isActive) continue;
     await ctx.tx.category.update({ where: { id: item.currentId }, data: { isActive: false } });
     ctx.counters.deactivatedCount += 1;
-    await recordItem(ctx.tx, ctx.runId, {
+    await recordItem(ctx, {
       entityType: "Category",
       action: "DEACTIVATE",
       entityId: item.currentId,
@@ -384,6 +387,7 @@ async function executeRestructurePlan(input: {
         categoryIdByName: new Map(input.currentCategories.map((c) => [c.nameAr, c.id])),
         processedClassificationIds: new Set(),
         counters,
+        itemSequence: createRestructureItemSequence(),
       };
       await applyCategoryCreates(ctx);
       await applyCategoryRenames(ctx);

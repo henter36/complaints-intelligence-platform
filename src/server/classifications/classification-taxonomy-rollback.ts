@@ -8,11 +8,14 @@ import {
 import {
   RESTRUCTURE_OPERATIONS,
   RESTRUCTURE_RUN_STATUSES,
+  createRestructureItemSequence,
   type RestructureDb,
+  type RestructureItemSequence,
 } from "./classification-taxonomy-manifest";
 
 type AppliedItem = {
   id: string;
+  sequence: number;
   entityType: string;
   action: string;
   entityId: string | null;
@@ -39,6 +42,7 @@ type RollbackItemDecision =
       action: "RESTORE_COMPLAINT_CATEGORY";
       entityId: string;
       previousCategoryId: string;
+      appliedCategoryId?: string;
     }
   | { action: "SKIP"; reason: string; entityId?: string | null };
 
@@ -110,7 +114,7 @@ async function createRollbackRun(
 async function loadAppliedRestructureItems(db: RestructureDb, originalRunId: string): Promise<AppliedItem[]> {
   return db.classificationTaxonomyRestructureItem.findMany({
     where: { runId: originalRunId, result: "APPLIED" },
-    orderBy: { createdAt: "desc" },
+    orderBy: [{ sequence: "desc" }, { id: "desc" }],
   });
 }
 
@@ -238,10 +242,13 @@ function evaluateComplaintConsistencyRollback(
 ): RollbackItemDecision | null {
   if (item.action !== "CATEGORY_CONSISTENCY" || !item.entityId || !prev) return null;
   if (typeof prev.categoryId !== "string") return null;
+  const next = asRecord(item.nextStateJson);
   return {
     action: "RESTORE_COMPLAINT_CATEGORY",
     entityId: item.entityId,
     previousCategoryId: prev.categoryId,
+    appliedCategoryId:
+      next && typeof next.categoryId === "string" ? next.categoryId : undefined,
   };
 }
 
@@ -309,7 +316,13 @@ async function processRollbackItem(
       return "ROLLED_BACK";
     case "RESTORE_COMPLAINT_CATEGORY":
       await tx.complaint.updateMany({
-        where: { classificationId: decision.entityId, isDeleted: false },
+        where: {
+          classificationId: decision.entityId,
+          isDeleted: false,
+          ...(decision.appliedCategoryId
+            ? { categoryId: decision.appliedCategoryId }
+            : {}),
+        },
         data: { categoryId: decision.previousCategoryId },
       });
       return "ROLLED_BACK";
@@ -328,6 +341,7 @@ async function executeRollbackTransaction(input: {
       let rolledBack = 0;
       let skipped = 0;
       const skipReasons: string[] = [];
+      const itemSequence = createRestructureItemSequence();
       for (const item of input.items) {
         const decision = await evaluateRollbackItem(tx, item);
         const result = await processRollbackItem(tx, decision);
@@ -337,17 +351,7 @@ async function executeRollbackTransaction(input: {
             where: { id: item.id },
             data: { result: "ROLLED_BACK" },
           });
-          await tx.classificationTaxonomyRestructureItem.create({
-            data: {
-              runId: input.rollbackRunId,
-              entityType: item.entityType,
-              action: item.action,
-              entityId: item.entityId,
-              previousStateJson: item.nextStateJson ?? undefined,
-              nextStateJson: item.previousStateJson ?? undefined,
-              result: "ROLLED_BACK",
-            },
-          });
+          await recordRollbackItem(tx, input.rollbackRunId, itemSequence, item, "ROLLED_BACK");
         } else {
           skipped += 1;
           const reason = decision.action === "SKIP" ? decision.reason : "SKIPPED";
@@ -356,24 +360,43 @@ async function executeRollbackTransaction(input: {
             where: { id: item.id },
             data: { result: "ROLLBACK_SKIPPED", skipReason: reason },
           });
-          await tx.classificationTaxonomyRestructureItem.create({
-            data: {
-              runId: input.rollbackRunId,
-              entityType: item.entityType,
-              action: item.action,
-              entityId: item.entityId,
-              previousStateJson: item.nextStateJson ?? undefined,
-              nextStateJson: item.previousStateJson ?? undefined,
-              result: "ROLLBACK_SKIPPED",
-              skipReason: reason,
-            },
-          });
+          await recordRollbackItem(
+            tx,
+            input.rollbackRunId,
+            itemSequence,
+            item,
+            "ROLLBACK_SKIPPED",
+            reason
+          );
         }
       }
       return { rolledBack, skipped, skipReasons };
     },
     { timeout: 180_000 }
   );
+}
+
+async function recordRollbackItem(
+  tx: Prisma.TransactionClient,
+  rollbackRunId: string,
+  itemSequence: RestructureItemSequence,
+  item: AppliedItem,
+  result: "ROLLED_BACK" | "ROLLBACK_SKIPPED",
+  skipReason?: string
+): Promise<void> {
+  await tx.classificationTaxonomyRestructureItem.create({
+    data: {
+      runId: rollbackRunId,
+      sequence: itemSequence.next(),
+      entityType: item.entityType,
+      action: item.action,
+      entityId: item.entityId,
+      previousStateJson: item.nextStateJson ?? undefined,
+      nextStateJson: item.previousStateJson ?? undefined,
+      result,
+      skipReason,
+    },
+  });
 }
 
 function resolveRollbackRunStatus(skipped: number): string {

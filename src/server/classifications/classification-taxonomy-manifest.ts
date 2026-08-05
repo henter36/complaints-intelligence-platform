@@ -31,6 +31,20 @@ export const RESTRUCTURE_RUN_STATUSES = {
   PARTIALLY_ROLLED_BACK: "PARTIALLY_ROLLED_BACK",
 } as const;
 
+export type RestructureItemSequence = {
+  next(): number;
+};
+
+export function createRestructureItemSequence(): RestructureItemSequence {
+  let current = 0;
+  return {
+    next() {
+      current += 1;
+      return current;
+    },
+  };
+}
+
 export type RestructureDb = PrismaClient;
 
 export type PlanChange = {

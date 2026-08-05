@@ -737,6 +737,7 @@ model ClassificationTaxonomyRestructureItem {
   id                String   @id @default(cuid())
   runId             String
   run               ClassificationTaxonomyRestructureRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  sequence          Int
   entityType        String
   action            String
   entityId          String?
@@ -747,6 +748,7 @@ model ClassificationTaxonomyRestructureItem {
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
+  @@unique([runId, sequence])
   @@index([runId])
   @@index([entityType])
   @@index([action])

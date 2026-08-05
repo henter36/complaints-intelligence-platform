@@ -33,6 +33,7 @@ CREATE INDEX "ClassificationTaxonomyRestructureRun_rollbackOfRunId_idx" ON "Clas
 CREATE TABLE "ClassificationTaxonomyRestructureItem" (
     "id" TEXT NOT NULL PRIMARY KEY,
     "runId" TEXT NOT NULL,
+    "sequence" INTEGER NOT NULL,
     "entityType" TEXT NOT NULL,
     "action" TEXT NOT NULL,
     "entityId" TEXT,
@@ -45,6 +46,7 @@ CREATE TABLE "ClassificationTaxonomyRestructureItem" (
     CONSTRAINT "ClassificationTaxonomyRestructureItem_runId_fkey" FOREIGN KEY ("runId") REFERENCES "ClassificationTaxonomyRestructureRun" ("id") ON DELETE CASCADE ON UPDATE CASCADE
 );
 
+CREATE UNIQUE INDEX "ClassificationTaxonomyRestructureItem_runId_sequence_key" ON "ClassificationTaxonomyRestructureItem"("runId", "sequence");
 CREATE INDEX "ClassificationTaxonomyRestructureItem_runId_idx" ON "ClassificationTaxonomyRestructureItem"("runId");
 CREATE INDEX "ClassificationTaxonomyRestructureItem_entityType_idx" ON "ClassificationTaxonomyRestructureItem"("entityType");
 CREATE INDEX "ClassificationTaxonomyRestructureItem_action_idx" ON "ClassificationTaxonomyRestructureItem"("action");

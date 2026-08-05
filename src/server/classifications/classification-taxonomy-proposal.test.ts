@@ -39,6 +39,40 @@ describe("stableStringify canonical hashing", () => {
     expect(stableStringify({ rows: ["b", "a"] })).not.toBe(stableStringify({ rows: ["a", "b"] }));
   });
 
+  it("omits object undefined and turns array undefined into null", () => {
+    const serialized = stableStringify({
+      keep: "yes",
+      classificationKey: undefined,
+      nested: { a: 1, b: undefined },
+      rows: ["a", undefined, "c"],
+    });
+    expect(serialized).not.toContain("undefined");
+    expect(serialized).toBe(
+      stableStringify({ keep: "yes", nested: { a: 1 }, rows: ["a", null, "c"] })
+    );
+    expect(JSON.parse(serialized)).toEqual({
+      keep: "yes",
+      nested: { a: 1 },
+      rows: ["a", null, "c"],
+    });
+  });
+
+  it("matches JSON.stringify round-trip for hashing", () => {
+    const payload = {
+      schemaVersion: 1,
+      plan: {
+        change: {
+          currentId: "x",
+          classificationKey: undefined as string | undefined,
+          keywords: ["a", undefined as unknown as string],
+        },
+      },
+    };
+    const before = sha256(stableStringify(payload));
+    const roundTripped = JSON.parse(JSON.stringify(payload));
+    expect(sha256(stableStringify(roundTripped))).toBe(before);
+  });
+
   it("keeps proposalHash and mappingHash stable for the same fixture files", () => {
     const first = loadAndValidateProposal(PROPOSAL, MAPPING);
     const second = loadAndValidateProposal(PROPOSAL, MAPPING);
@@ -64,6 +98,48 @@ describe("classification taxonomy proposal validation", () => {
     const other = proposal.sourceDetailMappings.find((m) => m.sourceDetail === "أخرى");
     expect(other?.classificationKey).toBe("OTHER_REVIEW");
     expect(other?.proposedPath).toBe("بيانات غير محددة / أخرى تحتاج مراجعة");
+    expect(other?.currentPath).toBeUndefined();
+  });
+
+  it("accepts mappings that omit optional metadata fields", () => {
+    withTempDir("cip-restructure-optional-sd-", (dir) => {
+      const good = JSON.parse(readFileSync(PROPOSAL, "utf8"));
+      good.sourceDetailMappings = good.sourceDetailMappings.map(
+        (m: Record<string, unknown>) => ({
+          sourceDetail: m.sourceDetail,
+          count: m.count,
+          proposedPath: m.proposedPath,
+          classificationKey: m.classificationKey,
+        })
+      );
+      const path = join(dir, "good.json");
+      writeFileSync(path, JSON.stringify(good));
+      const { proposal } = loadAndValidateProposal(path, MAPPING);
+      expect(proposal.sourceDetailMappings).toHaveLength(3);
+    });
+  });
+
+  it("rejects invalid required sourceDetailMapping fields", () => {
+    const cases: Array<{ mutate: (m: Record<string, unknown>) => void; label: string }> = [
+      { label: "missing sourceDetail", mutate: (m) => delete m.sourceDetail },
+      { label: "missing count", mutate: (m) => delete m.count },
+      { label: "string count", mutate: (m) => { m.count = "1"; } },
+      { label: "negative count", mutate: (m) => { m.count = -1; } },
+      { label: "missing proposedPath", mutate: (m) => delete m.proposedPath },
+      { label: "missing classificationKey", mutate: (m) => delete m.classificationKey },
+      { label: "non-string optional", mutate: (m) => { m.decision = 12; } },
+    ];
+    for (const testCase of cases) {
+      withTempDir("cip-restructure-sd-invalid-", (dir) => {
+        const bad = JSON.parse(readFileSync(PROPOSAL, "utf8"));
+        testCase.mutate(bad.sourceDetailMappings[0] as Record<string, unknown>);
+        const path = join(dir, "bad.json");
+        writeFileSync(path, JSON.stringify(bad));
+        expect(() => loadAndValidateProposal(path, MAPPING), testCase.label).toThrowError(
+          expect.objectContaining({ code: RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID })
+        );
+      });
+    }
   });
 
   it("rejects missing proposal and mapping paths", () => {

@@ -64,14 +64,15 @@ export type ProposedCategory = {
 export type SourceDetailMapping = {
   sourceDetail: string;
   count: number;
-  currentPath: string;
-  proposedCategory: string;
-  proposedClassification: string;
   proposedPath: string;
-  categoryKey: string;
   classificationKey: string;
-  decision: string;
-  reason: string;
+  currentPath?: string;
+  proposedCategory?: string;
+  proposedClassification?: string;
+  categoryKey?: string;
+  decision?: string;
+  reason?: string;
+  legacyPreserved?: boolean;
 };
 
 export type EntityMigration = {
@@ -107,14 +108,32 @@ function serializeStableEntry(key: string, value: unknown): string {
   return JSON.stringify(key) + ":" + stableStringify(value);
 }
 
+/**
+ * Canonical JSON for hashing. Matches JSON.stringify semantics for undefined:
+ * object properties with undefined are omitted; array holes/undefined become null.
+ */
 export function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) {
-    return "[" + value.map((item) => stableStringify(item)).join(",") + "]";
+    const serializedItems = value.map((item) =>
+      item === undefined ? "null" : stableStringify(item)
+    );
+    return "[" + serializedItems.join(",") + "]";
   }
-  const obj = value as Record<string, unknown>;
-  const keys = Object.keys(obj).sort(compareCodeUnits);
-  return "{" + keys.map((key) => serializeStableEntry(key, obj[key])).join(",") + "}";
+
+  if (value !== null && typeof value === "object") {
+    const objectValue = value as Record<string, unknown>;
+    const keys = Object.keys(objectValue)
+      .filter((key) => objectValue[key] !== undefined)
+      .sort(compareCodeUnits);
+    return (
+      "{" +
+      keys.map((key) => serializeStableEntry(key, objectValue[key])).join(",") +
+      "}"
+    );
+  }
+
+  const serialized = JSON.stringify(value);
+  return serialized === undefined ? "null" : serialized;
 }
 
 export function sha256(text: string): string {
@@ -191,12 +210,103 @@ function resolveProposalInputPaths(
   return { proposalAbs, mappingAbs };
 }
 
-function readProposalJson(proposalAbs: string): ClassificationTaxonomyProposal {
+function readProposalJson(proposalAbs: string): unknown {
   try {
-    return JSON.parse(readFileSync(proposalAbs, "utf8")) as ClassificationTaxonomyProposal;
+    return JSON.parse(readFileSync(proposalAbs, "utf8"));
   } catch {
     throw new TaxonomyRestructureError(RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID, "تعذر قراءة JSON");
   }
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function assertOptionalStringField(
+  mapping: Record<string, unknown>,
+  field: string,
+  index: number
+): void {
+  if (!(field in mapping) || mapping[field] === undefined) return;
+  if (typeof mapping[field] === "string") return;
+  throw new TaxonomyRestructureError(
+    RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID,
+    `حقل اختياري غير نصي في sourceDetailMappings[${index}].${field}`
+  );
+}
+
+function validateSourceDetailMappingEntry(
+  raw: unknown,
+  index: number
+): SourceDetailMapping {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID,
+      `عنصر sourceDetailMappings[${index}] غير صالح`
+    );
+  }
+  const mapping = raw as Record<string, unknown>;
+  if (!isNonEmptyString(mapping.sourceDetail)) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID,
+      `sourceDetail مفقود أو غير صالح عند الفهرس ${index}`
+    );
+  }
+  if (!isNonNegativeInteger(mapping.count)) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID,
+      `count مفقود أو غير صالح عند الفهرس ${index}`
+    );
+  }
+  if (!isNonEmptyString(mapping.proposedPath)) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID,
+      `proposedPath مفقود أو غير صالح عند الفهرس ${index}`
+    );
+  }
+  if (!isNonEmptyString(mapping.classificationKey)) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID,
+      `classificationKey مفقود أو غير صالح عند الفهرس ${index}`
+    );
+  }
+  for (const field of [
+    "currentPath",
+    "proposedCategory",
+    "proposedClassification",
+    "categoryKey",
+    "decision",
+    "reason",
+  ]) {
+    assertOptionalStringField(mapping, field, index);
+  }
+  if (
+    "legacyPreserved" in mapping &&
+    mapping.legacyPreserved !== undefined &&
+    typeof mapping.legacyPreserved !== "boolean"
+  ) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID,
+      `legacyPreserved غير صالح عند الفهرس ${index}`
+    );
+  }
+  return mapping as SourceDetailMapping;
+}
+
+function validateSourceDetailMappings(proposal: ClassificationTaxonomyProposal): void {
+  if (!Array.isArray(proposal.sourceDetailMappings)) {
+    throw new TaxonomyRestructureError(
+      RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID,
+      "sourceDetailMappings يجب أن يكون مصفوفة"
+    );
+  }
+  proposal.sourceDetailMappings = proposal.sourceDetailMappings.map((entry, index) =>
+    validateSourceDetailMappingEntry(entry, index)
+  );
 }
 
 function validateProposalSchema(proposal: ClassificationTaxonomyProposal): void {
@@ -352,10 +462,15 @@ export function loadAndValidateProposal(
   mappingCsvPath: string
 ): { proposal: ClassificationTaxonomyProposal; proposalHash: string; mappingHash: string } {
   const { proposalAbs, mappingAbs } = resolveProposalInputPaths(proposalPath, mappingCsvPath);
-  const proposal = readProposalJson(proposalAbs);
+  const raw = readProposalJson(proposalAbs);
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new TaxonomyRestructureError(RESTRUCTURE_ERROR_CODES.PROPOSAL_INVALID, "تعذر قراءة JSON");
+  }
+  const proposal = raw as ClassificationTaxonomyProposal;
   validateProposalSchema(proposal);
   validateProposalStatus(proposal);
   validateProposalTotals(proposal);
+  validateSourceDetailMappings(proposal);
   assertUniqueClassificationKeys(collectProposedClassificationKeys(proposal));
   assertUniqueSourceDetails(proposal);
   validateClassificationNames(proposal);

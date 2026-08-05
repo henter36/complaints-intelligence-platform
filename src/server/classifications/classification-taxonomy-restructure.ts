@@ -27,12 +27,14 @@ export {
   readAndValidateManifest,
   emptyPlan,
   countPlanChanges,
+  createRestructureItemSequence,
   type RestructureDb,
   type PlanChange,
   type RestructurePlan,
   type RestructureManifest,
   type LoadedCategory,
   type LoadedClassification,
+  type RestructureItemSequence,
 } from "./classification-taxonomy-manifest";
 export { buildRestructurePlan } from "./classification-taxonomy-plan";
 export { applyTaxonomyRestructure } from "./classification-taxonomy-apply";
