@@ -364,28 +364,44 @@ export function buildComplaintQuery(
   const params = new URLSearchParams();
   if (page !== undefined) params.set("page", String(page));
   params.set("pageSize", String(PAGE_SIZE));
-  if (filters.search) params.set("search", filters.search);
-  if (filters.regionId) params.set("regionId", filters.regionId);
-  if (filters.departmentId) params.set("departmentId", filters.departmentId);
-  if (filters.classificationId) params.set("classificationId", filters.classificationId);
-  if (filters.channel) params.set("channel", filters.channel);
-  if (filters.status) params.set("status", filters.status);
-  if (filters.priority) params.set("priority", filters.priority);
-  if (filters.severity) params.set("severity", filters.severity);
-  if (filters.from) params.set("from", filters.from);
-  if (filters.to) params.set("to", filters.to);
-  if (filters.sourceOrigin) params.set("sourceOrigin", filters.sourceOrigin);
-  if (filters.sourceStatus) params.set("sourceStatus", filters.sourceStatus);
-  if (filters.sourceActionStatus) params.set("sourceActionStatus", filters.sourceActionStatus);
-  if (filters.wingCode) params.set("wingCode", filters.wingCode);
-  if (filters.dataFreshnessBucket) params.set("dataFreshnessBucket", filters.dataFreshnessBucket);
-  if (filters.isLate) params.set("isLate", "true");
-  if (filters.isRepeated) params.set("isRepeated", "true");
-  if (filters.isValidated) params.set("isValidated", "true");
-  if (filters.aiAnalyzed) params.set("aiAnalyzed", "true");
+  appendDefinedParams(params, {
+    search: filters.search,
+    regionId: filters.regionId,
+    departmentId: filters.departmentId,
+    classificationId: filters.classificationId,
+    channel: filters.channel,
+    status: filters.status,
+    priority: filters.priority,
+    severity: filters.severity,
+    from: filters.from,
+    to: filters.to,
+    sourceOrigin: filters.sourceOrigin,
+    sourceStatus: filters.sourceStatus,
+    sourceActionStatus: filters.sourceActionStatus,
+    wingCode: filters.wingCode,
+    dataFreshnessBucket: filters.dataFreshnessBucket,
+  });
+  appendFlagParams(params, {
+    isLate: filters.isLate,
+    isRepeated: filters.isRepeated,
+    isValidated: filters.isValidated,
+    aiAnalyzed: filters.aiAnalyzed,
+  });
   params.set("sortBy", sortBy);
   params.set("sortOrder", sortOrder);
   return params;
+}
+
+function appendDefinedParams(params: URLSearchParams, values: Record<string, string>): void {
+  for (const [key, value] of Object.entries(values)) {
+    if (value) params.set(key, value);
+  }
+}
+
+function appendFlagParams(params: URLSearchParams, flags: Record<string, boolean>): void {
+  for (const [key, value] of Object.entries(flags)) {
+    if (value) params.set(key, "true");
+  }
 }
 
 export function extractFileName(disposition: string | null): string | null {
@@ -623,26 +639,28 @@ export function ComplaintsExplorer() {
   }, [appliedFilters, sortBy, sortOrder, page]);
 
   const activeFilterCount = useMemo(() => {
-    let count = 0;
-    if (appliedFilters.search) count++;
-    if (appliedFilters.regionId) count++;
-    if (appliedFilters.departmentId) count++;
-    if (appliedFilters.classificationId) count++;
-    if (appliedFilters.channel) count++;
-    if (appliedFilters.status) count++;
-    if (appliedFilters.priority) count++;
-    if (appliedFilters.severity) count++;
-    if (appliedFilters.from) count++;
-    if (appliedFilters.to) count++;
-    if (appliedFilters.sourceOrigin) count++;
-    if (appliedFilters.sourceStatus) count++;
-    if (appliedFilters.sourceActionStatus) count++;
-    if (appliedFilters.wingCode) count++;
-    if (appliedFilters.dataFreshnessBucket) count++;
-    if (appliedFilters.isLate) count++;
-    if (appliedFilters.isRepeated) count++;
-    if (appliedFilters.isValidated) count++;
-    return count;
+    const textKeys: Array<keyof FilterState> = [
+      "search",
+      "regionId",
+      "departmentId",
+      "classificationId",
+      "channel",
+      "status",
+      "priority",
+      "severity",
+      "from",
+      "to",
+      "sourceOrigin",
+      "sourceStatus",
+      "sourceActionStatus",
+      "wingCode",
+      "dataFreshnessBucket",
+    ];
+    const flagKeys: Array<keyof FilterState> = ["isLate", "isRepeated", "isValidated"];
+    return (
+      textKeys.filter((key) => Boolean(appliedFilters[key])).length +
+      flagKeys.filter((key) => appliedFilters[key] === true).length
+    );
   }, [appliedFilters]);
 
   const applyFilters = useCallback(() => {

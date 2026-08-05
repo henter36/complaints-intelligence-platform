@@ -315,16 +315,15 @@ function buildFreshness(rows: SlimOperationalRow[], now: Date): DataFreshnessMet
   let oldest: Date | null = null;
 
   for (const row of rows) {
-    const bucket = resolveFreshnessBucket(row.sourceUpdatedAt, now);
-    bucketCounts[bucket] += 1;
+    bucketCounts[resolveFreshnessBucket(row.sourceUpdatedAt, now)] += 1;
     if (!row.sourceUpdatedAt) missingUpdatedAt += 1;
-    if (!row.sourceModifiedAt) missingModifiedAt += 1;
-    if (row.sourceUpdatedAt) {
+    else {
       ageSum += (now.getTime() - row.sourceUpdatedAt.getTime()) / DAY_MS;
       ageN += 1;
-      if (!last || row.sourceUpdatedAt > last) last = row.sourceUpdatedAt;
-      if (!oldest || row.sourceUpdatedAt < oldest) oldest = row.sourceUpdatedAt;
+      last = !last || row.sourceUpdatedAt > last ? row.sourceUpdatedAt : last;
+      oldest = !oldest || row.sourceUpdatedAt < oldest ? row.sourceUpdatedAt : oldest;
     }
+    if (!row.sourceModifiedAt) missingModifiedAt += 1;
     if (row.sourceUpdatedAt && row.sourceModifiedAt) {
       diffSum += (row.sourceUpdatedAt.getTime() - row.sourceModifiedAt.getTime()) / (60 * 60 * 1000);
       diffN += 1;
@@ -333,7 +332,6 @@ function buildFreshness(rows: SlimOperationalRow[], now: Date): DataFreshnessMet
   }
 
   const total = rows.length;
-  const freshCount = bucketCounts.fresh_1d;
   const staleCount = bucketCounts.stale_1_3d + bucketCounts.stale_3_7d + bucketCounts.stale_7d_plus;
 
   return {
@@ -342,7 +340,7 @@ function buildFreshness(rows: SlimOperationalRow[], now: Date): DataFreshnessMet
     oldestSourceUpdatedAt: oldest?.toISOString() ?? null,
     oldestSourceUpdatedAtRiyadh: formatInstantInRiyadh(oldest),
     averageAgeDays: ageN > 0 ? Math.round((ageSum / ageN) * 10) / 10 : null,
-    freshShare: pct(freshCount, total),
+    freshShare: pct(bucketCounts.fresh_1d, total),
     staleShare: pct(staleCount, total),
     buckets: DATA_FRESHNESS_BUCKETS.map((bucket) => ({
       bucket,

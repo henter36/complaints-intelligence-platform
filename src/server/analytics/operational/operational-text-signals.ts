@@ -34,10 +34,10 @@ export type OperationalTextPattern = {
 };
 
 const PATTERNS: Array<{ code: string; label: string; re: RegExp }> = [
-  { code: "NO_ACTION", label: "عدم اتخاذ إجراء", re: /لم\s*يت[مّ]\s*اتخاذ|بدون\s*إجراء|لا\s*يوجد\s*إجراء/i },
-  { code: "INCOMPLETE_ACTION", label: "إجراء غير مكتمل", re: /غير\s*مكتمل|تحت\s*الإجراء|جار[يى]?\s*العمل/i },
-  { code: "ACTION_BLOCKED", label: "تعطل إجراء", re: /تعطل|معل[قّ]|تعذر\s*التنفيذ/i },
-  { code: "CLOSURE_WITHOUT_TREATMENT", label: "إغلاق دون معالجة واضحة", re: /أُغلق|تم\s*الإغلاق.*دون|إغلاق\s*إداري/i },
+  { code: "NO_ACTION", label: "عدم اتخاذ إجراء", re: /لم\s*يتم\s*اتخاذ|بدون\s*إجراء|لا\s*يوجد\s*إجراء/i },
+  { code: "INCOMPLETE_ACTION", label: "إجراء غير مكتمل", re: /غير\s*مكتمل|تحت\s*الإجراء|جارى?\s*العمل|جاري\s*العمل/i },
+  { code: "ACTION_BLOCKED", label: "تعطل إجراء", re: /تعطل|معلق|معلّق|تعذر\s*التنفيذ/i },
+  { code: "CLOSURE_WITHOUT_TREATMENT", label: "إغلاق دون معالجة واضحة", re: /أغلق|تم\s*الإغلاق.*دون|إغلاق\s*إداري/i },
 ];
 
 export function detectOperationalTextPatterns(input: MultiSourceTextInput): OperationalTextPattern[] {
