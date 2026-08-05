@@ -37,11 +37,11 @@ export type OperationalTextPattern = {
 export function normalizeArabicForMatch(text: string): string {
   return text
     .normalize("NFC")
-    .replace(/[\u064B-\u065F\u0670]/g, "") // harakat + superscript alef
-    .replace(/\u0640/g, "") // tatweel
-    .replace(/[إأآٱ]/g, "ا")
-    .replace(/\u0629/g, "ه") // teh marbuta → heh
-    .replace(/\s+/g, " ")
+    .replaceAll(/[\u064B-\u065F\u0670]/g, "")
+    .replaceAll("\u0640", "")
+    .replaceAll(/[إأآٱ]/g, "ا")
+    .replaceAll("\u0629", "ه")
+    .replaceAll(/\s+/g, " ")
     .trim();
 }
 

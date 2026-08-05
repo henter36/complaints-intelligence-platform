@@ -53,7 +53,7 @@ describe("GET /api/filters wingCode query", () => {
     });
 
     expect(body.wingCodes[0]).toEqual({ id: "__UNSPECIFIED__", name: "غير محدد" });
-    expect(body.wingCodes.length).toBe(4);
+    expect(body.wingCodes).toHaveLength(4);
     expect(body.wingCodes.some((w: { id: string }) => w.id === null || w.id === "")).toBe(false);
   });
 
