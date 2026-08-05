@@ -9,6 +9,7 @@ import { buildComplaintSlaTiming, resolveComplaintEffectiveClosedAt } from "./co
 import {
   buildClassificationPath,
   classificationDisplayName,
+  UNCLASSIFIED_CLASSIFICATION_KEY,
   UNCLASSIFIED_CLASSIFICATION_LABEL,
 } from "@/lib/reports/classification-keys";
 import { displayRegionName, normalizeRegionName } from "@/lib/reports/region-normalization";
@@ -544,13 +545,12 @@ function buildDistributions(complaints: KpiComplaint[], now: Date): ComplaintDis
     byFacility: groupMetrics(complaints, now, (complaint) => ({ name: complaint.facility ?? UNSPECIFIED_LABEL })),
     byDepartment: groupMetrics(complaints, now, (complaint) => ({ name: complaint.department ?? UNSPECIFIED_LABEL })),
     byClassification: groupMetrics(complaints, now, (complaint) => {
-      const leafName = complaint.classification?.nameAr?.trim() || null;
-      const isClassified = Boolean(
-        leafName || complaint.classification?.id || complaint.classificationId
-      );
+      const classificationId = complaint.classification?.id ?? complaint.classificationId ?? null;
+      const isClassified = Boolean(classificationId);
+      const leafName = isClassified ? (complaint.classification?.nameAr ?? null) : null;
       const categoryName = isClassified ? (complaint.category?.nameAr ?? null) : null;
       return {
-        id: complaint.classification?.id ?? complaint.classificationId ?? null,
+        id: classificationId,
         name: isClassified
           ? buildClassificationPath(categoryName, leafName)
           : UNCLASSIFIED_CLASSIFICATION_LABEL,
@@ -704,14 +704,12 @@ function buildClassificationCrossTab(
 ): CrossTabRow[] {
   const map = new Map<string, CrossTabRow>();
   for (const complaint of complaints) {
-    const leafName = complaint.classification?.nameAr ?? null;
-    const categoryName = complaint.category?.nameAr ?? null;
-    const classification = leafName
-      ? buildClassificationPath(categoryName, leafName)
+    const classificationId = complaint.classification?.id ?? complaint.classificationId ?? null;
+    const classification = classificationId
+      ? buildClassificationPath(complaint.category?.nameAr, complaint.classification?.nameAr)
       : UNCLASSIFIED_CLASSIFICATION_LABEL;
-    const classificationId = complaint.classification?.id ?? null;
     const group = groupName(complaint);
-    const key = `${classificationId ?? classification}:${group}`;
+    const key = `${classificationId ?? UNCLASSIFIED_CLASSIFICATION_KEY}:${group}`;
     const current = map.get(key) ?? { classificationId, classification, group, count: 0 };
     current.count += 1;
     map.set(key, current);

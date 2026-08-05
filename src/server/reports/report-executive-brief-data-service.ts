@@ -410,6 +410,7 @@ export function buildTopClassifications(
 ): ClassificationBriefRow[] {
   const toRowKey = (group: ComplaintGroupMetrics): string => {
     if (group.id) return group.id;
+    // Null id + unclassified display name → shared sentinel for open/late join.
     if (
       group.name === UNCLASSIFIED_CLASSIFICATION_LABEL ||
       group.classificationName === UNCLASSIFIED_CLASSIFICATION_LABEL

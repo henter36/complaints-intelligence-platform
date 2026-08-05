@@ -864,8 +864,9 @@ function formatClassificationCell(
   if (key === "difference") return formatReportNumber(row.difference, { sign: true });
   if (key === "shareOfTotal") return formatReportNumber(row.shareOfTotal, { percent: true });
   if (key === "changeRate") return formatNullableReportNumber(row.changeRate, { percent: true });
+  if (key === "classificationPath") return row.classificationPath;
   const value = row[key];
-  return typeof value === "number" ? formatReportNumber(value) : String(value);
+  return typeof value === "number" ? formatReportNumber(value) : String(value ?? "");
 }
 
 type DeptTableRow = {

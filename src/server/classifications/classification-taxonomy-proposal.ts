@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { normalizeClassificationKeyword } from "@/lib/classifications/classification-keyword-normalizer";
+import { compareCodeUnits } from "./canonical-string-order";
 import { assertClassificationNameDiffersFromCategory } from "./classification-management-service";
 
 export const RESTRUCTURE_SCHEMA_VERSION = 1;
@@ -107,7 +108,7 @@ export function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map((v) => stableStringify(v)).join(",")}]`;
   const obj = value as Record<string, unknown>;
-  const keys = Object.keys(obj).sort();
+  const keys = Object.keys(obj).sort(compareCodeUnits);
   return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
 }
 

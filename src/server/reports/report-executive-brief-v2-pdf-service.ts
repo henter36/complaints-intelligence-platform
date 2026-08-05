@@ -1211,6 +1211,9 @@ function formatClassificationTableCell(
   if (key === "changeRate") {
     return formatNullableReportNumber(row.changeRate, { percent: true });
   }
+  if (key === "classificationPath") {
+    return row.classificationPath;
+  }
   return formatTableValue((row as Record<string, unknown>)[key]);
 }
 

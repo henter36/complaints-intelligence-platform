@@ -3,6 +3,11 @@ import { ComplaintPriority, type Complaint, type Prisma } from "@prisma/client";
 import { z } from "zod";
 import { db } from "@/lib/db";
 import { writeAuditLog } from "@/server/audit/audit-log-service";
+import {
+  buildClassificationAssignmentMetadata,
+  buildManualClearClassificationMetadata,
+  CLASSIFICATION_ASSIGNMENT_SOURCES,
+} from "@/server/classifications/classification-assignment";
 import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 import { buildComplaintTiming } from "@/server/complaints/complaint-timing";
 
@@ -87,6 +92,10 @@ type ComplaintPatchPayload = z.infer<typeof updateSchema>;
 type ComplaintDetailProjection = Prisma.ComplaintGetPayload<{ select: typeof COMPLAINT_DETAIL_SELECT }>;
 type ActiveComplaintProjection = Pick<Complaint, "id" | "categoryId" | "classificationId">;
 
+type ClassificationRelationCheck = {
+  linkedCategoryId: string;
+};
+
 class ComplaintRouteError extends Error {
   constructor(
     readonly code:
@@ -157,37 +166,59 @@ async function loadComplaintDetailOrThrow(id: string): Promise<ComplaintDetailPr
   return complaint;
 }
 
-async function assertClassificationRelation(categoryId?: string | null, classificationId?: string | null): Promise<void> {
-  if (!classificationId) return;
-  if (!categoryId) {
-    throw new ComplaintRouteError("INVALID_CLASSIFICATION_RELATION", "التصنيف لا يتبع الفئة المحددة", 422);
+function resolveEffectiveCategoryId(
+  current: ActiveComplaintProjection,
+  payload: ComplaintPatchPayload
+): string | null {
+  if (payload.categoryId !== undefined) {
+    return payload.categoryId;
   }
+  return current.categoryId;
+}
+
+/**
+ * Validates category/classification consistency once and returns the linked category
+ * for use during update. Does not run updateMany.
+ */
+async function validateEffectiveClassificationRelation(
+  current: ActiveComplaintProjection,
+  payload: ComplaintPatchPayload
+): Promise<ClassificationRelationCheck | null> {
+  const effectiveClassificationId =
+    payload.classificationId !== undefined
+      ? payload.classificationId
+      : current.classificationId;
+
+  if (!effectiveClassificationId) {
+    return null;
+  }
+
   const classification = await db.classification.findFirst({
-    where: { id: classificationId, isDeleted: false, isActive: true },
+    where: { id: effectiveClassificationId, isDeleted: false, isActive: true },
     select: { categoryId: true },
   });
   if (!classification) {
     throw new ComplaintRouteError("CLASSIFICATION_NOT_FOUND", "التصنيف غير موجود أو غير فعال", 422);
   }
-  if (categoryId && classification.categoryId !== categoryId) {
-    throw new ComplaintRouteError("INVALID_CLASSIFICATION_RELATION", "التصنيف لا يتبع الفئة المحددة", 422);
+
+  const effectiveCategoryId = resolveEffectiveCategoryId(current, payload);
+  if (!effectiveCategoryId || classification.categoryId !== effectiveCategoryId) {
+    throw new ComplaintRouteError(
+      "INVALID_CLASSIFICATION_RELATION",
+      "التصنيف لا يتبع الفئة المحددة",
+      422
+    );
   }
+
+  return { linkedCategoryId: classification.categoryId };
 }
 
-async function validateEffectiveClassificationRelation(
-  current: ActiveComplaintProjection,
-  payload: ComplaintPatchPayload
-): Promise<void> {
-  const effectiveCategoryId = payload.categoryId !== undefined ? payload.categoryId : current.categoryId;
-  const effectiveClassificationId = payload.classificationId !== undefined
-    ? payload.classificationId
-    : current.classificationId;
-
-  await assertClassificationRelation(effectiveCategoryId, effectiveClassificationId);
-}
-
-function buildComplaintUpdateData(payload: ComplaintPatchPayload): Prisma.ComplaintUncheckedUpdateManyInput {
-  return {
+function buildComplaintUpdateData(
+  payload: ComplaintPatchPayload,
+  actor: string,
+  linkedCategoryId?: string | null
+): Prisma.ComplaintUncheckedUpdateManyInput {
+  const data: Prisma.ComplaintUncheckedUpdateManyInput = {
     sourceReference: payload.sourceReference,
     complaintDate: parseDate(payload.complaintDate),
     receivedAt: payload.receivedAt ? new Date(payload.receivedAt) : undefined,
@@ -207,6 +238,23 @@ function buildComplaintUpdateData(payload: ComplaintPatchPayload): Prisma.Compla
     complainantPhone: payload.complainantPhone,
     version: { increment: 1 },
   };
+
+  if (payload.classificationId !== undefined) {
+    if (payload.classificationId === null) {
+      Object.assign(data, buildManualClearClassificationMetadata({ assignedBy: actor }));
+    } else {
+      data.categoryId = linkedCategoryId ?? payload.categoryId;
+      Object.assign(
+        data,
+        buildClassificationAssignmentMetadata({
+          source: CLASSIFICATION_ASSIGNMENT_SOURCES.MANUAL,
+          assignedBy: actor,
+        })
+      );
+    }
+  }
+
+  return data;
 }
 
 function toComplaintDetailResponse(complaint: ComplaintDetailProjection) {
@@ -246,11 +294,13 @@ function toComplaintDetailResponse(complaint: ComplaintDetailProjection) {
 
 async function updateComplaint(
   current: ActiveComplaintProjection,
-  payload: ComplaintPatchPayload
+  payload: ComplaintPatchPayload,
+  actor: string,
+  linkedCategoryId?: string | null
 ): Promise<ComplaintDetailProjection> {
   const result = await db.complaint.updateMany({
     where: { id: current.id, version: payload.expectedVersion, isDeleted: false },
-    data: buildComplaintUpdateData(payload),
+    data: buildComplaintUpdateData(payload, actor, linkedCategoryId),
   });
 
   if (result.count !== 1) {
@@ -302,8 +352,13 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
     const current = await loadActiveComplaintOrThrow(id);
     const payload = await parseComplaintPatchRequest(req);
     validateComplaintPatchPayload(payload);
-    await validateEffectiveClassificationRelation(current, payload);
-    const updated = await updateComplaint(current, payload);
+    const relation = await validateEffectiveClassificationRelation(current, payload);
+    const updated = await updateComplaint(
+      current,
+      payload,
+      session.username,
+      relation?.linkedCategoryId
+    );
 
     await writeAuditLog(db, {
       action: "COMPLAINT_UPDATED",

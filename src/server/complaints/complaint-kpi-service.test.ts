@@ -87,6 +87,41 @@ describe("complaint KPI service", () => {
     expect(result.distributions.byClassification.map((item) => item.id).sort()).toEqual(["cls_1", "cls_2"]);
   });
 
+  it("keeps unclassified when category exists without classificationId", async () => {
+    dbMocks.findMany.mockResolvedValueOnce([
+      complaint({
+        id: "cmp_1",
+        classificationId: null,
+        classification: null,
+        categoryId: "cat_1",
+        category: { id: "cat_1", nameAr: "فئة" },
+      }),
+    ]);
+
+    const result = await getComplaintKpis(new URLSearchParams(), new Date("2026-07-31T00:00:00Z"));
+    expect(result.distributions.byClassification).toEqual([
+      expect.objectContaining({ name: "غير مصنف", id: null, total: 1 }),
+    ]);
+  });
+
+  it("shows leaf-only path safely when classified without category name", async () => {
+    dbMocks.findMany.mockResolvedValueOnce([
+      complaint({
+        classificationId: "cls_1",
+        classification: { id: "cls_1", nameAr: "تصنيف" },
+        categoryId: null,
+        category: null,
+      }),
+    ]);
+
+    const result = await getComplaintKpis(new URLSearchParams(), new Date("2026-07-31T00:00:00Z"));
+    expect(result.distributions.byClassification[0]).toMatchObject({
+      id: "cls_1",
+      name: "تصنيف",
+      classificationName: "تصنيف",
+    });
+  });
+
   it("uses the name as group key when id is missing", async () => {
     dbMocks.findMany.mockResolvedValueOnce([
       complaint({ id: "cmp_1", classificationId: null, classification: null }),

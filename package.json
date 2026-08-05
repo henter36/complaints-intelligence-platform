@@ -29,6 +29,7 @@
     "backup:restore": "tsx scripts/backup-restore.ts",
     "integrity:check": "tsx scripts/integrity-check.ts",
     "classifications:restructure": "tsx scripts/restructure-classification-taxonomy.ts",
+    "classifications:backfill": "tsx scripts/backfill-historical-classifications.ts",
     "release:manifest": "tsx scripts/release-manifest.ts",
     "release:check": "tsx scripts/release-check.ts"
   },

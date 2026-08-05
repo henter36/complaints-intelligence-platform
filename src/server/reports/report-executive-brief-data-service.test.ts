@@ -190,16 +190,11 @@ function makeKpiResult(overrides: Partial<ComplaintKpiResult> = {}): ComplaintKp
         { name: "الخدمات", id: "dept-svc", count: 20, total: 20, open: 8, closed: 10, currentlyLate: 2, closedLate: 0, withinDueDate: 10, complianceRate: 100.0, averageResolutionDays: 2.9, highPriorityOpen: 1, unclassified: 1, averageResolutionEligibleCount: 10, slaEligibleCount: 10, closedWithoutTrustedDateCount: 0 },
       ],
       byClassification: [
-        { name: "فئة اختبار / ضوضاء", id: "class-01", categoryId: "cat-1", categoryName: "فئة اختبار", classificationName: "ضوضاء",
-      classificationPath: "فئة اختبار / ضوضاء", count: 30, total: 30, open: 8, closed: 20, currentlyLate: 3, closedLate: 1, withinDueDate: 19, complianceRate: 95.0, averageResolutionDays: 3.2, highPriorityOpen: 1, unclassified: 0, averageResolutionEligibleCount: 19, slaEligibleCount: 19, closedWithoutTrustedDateCount: 0 },
-        { name: "فئة اختبار / بنية تحتية", id: "class-02", categoryId: "cat-1", categoryName: "فئة اختبار", classificationName: "بنية تحتية",
-      classificationPath: "فئة اختبار / بنية تحتية", count: 25, total: 25, open: 7, closed: 17, currentlyLate: 2, closedLate: 1, withinDueDate: 16, complianceRate: 94.1, averageResolutionDays: 3.8, highPriorityOpen: 2, unclassified: 1, averageResolutionEligibleCount: 16, slaEligibleCount: 16, closedWithoutTrustedDateCount: 0 },
-        { name: "فئة اختبار / مخلفات", id: "class-03", categoryId: "cat-1", categoryName: "فئة اختبار", classificationName: "مخلفات",
-      classificationPath: "فئة اختبار / مخلفات", count: 20, total: 20, open: 5, closed: 13, currentlyLate: 1, closedLate: 0, withinDueDate: 13, complianceRate: 100.0, averageResolutionDays: 2.8, highPriorityOpen: 0, unclassified: 0, averageResolutionEligibleCount: 13, slaEligibleCount: 13, closedWithoutTrustedDateCount: 0 },
-        { name: "فئة اختبار / مياه", id: "class-04", categoryId: "cat-1", categoryName: "فئة اختبار", classificationName: "مياه",
-      classificationPath: "فئة اختبار / مياه", count: 15, total: 15, open: 6, closed: 8, currentlyLate: 1, closedLate: 1, withinDueDate: 7, complianceRate: 87.5, averageResolutionDays: 4.5, highPriorityOpen: 2, unclassified: 1, averageResolutionEligibleCount: 7, slaEligibleCount: 7, closedWithoutTrustedDateCount: 0 },
-        { name: "فئة اختبار / إضاءة", id: "class-05", categoryId: "cat-1", categoryName: "فئة اختبار", classificationName: "إضاءة",
-      classificationPath: "فئة اختبار / إضاءة", count: 10, total: 10, open: 4, closed: 7, currentlyLate: 1, closedLate: 0, withinDueDate: 7, complianceRate: 100.0, averageResolutionDays: 2.5, highPriorityOpen: 0, unclassified: 0, averageResolutionEligibleCount: 7, slaEligibleCount: 7, closedWithoutTrustedDateCount: 0 },
+        { name: "فئة اختبار / ضوضاء", id: "class-01", categoryId: "cat-1", categoryName: "فئة اختبار", classificationName: "ضوضاء", count: 30, total: 30, open: 8, closed: 20, currentlyLate: 3, closedLate: 1, withinDueDate: 19, complianceRate: 95.0, averageResolutionDays: 3.2, highPriorityOpen: 1, unclassified: 0, averageResolutionEligibleCount: 19, slaEligibleCount: 19, closedWithoutTrustedDateCount: 0 },
+        { name: "فئة اختبار / بنية تحتية", id: "class-02", categoryId: "cat-1", categoryName: "فئة اختبار", classificationName: "بنية تحتية", count: 25, total: 25, open: 7, closed: 17, currentlyLate: 2, closedLate: 1, withinDueDate: 16, complianceRate: 94.1, averageResolutionDays: 3.8, highPriorityOpen: 2, unclassified: 1, averageResolutionEligibleCount: 16, slaEligibleCount: 16, closedWithoutTrustedDateCount: 0 },
+        { name: "فئة اختبار / مخلفات", id: "class-03", categoryId: "cat-1", categoryName: "فئة اختبار", classificationName: "مخلفات", count: 20, total: 20, open: 5, closed: 13, currentlyLate: 1, closedLate: 0, withinDueDate: 13, complianceRate: 100.0, averageResolutionDays: 2.8, highPriorityOpen: 0, unclassified: 0, averageResolutionEligibleCount: 13, slaEligibleCount: 13, closedWithoutTrustedDateCount: 0 },
+        { name: "فئة اختبار / مياه", id: "class-04", categoryId: "cat-1", categoryName: "فئة اختبار", classificationName: "مياه", count: 15, total: 15, open: 6, closed: 8, currentlyLate: 1, closedLate: 1, withinDueDate: 7, complianceRate: 87.5, averageResolutionDays: 4.5, highPriorityOpen: 2, unclassified: 1, averageResolutionEligibleCount: 7, slaEligibleCount: 7, closedWithoutTrustedDateCount: 0 },
+        { name: "فئة اختبار / إضاءة", id: "class-05", categoryId: "cat-1", categoryName: "فئة اختبار", classificationName: "إضاءة", count: 10, total: 10, open: 4, closed: 7, currentlyLate: 1, closedLate: 0, withinDueDate: 7, complianceRate: 100.0, averageResolutionDays: 2.5, highPriorityOpen: 0, unclassified: 0, averageResolutionEligibleCount: 7, slaEligibleCount: 7, closedWithoutTrustedDateCount: 0 },
       ],
       byCategory: [],
       byChannel: [],
@@ -509,6 +504,8 @@ describe("buildExecutiveBriefData — topClassifications", () => {
       expect(typeof row.classificationId).toBe("string");
       expect(typeof row.classificationName).toBe("string");
       expect(typeof row.classificationPath).toBe("string");
+      expect(row).toHaveProperty("categoryId");
+      expect(row).toHaveProperty("categoryName");
       expect(typeof row.categoryName).toBe("string");
       expect(row.classificationPath).toContain(row.classificationName);
     }

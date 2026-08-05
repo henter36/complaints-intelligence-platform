@@ -17,6 +17,7 @@ import {
   type SourceDetailClassificationCandidate,
 } from "./source-detail-classification-resolver";
 import { assertClassificationNameDiffersFromCategory } from "./classification-management-service";
+import { compareCodeUnits } from "./canonical-string-order";
 import {
   RESTRUCTURE_ERROR_CODES,
   TaxonomyRestructureError,
@@ -139,7 +140,7 @@ export function computeTaxonomyFingerprint(
 ): string {
   const catPayload = [...categories]
     .map((c) => ({ id: c.id, nameAr: c.nameAr, isActive: c.isActive, isDeleted: c.isDeleted }))
-    .sort((a, b) => a.id.localeCompare(b.id));
+    .sort((a, b) => compareCodeUnits(a.id, b.id));
   const clsPayload = [...classifications]
     .map((c) => {
       let keywords: string[] = [];
@@ -150,7 +151,7 @@ export function computeTaxonomyFingerprint(
       }
       const normalized = [
         ...new Set(keywords.map((k) => normalizeClassificationKeyword(k)).filter(Boolean)),
-      ].sort((a, b) => a.localeCompare(b, "ar"));
+      ].sort(compareCodeUnits);
       return {
         id: c.id,
         nameAr: c.nameAr,
@@ -160,7 +161,7 @@ export function computeTaxonomyFingerprint(
         normalizedKeywords: normalized,
       };
     })
-    .sort((a, b) => a.id.localeCompare(b.id));
+    .sort((a, b) => compareCodeUnits(a.id, b.id));
   return sha256(stableStringify({ categories: catPayload, classifications: clsPayload }));
 }
 

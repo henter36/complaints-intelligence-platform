@@ -343,8 +343,10 @@ describe("Phase 6 complaint routes", () => {
   });
 
   it("rejects classification-only updates when it conflicts with the current category", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
     const { classificationFindFirst } = mockDb({
       findFirst: vi.fn().mockResolvedValue({ id: "cmp_phase6", categoryId: "cat_current", classificationId: "cls_old" }),
+      updateMany,
     });
     classificationFindFirst.mockResolvedValue({ categoryId: "cat_other" });
 
@@ -360,6 +362,7 @@ describe("Phase 6 complaint routes", () => {
 
     expect(response.status).toBe(422);
     expect(body.error.code).toBe("INVALID_CLASSIFICATION_RELATION");
+    expect(updateMany).not.toHaveBeenCalled();
   });
 
   it("accepts explicit matching category and classification", async () => {
@@ -383,11 +386,14 @@ describe("Phase 6 complaint routes", () => {
 
     expect(response.status).toBe(200);
     expect(updateMany).toHaveBeenCalled();
+    expect(classificationFindFirst).toHaveBeenCalledTimes(1);
   });
 
   it("rejects explicit category/classification mismatches", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
     const { classificationFindFirst } = mockDb({
       findFirst: vi.fn().mockResolvedValue({ id: "cmp_phase6", categoryId: "cat_current", classificationId: null }),
+      updateMany,
     });
     classificationFindFirst.mockResolvedValue({ categoryId: "cat_other" });
 
@@ -399,8 +405,40 @@ describe("Phase 6 complaint routes", () => {
       }),
       { params: Promise.resolve({ id: "cmp_phase6" }) }
     );
+    const body = await response.json();
 
     expect(response.status).toBe(422);
+    expect(body.error.code).toBe("INVALID_CLASSIFICATION_RELATION");
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it("returns 409 only for real version conflicts after valid relation checks", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const { classificationFindFirst } = mockDb({
+      findFirst: vi.fn()
+        .mockResolvedValueOnce({ id: "cmp_phase6", categoryId: "cat_current", classificationId: null })
+        .mockResolvedValueOnce({ id: "cmp_phase6" }),
+      updateMany,
+    });
+    classificationFindFirst.mockResolvedValue({ categoryId: "cat_current" });
+
+    const { PATCH } = await import("./[id]/route");
+    const response = await PATCH(
+      new NextRequest("http://localhost/api/complaints/cmp_phase6", {
+        method: "PATCH",
+        body: JSON.stringify({
+          expectedVersion: 1,
+          categoryId: "cat_current",
+          classificationId: "cls_next",
+        }),
+      }),
+      { params: Promise.resolve({ id: "cmp_phase6" }) }
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(409);
+    expect(body.error.code).toBe("COMPLAINT_VERSION_CONFLICT");
+    expect(updateMany).toHaveBeenCalled();
   });
 
   it("allows clearing classification", async () => {

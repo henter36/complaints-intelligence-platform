@@ -8,9 +8,9 @@ import {
   normalizeRegionName,
   type RegionalReconciliationInput,
 } from "@/lib/reports/region-normalization";
+import { buildClassificationPath } from "@/lib/reports/classification-keys";
 import { comparisonHalfOpenPeriod } from "@/lib/reports/period-range";
 import type { ComparisonMode } from "@/lib/reports/report-contract";
-import { buildClassificationPath } from "@/lib/reports/classification-keys";
 
 // ---------------------------------------------------------------------------
 // Centralized period-comparison module.
@@ -473,6 +473,13 @@ function hasValidDeptAndClass(complaint: ComparisonComplaint): boolean {
   return Boolean(complaint.department) && Boolean(complaint.classificationId);
 }
 
+function classificationPathForComplaint(complaint: ComparisonComplaint): string {
+  return buildClassificationPath(
+    complaint.category?.nameAr,
+    complaint.classification?.nameAr
+  );
+}
+
 function accumulateDeptClass(
   map: Map<string, DeptClassAccumulator>,
   complaints: ComparisonComplaint[],
@@ -483,27 +490,22 @@ function accumulateDeptClass(
     const departmentId = complaint.department!;
     const classificationId = complaint.classificationId!;
     const key = deptClassKey(departmentId, classificationId);
+    const path = classificationPathForComplaint(complaint);
+    const leaf = complaint.classification?.nameAr ?? classificationId;
     const existing =
       map.get(key) ??
       ({
         departmentId,
         departmentName: departmentId,
         classificationId,
-        classificationName: complaint.classification?.nameAr ?? classificationId,
-        classificationPath: buildClassificationPath(
-          complaint.category?.nameAr,
-          complaint.classification?.nameAr ?? classificationId
-        ),
+        classificationName: leaf,
+        classificationPath: path,
         currentCount: 0,
         previousCount: 0,
       } satisfies DeptClassAccumulator);
-    // Prefer a real classification name whenever we encounter one.
     if (complaint.classification?.nameAr) {
       existing.classificationName = complaint.classification.nameAr;
-      existing.classificationPath = buildClassificationPath(
-        complaint.category?.nameAr,
-        complaint.classification.nameAr
-      );
+      existing.classificationPath = path;
     }
     existing[field] += 1;
     map.set(key, existing);
