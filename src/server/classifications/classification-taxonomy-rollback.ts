@@ -198,7 +198,7 @@ function optionalKeywordsMatch(
   next: Record<string, unknown>,
   actualKeywords: unknown
 ): boolean {
-  if (!Object.prototype.hasOwnProperty.call(next, "keywords")) return true;
+  if (!Object.hasOwn(next, "keywords")) return true;
   return keywordsMatch(next.keywords, actualKeywords);
 }
 

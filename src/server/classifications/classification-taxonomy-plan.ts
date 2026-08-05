@@ -528,69 +528,160 @@ export function ensureProposedCategories(ctx: RestructurePlanningContext): void 
   }
 }
 
+function classificationAlreadyTracked(
+  ctx: RestructurePlanningContext,
+  classification: ProposedClassification,
+  resolvedId: string
+): boolean {
+  return (
+    ctx.plan.classificationsToKeep.some(
+      (x) =>
+        x.currentId === resolvedId || x.classificationKey === classification.classificationKey
+    ) ||
+    ctx.plan.classificationsToReactivate.some(
+      (x) =>
+        x.currentId === resolvedId || x.classificationKey === classification.classificationKey
+    ) ||
+    ctx.plan.classificationsToRename.some((x) => x.currentId === resolvedId) ||
+    ctx.plan.classificationsToMove.some((x) => x.currentId === resolvedId) ||
+    ctx.plan.classificationsToSplit.some((x) => x.currentId === resolvedId)
+  );
+}
+
+type ProposedClassificationPlanningResult =
+  | { status: "REUSED"; reuseId: string }
+  | { status: "CREATE" }
+  | { status: "BLOCKED" };
+
+function appendClassificationKeepIfNeeded(
+  ctx: RestructurePlanningContext,
+  classification: ProposedClassification,
+  resolved: LoadedClassification
+): void {
+  if (!resolved.isActive) return;
+  if (classificationAlreadyTracked(ctx, classification, resolved.id)) return;
+  ctx.plan.classificationsToKeep.push(
+    buildPlanChange({
+      currentId: resolved.id,
+      currentName: resolved.nameAr,
+      targetName: classification.classification,
+      currentCategory: resolved.categoryName,
+      targetCategory: classification.category,
+      action: "KEEP",
+      reason: "مطابقة بالاسم والفئة",
+      affectedExistingComplaintCount: resolved.complaintCount,
+      classificationKey: classification.classificationKey,
+    })
+  );
+}
+
+function handleResolvedProposedClassification(
+  ctx: RestructurePlanningContext,
+  classification: ProposedClassification,
+  resolved: LoadedClassification
+): string {
+  registerClassificationReuse(ctx, classification.classificationKey, resolved.id);
+  ensureClassificationReactivation(
+    ctx,
+    resolved,
+    classification.classification,
+    classification.category,
+    classification.classificationKey
+  );
+  appendClassificationKeepIfNeeded(ctx, classification, resolved);
+  return resolved.id;
+}
+
+function resolveProposedClassificationReuse(
+  ctx: RestructurePlanningContext,
+  classification: ProposedClassification
+): ProposedClassificationPlanningResult {
+  const existingReuseId = ctx.classificationReuseByKey.get(classification.classificationKey);
+  if (existingReuseId) {
+    return { status: "REUSED", reuseId: existingReuseId };
+  }
+
+  const resolution = resolveExistingClassification(
+    ctx,
+    "",
+    classification.classification,
+    classification.category,
+    { includeInactive: true }
+  );
+
+  if (resolution.status === "AMBIGUOUS") {
+    ctx.plan.namingConflicts.push(
+      resolutionConflictLabel(
+        `${classification.category} / ${classification.classification}`,
+        resolution
+      )
+    );
+    return { status: "BLOCKED" };
+  }
+
+  if (resolution.status === "FOUND") {
+    return {
+      status: "REUSED",
+      reuseId: handleResolvedProposedClassification(ctx, classification, resolution.classification),
+    };
+  }
+
+  return { status: "CREATE" };
+}
+
+function setFinalClassificationTarget(
+  ctx: RestructurePlanningContext,
+  classification: ProposedClassification,
+  reuseId: string | null
+): void {
+  ctx.plan.finalClassificationTargets[classification.classificationKey] = {
+    categoryName: classification.category,
+    classificationName: classification.classification,
+    reuseId,
+  };
+}
+
+function appendProposedClassificationCreate(
+  ctx: RestructurePlanningContext,
+  classification: ProposedClassification
+): void {
+  ctx.plan.classificationsToCreate.push(
+    buildPlanChange({
+      currentId: null,
+      currentName: "",
+      targetName: classification.classification,
+      currentCategory: null,
+      targetCategory: classification.category,
+      action: "CREATE",
+      reason: "تصنيف فرعي مقترح جديد",
+      affectedExistingComplaintCount: 0,
+      classificationKey: classification.classificationKey,
+      keywords: classification.sourceDetails,
+    })
+  );
+}
+
+function processProposedClassification(
+  ctx: RestructurePlanningContext,
+  classification: ProposedClassification
+): void {
+  const planning = resolveProposedClassificationReuse(ctx, classification);
+  if (planning.status === "REUSED") {
+    setFinalClassificationTarget(ctx, classification, planning.reuseId);
+    return;
+  }
+  if (planning.status === "BLOCKED") {
+    setFinalClassificationTarget(ctx, classification, null);
+    return;
+  }
+  setFinalClassificationTarget(ctx, classification, null);
+  appendProposedClassificationCreate(ctx, classification);
+}
+
 export function ensureProposedClassifications(ctx: RestructurePlanningContext): void {
-  for (const cat of ctx.proposal.proposedTaxonomy) {
-    for (const cls of cat.classifications) {
-      let reuseClsId = ctx.classificationReuseByKey.get(cls.classificationKey) ?? null;
-      if (!reuseClsId) {
-        const resolution = resolveExistingClassification(
-          ctx,
-          "",
-          cls.classification,
-          cls.category,
-          { includeInactive: true }
-        );
-        if (resolution.status === "AMBIGUOUS") {
-          ctx.plan.namingConflicts.push(
-            resolutionConflictLabel(`${cls.category} / ${cls.classification}`, resolution)
-          );
-        } else if (resolution.status === "FOUND") {
-          reuseClsId = resolution.classification.id;
-          registerClassificationReuse(ctx, cls.classificationKey, reuseClsId);
-          ensureClassificationReactivation(
-            ctx,
-            resolution.classification,
-            cls.classification,
-            cls.category,
-            cls.classificationKey
-          );
-          if (resolution.classification.isActive) {
-            ctx.plan.classificationsToKeep.push(
-              buildPlanChange({
-                currentId: reuseClsId,
-                currentName: resolution.classification.nameAr,
-                targetName: cls.classification,
-                currentCategory: resolution.classification.categoryName,
-                targetCategory: cls.category,
-                action: "KEEP",
-                reason: "مطابقة بالاسم والفئة",
-                affectedExistingComplaintCount: resolution.classification.complaintCount,
-                classificationKey: cls.classificationKey,
-              })
-            );
-          }
-        }
-      }
-      ctx.plan.finalClassificationTargets[cls.classificationKey] = {
-        categoryName: cls.category,
-        classificationName: cls.classification,
-        reuseId: reuseClsId,
-      };
-      if (reuseClsId) continue;
-      ctx.plan.classificationsToCreate.push(
-        buildPlanChange({
-          currentId: null,
-          currentName: "",
-          targetName: cls.classification,
-          currentCategory: null,
-          targetCategory: cls.category,
-          action: "CREATE",
-          reason: "تصنيف فرعي مقترح جديد",
-          affectedExistingComplaintCount: 0,
-          classificationKey: cls.classificationKey,
-          keywords: cls.sourceDetails,
-        })
-      );
+  for (const category of ctx.proposal.proposedTaxonomy) {
+    for (const classification of category.classifications) {
+      processProposedClassification(ctx, classification);
     }
   }
 }

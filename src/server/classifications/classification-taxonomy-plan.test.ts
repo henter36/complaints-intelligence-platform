@@ -6,8 +6,10 @@ import {
 } from "./classification-taxonomy-manifest";
 import {
   assertPlanIsApplicable,
+  buildPlanChange,
   createPlanningContext,
   ensureProposedCategories,
+  ensureProposedClassifications,
   resolveExistingCategory,
   resolveExistingClassification,
 } from "./classification-taxonomy-plan";
@@ -236,5 +238,155 @@ describe("inactive category reuse and reactivation", () => {
     if (resolution.status === "AMBIGUOUS") {
       expect(resolution.matches).toHaveLength(2);
     }
+  });
+});
+
+describe("ensureProposedClassifications planning", () => {
+  function baseCategory(id: string, nameAr: string) {
+    return { id, nameAr, isActive: true, isDeleted: false, complaintCount: 0 };
+  }
+
+  function baseClassification(input: {
+    id: string;
+    nameAr: string;
+    categoryId: string;
+    categoryName: string;
+    isActive?: boolean;
+  }) {
+    return {
+      id: input.id,
+      nameAr: input.nameAr,
+      categoryId: input.categoryId,
+      categoryName: input.categoryName,
+      keywords: [],
+      isActive: input.isActive ?? true,
+      isDeleted: false,
+      complaintCount: 0,
+    };
+  }
+
+  it("reuses preexisting classificationReuseByKey without searching again", () => {
+    const proposal = loadAndValidateProposal(PROPOSAL, MAPPING).proposal;
+    const ctx = createPlanningContext(
+      { categories: [], classifications: [], fingerprint: "f" },
+      proposal
+    );
+    ctx.classificationReuseByKey.set("OTHER_REVIEW", "preexisting-id");
+    ensureProposedClassifications(ctx);
+    expect(ctx.plan.finalClassificationTargets.OTHER_REVIEW?.reuseId).toBe("preexisting-id");
+    expect(ctx.plan.classificationsToCreate.some((c) => c.classificationKey === "OTHER_REVIEW")).toBe(
+      false
+    );
+    expect(ctx.plan.classificationsToKeep.some((c) => c.classificationKey === "OTHER_REVIEW")).toBe(
+      false
+    );
+  });
+
+  it("keeps active matches, reactivates inactive matches, and creates missing ones", () => {
+    const proposal = loadAndValidateProposal(PROPOSAL, MAPPING).proposal;
+    const health = baseCategory("cat_health", "الرعاية الصحية");
+    const otherCat = baseCategory("cat_other", "بيانات غير محددة");
+    const current = {
+      categories: [health, otherCat],
+      classifications: [
+        baseClassification({
+          id: "cls_appts",
+          nameAr: "المواعيد والإحالات الصحية",
+          categoryId: health.id,
+          categoryName: health.nameAr,
+        }),
+        baseClassification({
+          id: "cls_other",
+          nameAr: "أخرى تحتاج مراجعة",
+          categoryId: otherCat.id,
+          categoryName: otherCat.nameAr,
+          isActive: false,
+        }),
+      ],
+      fingerprint: "f",
+    };
+    const ctx = createPlanningContext(current, proposal);
+    ensureProposedClassifications(ctx);
+
+    expect(ctx.plan.finalClassificationTargets.HEALTH_APPOINTMENTS?.reuseId).toBe("cls_appts");
+    expect(ctx.plan.classificationsToKeep.some((c) => c.currentId === "cls_appts")).toBe(true);
+    expect(
+      ctx.plan.classificationsToCreate.some((c) => c.classificationKey === "HEALTH_APPOINTMENTS")
+    ).toBe(false);
+
+    expect(ctx.plan.finalClassificationTargets.OTHER_REVIEW?.reuseId).toBe("cls_other");
+    expect(ctx.plan.classificationsToReactivate.some((c) => c.currentId === "cls_other")).toBe(true);
+    expect(ctx.plan.classificationsToCreate.some((c) => c.classificationKey === "OTHER_REVIEW")).toBe(
+      false
+    );
+
+    expect(ctx.plan.finalClassificationTargets.HEALTH_QUALITY?.reuseId).toBeNull();
+    expect(ctx.plan.classificationsToCreate.some((c) => c.classificationKey === "HEALTH_QUALITY")).toBe(
+      true
+    );
+  });
+
+  it("records AMBIGUOUS without CREATE and does not duplicate KEEP/REACTIVATE", () => {
+    const proposal = loadAndValidateProposal(PROPOSAL, MAPPING).proposal;
+    const otherCat = baseCategory("c1", "بيانات غير محددة");
+    const health = baseCategory("cat_h", "الرعاية الصحية");
+    const current = {
+      categories: [otherCat, health],
+      classifications: [
+        baseClassification({
+          id: "dup1",
+          nameAr: "أخرى تحتاج مراجعة",
+          categoryId: otherCat.id,
+          categoryName: otherCat.nameAr,
+        }),
+        baseClassification({
+          id: "dup2",
+          nameAr: "أخرى تحتاج مراجعة",
+          categoryId: otherCat.id,
+          categoryName: otherCat.nameAr,
+        }),
+        baseClassification({
+          id: "active_keep",
+          nameAr: "المواعيد والإحالات الصحية",
+          categoryId: health.id,
+          categoryName: health.nameAr,
+        }),
+      ],
+      fingerprint: "f",
+    };
+
+    const ctx = createPlanningContext(current, proposal);
+    ensureProposedClassifications(ctx);
+    expect(ctx.plan.namingConflicts.some((c) => c.includes("أخرى تحتاج مراجعة"))).toBe(true);
+    expect(ctx.plan.classificationsToCreate.some((c) => c.classificationKey === "OTHER_REVIEW")).toBe(
+      false
+    );
+    expect(ctx.plan.finalClassificationTargets.OTHER_REVIEW?.reuseId).toBeNull();
+
+    expect(ctx.plan.classificationsToKeep.filter((c) => c.currentId === "active_keep")).toHaveLength(
+      1
+    );
+    ensureProposedClassifications(ctx);
+    expect(ctx.plan.classificationsToKeep.filter((c) => c.currentId === "active_keep")).toHaveLength(
+      1
+    );
+
+    ctx.plan.classificationsToReactivate.push(
+      buildPlanChange({
+        currentId: "react1",
+        currentName: "x",
+        targetName: "x",
+        currentCategory: null,
+        targetCategory: "y",
+        action: "REACTIVATE",
+        reason: "seed",
+        affectedExistingComplaintCount: 0,
+        classificationKey: "STAFF_CONDUCT",
+      })
+    );
+    const before = ctx.plan.classificationsToReactivate.length;
+    ctx.classificationReuseByKey.set("STAFF_CONDUCT", "react1");
+    ensureProposedClassifications(ctx);
+    expect(ctx.plan.classificationsToReactivate.length).toBe(before);
   });
 });

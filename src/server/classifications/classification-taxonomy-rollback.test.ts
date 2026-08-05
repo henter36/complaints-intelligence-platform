@@ -56,6 +56,16 @@ describe("keyword canonical comparison", () => {
     expect(keywordsMatch(["أ", "ب"], ["أ"])).toBe(false);
     expect(keywordsMatch(["أ"], { not: "array" })).toBe(false);
   });
+
+  it("Object.hasOwn ignores inherited keywords on the prototype chain", () => {
+    const proto = { keywords: ["موروثة"] };
+    const next = Object.create(proto) as Record<string, unknown>;
+    expect("keywords" in next).toBe(true);
+    expect(Object.hasOwn(next, "keywords")).toBe(false);
+    next.keywords = ["مباشرة"];
+    expect(Object.hasOwn(next, "keywords")).toBe(true);
+    expect(keywordsMatch(next.keywords, ["مباشرة"])).toBe(true);
+  });
 });
 
 describe("rollback keyword drift", () => {
