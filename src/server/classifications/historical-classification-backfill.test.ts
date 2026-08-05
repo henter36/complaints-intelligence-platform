@@ -14,6 +14,7 @@ import {
   parseInclusivePeriod,
   previewHistoricalClassificationBackfill,
   readAndValidateManifest,
+  stableStringify,
   validateBatchSize,
   type BackfillManifest,
   type ManifestRow,
@@ -308,6 +309,15 @@ describe("dry-run preview", () => {
       rows,
     };
     expect(computeManifestHash(base)).toBe(computeManifestHash({ ...base, rows: [...rows].reverse() }));
+  });
+
+  it("stableStringify is independent of object key insertion order", () => {
+    const left = { schemaVersion: 1, totals: { eligibleCount: 2 }, period: { from: "a", to: "b" } };
+    const right = { period: { to: "b", from: "a" }, totals: { eligibleCount: 2 }, schemaVersion: 1 };
+    expect(stableStringify(left)).toBe(stableStringify(right));
+    expect(createHash("sha256").update(stableStringify(left), "utf8").digest("hex")).toBe(
+      createHash("sha256").update(stableStringify(right), "utf8").digest("hex")
+    );
   });
 });
 

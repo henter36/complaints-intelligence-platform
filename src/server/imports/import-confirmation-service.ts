@@ -768,6 +768,35 @@ function assignIfDefined<T extends keyof Prisma.ComplaintUncheckedUpdateManyInpu
   }
 }
 
+function assignImportClassificationFields(
+  data: Prisma.ComplaintUncheckedUpdateManyInput,
+  current: Complaint,
+  taxonomy: { categoryId?: string | null; classificationId?: string | null },
+  assignmentFields: ReturnType<typeof buildImportAssignmentFields>
+): void {
+  const protectManual =
+    current.classificationAssignmentSource === CLASSIFICATION_ASSIGNMENT_SOURCES.MANUAL;
+  if (protectManual) {
+    return;
+  }
+
+  if (taxonomy.classificationId) {
+    // Always persist main + sub together from the classification relation.
+    data.classificationId = taxonomy.classificationId;
+    data.categoryId = taxonomy.categoryId ?? null;
+    if (Object.keys(assignmentFields).length > 0) {
+      Object.assign(data, assignmentFields);
+    }
+    return;
+  }
+
+  assignIfDefined(data, "categoryId", taxonomy.categoryId);
+  assignIfDefined(data, "classificationId", taxonomy.classificationId);
+  if (Object.keys(assignmentFields).length > 0) {
+    Object.assign(data, assignmentFields);
+  }
+}
+
 function assignImportUpdateFields(
   data: Prisma.ComplaintUncheckedUpdateManyInput,
   current: Complaint,
@@ -802,24 +831,7 @@ function assignImportUpdateFields(
   assignIfDefined(data, "facility", normalized.facility);
   assignIfDefined(data, "department", normalized.department);
 
-  const protectManual =
-    current.classificationAssignmentSource === CLASSIFICATION_ASSIGNMENT_SOURCES.MANUAL;
-  if (!protectManual) {
-    if (taxonomy.classificationId) {
-      // Always persist main + sub together from the classification relation.
-      data.classificationId = taxonomy.classificationId;
-      data.categoryId = taxonomy.categoryId ?? null;
-      if (Object.keys(assignmentFields).length > 0) {
-        Object.assign(data, assignmentFields);
-      }
-    } else {
-      assignIfDefined(data, "categoryId", taxonomy.categoryId);
-      assignIfDefined(data, "classificationId", taxonomy.classificationId);
-      if (Object.keys(assignmentFields).length > 0) {
-        Object.assign(data, assignmentFields);
-      }
-    }
-  }
+  assignImportClassificationFields(data, current, taxonomy, assignmentFields);
 
   assignIfDefined(data, "priority", normalized.priority === null ? current.priority : normalized.priority);
   assignIfDefined(data, "severity", normalized.priority === null ? current.severity : normalized.priority);

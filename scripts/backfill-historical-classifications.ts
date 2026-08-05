@@ -18,6 +18,18 @@ import {
 
 const prisma = new PrismaClient();
 
+type CliOptions = {
+  mode: string;
+  actor: string;
+  batchSize?: number;
+  from: string | null;
+  to: string | null;
+  manifest: string | null;
+  confirm: string | null;
+  runId: string | null;
+  overwrite: boolean;
+};
+
 function readArg(name: string): string | null {
   const prefix = `--${name}=`;
   const value = process.argv.find((arg) => arg.startsWith(prefix));
@@ -32,93 +44,114 @@ function safePrint(value: unknown): void {
   console.log(JSON.stringify(value, null, 2));
 }
 
-async function main(): Promise<number> {
-  const mode = readArg("mode") ?? "dry-run";
-  const actor = readArg("actor") ?? "system";
+function parseCliOptions(): CliOptions {
   const batchSizeRaw = readArg("batch-size");
-  const batchSize = batchSizeRaw ? Number(batchSizeRaw) : undefined;
+  return {
+    mode: readArg("mode") ?? "dry-run",
+    actor: readArg("actor") ?? "system",
+    batchSize: batchSizeRaw ? Number(batchSizeRaw) : undefined,
+    from: readArg("from"),
+    to: readArg("to"),
+    manifest: readArg("manifest"),
+    confirm: readArg("confirm"),
+    runId: readArg("run-id"),
+    overwrite: readFlag("overwrite"),
+  };
+}
 
-  try {
-    if (mode === "dry-run") {
-      const from = readArg("from");
-      const to = readArg("to");
-      const manifest = readArg("manifest");
-      if (!from || !to || !manifest) {
-        throw new HistoricalBackfillError(
-          "BACKFILL_PERIOD_REQUIRED",
-          "dry-run يتطلب --from و --to و --manifest"
-        );
-      }
-      const result = await previewHistoricalClassificationBackfill(prisma, {
-        from,
-        toInclusive: to,
-        manifestPath: manifest,
-        overwrite: readFlag("overwrite"),
-        actor,
-      });
-      safePrint(result);
-      return 0;
-    }
+function formatCliError(error: unknown): { code: string; message: string; details?: unknown } {
+  if (error instanceof HistoricalBackfillError) {
+    return { code: error.code, message: error.message, details: error.details };
+  }
+  return {
+    code: "UNEXPECTED_ERROR",
+    message: error instanceof Error ? error.message.slice(0, 200) : "unknown",
+  };
+}
 
-    if (mode === "apply") {
-      const manifest = readArg("manifest");
-      if (!manifest) {
-        throw new HistoricalBackfillError(
-          "BACKFILL_MANIFEST_REQUIRED",
-          "apply يتطلب --manifest"
-        );
-      }
-      const result = await applyHistoricalClassificationBackfill(prisma, {
-        manifestPath: manifest,
-        confirm: readArg("confirm") ?? undefined,
-        batchSize,
-        actor,
-        resumeRunId: readArg("run-id") ?? undefined,
-      });
-      safePrint(result);
-      return result.status === "APPLIED" || result.status === "PARTIALLY_APPLIED" ? 0 : 1;
-    }
-
-    if (mode === "verify") {
-      const runId = readArg("run-id");
-      if (!runId) {
-        throw new HistoricalBackfillError("BACKFILL_RUN_NOT_FOUND", "verify يتطلب --run-id");
-      }
-      const result = await verifyHistoricalClassificationBackfill(prisma, { runId });
-      safePrint(result);
-      return result.ok ? 0 : 1;
-    }
-
-    if (mode === "rollback") {
-      const runId = readArg("run-id");
-      if (!runId) {
-        throw new HistoricalBackfillError("BACKFILL_RUN_NOT_FOUND", "rollback يتطلب --run-id");
-      }
-      const result = await rollbackHistoricalClassificationBackfill(prisma, {
-        runId,
-        confirm: readArg("confirm") ?? undefined,
-        batchSize,
-        actor,
-      });
-      safePrint(result);
-      return result.status === "ROLLED_BACK" || result.status === "PARTIALLY_ROLLED_BACK" ? 0 : 1;
-    }
-
+async function runDryRunMode(options: CliOptions): Promise<number> {
+  if (!options.from || !options.to || !options.manifest) {
     throw new HistoricalBackfillError(
-      "BACKFILL_MANIFEST_INVALID",
-      `وضع غير مدعوم: ${mode}`
+      "BACKFILL_PERIOD_REQUIRED",
+      "dry-run يتطلب --from و --to و --manifest"
     );
+  }
+  const result = await previewHistoricalClassificationBackfill(prisma, {
+    from: options.from,
+    toInclusive: options.to,
+    manifestPath: options.manifest,
+    overwrite: options.overwrite,
+    actor: options.actor,
+  });
+  safePrint(result);
+  return 0;
+}
+
+async function runApplyMode(options: CliOptions): Promise<number> {
+  if (!options.manifest) {
+    throw new HistoricalBackfillError(
+      "BACKFILL_MANIFEST_REQUIRED",
+      "apply يتطلب --manifest"
+    );
+  }
+  const result = await applyHistoricalClassificationBackfill(prisma, {
+    manifestPath: options.manifest,
+    confirm: options.confirm ?? undefined,
+    batchSize: options.batchSize,
+    actor: options.actor,
+    resumeRunId: options.runId ?? undefined,
+  });
+  safePrint(result);
+  return result.status === "APPLIED" || result.status === "PARTIALLY_APPLIED" ? 0 : 1;
+}
+
+async function runVerifyMode(options: CliOptions): Promise<number> {
+  if (!options.runId) {
+    throw new HistoricalBackfillError("BACKFILL_RUN_NOT_FOUND", "verify يتطلب --run-id");
+  }
+  const result = await verifyHistoricalClassificationBackfill(prisma, { runId: options.runId });
+  safePrint(result);
+  return result.ok ? 0 : 1;
+}
+
+async function runRollbackMode(options: CliOptions): Promise<number> {
+  if (!options.runId) {
+    throw new HistoricalBackfillError("BACKFILL_RUN_NOT_FOUND", "rollback يتطلب --run-id");
+  }
+  const result = await rollbackHistoricalClassificationBackfill(prisma, {
+    runId: options.runId,
+    confirm: options.confirm ?? undefined,
+    batchSize: options.batchSize,
+    actor: options.actor,
+  });
+  safePrint(result);
+  return result.status === "ROLLED_BACK" || result.status === "PARTIALLY_ROLLED_BACK" ? 0 : 1;
+}
+
+async function dispatchMode(options: CliOptions): Promise<number> {
+  switch (options.mode) {
+    case "dry-run":
+      return runDryRunMode(options);
+    case "apply":
+      return runApplyMode(options);
+    case "verify":
+      return runVerifyMode(options);
+    case "rollback":
+      return runRollbackMode(options);
+    default:
+      throw new HistoricalBackfillError(
+        "BACKFILL_MANIFEST_INVALID",
+        `وضع غير مدعوم: ${options.mode}`
+      );
+  }
+}
+
+async function main(): Promise<number> {
+  const options = parseCliOptions();
+  try {
+    return await dispatchMode(options);
   } catch (error) {
-    if (error instanceof HistoricalBackfillError) {
-      safePrint({ error: { code: error.code, message: error.message, details: error.details } });
-      return 1;
-    }
-    safePrint({
-      error: {
-        code: "UNEXPECTED_ERROR",
-        message: error instanceof Error ? error.message.slice(0, 200) : "unknown",
-      },
-    });
+    safePrint({ error: formatCliError(error) });
     return 1;
   } finally {
     await prisma.$disconnect();

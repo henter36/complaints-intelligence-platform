@@ -369,7 +369,7 @@ async function requireActiveCategory(
   return category;
 }
 
-function assertClassificationNameDiffersFromCategory(
+export function assertClassificationNameDiffersFromCategory(
   categoryName: string,
   classificationName: string
 ): void {

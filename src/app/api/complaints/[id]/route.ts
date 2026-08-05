@@ -92,6 +92,10 @@ type ComplaintPatchPayload = z.infer<typeof updateSchema>;
 type ComplaintDetailProjection = Prisma.ComplaintGetPayload<{ select: typeof COMPLAINT_DETAIL_SELECT }>;
 type ActiveComplaintProjection = Pick<Complaint, "id" | "categoryId" | "classificationId">;
 
+type ClassificationRelationCheck = {
+  linkedCategoryId: string;
+};
+
 class ComplaintRouteError extends Error {
   constructor(
     readonly code:
@@ -162,32 +166,32 @@ async function loadComplaintDetailOrThrow(id: string): Promise<ComplaintDetailPr
   return complaint;
 }
 
-async function assertClassificationRelation(categoryId?: string | null, classificationId?: string | null): Promise<void> {
-  if (!classificationId) return;
-  if (!categoryId) {
-    throw new ComplaintRouteError("INVALID_CLASSIFICATION_RELATION", "التصنيف لا يتبع الفئة المحددة", 422);
+function resolveEffectiveCategoryId(
+  current: ActiveComplaintProjection,
+  payload: ComplaintPatchPayload
+): string | null {
+  if (payload.categoryId !== undefined) {
+    return payload.categoryId;
   }
-  const classification = await db.classification.findFirst({
-    where: { id: classificationId, isDeleted: false, isActive: true },
-    select: { categoryId: true },
-  });
-  if (!classification) {
-    throw new ComplaintRouteError("CLASSIFICATION_NOT_FOUND", "التصنيف غير موجود أو غير فعال", 422);
-  }
-  if (categoryId && classification.categoryId !== categoryId) {
-    throw new ComplaintRouteError("INVALID_CLASSIFICATION_RELATION", "التصنيف لا يتبع الفئة المحددة", 422);
-  }
+  return current.categoryId;
 }
 
+/**
+ * Validates category/classification consistency once and returns the linked category
+ * for use during update. Does not run updateMany.
+ */
 async function validateEffectiveClassificationRelation(
   current: ActiveComplaintProjection,
   payload: ComplaintPatchPayload
-): Promise<void> {
-  const effectiveClassificationId = payload.classificationId !== undefined
-    ? payload.classificationId
-    : current.classificationId;
+): Promise<ClassificationRelationCheck | null> {
+  const effectiveClassificationId =
+    payload.classificationId !== undefined
+      ? payload.classificationId
+      : current.classificationId;
 
-  if (!effectiveClassificationId) return;
+  if (!effectiveClassificationId) {
+    return null;
+  }
 
   const classification = await db.classification.findFirst({
     where: { id: effectiveClassificationId, isDeleted: false, isActive: true },
@@ -197,19 +201,20 @@ async function validateEffectiveClassificationRelation(
     throw new ComplaintRouteError("CLASSIFICATION_NOT_FOUND", "التصنيف غير موجود أو غير فعال", 422);
   }
 
-  const effectiveCategoryId =
-    payload.classificationId !== undefined
-      ? classification.categoryId
-      : payload.categoryId !== undefined
-        ? payload.categoryId
-        : current.categoryId;
+  const effectiveCategoryId = resolveEffectiveCategoryId(current, payload);
+  if (!effectiveCategoryId || classification.categoryId !== effectiveCategoryId) {
+    throw new ComplaintRouteError(
+      "INVALID_CLASSIFICATION_RELATION",
+      "التصنيف لا يتبع الفئة المحددة",
+      422
+    );
+  }
 
-  await assertClassificationRelation(effectiveCategoryId, effectiveClassificationId);
+  return { linkedCategoryId: classification.categoryId };
 }
 
 function buildComplaintUpdateData(
   payload: ComplaintPatchPayload,
-  current: ActiveComplaintProjection,
   actor: string,
   linkedCategoryId?: string | null
 ): Prisma.ComplaintUncheckedUpdateManyInput {
@@ -249,7 +254,6 @@ function buildComplaintUpdateData(
     }
   }
 
-  void current;
   return data;
 }
 
@@ -291,23 +295,12 @@ function toComplaintDetailResponse(complaint: ComplaintDetailProjection) {
 async function updateComplaint(
   current: ActiveComplaintProjection,
   payload: ComplaintPatchPayload,
-  actor: string
+  actor: string,
+  linkedCategoryId?: string | null
 ): Promise<ComplaintDetailProjection> {
-  let linkedCategoryId: string | null | undefined;
-  if (payload.classificationId) {
-    const classification = await db.classification.findFirst({
-      where: { id: payload.classificationId, isDeleted: false, isActive: true },
-      select: { categoryId: true },
-    });
-    if (!classification) {
-      throw new ComplaintRouteError("CLASSIFICATION_NOT_FOUND", "التصنيف غير موجود أو غير فعال", 422);
-    }
-    linkedCategoryId = classification.categoryId;
-  }
-
   const result = await db.complaint.updateMany({
     where: { id: current.id, version: payload.expectedVersion, isDeleted: false },
-    data: buildComplaintUpdateData(payload, current, actor, linkedCategoryId),
+    data: buildComplaintUpdateData(payload, actor, linkedCategoryId),
   });
 
   if (result.count !== 1) {
@@ -359,8 +352,13 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
     const current = await loadActiveComplaintOrThrow(id);
     const payload = await parseComplaintPatchRequest(req);
     validateComplaintPatchPayload(payload);
-    await validateEffectiveClassificationRelation(current, payload);
-    const updated = await updateComplaint(current, payload, session.username);
+    const relation = await validateEffectiveClassificationRelation(current, payload);
+    const updated = await updateComplaint(
+      current,
+      payload,
+      session.username,
+      relation?.linkedCategoryId
+    );
 
     await writeAuditLog(db, {
       action: "COMPLAINT_UPDATED",

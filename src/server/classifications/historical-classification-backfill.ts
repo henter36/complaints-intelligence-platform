@@ -200,16 +200,20 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_BATCH_SIZE = 500;
 const MAX_BATCH_SIZE = 1000;
 
-function stableStringify(value: unknown): string {
+export function serializeStableEntry(key: string, value: unknown): string {
+  return JSON.stringify(key) + ":" + stableStringify(value);
+}
+
+export function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") {
     return JSON.stringify(value);
   }
   if (Array.isArray(value)) {
-    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+    return "[" + value.map((item) => stableStringify(item)).join(",") + "]";
   }
   const obj = value as Record<string, unknown>;
-  const keys = Object.keys(obj).sort();
-  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
+  const keys = Object.keys(obj).sort((a, b) => a.localeCompare(b, "en"));
+  return "{" + keys.map((key) => serializeStableEntry(key, obj[key])).join(",") + "}";
 }
 
 export function parseInclusivePeriod(from: string, toInclusive: string): {
@@ -429,6 +433,138 @@ function emptyCounters(): PreviewCounters {
   };
 }
 
+
+type PreviewComplaintInput = {
+  id: string;
+  version: number;
+  classificationId: string | null;
+  categoryId: string | null;
+  classificationAssignmentSource: string | null;
+  sourceDetail: string | null;
+  complaintDate: Date | null;
+  receivedAt: Date;
+};
+
+type PreviewEvaluation =
+  | { kind: "OUTSIDE_PERIOD" }
+  | { kind: "ALREADY_CLASSIFIED" }
+  | { kind: "MANUALLY_PROTECTED" }
+  | { kind: "MISSING_SOURCE_DETAIL" }
+  | { kind: "AMBIGUOUS" }
+  | { kind: "UNMATCHED" }
+  | { kind: "INACTIVE_CLASSIFICATION" }
+  | {
+      kind: "ELIGIBLE";
+      sourceDetail: string;
+      match: {
+        classificationId: string;
+        classificationName: string;
+        categoryId: string;
+        categoryName: string;
+      };
+    };
+
+function evaluatePreviewComplaint(
+  complaint: PreviewComplaintInput,
+  period: { from: Date; toExclusive: Date },
+  candidates: SourceDetailClassificationCandidate[],
+  activeIds: Set<string>
+): PreviewEvaluation {
+  if (!inPeriod(complaint, period.from, period.toExclusive)) {
+    return { kind: "OUTSIDE_PERIOD" };
+  }
+  if (complaint.classificationId) {
+    return { kind: "ALREADY_CLASSIFIED" };
+  }
+  if (
+    isManuallyProtectedUnclassified({
+      classificationId: complaint.classificationId,
+      classificationAssignmentSource: complaint.classificationAssignmentSource,
+    }) ||
+    complaint.classificationAssignmentSource != null
+  ) {
+    return { kind: "MANUALLY_PROTECTED" };
+  }
+
+  const sourceDetail = complaint.sourceDetail?.trim();
+  if (!sourceDetail) {
+    return { kind: "MISSING_SOURCE_DETAIL" };
+  }
+
+  const resolution = resolveSourceDetailClassification({
+    sourceDetail,
+    classifications: candidates,
+  });
+
+  if (resolution.status === "AMBIGUOUS") {
+    return { kind: "AMBIGUOUS" };
+  }
+  if (resolution.status === "UNMATCHED" || resolution.status === "NO_SOURCE_DETAIL") {
+    return resolution.status === "NO_SOURCE_DETAIL"
+      ? { kind: "MISSING_SOURCE_DETAIL" }
+      : { kind: "UNMATCHED" };
+  }
+  if (resolution.status !== "MATCHED") {
+    return { kind: "UNMATCHED" };
+  }
+  if (!activeIds.has(resolution.match.classificationId)) {
+    return { kind: "INACTIVE_CLASSIFICATION" };
+  }
+  return { kind: "ELIGIBLE", sourceDetail, match: resolution.match };
+}
+
+function bumpPreviewCounter(totals: PreviewCounters, kind: PreviewEvaluation["kind"]): void {
+  switch (kind) {
+    case "OUTSIDE_PERIOD":
+      totals.outsidePeriodCount += 1;
+      break;
+    case "ALREADY_CLASSIFIED":
+      totals.alreadyClassifiedCount += 1;
+      break;
+    case "MANUALLY_PROTECTED":
+      totals.manuallyProtectedCount += 1;
+      break;
+    case "MISSING_SOURCE_DETAIL":
+      totals.missingSourceDetailCount += 1;
+      break;
+    case "AMBIGUOUS":
+      totals.ambiguousCount += 1;
+      break;
+    case "UNMATCHED":
+      totals.unmatchedCount += 1;
+      break;
+    case "INACTIVE_CLASSIFICATION":
+      totals.inactiveTargetCount += 1;
+      break;
+    case "ELIGIBLE":
+      totals.eligibleCount += 1;
+      break;
+  }
+}
+
+function updatePreviewDistribution(
+  distribution: Map<string, ClassificationDistributionEntry>,
+  match: {
+    classificationId: string;
+    classificationName: string;
+    categoryId: string;
+    categoryName: string;
+  }
+): void {
+  const existing = distribution.get(match.classificationId);
+  if (existing) {
+    existing.eligibleCount += 1;
+    return;
+  }
+  distribution.set(match.classificationId, {
+    classificationId: match.classificationId,
+    classificationName: match.classificationName,
+    categoryId: match.categoryId,
+    categoryName: match.categoryName,
+    eligibleCount: 1,
+  });
+}
+
 export async function previewHistoricalClassificationBackfill(
   db: BackfillDb,
   input: {
@@ -466,81 +602,27 @@ export async function previewHistoricalClassificationBackfill(
   const rows: ManifestRow[] = [];
 
   for (const complaint of complaints) {
-    if (!inPeriod(complaint, period.from, period.toExclusive)) {
-      totals.outsidePeriodCount += 1;
+    const evaluation = evaluatePreviewComplaint(
+      complaint,
+      { from: period.from, toExclusive: period.toExclusive },
+      candidates,
+      activeIds
+    );
+    bumpPreviewCounter(totals, evaluation.kind);
+    if (evaluation.kind !== "ELIGIBLE") {
       continue;
     }
-    if (complaint.classificationId) {
-      totals.alreadyClassifiedCount += 1;
-      continue;
-    }
-    if (
-      isManuallyProtectedUnclassified({
-        classificationId: complaint.classificationId,
-        classificationAssignmentSource: complaint.classificationAssignmentSource,
-      })
-    ) {
-      totals.manuallyProtectedCount += 1;
-      continue;
-    }
-    if (complaint.classificationAssignmentSource != null) {
-      // Non-null source without classificationId that isn't MANUAL — treat as protected from automation
-      totals.manuallyProtectedCount += 1;
-      continue;
-    }
-
-    const sourceDetail = complaint.sourceDetail?.trim();
-    if (!sourceDetail) {
-      totals.missingSourceDetailCount += 1;
-      continue;
-    }
-
-    const resolution = resolveSourceDetailClassification({
-      sourceDetail,
-      classifications: candidates,
-    });
-
-    if (resolution.status === "AMBIGUOUS") {
-      totals.ambiguousCount += 1;
-      continue;
-    }
-    if (resolution.status === "UNMATCHED" || resolution.status === "NO_SOURCE_DETAIL") {
-      if (resolution.status === "NO_SOURCE_DETAIL") totals.missingSourceDetailCount += 1;
-      else totals.unmatchedCount += 1;
-      continue;
-    }
-    if (resolution.status !== "MATCHED") {
-      totals.unmatchedCount += 1;
-      continue;
-    }
-    if (!activeIds.has(resolution.match.classificationId)) {
-      totals.inactiveTargetCount += 1;
-      continue;
-    }
-
-    totals.eligibleCount += 1;
-    const existing = distribution.get(resolution.match.classificationId);
-    if (existing) existing.eligibleCount += 1;
-    else {
-      distribution.set(resolution.match.classificationId, {
-        classificationId: resolution.match.classificationId,
-        classificationName: resolution.match.classificationName,
-        categoryId: resolution.match.categoryId,
-        categoryName: resolution.match.categoryName,
-        eligibleCount: 1,
-      });
-    }
-
+    updatePreviewDistribution(distribution, evaluation.match);
     rows.push({
       complaintId: complaint.id,
       expectedVersion: complaint.version,
       previousClassificationId: null,
       previousCategoryId: complaint.categoryId,
       previousAssignmentSource: null,
-      targetClassificationId: resolution.match.classificationId,
-      targetCategoryId: resolution.match.categoryId,
-      targetClassificationName: resolution.match.classificationName,
-      sourceDetailHash: hashSourceDetailValue(sourceDetail),
+      targetClassificationId: evaluation.match.classificationId,
+      targetCategoryId: evaluation.match.categoryId,
+      targetClassificationName: evaluation.match.classificationName,
+      sourceDetailHash: hashSourceDetailValue(evaluation.sourceDetail),
       matchCode: "MATCHED",
     });
   }
@@ -725,6 +807,127 @@ function sanitizeFailureMessage(error: unknown): string {
   return "UNEXPECTED_ERROR";
 }
 
+
+type ApplyItemDecision =
+  | { action: "SKIP"; reason: string }
+  | { action: "APPLY"; targetCategoryId: string };
+
+async function markBackfillItemSkipped(
+  tx: Prisma.TransactionClient,
+  itemId: string,
+  reason: string
+): Promise<void> {
+  await tx.classificationBackfillItem.update({
+    where: { id: itemId },
+    data: {
+      result: BACKFILL_ITEM_RESULTS.SKIPPED,
+      skipReason: reason,
+    },
+  });
+}
+
+function resolveResolutionSkipReason(status: string): string {
+  if (status === "AMBIGUOUS") return BACKFILL_SKIP_REASONS.AMBIGUOUS;
+  if (status === "UNMATCHED") return BACKFILL_SKIP_REASONS.UNMATCHED;
+  return BACKFILL_SKIP_REASONS.TARGET_CHANGED;
+}
+
+function evaluateApplyItem(input: {
+  complaint:
+    | {
+        id: string;
+        version: number;
+        isDeleted: boolean;
+        classificationId: string | null;
+        classificationAssignmentSource: string | null;
+        sourceDetail: string | null;
+      }
+    | null;
+  item: {
+    expectedVersion: number;
+    sourceDetailHash: string;
+    targetClassificationId: string;
+    targetCategoryId: string | null;
+  };
+  activeIds: Set<string>;
+  candidates: SourceDetailClassificationCandidate[];
+}): ApplyItemDecision {
+  const { complaint, item, activeIds, candidates } = input;
+  if (!complaint || complaint.isDeleted) {
+    return { action: "SKIP", reason: BACKFILL_SKIP_REASONS.DELETED_AFTER_PREVIEW };
+  }
+  if (complaint.classificationId != null) {
+    return { action: "SKIP", reason: BACKFILL_SKIP_REASONS.ALREADY_CLASSIFIED };
+  }
+  if (
+    isManuallyProtectedUnclassified({
+      classificationId: complaint.classificationId,
+      classificationAssignmentSource: complaint.classificationAssignmentSource,
+    }) ||
+    complaint.classificationAssignmentSource != null
+  ) {
+    return { action: "SKIP", reason: BACKFILL_SKIP_REASONS.MANUALLY_PROTECTED };
+  }
+  if (complaint.version !== item.expectedVersion) {
+    return { action: "SKIP", reason: BACKFILL_SKIP_REASONS.VERSION_CHANGED };
+  }
+  const sourceDetail = complaint.sourceDetail?.trim();
+  if (!sourceDetail) {
+    return { action: "SKIP", reason: BACKFILL_SKIP_REASONS.MISSING_SOURCE_DETAIL };
+  }
+  if (hashSourceDetailValue(sourceDetail) !== item.sourceDetailHash) {
+    return { action: "SKIP", reason: BACKFILL_SKIP_REASONS.SOURCE_DETAIL_CHANGED };
+  }
+  if (!activeIds.has(item.targetClassificationId)) {
+    return { action: "SKIP", reason: BACKFILL_SKIP_REASONS.INACTIVE_CLASSIFICATION };
+  }
+  const resolution = resolveSourceDetailClassification({
+    sourceDetail,
+    classifications: candidates,
+  });
+  if (
+    resolution.status !== "MATCHED" ||
+    resolution.match.classificationId !== item.targetClassificationId
+  ) {
+    return {
+      action: "SKIP",
+      reason: resolveResolutionSkipReason(resolution.status),
+    };
+  }
+  const targetCategoryId = item.targetCategoryId ?? resolution.match.categoryId;
+  if (
+    !targetCategoryId ||
+    resolution.match.categoryId !== targetCategoryId ||
+    (item.targetCategoryId != null && item.targetCategoryId !== resolution.match.categoryId)
+  ) {
+    return { action: "SKIP", reason: BACKFILL_SKIP_REASONS.CATEGORY_CLASSIFICATION_MISMATCH };
+  }
+  return { action: "APPLY", targetCategoryId };
+}
+
+function resolveApplyRunStatus(input: {
+  halted: boolean;
+  failedDb: number;
+  plannedDb: number;
+  appliedDb: number;
+}): BackfillRunStatus {
+  if (input.halted || input.failedDb > 0 || input.plannedDb > 0) {
+    if (input.appliedDb > 0) return BACKFILL_RUN_STATUSES.PARTIALLY_APPLIED;
+    return BACKFILL_RUN_STATUSES.FAILED;
+  }
+  return BACKFILL_RUN_STATUSES.APPLIED;
+}
+
+function resolveApplyAuditAction(status: BackfillRunStatus): string {
+  if (status === BACKFILL_RUN_STATUSES.APPLIED) {
+    return "CLASSIFICATION_HISTORICAL_BACKFILL_APPLIED";
+  }
+  if (status === BACKFILL_RUN_STATUSES.PARTIALLY_APPLIED) {
+    return "CLASSIFICATION_HISTORICAL_BACKFILL_PARTIALLY_APPLIED";
+  }
+  return "CLASSIFICATION_HISTORICAL_BACKFILL_FAILED";
+}
+
 export async function applyHistoricalClassificationBackfill(
   db: BackfillDb,
   input: {
@@ -790,7 +993,7 @@ export async function applyHistoricalClassificationBackfill(
   let runId = input.resumeRunId;
   if (runId) {
     const run = await db.classificationBackfillRun.findUnique({ where: { id: runId } });
-    if (!run || run.manifestHash !== manifest.manifestHash) {
+    if (run?.manifestHash !== manifest.manifestHash) {
       throw new HistoricalBackfillError(
         BACKFILL_ERROR_CODES.BACKFILL_RUN_NOT_FOUND,
         "تشغيل الاستكمال غير موجود أو لا يطابق الـmanifest"
@@ -893,134 +1096,14 @@ export async function applyHistoricalClassificationBackfill(
             },
           });
 
-          if (!complaint || complaint.isDeleted) {
-            await tx.classificationBackfillItem.update({
-              where: { id: item.id },
-              data: {
-                result: BACKFILL_ITEM_RESULTS.SKIPPED,
-                skipReason: BACKFILL_SKIP_REASONS.DELETED_AFTER_PREVIEW,
-              },
-            });
-            skippedCount += 1;
-            continue;
-          }
-
-          if (complaint.classificationId != null) {
-            await tx.classificationBackfillItem.update({
-              where: { id: item.id },
-              data: {
-                result: BACKFILL_ITEM_RESULTS.SKIPPED,
-                skipReason: BACKFILL_SKIP_REASONS.ALREADY_CLASSIFIED,
-              },
-            });
-            skippedCount += 1;
-            continue;
-          }
-
-          if (
-            isManuallyProtectedUnclassified({
-              classificationId: complaint.classificationId,
-              classificationAssignmentSource: complaint.classificationAssignmentSource,
-            }) ||
-            complaint.classificationAssignmentSource != null
-          ) {
-            await tx.classificationBackfillItem.update({
-              where: { id: item.id },
-              data: {
-                result: BACKFILL_ITEM_RESULTS.SKIPPED,
-                skipReason: BACKFILL_SKIP_REASONS.MANUALLY_PROTECTED,
-              },
-            });
-            skippedCount += 1;
-            continue;
-          }
-
-          if (complaint.version !== item.expectedVersion) {
-            await tx.classificationBackfillItem.update({
-              where: { id: item.id },
-              data: {
-                result: BACKFILL_ITEM_RESULTS.SKIPPED,
-                skipReason: BACKFILL_SKIP_REASONS.VERSION_CHANGED,
-              },
-            });
-            skippedCount += 1;
-            continue;
-          }
-
-          const sourceDetail = complaint.sourceDetail?.trim();
-          if (!sourceDetail) {
-            await tx.classificationBackfillItem.update({
-              where: { id: item.id },
-              data: {
-                result: BACKFILL_ITEM_RESULTS.SKIPPED,
-                skipReason: BACKFILL_SKIP_REASONS.MISSING_SOURCE_DETAIL,
-              },
-            });
-            skippedCount += 1;
-            continue;
-          }
-
-          if (hashSourceDetailValue(sourceDetail) !== item.sourceDetailHash) {
-            await tx.classificationBackfillItem.update({
-              where: { id: item.id },
-              data: {
-                result: BACKFILL_ITEM_RESULTS.SKIPPED,
-                skipReason: BACKFILL_SKIP_REASONS.SOURCE_DETAIL_CHANGED,
-              },
-            });
-            skippedCount += 1;
-            continue;
-          }
-
-          if (!activeIds.has(item.targetClassificationId)) {
-            await tx.classificationBackfillItem.update({
-              where: { id: item.id },
-              data: {
-                result: BACKFILL_ITEM_RESULTS.SKIPPED,
-                skipReason: BACKFILL_SKIP_REASONS.INACTIVE_CLASSIFICATION,
-              },
-            });
-            skippedCount += 1;
-            continue;
-          }
-
-          const resolution = resolveSourceDetailClassification({
-            sourceDetail,
-            classifications: candidates,
+          const decision = evaluateApplyItem({
+            complaint,
+            item,
+            activeIds,
+            candidates,
           });
-          if (
-            resolution.status !== "MATCHED" ||
-            resolution.match.classificationId !== item.targetClassificationId
-          ) {
-            await tx.classificationBackfillItem.update({
-              where: { id: item.id },
-              data: {
-                result: BACKFILL_ITEM_RESULTS.SKIPPED,
-                skipReason:
-                  resolution.status === "AMBIGUOUS"
-                    ? BACKFILL_SKIP_REASONS.AMBIGUOUS
-                    : resolution.status === "UNMATCHED"
-                      ? BACKFILL_SKIP_REASONS.UNMATCHED
-                      : BACKFILL_SKIP_REASONS.TARGET_CHANGED,
-              },
-            });
-            skippedCount += 1;
-            continue;
-          }
-
-          const targetCategoryId = item.targetCategoryId ?? resolution.match.categoryId;
-          if (
-            !targetCategoryId ||
-            resolution.match.categoryId !== targetCategoryId ||
-            (item.targetCategoryId != null && item.targetCategoryId !== resolution.match.categoryId)
-          ) {
-            await tx.classificationBackfillItem.update({
-              where: { id: item.id },
-              data: {
-                result: BACKFILL_ITEM_RESULTS.SKIPPED,
-                skipReason: BACKFILL_SKIP_REASONS.CATEGORY_CLASSIFICATION_MISMATCH,
-              },
-            });
+          if (decision.action === "SKIP") {
+            await markBackfillItemSkipped(tx, item.id, decision.reason);
             skippedCount += 1;
             continue;
           }
@@ -1034,7 +1117,7 @@ export async function applyHistoricalClassificationBackfill(
 
           const updateResult = await tx.complaint.updateMany({
             where: {
-              id: complaint.id,
+              id: complaint!.id,
               version: item.expectedVersion,
               isDeleted: false,
               classificationId: null,
@@ -1042,20 +1125,14 @@ export async function applyHistoricalClassificationBackfill(
             },
             data: {
               classificationId: item.targetClassificationId,
-              categoryId: targetCategoryId,
+              categoryId: decision.targetCategoryId,
               ...assignment,
               version: { increment: 1 },
             },
           });
 
           if (updateResult.count !== 1) {
-            await tx.classificationBackfillItem.update({
-              where: { id: item.id },
-              data: {
-                result: BACKFILL_ITEM_RESULTS.SKIPPED,
-                skipReason: BACKFILL_SKIP_REASONS.VERSION_CHANGED,
-              },
-            });
+            await markBackfillItemSkipped(tx, item.id, BACKFILL_SKIP_REASONS.VERSION_CHANGED);
             skippedCount += 1;
             continue;
           }
@@ -1113,15 +1190,12 @@ export async function applyHistoricalClassificationBackfill(
   skippedCount = skippedDb;
   failedCount = failedDb;
 
-  let status: BackfillRunStatus = BACKFILL_RUN_STATUSES.APPLIED;
-  if (halted || failedDb > 0 || plannedDb > 0) {
-    status =
-      appliedDb > 0
-        ? BACKFILL_RUN_STATUSES.PARTIALLY_APPLIED
-        : BACKFILL_RUN_STATUSES.FAILED;
-  } else if (appliedDb === 0 && skippedDb > 0 && manifest.rows.length > 0) {
-    status = BACKFILL_RUN_STATUSES.APPLIED;
-  }
+  const status = resolveApplyRunStatus({
+    halted,
+    failedDb,
+    plannedDb,
+    appliedDb,
+  });
 
   const completedAt = new Date();
   await db.classificationBackfillRun.update({
@@ -1137,12 +1211,7 @@ export async function applyHistoricalClassificationBackfill(
     },
   });
 
-  const auditAction =
-    status === BACKFILL_RUN_STATUSES.APPLIED
-      ? "CLASSIFICATION_HISTORICAL_BACKFILL_APPLIED"
-      : status === BACKFILL_RUN_STATUSES.PARTIALLY_APPLIED
-        ? "CLASSIFICATION_HISTORICAL_BACKFILL_PARTIALLY_APPLIED"
-        : "CLASSIFICATION_HISTORICAL_BACKFILL_FAILED";
+  const auditAction = resolveApplyAuditAction(status);
 
   await writeAuditLog(db, {
     action: auditAction,
@@ -1197,32 +1266,34 @@ export async function verifyHistoricalClassificationBackfill(
     );
   }
 
-  const invariants: VerifyResult["invariants"] = [];
   const items = await db.classificationBackfillItem.findMany({ where: { runId: run.id } });
   const appliedItems = items.filter((i) => i.result === BACKFILL_ITEM_RESULTS.APPLIED);
   const skippedItems = items.filter((i) => i.result === BACKFILL_ITEM_RESULTS.SKIPPED);
   const failedItems = items.filter((i) => i.result === BACKFILL_ITEM_RESULTS.FAILED);
 
-  invariants.push({
-    code: "PLANNED_COUNT",
-    ok: items.length === run.plannedCount,
-    detail: `${items.length}/${run.plannedCount}`,
-  });
-  invariants.push({
-    code: "APPLIED_COUNT",
-    ok: appliedItems.length === run.appliedCount,
-    detail: `${appliedItems.length}/${run.appliedCount}`,
-  });
-  invariants.push({
-    code: "SKIPPED_COUNT",
-    ok: skippedItems.length === run.skippedCount,
-    detail: `${skippedItems.length}/${run.skippedCount}`,
-  });
-  invariants.push({
-    code: "FAILED_COUNT",
-    ok: failedItems.length === run.failedCount,
-    detail: `${failedItems.length}/${run.failedCount}`,
-  });
+  const countInvariants: VerifyResult["invariants"] = [
+    {
+      code: "PLANNED_COUNT",
+      ok: items.length === run.plannedCount,
+      detail: `${items.length}/${run.plannedCount}`,
+    },
+    {
+      code: "APPLIED_COUNT",
+      ok: appliedItems.length === run.appliedCount,
+      detail: `${appliedItems.length}/${run.appliedCount}`,
+    },
+    {
+      code: "SKIPPED_COUNT",
+      ok: skippedItems.length === run.skippedCount,
+      detail: `${skippedItems.length}/${run.skippedCount}`,
+    },
+    {
+      code: "FAILED_COUNT",
+      ok: failedItems.length === run.failedCount,
+      detail: `${failedItems.length}/${run.failedCount}`,
+    },
+  ];
+  const invariants: VerifyResult["invariants"] = [...countInvariants];
 
   let appliedOk = true;
   for (const batch of chunks(appliedItems, DEFAULT_BATCH_SIZE)) {
@@ -1272,21 +1343,14 @@ export async function verifyHistoricalClassificationBackfill(
   }
   invariants.push({ code: "APPLIED_ITEMS_MATCH_COMPLAINTS", ok: appliedOk });
 
-  const orphanComplaints =
-    appliedItems.length === 0
-      ? await db.complaint.count({
-          where: {
-            classificationAssignmentRunId: run.id,
-            classificationAssignmentSource: CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL,
-          },
-        })
-      : await db.complaint.count({
-          where: {
-            classificationAssignmentRunId: run.id,
-            classificationAssignmentSource: CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL,
-            id: { notIn: appliedItems.map((i) => i.complaintId) },
-          },
-        });
+  const orphanWhere: Prisma.ComplaintWhereInput = {
+    classificationAssignmentRunId: run.id,
+    classificationAssignmentSource: CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL,
+  };
+  if (appliedItems.length > 0) {
+    orphanWhere.id = { notIn: appliedItems.map((i) => i.complaintId) };
+  }
+  const orphanComplaints = await db.complaint.count({ where: orphanWhere });
   invariants.push({
     code: "NO_ORPHAN_COMPLAINTS",
     ok: orphanComplaints === 0,
@@ -1351,6 +1415,71 @@ export async function verifyHistoricalClassificationBackfill(
     remainingUnclassifiedInPeriod,
     taxonomyNote,
   };
+}
+
+
+type RollbackItemDecision =
+  | { action: "SKIP"; reason: string }
+  | { action: "ROLLBACK" };
+
+async function markRollbackItemSkipped(
+  tx: Prisma.TransactionClient,
+  itemId: string,
+  reason: string
+): Promise<void> {
+  await tx.classificationBackfillItem.update({
+    where: { id: itemId },
+    data: {
+      result: BACKFILL_ITEM_RESULTS.ROLLBACK_SKIPPED,
+      skipReason: reason,
+      rolledBackAt: new Date(),
+    },
+  });
+}
+
+function evaluateRollbackItem(input: {
+  complaint:
+    | {
+        id: string;
+        version: number;
+        isDeleted: boolean;
+        classificationId: string | null;
+        classificationAssignmentSource: string | null;
+        classificationAssignmentRunId: string | null;
+      }
+    | null;
+  item: {
+    targetClassificationId: string;
+    appliedVersion: number | null;
+  };
+  originalRunId: string;
+}): RollbackItemDecision {
+  const { complaint, item, originalRunId } = input;
+  if (!complaint || complaint.isDeleted) {
+    return { action: "SKIP", reason: BACKFILL_SKIP_REASONS.ROLLBACK_SKIPPED_DELETED };
+  }
+  if (complaint.classificationAssignmentSource === CLASSIFICATION_ASSIGNMENT_SOURCES.MANUAL) {
+    return { action: "SKIP", reason: BACKFILL_SKIP_REASONS.ROLLBACK_SKIPPED_MANUAL_CHANGE };
+  }
+  if (
+    complaint.classificationId !== item.targetClassificationId ||
+    complaint.classificationAssignmentSource !==
+      CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL ||
+    complaint.classificationAssignmentRunId !== originalRunId
+  ) {
+    return { action: "SKIP", reason: BACKFILL_SKIP_REASONS.ROLLBACK_SKIPPED_CLASSIFICATION_CHANGED };
+  }
+  if (item.appliedVersion != null && complaint.version !== item.appliedVersion) {
+    return { action: "SKIP", reason: BACKFILL_SKIP_REASONS.ROLLBACK_SKIPPED_VERSION_CHANGED };
+  }
+  return { action: "ROLLBACK" };
+}
+
+function resolveRollbackStatus(rolledBackCount: number, skippedCount: number): BackfillRunStatus {
+  if (skippedCount > 0) {
+    return BACKFILL_RUN_STATUSES.PARTIALLY_ROLLED_BACK;
+  }
+  return BACKFILL_RUN_STATUSES.ROLLED_BACK;
 }
 
 export async function rollbackHistoricalClassificationBackfill(
@@ -1431,69 +1560,21 @@ export async function rollbackHistoricalClassificationBackfill(
           },
         });
 
-        if (!complaint || complaint.isDeleted) {
-          await tx.classificationBackfillItem.update({
-            where: { id: item.id },
-            data: {
-              result: BACKFILL_ITEM_RESULTS.ROLLBACK_SKIPPED,
-              skipReason: BACKFILL_SKIP_REASONS.ROLLBACK_SKIPPED_DELETED,
-              rolledBackAt: new Date(),
-            },
-          });
-          skippedCount += 1;
-          continue;
-        }
-
-        if (
-          complaint.classificationAssignmentSource === CLASSIFICATION_ASSIGNMENT_SOURCES.MANUAL
-        ) {
-          await tx.classificationBackfillItem.update({
-            where: { id: item.id },
-            data: {
-              result: BACKFILL_ITEM_RESULTS.ROLLBACK_SKIPPED,
-              skipReason: BACKFILL_SKIP_REASONS.ROLLBACK_SKIPPED_MANUAL_CHANGE,
-              rolledBackAt: new Date(),
-            },
-          });
-          skippedCount += 1;
-          continue;
-        }
-
-        if (
-          complaint.classificationId !== item.targetClassificationId ||
-          complaint.classificationAssignmentSource !==
-            CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL ||
-          complaint.classificationAssignmentRunId !== original.id
-        ) {
-          await tx.classificationBackfillItem.update({
-            where: { id: item.id },
-            data: {
-              result: BACKFILL_ITEM_RESULTS.ROLLBACK_SKIPPED,
-              skipReason: BACKFILL_SKIP_REASONS.ROLLBACK_SKIPPED_CLASSIFICATION_CHANGED,
-              rolledBackAt: new Date(),
-            },
-          });
-          skippedCount += 1;
-          continue;
-        }
-
-        if (item.appliedVersion != null && complaint.version !== item.appliedVersion) {
-          await tx.classificationBackfillItem.update({
-            where: { id: item.id },
-            data: {
-              result: BACKFILL_ITEM_RESULTS.ROLLBACK_SKIPPED,
-              skipReason: BACKFILL_SKIP_REASONS.ROLLBACK_SKIPPED_VERSION_CHANGED,
-              rolledBackAt: new Date(),
-            },
-          });
+        const decision = evaluateRollbackItem({
+          complaint,
+          item,
+          originalRunId: original.id,
+        });
+        if (decision.action === "SKIP") {
+          await markRollbackItemSkipped(tx, item.id, decision.reason);
           skippedCount += 1;
           continue;
         }
 
         const updateResult = await tx.complaint.updateMany({
           where: {
-            id: complaint.id,
-            version: item.appliedVersion ?? complaint.version,
+            id: complaint!.id,
+            version: item.appliedVersion ?? complaint!.version,
             isDeleted: false,
             classificationId: item.targetClassificationId,
             classificationAssignmentSource: CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL,
@@ -1512,14 +1593,11 @@ export async function rollbackHistoricalClassificationBackfill(
         });
 
         if (updateResult.count !== 1) {
-          await tx.classificationBackfillItem.update({
-            where: { id: item.id },
-            data: {
-              result: BACKFILL_ITEM_RESULTS.ROLLBACK_SKIPPED,
-              skipReason: BACKFILL_SKIP_REASONS.ROLLBACK_SKIPPED_VERSION_CHANGED,
-              rolledBackAt: new Date(),
-            },
-          });
+          await markRollbackItemSkipped(
+            tx,
+            item.id,
+            BACKFILL_SKIP_REASONS.ROLLBACK_SKIPPED_VERSION_CHANGED
+          );
           skippedCount += 1;
           continue;
         }
@@ -1537,12 +1615,7 @@ export async function rollbackHistoricalClassificationBackfill(
     });
   }
 
-  const status: BackfillRunStatus =
-    skippedCount > 0 && rolledBackCount > 0
-      ? BACKFILL_RUN_STATUSES.PARTIALLY_ROLLED_BACK
-      : skippedCount > 0 && rolledBackCount === 0
-        ? BACKFILL_RUN_STATUSES.PARTIALLY_ROLLED_BACK
-        : BACKFILL_RUN_STATUSES.ROLLED_BACK;
+  const status = resolveRollbackStatus(rolledBackCount, skippedCount);
 
   await db.classificationBackfillRun.update({
     where: { id: rollbackRun.id },
@@ -1557,10 +1630,7 @@ export async function rollbackHistoricalClassificationBackfill(
   await db.classificationBackfillRun.update({
     where: { id: original.id },
     data: {
-      status:
-        status === BACKFILL_RUN_STATUSES.ROLLED_BACK
-          ? BACKFILL_RUN_STATUSES.ROLLED_BACK
-          : BACKFILL_RUN_STATUSES.PARTIALLY_ROLLED_BACK,
+      status,
     },
   });
 
