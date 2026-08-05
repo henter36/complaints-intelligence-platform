@@ -5,11 +5,15 @@ import {
   parseComplaintQuery,
 } from "@/server/complaints/complaint-query-service";
 import {
+  buildFreshness,
   formatInstantInRiyadh,
   normalizeActionTakenKey,
   resolveFreshnessBucket,
 } from "@/server/analytics/operational/operational-analytics-service";
-import { OPERATIONAL_UNSPECIFIED } from "@/server/analytics/operational/operational-analytics-types";
+import {
+  DATA_FRESHNESS_BUCKETS,
+  OPERATIONAL_UNSPECIFIED,
+} from "@/server/analytics/operational/operational-analytics-types";
 import {
   detectOperationalTextPatterns,
   iterTextSignalSources,
@@ -22,6 +26,83 @@ import { resolve } from "node:path";
 function q(query: string) {
   return new URLSearchParams(query);
 }
+
+const FRESHNESS_NOW = new Date("2026-08-05T12:00:00.000Z");
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function ago(ms: number): Date {
+  return new Date(FRESHNESS_NOW.getTime() - ms);
+}
+
+/** Fixed fixture covering all required freshness cases for object-parity checks. */
+function createFreshnessFixtureRows() {
+  return [
+    { sourceUpdatedAt: null, sourceModifiedAt: null },
+    { sourceUpdatedAt: ago(12 * 60 * 60 * 1000), sourceModifiedAt: ago(13 * 60 * 60 * 1000) },
+    { sourceUpdatedAt: ago(DAY_MS), sourceModifiedAt: ago(DAY_MS + 60 * 60 * 1000) },
+    { sourceUpdatedAt: ago(2 * DAY_MS), sourceModifiedAt: ago(2 * DAY_MS - 2 * 60 * 60 * 1000) },
+    { sourceUpdatedAt: ago(3 * DAY_MS), sourceModifiedAt: ago(4 * DAY_MS) },
+    { sourceUpdatedAt: ago(5 * DAY_MS), sourceModifiedAt: ago(6 * DAY_MS) },
+    { sourceUpdatedAt: ago(7 * DAY_MS), sourceModifiedAt: ago(8 * DAY_MS) },
+    { sourceUpdatedAt: ago(10 * DAY_MS), sourceModifiedAt: ago(11 * DAY_MS) },
+    { sourceUpdatedAt: ago(4 * DAY_MS), sourceModifiedAt: ago(4 * DAY_MS - 3 * 60 * 60 * 1000) },
+    { sourceUpdatedAt: ago(6 * DAY_MS), sourceModifiedAt: ago(6 * DAY_MS + 5 * 60 * 60 * 1000) },
+    { sourceUpdatedAt: null, sourceModifiedAt: ago(DAY_MS) },
+    { sourceUpdatedAt: ago(20 * DAY_MS), sourceModifiedAt: ago(21 * DAY_MS) },
+    { sourceUpdatedAt: ago(1 * 60 * 60 * 1000), sourceModifiedAt: ago(2 * 60 * 60 * 1000) },
+  ];
+}
+
+const FRESHNESS_REFERENCE = {
+  lastSourceUpdatedAt: "2026-08-05T11:00:00.000Z",
+  lastSourceUpdatedAtRiyadh: formatInstantInRiyadh(new Date("2026-08-05T11:00:00.000Z")),
+  oldestSourceUpdatedAt: "2026-07-16T12:00:00.000Z",
+  oldestSourceUpdatedAtRiyadh: formatInstantInRiyadh(new Date("2026-07-16T12:00:00.000Z")),
+  averageAgeDays: 5.3,
+  freshShare: 15.4,
+  staleShare: 69.2,
+  buckets: [
+    {
+      bucket: "fresh_1d" as const,
+      label: "خلال يوم",
+      count: 2,
+      percentage: 15.4,
+      drillDownFilters: { dataFreshnessBucket: "fresh_1d" },
+    },
+    {
+      bucket: "stale_1_3d" as const,
+      label: "1–3 أيام",
+      count: 2,
+      percentage: 15.4,
+      drillDownFilters: { dataFreshnessBucket: "stale_1_3d" },
+    },
+    {
+      bucket: "stale_3_7d" as const,
+      label: "3–7 أيام",
+      count: 4,
+      percentage: 30.8,
+      drillDownFilters: { dataFreshnessBucket: "stale_3_7d" },
+    },
+    {
+      bucket: "stale_7d_plus" as const,
+      label: "أكثر من 7 أيام",
+      count: 3,
+      percentage: 23.1,
+      drillDownFilters: { dataFreshnessBucket: "stale_7d_plus" },
+    },
+    {
+      bucket: "missing" as const,
+      label: "بلا تاريخ تحديث",
+      count: 2,
+      percentage: 15.4,
+      drillDownFilters: { dataFreshnessBucket: "missing" },
+    },
+  ],
+  missingUpdatedAt: 2,
+  missingModifiedAt: 1,
+  modifiedBeforeUpdated: 2,
+  updatedVsModifiedDiffHoursAvg: 11.2,
+};
 
 describe("operational field semantic separation", () => {
   it("keeps sourceOrigin independent from channel", () => {
@@ -81,20 +162,17 @@ describe("operational field semantic separation", () => {
 });
 
 describe("freshness buckets and Riyadh display", () => {
-  const now = new Date("2026-08-05T12:00:00.000Z");
+  const now = FRESHNESS_NOW;
 
   it("classifies freshness buckets at boundaries", () => {
     expect(resolveFreshnessBucket(null, now)).toBe("missing");
     expect(resolveFreshnessBucket(new Date(now.getTime() - 12 * 60 * 60 * 1000), now)).toBe("fresh_1d");
-    expect(resolveFreshnessBucket(new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000), now)).toBe(
-      "stale_1_3d"
-    );
-    expect(resolveFreshnessBucket(new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000), now)).toBe(
-      "stale_3_7d"
-    );
-    expect(resolveFreshnessBucket(new Date(now.getTime() - 10 * 24 * 60 * 60 * 1000), now)).toBe(
-      "stale_7d_plus"
-    );
+    expect(resolveFreshnessBucket(new Date(now.getTime() - DAY_MS), now)).toBe("stale_1_3d");
+    expect(resolveFreshnessBucket(new Date(now.getTime() - 2 * DAY_MS), now)).toBe("stale_1_3d");
+    expect(resolveFreshnessBucket(new Date(now.getTime() - 3 * DAY_MS), now)).toBe("stale_3_7d");
+    expect(resolveFreshnessBucket(new Date(now.getTime() - 5 * DAY_MS), now)).toBe("stale_3_7d");
+    expect(resolveFreshnessBucket(new Date(now.getTime() - 7 * DAY_MS), now)).toBe("stale_7d_plus");
+    expect(resolveFreshnessBucket(new Date(now.getTime() - 10 * DAY_MS), now)).toBe("stale_7d_plus");
   });
 
   it("formats display timestamps in Asia/Riyadh without mutating storage", () => {
@@ -106,6 +184,46 @@ describe("freshness buckets and Riyadh display", () => {
 
   it("normalizes actionTaken keys without writing a permanent dictionary", () => {
     expect(normalizeActionTakenKey("  تم  الإجراء  ")).toBe("تم الإجراء");
+  });
+
+  it("matches the frozen freshness reference object exactly after refactor", () => {
+    const rows = createFreshnessFixtureRows();
+    const inputSnapshots = rows.map((row) => ({
+      sourceUpdatedAt: row.sourceUpdatedAt?.toISOString() ?? null,
+      sourceModifiedAt: row.sourceModifiedAt?.toISOString() ?? null,
+    }));
+
+    const actual = buildFreshness(rows, FRESHNESS_NOW);
+
+    expect(actual).toEqual(FRESHNESS_REFERENCE);
+    expect(DATA_FRESHNESS_BUCKETS).toEqual([
+      "fresh_1d",
+      "stale_1_3d",
+      "stale_3_7d",
+      "stale_7d_plus",
+      "missing",
+    ]);
+    expect(actual.buckets.map((bucket) => bucket.bucket)).toEqual([...DATA_FRESHNESS_BUCKETS]);
+    expect(actual.missingUpdatedAt).toBe(2);
+    expect(actual.missingModifiedAt).toBe(1);
+    expect(actual.modifiedBeforeUpdated).toBe(2);
+    expect(actual.averageAgeDays).toBe(5.3);
+    expect(actual.updatedVsModifiedDiffHoursAvg).toBe(11.2);
+    expect(actual.lastSourceUpdatedAt).toBe("2026-08-05T11:00:00.000Z");
+    expect(actual.oldestSourceUpdatedAt).toBe("2026-07-16T12:00:00.000Z");
+    expect(actual.lastSourceUpdatedAtRiyadh).toBe(
+      formatInstantInRiyadh(new Date("2026-08-05T11:00:00.000Z"))
+    );
+    expect(actual.oldestSourceUpdatedAtRiyadh).toBe(
+      formatInstantInRiyadh(new Date("2026-07-16T12:00:00.000Z"))
+    );
+
+    expect(
+      rows.map((row) => ({
+        sourceUpdatedAt: row.sourceUpdatedAt?.toISOString() ?? null,
+        sourceModifiedAt: row.sourceModifiedAt?.toISOString() ?? null,
+      }))
+    ).toEqual(inputSnapshots);
   });
 });
 

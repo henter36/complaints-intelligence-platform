@@ -299,61 +299,149 @@ function buildWingMetrics(rows: SlimOperationalRow[], now: Date, total: number):
   };
 }
 
-function buildFreshness(rows: SlimOperationalRow[], now: Date): DataFreshnessMetrics {
-  const bucketCounts = Object.fromEntries(DATA_FRESHNESS_BUCKETS.map((b) => [b, 0])) as Record<
-    DataFreshnessBucket,
-    number
-  >;
-  let ageSum = 0;
-  let ageN = 0;
-  let missingUpdatedAt = 0;
-  let missingModifiedAt = 0;
-  let modifiedAfterUpdated = 0;
-  let diffSum = 0;
-  let diffN = 0;
-  let last: Date | null = null;
-  let oldest: Date | null = null;
+type FreshnessRow = {
+  sourceUpdatedAt: Date | null;
+  sourceModifiedAt: Date | null;
+};
+
+type FreshnessAccumulator = {
+  bucketCounts: Record<DataFreshnessBucket, number>;
+  ageDaysSum: number;
+  ageCount: number;
+  missingUpdatedAt: number;
+  missingModifiedAt: number;
+  modifiedAfterUpdated: number;
+  diffHoursSum: number;
+  diffCount: number;
+  latestUpdatedAt: Date | null;
+  oldestUpdatedAt: Date | null;
+};
+
+function createFreshnessAccumulator(): FreshnessAccumulator {
+  return {
+    bucketCounts: Object.fromEntries(DATA_FRESHNESS_BUCKETS.map((bucket) => [bucket, 0])) as Record<
+      DataFreshnessBucket,
+      number
+    >,
+    ageDaysSum: 0,
+    ageCount: 0,
+    missingUpdatedAt: 0,
+    missingModifiedAt: 0,
+    modifiedAfterUpdated: 0,
+    diffHoursSum: 0,
+    diffCount: 0,
+    latestUpdatedAt: null,
+    oldestUpdatedAt: null,
+  };
+}
+
+function updateUpdatedAtBounds(accumulator: FreshnessAccumulator, value: Date): void {
+  if (accumulator.latestUpdatedAt === null || value > accumulator.latestUpdatedAt) {
+    accumulator.latestUpdatedAt = value;
+  }
+  if (accumulator.oldestUpdatedAt === null || value < accumulator.oldestUpdatedAt) {
+    accumulator.oldestUpdatedAt = value;
+  }
+}
+
+function accumulateSourceUpdatedAt(
+  accumulator: FreshnessAccumulator,
+  sourceUpdatedAt: Date | null,
+  now: Date
+): void {
+  accumulator.bucketCounts[resolveFreshnessBucket(sourceUpdatedAt, now)] += 1;
+  if (sourceUpdatedAt === null) {
+    accumulator.missingUpdatedAt += 1;
+    return;
+  }
+  accumulator.ageDaysSum += (now.getTime() - sourceUpdatedAt.getTime()) / DAY_MS;
+  accumulator.ageCount += 1;
+  updateUpdatedAtBounds(accumulator, sourceUpdatedAt);
+}
+
+function accumulateSourceModification(
+  accumulator: FreshnessAccumulator,
+  sourceUpdatedAt: Date | null,
+  sourceModifiedAt: Date | null
+): void {
+  if (sourceModifiedAt === null) {
+    accumulator.missingModifiedAt += 1;
+    return;
+  }
+  if (sourceUpdatedAt === null) {
+    return;
+  }
+  accumulator.diffHoursSum +=
+    (sourceUpdatedAt.getTime() - sourceModifiedAt.getTime()) / (60 * 60 * 1000);
+  accumulator.diffCount += 1;
+  if (sourceModifiedAt > sourceUpdatedAt) {
+    accumulator.modifiedAfterUpdated += 1;
+  }
+}
+
+function accumulateFreshnessRow(
+  accumulator: FreshnessAccumulator,
+  row: FreshnessRow,
+  now: Date
+): void {
+  accumulateSourceUpdatedAt(accumulator, row.sourceUpdatedAt, now);
+  accumulateSourceModification(accumulator, row.sourceUpdatedAt, row.sourceModifiedAt);
+}
+
+function roundToOneDecimal(value: number): number {
+  return Math.round(value * 10) / 10;
+}
+
+function averageOrNull(sum: number, count: number): number | null {
+  if (count <= 0) return null;
+  return roundToOneDecimal(sum / count);
+}
+
+function calculateStaleCount(bucketCounts: Record<DataFreshnessBucket, number>): number {
+  return bucketCounts.stale_1_3d + bucketCounts.stale_3_7d + bucketCounts.stale_7d_plus;
+}
+
+function buildFreshnessBuckets(
+  bucketCounts: Record<DataFreshnessBucket, number>,
+  total: number
+): DataFreshnessMetrics["buckets"] {
+  return DATA_FRESHNESS_BUCKETS.map((bucket) => ({
+    bucket,
+    label: FRESHNESS_BUCKET_LABELS[bucket],
+    count: bucketCounts[bucket],
+    percentage: pct(bucketCounts[bucket], total),
+    drillDownFilters: { dataFreshnessBucket: bucket },
+  }));
+}
+
+function buildFreshnessMetrics(
+  accumulator: FreshnessAccumulator,
+  total: number
+): DataFreshnessMetrics {
+  return {
+    lastSourceUpdatedAt: accumulator.latestUpdatedAt?.toISOString() ?? null,
+    lastSourceUpdatedAtRiyadh: formatInstantInRiyadh(accumulator.latestUpdatedAt),
+    oldestSourceUpdatedAt: accumulator.oldestUpdatedAt?.toISOString() ?? null,
+    oldestSourceUpdatedAtRiyadh: formatInstantInRiyadh(accumulator.oldestUpdatedAt),
+    averageAgeDays: averageOrNull(accumulator.ageDaysSum, accumulator.ageCount),
+    freshShare: pct(accumulator.bucketCounts.fresh_1d, total),
+    staleShare: pct(calculateStaleCount(accumulator.bucketCounts), total),
+    buckets: buildFreshnessBuckets(accumulator.bucketCounts, total),
+    missingUpdatedAt: accumulator.missingUpdatedAt,
+    missingModifiedAt: accumulator.missingModifiedAt,
+    modifiedBeforeUpdated: accumulator.modifiedAfterUpdated,
+    updatedVsModifiedDiffHoursAvg: averageOrNull(accumulator.diffHoursSum, accumulator.diffCount),
+  };
+}
+
+export function buildFreshness(rows: FreshnessRow[], now: Date): DataFreshnessMetrics {
+  const accumulator = createFreshnessAccumulator();
 
   for (const row of rows) {
-    bucketCounts[resolveFreshnessBucket(row.sourceUpdatedAt, now)] += 1;
-    if (!row.sourceUpdatedAt) missingUpdatedAt += 1;
-    else {
-      ageSum += (now.getTime() - row.sourceUpdatedAt.getTime()) / DAY_MS;
-      ageN += 1;
-      if (!last || row.sourceUpdatedAt.getTime() > last.getTime()) last = row.sourceUpdatedAt;
-      if (!oldest || row.sourceUpdatedAt.getTime() < oldest.getTime()) oldest = row.sourceUpdatedAt;
-    }
-    if (!row.sourceModifiedAt) missingModifiedAt += 1;
-    if (row.sourceUpdatedAt && row.sourceModifiedAt) {
-      diffSum += (row.sourceUpdatedAt.getTime() - row.sourceModifiedAt.getTime()) / (60 * 60 * 1000);
-      diffN += 1;
-      if (row.sourceModifiedAt > row.sourceUpdatedAt) modifiedAfterUpdated += 1;
-    }
+    accumulateFreshnessRow(accumulator, row, now);
   }
 
-  const total = rows.length;
-  const staleCount = bucketCounts.stale_1_3d + bucketCounts.stale_3_7d + bucketCounts.stale_7d_plus;
-
-  return {
-    lastSourceUpdatedAt: last?.toISOString() ?? null,
-    lastSourceUpdatedAtRiyadh: formatInstantInRiyadh(last),
-    oldestSourceUpdatedAt: oldest?.toISOString() ?? null,
-    oldestSourceUpdatedAtRiyadh: formatInstantInRiyadh(oldest),
-    averageAgeDays: ageN > 0 ? Math.round((ageSum / ageN) * 10) / 10 : null,
-    freshShare: pct(bucketCounts.fresh_1d, total),
-    staleShare: pct(staleCount, total),
-    buckets: DATA_FRESHNESS_BUCKETS.map((bucket) => ({
-      bucket,
-      label: FRESHNESS_BUCKET_LABELS[bucket],
-      count: bucketCounts[bucket],
-      percentage: pct(bucketCounts[bucket], total),
-      drillDownFilters: { dataFreshnessBucket: bucket },
-    })),
-    missingUpdatedAt,
-    missingModifiedAt,
-    modifiedBeforeUpdated: modifiedAfterUpdated,
-    updatedVsModifiedDiffHoursAvg: diffN > 0 ? Math.round((diffSum / diffN) * 10) / 10 : null,
-  };
+  return buildFreshnessMetrics(accumulator, rows.length);
 }
 
 function buildDataQuality(rows: SlimOperationalRow[], total: number): OperationalDataQualitySignal[] {
