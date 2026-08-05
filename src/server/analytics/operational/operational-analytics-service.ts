@@ -320,8 +320,8 @@ function buildFreshness(rows: SlimOperationalRow[], now: Date): DataFreshnessMet
     else {
       ageSum += (now.getTime() - row.sourceUpdatedAt.getTime()) / DAY_MS;
       ageN += 1;
-      last = !last || row.sourceUpdatedAt > last ? row.sourceUpdatedAt : last;
-      oldest = !oldest || row.sourceUpdatedAt < oldest ? row.sourceUpdatedAt : oldest;
+      if (!last || row.sourceUpdatedAt.getTime() > last.getTime()) last = row.sourceUpdatedAt;
+      if (!oldest || row.sourceUpdatedAt.getTime() < oldest.getTime()) oldest = row.sourceUpdatedAt;
     }
     if (!row.sourceModifiedAt) missingModifiedAt += 1;
     if (row.sourceUpdatedAt && row.sourceModifiedAt) {
