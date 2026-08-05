@@ -387,6 +387,6 @@ describe("ensureProposedClassifications planning", () => {
     const before = ctx.plan.classificationsToReactivate.length;
     ctx.classificationReuseByKey.set("STAFF_CONDUCT", "react1");
     ensureProposedClassifications(ctx);
-    expect(ctx.plan.classificationsToReactivate.length).toBe(before);
+    expect(ctx.plan.classificationsToReactivate).toHaveLength(before);
   });
 });
