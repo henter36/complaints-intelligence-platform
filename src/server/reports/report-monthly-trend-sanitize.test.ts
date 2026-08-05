@@ -59,11 +59,6 @@ describe("sanitizeMonthlyTrendForReport", () => {
   });
 
   it("trims to last maxMonths without creating pads", () => {
-    const points = Array.from({ length: 15 }, (_, i) => {
-      const month = ((i % 12) + 1).toString().padStart(2, "0");
-      const year = 2025 + Math.floor(i / 12);
-      return point(`${year}-${month}`);
-    });
     // ensure valid chain ending at 2026-03
     const keyed = [
       point("2025-01"),
@@ -86,7 +81,6 @@ describe("sanitizeMonthlyTrendForReport", () => {
     expect(sanitized).toHaveLength(13);
     expect(sanitized[0].monthKey).toBe("2025-03");
     expect(sanitized.at(-1)?.monthKey).toBe("2026-03");
-    void points;
   });
 });
 

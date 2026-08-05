@@ -47,6 +47,7 @@ describe("applyOperationalImportSemantics", () => {
     });
 
     expect(result.row.closedAt?.toISOString()).toBe(sourceUpdatedAt.toISOString());
+    expect(result.row.closedAt).toBe(result.row.sourceUpdatedAt);
     expect(result.row.sourceUpdatedAt?.toISOString()).toBe(sourceUpdatedAt.toISOString());
     expect(result.derived).toEqual(
       expect.arrayContaining([

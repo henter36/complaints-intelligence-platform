@@ -11,6 +11,9 @@ import {
   formatTableValue,
   fitTextToBox,
   measurePreparedArabicText,
+  resolveV2MonthlyChartAvailableHeight,
+  resolveV2MonthlyChartHeight,
+  resolveV2ConclusionsAvailableHeight,
 } from "./report-executive-brief-v2-pdf-service";
 import { preparePdfText } from "./arabic-pdf-text";
 import { REPORT_DESIGN_TOKENS } from "@/lib/reports/design-tokens";
@@ -412,6 +415,74 @@ describe("V2 monthly chart contract + KPI packing", () => {
     } finally {
       pngSpy.mockRestore();
     }
+  });
+
+  it("renders empty monthly chart series with emptyState when all values are zero", async () => {
+    const pngSpy = vi.spyOn(await import("./report-chart-service"), "renderLineChartPng");
+    pngSpy.mockResolvedValue(Buffer.from("png"));
+    try {
+      await renderExecutiveBriefV2Pdf(
+        makeV2Report({
+          briefData: makeV2Brief({
+            monthlyStockFlow: [
+              {
+                monthKey: "2025-11",
+                monthLabel: "نوفمبر 2025",
+                receivedCount: 0,
+                closedDuringMonthCount: 0,
+                openAtMonthEndCount: 0,
+                lateAtMonthEndCount: 0,
+              },
+              {
+                monthKey: "2025-12",
+                monthLabel: "ديسمبر 2025",
+                receivedCount: 0,
+                closedDuringMonthCount: 0,
+                openAtMonthEndCount: 0,
+                lateAtMonthEndCount: 0,
+              },
+            ],
+          }),
+        })
+      );
+      const call = pngSpy.mock.calls.find((c) => (c[0] as { id?: string }).id === "v2-monthly-flow");
+      expect(call).toBeTruthy();
+      const section = call![0] as { series: unknown[]; emptyState?: string };
+      expect(section.series).toEqual([]);
+      expect(section.emptyState).toBe("لا توجد بيانات للاتجاه الزمني.");
+    } finally {
+      pngSpy.mockRestore();
+    }
+  });
+
+  it("clamps monthly chart height to remaining page space", () => {
+    const tight = resolveV2MonthlyChartAvailableHeight(842, 42, 600);
+    expect(tight).toBeLessThan(320);
+    expect(resolveV2MonthlyChartHeight(tight)).toBe(tight);
+    expect(resolveV2MonthlyChartHeight(tight)).toBeLessThanOrEqual(tight);
+
+    const negativeSpace = resolveV2MonthlyChartAvailableHeight(842, 42, 900);
+    expect(negativeSpace).toBe(0);
+    expect(resolveV2MonthlyChartHeight(negativeSpace)).toBe(0);
+    expect(resolveV2MonthlyChartHeight(-40)).toBe(0);
+  });
+
+  it("keeps conclusions box within the footer reserve", () => {
+    const pageHeight = 842;
+    const margin = 42;
+    const y = 520;
+    const availableH = resolveV2ConclusionsAvailableHeight(pageHeight, margin, y);
+    expect(availableH).toBe(pageHeight - margin - 26 - y);
+    expect(availableH).not.toBe(pageHeight - margin * 2 - 26 - y);
+
+    const lineH = 22;
+    const boxHdrH = 30;
+    const conclusionsCount = 3;
+    const conclusionsBoxH = Math.max(
+      boxHdrH + lineH + 12,
+      Math.min(boxHdrH + 12 + Math.max(conclusionsCount, 1) * lineH, availableH)
+    );
+    expect(y + conclusionsBoxH).toBeLessThanOrEqual(pageHeight - margin - 26);
   });
 
   it("fits stress KPI values without throwing (0%, unavailable, large numbers)", async () => {

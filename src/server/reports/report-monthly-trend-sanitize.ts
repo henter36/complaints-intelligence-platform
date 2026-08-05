@@ -55,11 +55,18 @@ export function sanitizeMonthlyTrendForReport(
     byKey.set(point.monthKey, point);
   }
 
-  const sorted = [...byKey.values()].sort((a, b) =>
-    a.monthKey.localeCompare(b.monthKey)
-  );
+  const sorted = [...byKey.values()].sort(compareMonthKeys);
   if (sorted.length <= maxMonths) return sorted;
   return sorted.slice(sorted.length - maxMonths);
+}
+
+function compareMonthKeys(
+  a: MonthlyComplaintTrendPoint,
+  b: MonthlyComplaintTrendPoint
+): number {
+  if (a.monthKey < b.monthKey) return -1;
+  if (a.monthKey > b.monthKey) return 1;
+  return 0;
 }
 
 /**

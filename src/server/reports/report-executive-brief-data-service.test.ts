@@ -21,6 +21,7 @@ import {
   ARABIC_MONTH_NAMES,
 } from "./report-executive-brief-data-service";
 import { ComplaintStatus } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import type { ReportFilters } from "./report-definition-service";
 import type { ComparisonResult, DeptClassPeriodCount, PeriodRange } from "./report-comparison";
 import type { ComplaintKpiResult } from "@/server/complaints/complaint-kpi-service";
@@ -1853,8 +1854,13 @@ describe("isComplaintAffectingMonthlyTrend — candidate filter", () => {
   });
 
   it("primary where includes a lower time bound and non-date base filters", () => {
+    const departmentPredicate = { department: "d1" };
     const where = buildMonthlyTrendPrimaryWhere(
-      { isDeleted: false, region: "منطقة الرياض" },
+      {
+        isDeleted: false,
+        region: "منطقة الرياض",
+        AND: [departmentPredicate],
+      },
       windowFrom,
       windowToExclusive
     );
@@ -1862,10 +1868,24 @@ describe("isComplaintAffectingMonthlyTrend — candidate filter", () => {
       isDeleted: false,
       region: "منطقة الرياض",
     });
-    const serialized = JSON.stringify(where);
-    expect(serialized).toContain(windowFrom.toISOString());
-    expect(serialized).toContain(windowToExclusive.toISOString());
-    expect(serialized).toContain("closedAt");
+    expect(Array.isArray(where.AND)).toBe(true);
+    const andPredicates = where.AND as Prisma.ComplaintWhereInput[];
+    expect(andPredicates).toContainEqual(departmentPredicate);
+    expect(andPredicates).toContainEqual({
+      OR: [
+        { complaintDate: { lt: windowToExclusive } },
+        { complaintDate: null, receivedAt: { lt: windowToExclusive } },
+      ],
+    });
+    expect(andPredicates).toContainEqual({
+      OR: [
+        { complaintDate: { gte: windowFrom } },
+        { complaintDate: null, receivedAt: { gte: windowFrom } },
+        { closedAt: null },
+        { closedAt: { gte: windowFrom } },
+        { sourceUpdatedAt: { gte: windowFrom } },
+      ],
+    });
   });
 });
 

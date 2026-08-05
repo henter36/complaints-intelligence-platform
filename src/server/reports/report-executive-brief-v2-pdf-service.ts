@@ -89,6 +89,29 @@ function createV2Layout(regionCount: number): V2Layout {
   return { pageSize: [pw, pageH] as const, margin, contentWidth: pw - margin * 2 };
 }
 
+/** Remaining vertical space for the monthly chart (footer reserve 26 + gap 8). */
+export function resolveV2MonthlyChartAvailableHeight(
+  pageHeight: number,
+  margin: number,
+  y: number
+): number {
+  return Math.max(0, Math.floor(pageHeight - margin - 26 - y - 8));
+}
+
+/** Cap chart height without forcing a floor that can overflow the page. */
+export function resolveV2MonthlyChartHeight(availableForChart: number): number {
+  return Math.min(520, Math.max(0, availableForChart));
+}
+
+/** Remaining height for conclusions; y is absolute from page top so top margin is not subtracted again. */
+export function resolveV2ConclusionsAvailableHeight(
+  pageHeight: number,
+  margin: number,
+  y: number
+): number {
+  return pageHeight - margin - 26 - y;
+}
+
 type V2Context = {
   doc: PDFKit.PDFDocument;
   data: ReportData;
@@ -1030,46 +1053,65 @@ async function renderPage2(ctx: V2Context): Promise<void> {
   );
 
   // Use remaining page space for the chart (notes / methodology boxes removed).
-  const availableForChart = Math.floor(layout.pageSize[1] - layout.margin - 26 - y - 8);
-  const chartHeight = Math.min(
-    520,
-    Math.max(320, availableForChart)
+  const availableForChart = resolveV2MonthlyChartAvailableHeight(
+    layout.pageSize[1],
+    layout.margin,
+    y
   );
+  const chartHeight = resolveV2MonthlyChartHeight(availableForChart);
+  const minPracticalChartHeight = 80;
 
-  if (hasFlow) {
+  const monthlyChartSeries = [
+    {
+      name: "الواردة",
+      renderAs: "bar" as const,
+      points: flow.map((p) => ({ x: p.monthLabel, y: p.receivedCount })),
+    },
+    {
+      name: "المغلقة",
+      renderAs: "bar" as const,
+      points: flow.map((p) => ({ x: p.monthLabel, y: p.closedDuringMonthCount })),
+    },
+    {
+      name: "المفتوحة",
+      renderAs: "line" as const,
+      dash: "0",
+      points: flow.map((p) => ({ x: p.monthLabel, y: p.openAtMonthEndCount })),
+    },
+    {
+      name: "المتأخرة",
+      renderAs: "line" as const,
+      dash: "6,4",
+      points: flow.map((p) => ({ x: p.monthLabel, y: p.lateAtMonthEndCount })),
+    },
+  ];
+
+  if (chartHeight < minPracticalChartHeight) {
+    warnings.push("تعذر رسم مخطط الاتجاه الزمني ضمن المساحة المتبقية من الصفحة.");
+    if (chartHeight > 0) {
+      doc.font("Body").fontSize(11).fillColor(COLORS.neutral).text(
+        preparePdfText("لا توجد بيانات للاتجاه الزمني."),
+        margin,
+        y,
+        {
+          width: contentWidth,
+          height: chartHeight,
+          align: "center",
+          wordSpacing: WORD_SPACING,
+        }
+      );
+      resetInk(doc);
+    }
+  } else {
     try {
       // Single Y-axis combo chart — system total is intentionally excluded.
-      // Legend uses short series names; month-end meaning stays in the data.
-      const monthlyChartSeries = [
-        {
-          name: "الواردة",
-          renderAs: "bar" as const,
-          points: flow.map((p) => ({ x: p.monthLabel, y: p.receivedCount })),
-        },
-        {
-          name: "المغلقة",
-          renderAs: "bar" as const,
-          points: flow.map((p) => ({ x: p.monthLabel, y: p.closedDuringMonthCount })),
-        },
-        {
-          name: "المفتوحة",
-          renderAs: "line" as const,
-          dash: "0",
-          points: flow.map((p) => ({ x: p.monthLabel, y: p.openAtMonthEndCount })),
-        },
-        {
-          name: "المتأخرة",
-          renderAs: "line" as const,
-          dash: "6,4",
-          points: flow.map((p) => ({ x: p.monthLabel, y: p.lateAtMonthEndCount })),
-        },
-      ];
+      // Empty series triggers the chart emptyState when hasFlow is false.
       const png = await renderLineChartPng({
         id: "v2-monthly-flow",
         kind: "chart",
         chartType: "bar",
         title: "",
-        series: monthlyChartSeries,
+        series: hasFlow ? monthlyChartSeries : [],
         emptyState: "لا توجد بيانات للاتجاه الزمني.",
       }, Math.round(contentWidth), chartHeight);
       doc.image(png, margin, y, { width: contentWidth, height: chartHeight });
@@ -1077,6 +1119,7 @@ async function renderPage2(ctx: V2Context): Promise<void> {
       warnings.push(`تعذر رسم مخطط الاتجاه الزمني: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
+  y += chartHeight + 8;
 }
 
 // ── Page 3: Regions ───────────────────────────────────────────────────────────
@@ -1394,7 +1437,11 @@ function renderPage4(ctx: V2Context): void {
   const lineH = 22;
   const boxHdrH = 30;
   const conclusions = (brief.conclusions ?? []).slice(0, 5);
-  const availableH = layout.pageSize[1] - layout.margin * 2 - 26 - y;
+  const availableH = resolveV2ConclusionsAvailableHeight(
+    layout.pageSize[1],
+    layout.margin,
+    y
+  );
   const conclusionsBoxH = Math.max(
     boxHdrH + lineH + 12,
     Math.min(

@@ -496,6 +496,50 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
     expect(geo.plotTop).toBeGreaterThanOrEqual(0);
   });
 
+  it("resolveChartGeometry keeps a valid horizontal plot span", () => {
+    const cases: Array<{ width: number; hasDualAxis: boolean }> = [
+      { width: 800, hasDualAxis: false },
+      { width: 800, hasDualAxis: true },
+      { width: 120, hasDualAxis: false },
+      { width: 120, hasDualAxis: true },
+      { width: 1, hasDualAxis: false },
+      { width: 0, hasDualAxis: true },
+      { width: -40, hasDualAxis: false },
+      { width: Number.NaN, hasDualAxis: true },
+      { width: Number.POSITIVE_INFINITY, hasDualAxis: false },
+    ];
+    for (const options of cases) {
+      const geo = resolveChartGeometry({
+        ...options,
+        height: 360,
+        plotTop: 40,
+        xCount: 4,
+      });
+      expect(Number.isFinite(geo.plotLeft)).toBe(true);
+      expect(Number.isFinite(geo.plotRight)).toBe(true);
+      expect(geo.plotLeft).toBeGreaterThanOrEqual(0);
+      expect(geo.plotRight).toBeGreaterThan(geo.plotLeft);
+    }
+    const normalSingle = resolveChartGeometry({
+      width: 800,
+      height: 360,
+      hasDualAxis: false,
+      plotTop: 40,
+      xCount: 4,
+    });
+    expect(normalSingle.plotLeft).toBe(54);
+    expect(normalSingle.plotRight).toBe(724);
+    const normalDual = resolveChartGeometry({
+      width: 800,
+      height: 360,
+      hasDualAxis: true,
+      plotTop: 40,
+      xCount: 4,
+    });
+    expect(normalDual.plotLeft).toBe(76);
+    expect(normalDual.plotRight).toBe(724);
+  });
+
   it("buildChartSvg with short height and many series keeps valid plot geometry", () => {
     const series = Array.from({ length: 10 }, (_, i) => ({
       name: `سلسلة رقم ${i + 1} بوصف تشغيلي طويل للتحقق من المفتاح`,
@@ -538,15 +582,36 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
 
   it("legend reserved band sits above the plot floor", () => {
     const svg = buildChartSvg(monthlySection(), 800, 360);
-    // Legend text y should be small; plot bottom axis y near height - 36
-    const legendTextYs = [...svg.matchAll(/font-size="11"[^>]*y="([^"]+)"/g)]
-      .map((m) => parseFloat(m[1]))
-      .filter((y) => Number.isFinite(y));
-    const axisBottomMatches = [...svg.matchAll(/y2="(\d+(?:\.\d+)?)" stroke="#D8BE7A"/g)]
-      .map((m) => parseFloat(m[1]));
-    if (legendTextYs.length > 0 && axisBottomMatches.length > 0) {
-      expect(Math.max(...legendTextYs.slice(0, 4))).toBeLessThan(Math.min(...axisBottomMatches));
+    const escapeRegex = (value: string) =>
+      value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const legendNames = ["الواردة", "المغلقة", "المفتوحة", "المتأخرة"];
+    const legendTextYs: number[] = [];
+    for (const name of legendNames) {
+      const re = new RegExp(`<text([^>]*)>${escapeRegex(name)}</text>`, "g");
+      for (const match of svg.matchAll(re)) {
+        const attrs = match[1] ?? "";
+        const yMatch = /(?:^|\s)y="([^"]+)"/.exec(attrs);
+        const fontMatch = /(?:^|\s)font-size="([^"]+)"/.exec(attrs);
+        const y = yMatch ? parseFloat(yMatch[1]) : Number.NaN;
+        const fontSize = fontMatch ? parseFloat(fontMatch[1]) : Number.NaN;
+        expect(Number.isFinite(y)).toBe(true);
+        expect(fontSize).toBeGreaterThanOrEqual(8);
+        expect(fontSize).toBeLessThanOrEqual(11);
+        legendTextYs.push(y);
+      }
     }
+    const borderColorPattern = escapeRegex(REPORT_DESIGN_TOKENS.colors.border);
+    const axisFloorYs = [
+      ...svg.matchAll(
+        new RegExp(
+          `y1="(\\d+(?:\\.\\d+)?)"[^>]*y2="\\1" stroke="${borderColorPattern}"`,
+          "g"
+        )
+      ),
+    ].map((m) => parseFloat(m[1]));
+    expect(legendTextYs.length).toBeGreaterThan(0);
+    expect(axisFloorYs.length).toBeGreaterThan(0);
+    expect(Math.max(...legendTextYs)).toBeLessThan(Math.max(...axisFloorYs));
   });
 
   it("integer Y ticks only for small monthly peaks", () => {

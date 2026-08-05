@@ -85,7 +85,7 @@ function applyClosedAtRule(
     return;
   }
 
-  row.closedAt = new Date(lastUpdatedAt.getTime());
+  row.closedAt = lastUpdatedAt;
   derived.push({
     field: "closedAt",
     code: "CLOSED_AT_DERIVED_FROM_LAST_UPDATED_AT",

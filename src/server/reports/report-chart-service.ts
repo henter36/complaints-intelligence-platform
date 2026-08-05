@@ -130,9 +130,8 @@ function seriesStyle(
   return { color, dash, width: mark === "bar" ? 2 : base.width, mark };
 }
 
-/** Bars always solid; lines use series/preset dash (late = index 3 kept on preset). */
+/** Bars always solid; lines use series/preset dash (late kept on preset). */
 function resolveMonthlyTrendDash(
-  index: number,
   mark: "bar" | "line",
   series: ChartSeries,
   preset: SeriesStyle
@@ -140,16 +139,6 @@ function resolveMonthlyTrendDash(
   if (mark === "bar") return "0";
   if (series.dash) return series.dash;
   return preset.dash;
-}
-
-/** Late end-of-month line (index 3) force danger; otherwise keep preset color. */
-function resolveMonthlyTrendColor(
-  index: number,
-  mark: "bar" | "line",
-  preset: SeriesStyle
-): string {
-  if (mark === "line" && index === 3) return COLORS.danger;
-  return preset.color;
 }
 
 function monthlyTrendStyle(
@@ -165,8 +154,8 @@ function monthlyTrendStyle(
   return {
     ...preset,
     mark,
-    dash: resolveMonthlyTrendDash(index, mark, series, preset),
-    color: resolveMonthlyTrendColor(index, mark, preset),
+    dash: resolveMonthlyTrendDash(mark, series, preset),
+    color: preset.color,
   };
 }
 
@@ -757,9 +746,22 @@ export function resolveChartGeometry(options: {
   if (!Number.isFinite(safePlotTop) || safePlotTop >= safePlotBottom) {
     safePlotTop = Math.max(0, safePlotBottom - 1);
   }
+
+  const safeWidth = Number.isFinite(options.width) ? Math.max(1, options.width) : 1;
+  const requestedPlotLeft = options.hasDualAxis ? 76 : 54;
+  const requestedPlotRight = safeWidth - 76;
+  const safePlotLeft = Math.min(
+    Math.max(0, requestedPlotLeft),
+    Math.max(0, safeWidth - 1)
+  );
+  const safePlotRight = Math.max(
+    safePlotLeft + 1,
+    Math.min(safeWidth, requestedPlotRight)
+  );
+
   return {
-    plotLeft: options.hasDualAxis ? 76 : 54,
-    plotRight: options.width - 76,
+    plotLeft: safePlotLeft,
+    plotRight: safePlotRight,
     plotTop: safePlotTop,
     plotBottom: safePlotBottom,
     xCount: options.xCount,

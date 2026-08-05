@@ -882,33 +882,44 @@ export function dedupeTrendComplaintsById(
  * Intentionally broader than trustedClosedAt semantics: closedAt before creation
  * or lastUpdatedAt fallbacks may still need a secondary fetch / post-filter.
  */
+function normalizeWhereAnd(
+  value: Prisma.ComplaintWhereInput["AND"]
+): Prisma.ComplaintWhereInput[] {
+  if (!value) return [];
+  return Array.isArray(value) ? [...value] : [value];
+}
+
 export function buildMonthlyTrendPrimaryWhere(
   baseWhere: Prisma.ComplaintWhereInput,
   windowFrom: Date,
   windowToExclusive: Date
 ): Prisma.ComplaintWhereInput {
+  const { AND: existingAnd, ...baseWithoutAnd } = baseWhere;
+  const creationUpperBoundPredicate: Prisma.ComplaintWhereInput = {
+    OR: [
+      { complaintDate: { lt: windowToExclusive } },
+      { complaintDate: null, receivedAt: { lt: windowToExclusive } },
+    ],
+  };
+  const affectingWindowPredicate: Prisma.ComplaintWhereInput = {
+    OR: [
+      // Created inside the history window → can contribute receivedCount.
+      { complaintDate: { gte: windowFrom } },
+      { complaintDate: null, receivedAt: { gte: windowFrom } },
+      // No closedAt → may be open stock or closed via lastUpdatedAt.
+      { closedAt: null },
+      // closedAt on/after window start → may close during a chart month.
+      { closedAt: { gte: windowFrom } },
+      // last-update fallback may close during the window when closedAt is absent/untrusted.
+      { sourceUpdatedAt: { gte: windowFrom } },
+    ],
+  };
   return {
-    ...baseWhere,
+    ...baseWithoutAnd,
     AND: [
-      {
-        OR: [
-          { complaintDate: { lt: windowToExclusive } },
-          { complaintDate: null, receivedAt: { lt: windowToExclusive } },
-        ],
-      },
-      {
-        OR: [
-          // Created inside the history window → can contribute receivedCount.
-          { complaintDate: { gte: windowFrom } },
-          { complaintDate: null, receivedAt: { gte: windowFrom } },
-          // No closedAt → may be open stock or closed via lastUpdatedAt.
-          { closedAt: null },
-          // closedAt on/after window start → may close during a chart month.
-          { closedAt: { gte: windowFrom } },
-          // last-update fallback may close during the window when closedAt is absent/untrusted.
-          { sourceUpdatedAt: { gte: windowFrom } },
-        ],
-      },
+      ...normalizeWhereAnd(existingAnd),
+      creationUpperBoundPredicate,
+      affectingWindowPredicate,
     ],
   };
 }
