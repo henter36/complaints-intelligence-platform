@@ -19,6 +19,11 @@ const baseFilters: FilterState = {
   severity: "MEDIUM",
   from: "2026-07-01",
   to: "2026-07-31",
+  sourceOrigin: "الجهاز الرئيسي",
+  sourceStatus: "مغلقة",
+  sourceActionStatus: "جديد",
+  wingCode: "3",
+  dataFreshnessBucket: "fresh_1d",
   isLate: true,
   isRepeated: true,
   isValidated: true,
@@ -65,6 +70,10 @@ describe("complaints explorer helpers", () => {
 
     expect(listQuery.toString()).toBe(exportQuery.toString());
     expect(exportQuery.get("status")).toBe("OPEN");
+    expect(exportQuery.get("sourceOrigin")).toBe("الجهاز الرئيسي");
+    expect(exportQuery.get("sourceStatus")).toBe("مغلقة");
+    expect(exportQuery.get("wingCode")).toBe("3");
+    expect(exportQuery.get("channel")).toBe("الهاتف");
     expect(exportQuery.get("sortBy")).toBe("receivedDate");
     expect(exportQuery.get("sortOrder")).toBe("desc");
     expect(exportQuery.get("aiAnalyzed")).toBe("true");

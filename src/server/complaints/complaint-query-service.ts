@@ -80,6 +80,22 @@ const querySchema = z.object({
   dueTo: dateSchema,
   closedFrom: dateSchema,
   closedTo: dateSchema,
+  sourceOrigin: optionalText,
+  sourceStatus: optionalText,
+  sourceActionStatus: optionalText,
+  wingCode: optionalText,
+  sourceUpdatedFrom: dateSchema,
+  sourceUpdatedTo: dateSchema,
+  sourceModifiedFrom: dateSchema,
+  sourceModifiedTo: dateSchema,
+  hasActionTaken: booleanSchema,
+  hasActionDescription: booleanSchema,
+  hasResolution: booleanSchema,
+  hasClosedAt: booleanSchema,
+  hasSourceModifiedAt: booleanSchema,
+  dataFreshnessBucket: z
+    .enum(["fresh_1d", "stale_1_3d", "stale_3_7d", "stale_7d_plus", "missing"])
+    .optional(),
   isLate: booleanSchema,
   isOpen: booleanSchema,
   isClosed: booleanSchema,
@@ -232,6 +248,13 @@ export function parseComplaintQuery(params: URLSearchParams): ComplaintQuery {
   validateRange(parsed.data.from, parsed.data.to, "from", "to");
   validateRange(parsed.data.dueFrom, parsed.data.dueTo, "dueFrom", "dueTo");
   validateRange(parsed.data.closedFrom, parsed.data.closedTo, "closedFrom", "closedTo");
+  validateRange(parsed.data.sourceUpdatedFrom, parsed.data.sourceUpdatedTo, "sourceUpdatedFrom", "sourceUpdatedTo");
+  validateRange(
+    parsed.data.sourceModifiedFrom,
+    parsed.data.sourceModifiedTo,
+    "sourceModifiedFrom",
+    "sourceModifiedTo"
+  );
   return parsed.data;
 }
 
@@ -272,6 +295,7 @@ export function buildComplaintWhere(query: ComplaintQuery, now = new Date()): Pr
   applyIdentityFilters(where, query);
   applyScalarFilters(where, query);
   applyDateFilters(where, query);
+  applyOperationalScalarFilters(where, query, now);
   applyTextSearch(where, query.search);
   applyBooleanFilters(where, query, now);
   return where;
@@ -307,6 +331,92 @@ function applyDateFilters(where: Prisma.ComplaintWhereInput, query: ComplaintQue
   if (closedAt) where.closedAt = closedAt;
 }
 
+const OPERATIONAL_UNSPECIFIED = "__UNSPECIFIED__";
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+function applyOperationalScalarFilters(
+  where: Prisma.ComplaintWhereInput,
+  query: ComplaintQuery,
+  now: Date
+): void {
+  applyCategoricalOrUnspecified(where, "sourceOrigin", query.sourceOrigin);
+  applyCategoricalOrUnspecified(where, "sourceStatus", query.sourceStatus);
+  applyCategoricalOrUnspecified(where, "sourceActionStatus", query.sourceActionStatus);
+  applyCategoricalOrUnspecified(where, "wingCode", query.wingCode);
+
+  const sourceUpdated = dateRange(query.sourceUpdatedFrom, query.sourceUpdatedTo);
+  if (sourceUpdated) where.sourceUpdatedAt = sourceUpdated;
+  const sourceModified = dateRange(query.sourceModifiedFrom, query.sourceModifiedTo);
+  if (sourceModified) where.sourceModifiedAt = sourceModified;
+
+  if (query.hasActionTaken === true) {
+    addAnd(where, { AND: [{ actionTaken: { not: null } }, { NOT: { actionTaken: "" } }] });
+  }
+  if (query.hasActionTaken === false) {
+    addAnd(where, { OR: [{ actionTaken: null }, { actionTaken: "" }] });
+  }
+  if (query.hasActionDescription === true) {
+    addAnd(where, { AND: [{ actionDescription: { not: null } }, { NOT: { actionDescription: "" } }] });
+  }
+  if (query.hasActionDescription === false) {
+    addAnd(where, { OR: [{ actionDescription: null }, { actionDescription: "" }] });
+  }
+  if (query.hasResolution === true) {
+    addAnd(where, { AND: [{ resolution: { not: null } }, { NOT: { resolution: "" } }] });
+  }
+  if (query.hasResolution === false) {
+    addAnd(where, { OR: [{ resolution: null }, { resolution: "" }] });
+  }
+  if (query.hasClosedAt === true) addAnd(where, { closedAt: { not: null } });
+  if (query.hasClosedAt === false) addAnd(where, { closedAt: null });
+  if (query.hasSourceModifiedAt === true) addAnd(where, { sourceModifiedAt: { not: null } });
+  if (query.hasSourceModifiedAt === false) addAnd(where, { sourceModifiedAt: null });
+
+  if (query.dataFreshnessBucket) {
+    addAnd(where, freshnessBucketWhere(query.dataFreshnessBucket, now));
+  }
+}
+
+function applyCategoricalOrUnspecified(
+  where: Prisma.ComplaintWhereInput,
+  field: "sourceOrigin" | "sourceStatus" | "sourceActionStatus" | "wingCode",
+  value: string | undefined
+): void {
+  if (!value) return;
+  if (value === OPERATIONAL_UNSPECIFIED) {
+    addAnd(where, { OR: [{ [field]: null }, { [field]: "" }] });
+    return;
+  }
+  where[field] = value;
+}
+
+function freshnessBucketWhere(
+  bucket: NonNullable<ComplaintQuery["dataFreshnessBucket"]>,
+  now: Date
+): Prisma.ComplaintWhereInput {
+  if (bucket === "missing") return { sourceUpdatedAt: null };
+  if (bucket === "fresh_1d") {
+    return { sourceUpdatedAt: { gte: new Date(now.getTime() - DAY_MS), lt: now } };
+  }
+  if (bucket === "stale_1_3d") {
+    return {
+      sourceUpdatedAt: {
+        gte: new Date(now.getTime() - 3 * DAY_MS),
+        lt: new Date(now.getTime() - DAY_MS),
+      },
+    };
+  }
+  if (bucket === "stale_3_7d") {
+    return {
+      sourceUpdatedAt: {
+        gte: new Date(now.getTime() - 7 * DAY_MS),
+        lt: new Date(now.getTime() - 3 * DAY_MS),
+      },
+    };
+  }
+  return { sourceUpdatedAt: { lt: new Date(now.getTime() - 7 * DAY_MS) } };
+}
+
 function applyTextSearch(where: Prisma.ComplaintWhereInput, search?: string): void {
   if (!search) return;
   addAnd(where, {
@@ -315,6 +425,8 @@ function applyTextSearch(where: Prisma.ComplaintWhereInput, search?: string): vo
       { sourceReference: { contains: search } },
       { subject: { contains: search } },
       { description: { contains: search } },
+      { actionDescription: { contains: search } },
+      { sourceDetail: { contains: search } },
     ],
   });
 }

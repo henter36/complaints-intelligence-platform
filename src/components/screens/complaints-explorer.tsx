@@ -90,6 +90,11 @@ interface FiltersResponse {
   locations: { id: string; name: string }[];
   classifications: ClassificationOption[];
   channels: string[];
+  sourceOrigins?: { id: string; name: string }[];
+  sourceStatuses?: { id: string; name: string }[];
+  sourceActionStatuses?: { id: string; name: string }[];
+  wingCodes?: { id: string; name: string }[];
+  dataFreshnessBuckets?: { id: string; name: string }[];
 }
 
 interface Complaint {
@@ -163,6 +168,11 @@ export interface FilterState {
   severity: string;
   from: string;
   to: string;
+  sourceOrigin: string;
+  sourceStatus: string;
+  sourceActionStatus: string;
+  wingCode: string;
+  dataFreshnessBucket: string;
   isLate: boolean;
   isRepeated: boolean;
   isValidated: boolean;
@@ -181,6 +191,11 @@ const DEFAULT_FILTERS: FilterState = {
   severity: "",
   from: "",
   to: "",
+  sourceOrigin: "",
+  sourceStatus: "",
+  sourceActionStatus: "",
+  wingCode: "",
+  dataFreshnessBucket: "",
   isLate: false,
   isRepeated: false,
   isValidated: false,
@@ -306,6 +321,11 @@ function initialFilterState(): FilterState {
     severity: params.get("severity") ?? "",
     from: params.get("from") ?? "",
     to: params.get("to") ?? "",
+    sourceOrigin: params.get("sourceOrigin") ?? "",
+    sourceStatus: params.get("sourceStatus") ?? "",
+    sourceActionStatus: params.get("sourceActionStatus") ?? "",
+    wingCode: params.get("wingCode") ?? "",
+    dataFreshnessBucket: params.get("dataFreshnessBucket") ?? "",
     isLate: params.get("isLate") === "true",
     isRepeated: params.get("isRepeated") === "true",
     isValidated: params.get("isValidated") === "true",
@@ -354,6 +374,11 @@ export function buildComplaintQuery(
   if (filters.severity) params.set("severity", filters.severity);
   if (filters.from) params.set("from", filters.from);
   if (filters.to) params.set("to", filters.to);
+  if (filters.sourceOrigin) params.set("sourceOrigin", filters.sourceOrigin);
+  if (filters.sourceStatus) params.set("sourceStatus", filters.sourceStatus);
+  if (filters.sourceActionStatus) params.set("sourceActionStatus", filters.sourceActionStatus);
+  if (filters.wingCode) params.set("wingCode", filters.wingCode);
+  if (filters.dataFreshnessBucket) params.set("dataFreshnessBucket", filters.dataFreshnessBucket);
   if (filters.isLate) params.set("isLate", "true");
   if (filters.isRepeated) params.set("isRepeated", "true");
   if (filters.isValidated) params.set("isValidated", "true");
@@ -609,6 +634,11 @@ export function ComplaintsExplorer() {
     if (appliedFilters.severity) count++;
     if (appliedFilters.from) count++;
     if (appliedFilters.to) count++;
+    if (appliedFilters.sourceOrigin) count++;
+    if (appliedFilters.sourceStatus) count++;
+    if (appliedFilters.sourceActionStatus) count++;
+    if (appliedFilters.wingCode) count++;
+    if (appliedFilters.dataFreshnessBucket) count++;
     if (appliedFilters.isLate) count++;
     if (appliedFilters.isRepeated) count++;
     if (appliedFilters.isValidated) count++;
@@ -925,6 +955,86 @@ export function ComplaintsExplorer() {
                         <SelectItem key={ch} value={ch}>
                           {ch}
                         </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">مصدر الورود</Label>
+                  <Select
+                    value={filters.sourceOrigin || "all"}
+                    onValueChange={(v) =>
+                      setFilters((f) => ({ ...f, sourceOrigin: v === "all" ? "" : v }))
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="كل المصادر" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">كل المصادر</SelectItem>
+                      {(filterOptions?.sourceOrigins ?? []).map((opt) => (
+                        <SelectItem key={opt.id} value={opt.id}>{opt.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">الحالة المصدرية</Label>
+                  <Select
+                    value={filters.sourceStatus || "all"}
+                    onValueChange={(v) =>
+                      setFilters((f) => ({ ...f, sourceStatus: v === "all" ? "" : v }))
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="كل الحالات المصدرية" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">كل الحالات المصدرية</SelectItem>
+                      {(filterOptions?.sourceStatuses ?? []).map((opt) => (
+                        <SelectItem key={opt.id} value={opt.id}>{opt.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">حالة الإجراء المصدرية</Label>
+                  <Select
+                    value={filters.sourceActionStatus || "all"}
+                    onValueChange={(v) =>
+                      setFilters((f) => ({ ...f, sourceActionStatus: v === "all" ? "" : v }))
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="كل حالات الإجراء" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">كل حالات الإجراء</SelectItem>
+                      {(filterOptions?.sourceActionStatuses ?? []).map((opt) => (
+                        <SelectItem key={opt.id} value={opt.id}>{opt.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">الجناح</Label>
+                  <Select
+                    value={filters.wingCode || "all"}
+                    onValueChange={(v) =>
+                      setFilters((f) => ({ ...f, wingCode: v === "all" ? "" : v }))
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="كل الأجنحة" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">كل الأجنحة</SelectItem>
+                      {(filterOptions?.wingCodes ?? []).slice(0, 100).map((opt) => (
+                        <SelectItem key={opt.id} value={opt.id}>{opt.name}</SelectItem>
                       ))}
                     </SelectContent>
                   </Select>

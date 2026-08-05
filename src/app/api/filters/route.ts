@@ -12,7 +12,7 @@ const compareArabicLabels = (left: string, right: string): number => left.locale
 export async function GET(req: NextRequest) {
   try {
     await requireAdminApiSession(req);
-    const [regionRows, departmentRows, facilityRows, categories, channels] = await Promise.all([
+    const [regionRows, departmentRows, facilityRows, categories, channels, sourceOrigins, sourceStatuses, sourceActionStatuses, wingCodes] = await Promise.all([
       db.complaint.findMany({
         where: { isDeleted: false, region: { not: null } },
         select: { region: true },
@@ -43,7 +43,29 @@ export async function GET(req: NextRequest) {
         select: { channel: true },
         distinct: ["channel"],
       }),
+      db.complaint.findMany({
+        where: { isDeleted: false, sourceOrigin: { not: null } },
+        select: { sourceOrigin: true },
+        distinct: ["sourceOrigin"],
+      }),
+      db.complaint.findMany({
+        where: { isDeleted: false, sourceStatus: { not: null } },
+        select: { sourceStatus: true },
+        distinct: ["sourceStatus"],
+      }),
+      db.complaint.findMany({
+        where: { isDeleted: false, sourceActionStatus: { not: null } },
+        select: { sourceActionStatus: true },
+        distinct: ["sourceActionStatus"],
+      }),
+      db.complaint.findMany({
+        where: { isDeleted: false, wingCode: { not: null } },
+        select: { wingCode: true },
+        distinct: ["wingCode"],
+      }),
     ]);
+
+    const unspecified = { id: "__UNSPECIFIED__", name: "غير محدد" };
 
     return NextResponse.json({
       regions: regionRows.flatMap(r => r.region ? [optionFromName(r.region)] : []).sort((a, b) => compareArabicLabels(a.name, b.name)),
@@ -64,6 +86,40 @@ export async function GET(req: NextRequest) {
       statuses: Object.values(ComplaintStatus),
       priorities: Object.values(ComplaintPriority),
       channels: channels.flatMap(c => c.channel ? [c.channel] : []).sort(compareArabicLabels),
+      sourceOrigins: [
+        unspecified,
+        ...sourceOrigins
+          .flatMap((r) => (r.sourceOrigin?.trim() ? [optionFromName(r.sourceOrigin.trim())] : []))
+          .sort((a, b) => compareArabicLabels(a.name, b.name)),
+      ],
+      sourceStatuses: [
+        unspecified,
+        ...sourceStatuses
+          .flatMap((r) => (r.sourceStatus?.trim() ? [optionFromName(r.sourceStatus.trim())] : []))
+          .sort((a, b) => compareArabicLabels(a.name, b.name)),
+      ],
+      sourceActionStatuses: [
+        unspecified,
+        ...sourceActionStatuses
+          .flatMap((r) =>
+            r.sourceActionStatus?.trim() ? [optionFromName(r.sourceActionStatus.trim())] : []
+          )
+          .sort((a, b) => compareArabicLabels(a.name, b.name)),
+      ],
+      wingCodes: [
+        unspecified,
+        ...wingCodes
+          .flatMap((r) => (r.wingCode?.trim() ? [optionFromName(r.wingCode.trim())] : []))
+          .sort((a, b) => compareArabicLabels(a.name, b.name))
+          .slice(0, 500),
+      ],
+      dataFreshnessBuckets: [
+        { id: "fresh_1d", name: "خلال يوم" },
+        { id: "stale_1_3d", name: "1–3 أيام" },
+        { id: "stale_3_7d", name: "3–7 أيام" },
+        { id: "stale_7d_plus", name: "أكثر من 7 أيام" },
+        { id: "missing", name: "بلا تاريخ تحديث" },
+      ],
     });
   } catch (error) {
     const authResponse = mapAuthError(error);
