@@ -1,3 +1,4 @@
+import { ComplaintStatus } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildComplaintWhere,
@@ -151,5 +152,23 @@ describe("central complaint query service", () => {
     expect(stale7.AND).toEqual(
       expect.arrayContaining([{ sourceUpdatedAt: { lte: sevenDaysAgo } }])
     );
+  });
+
+  it("uses currently late helper for isLate=true", () => {
+    const now = new Date("2026-07-30T00:00:00Z");
+    const where = buildComplaintWhere(parseComplaintQuery(query("isLate=true")), now);
+    expect(where.AND).toEqual([
+      {
+        dueDate: { lt: now },
+        status: {
+          in: [
+            ComplaintStatus.NEW,
+            ComplaintStatus.OPEN,
+            ComplaintStatus.IN_PROGRESS,
+            ComplaintStatus.AWAITING_RESPONSE,
+          ],
+        },
+      },
+    ]);
   });
 });

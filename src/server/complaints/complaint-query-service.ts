@@ -414,7 +414,7 @@ function applyBooleanFilters(where: Prisma.ComplaintWhereInput, query: Complaint
   if (query.hasClassification === true) addAnd(where, { classificationId: { not: null } });
   if (query.hasClassification === false) addAnd(where, { classificationId: null });
   if (query.isLate === true) {
-    addAnd(where, { dueDate: { lt: now }, status: { in: [...OPEN_COMPLAINT_STATUSES] } });
+    addAnd(where, buildCurrentlyLateWhere(now));
   }
   if (query.isLate === false) {
     addAnd(where, {
@@ -425,6 +425,14 @@ function applyBooleanFilters(where: Prisma.ComplaintWhereInput, query: Complaint
       ],
     });
   }
+}
+
+/** Open complaints with a due date strictly before `now` (currently overdue). */
+export function buildCurrentlyLateWhere(now: Date): Prisma.ComplaintWhereInput {
+  return {
+    dueDate: { lt: now },
+    status: { in: [...OPEN_COMPLAINT_STATUSES] },
+  };
 }
 
 export function buildComplaintOrderBy(query: ComplaintQuery): Prisma.ComplaintOrderByWithRelationInput[] {

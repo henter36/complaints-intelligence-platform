@@ -14,6 +14,7 @@ import {
   FRESHNESS_BUCKET_LABELS,
   resolveFreshnessBucket,
 } from "@/server/analytics/operational/operational-freshness";
+import { loadAggregatedOperationalDimensions } from "./operational-aggregate-service";
 import {
   DATA_FRESHNESS_BUCKETS,
   OPERATIONAL_UNSPECIFIED,
@@ -22,7 +23,6 @@ import {
   type DataFreshnessBucket,
   type DataFreshnessMetrics,
   type OperationalAnalyticsSummary,
-  type OperationalBucketMetrics,
   type OperationalDataQualitySignal,
   type StaffActorMetrics,
   type WingOperationalMetrics,
@@ -32,10 +32,10 @@ const LONG_ACTION_TAKEN_CHARS = 80;
 const RARE_SHARE_THRESHOLD = 0.01;
 const RIYADH_TZ = "Asia/Riyadh";
 
+/** Residual metrics still computed in Node (wing/freshness/actionTaken/dataQuality/staff). */
 type SlimOperationalRow = {
   id: string;
   status: ComplaintStatus;
-  channel: string | null;
   sourceOrigin: string | null;
   sourceStatus: string | null;
   sourceActionStatus: string | null;
@@ -107,11 +107,13 @@ function pct(part: number, total: number): number {
   return Math.round((part / total) * 1000) / 10;
 }
 
-/** Select excludes description/sourceDetail long complaint body text. */
-const OPERATIONAL_SELECT = {
+/**
+ * Narrow select for residual (non-aggregated) metrics only.
+ * Migrated dimensions use Prisma groupBy/count — do not interpret loadRows as full analytics I/O.
+ */
+const RESIDUAL_OPERATIONAL_SELECT = {
   id: true,
   status: true,
-  channel: true,
   sourceOrigin: true,
   sourceStatus: true,
   sourceActionStatus: true,
@@ -129,58 +131,6 @@ const OPERATIONAL_SELECT = {
   closedAt: true,
   classification: { select: { nameAr: true } },
 } satisfies Prisma.ComplaintSelect;
-
-function buildBucketMetrics(
-  rows: SlimOperationalRow[],
-  now: Date,
-  keyFn: (row: SlimOperationalRow) => string,
-  filterKey: string,
-  previousByKey: Map<string, number> | null,
-  total: number
-): OperationalBucketMetrics[] {
-  const groups = new Map<string, SlimOperationalRow[]>();
-  for (const row of rows) {
-    const key = keyFn(row);
-    const list = groups.get(key) ?? [];
-    list.push(row);
-    groups.set(key, list);
-  }
-
-  return Array.from(groups.entries())
-    .map(([key, items]) => {
-      let open = 0;
-      let closed = 0;
-      let currentlyLate = 0;
-      let resolutionSum = 0;
-      let resolutionN = 0;
-      for (const item of items) {
-        if (OPEN_COMPLAINT_STATUSES.has(item.status)) open += 1;
-        if (CLOSED_COMPLAINT_STATUSES.has(item.status)) closed += 1;
-        const timing = buildComplaintTiming(item, now);
-        if (timing.isCurrentlyLate) currentlyLate += 1;
-        if (timing.resolutionDays != null) {
-          resolutionSum += timing.resolutionDays;
-          resolutionN += 1;
-        }
-      }
-      const previousCount = previousByKey?.get(key) ?? null;
-      const count = items.length;
-      return {
-        key,
-        label: categoricalLabel(key),
-        count,
-        percentage: pct(count, total),
-        open,
-        closed,
-        currentlyLate,
-        averageResolutionDays: resolutionN > 0 ? Math.round((resolutionSum / resolutionN) * 10) / 10 : null,
-        previousCount,
-        change: previousCount == null ? null : count - previousCount,
-        drillDownFilters: { [filterKey]: key },
-      };
-    })
-    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "ar"));
-}
 
 function buildActionTakenQuality(rows: SlimOperationalRow[]): ActionTakenQuality {
   let emptyCount = 0;
@@ -648,95 +598,67 @@ export async function getOperationalAnalytics(
 
   const query = parseComplaintQuery(params);
   const where = buildComplaintWhere(query, now);
-
-  const loadCurrent = await timed(() =>
-    db.complaint.findMany({
-      where,
-      select: OPERATIONAL_SELECT,
-    })
-  );
-  const rows = loadCurrent.value as SlimOperationalRow[];
-  const total = rows.length;
-
   const prevParams = previousPeriodParams(params);
-  let previousByOrigin: Map<string, number> | null = null;
-  let prevMs = 0;
-  if (prevParams) {
-    const prevWhere = buildComplaintWhere(parseComplaintQuery(prevParams), now);
-    const prevLoad = await timed(() =>
-      db.complaint.groupBy({
-        by: ["sourceOrigin"],
-        where: prevWhere,
-        _count: { _all: true },
-      })
-    );
-    prevMs = prevLoad.ms;
-    previousByOrigin = new Map(
-      prevLoad.value.map((row) => [categoricalKey(row.sourceOrigin), row._count._all])
-    );
-  }
+  const previousWhere = prevParams
+    ? buildComplaintWhere(parseComplaintQuery(prevParams), now)
+    : null;
 
-  const originTimed = await timed(async () =>
-    buildBucketMetrics(rows, now, (r) => categoricalKey(r.sourceOrigin), "sourceOrigin", previousByOrigin, total)
-  );
-  const statusTimed = await timed(async () =>
-    buildBucketMetrics(rows, now, (r) => categoricalKey(r.sourceStatus), "sourceStatus", null, total)
-  );
-  const actionStatusTimed = await timed(async () =>
-    buildBucketMetrics(
-      rows,
-      now,
-      (r) => categoricalKey(r.sourceActionStatus),
-      "sourceActionStatus",
-      null,
-      total
-    )
-  );
+  const [aggregated, residualLoad] = await Promise.all([
+    loadAggregatedOperationalDimensions({ where, previousWhere, now }),
+    timed(() =>
+      db.complaint.findMany({
+        where,
+        select: RESIDUAL_OPERATIONAL_SELECT,
+      })
+    ),
+  ]);
+
+  const rows = residualLoad.value as SlimOperationalRow[];
+  const total = aggregated.totalInScope;
+
   const wingTimed = await timed(async () => buildWingMetrics(rows, now, total));
   const freshnessTimed = await timed(async () => buildFreshness(rows, now));
   const actionQualityTimed = await timed(async () => buildActionTakenQuality(rows));
   const qualityTimed = await timed(async () => buildDataQuality(rows, total));
-
-  const channelKeys = new Set(rows.map((r) => categoricalKey(r.channel))).size;
-  const originKeys = new Set(rows.map((r) => categoricalKey(r.sourceOrigin))).size;
   const staff = buildStaffActors(rows, includeStaffActors);
 
   return {
     totalInScope: total,
     generatedAt: now.toISOString(),
     timezoneDisplay: RIYADH_TZ,
-    sourceOrigin: { items: originTimed.value, total },
+    sourceOrigin: { items: aggregated.sourceOrigin, total },
     sourceStatus: {
-      items: statusTimed.value,
-      total,
-      unspecifiedCount: statusTimed.value.find((i) => i.key === OPERATIONAL_UNSPECIFIED)?.count ?? 0,
-    },
-    sourceActionStatus: {
-      items: actionStatusTimed.value,
+      items: aggregated.sourceStatus,
       total,
       unspecifiedCount:
-        actionStatusTimed.value.find((i) => i.key === OPERATIONAL_UNSPECIFIED)?.count ?? 0,
+        aggregated.sourceStatus.find((i) => i.key === OPERATIONAL_UNSPECIFIED)?.count ?? 0,
     },
-    channelIndependentCheck: {
-      sourceOriginKeys: originKeys,
-      channelKeys,
-      note: "sourceOrigin and channel are independent dimensions; do not merge.",
+    sourceActionStatus: {
+      items: aggregated.sourceActionStatus,
+      total,
+      unspecifiedCount:
+        aggregated.sourceActionStatus.find((i) => i.key === OPERATIONAL_UNSPECIFIED)?.count ?? 0,
     },
+    channelIndependentCheck: aggregated.channelIndependentCheck,
     actionTakenQuality: actionQualityTimed.value,
     wing: wingTimed.value,
     freshness: freshnessTimed.value,
     dataQuality: qualityTimed.value,
     staffActors: staff,
     performanceMs: {
-      loadRows: loadCurrent.ms,
-      previousPeriod: prevMs,
-      sourceOrigin: originTimed.ms,
-      sourceStatus: statusTimed.ms,
-      sourceActionStatus: actionStatusTimed.ms,
+      // Time to load residual rows only (wing/freshness/quality/staff) — not full analytics I/O.
+      loadRows: residualLoad.ms,
+      previousPeriod: aggregated.performanceMs.previousPeriod,
+      sourceOrigin: aggregated.performanceMs.sourceOrigin,
+      sourceStatus: aggregated.performanceMs.sourceStatus,
+      sourceActionStatus: aggregated.performanceMs.sourceActionStatus,
       wingCode: wingTimed.ms,
       freshness: freshnessTimed.ms,
       actionTakenQuality: actionQualityTimed.ms,
       dataQuality: qualityTimed.ms,
+      aggregateDimensions: aggregated.performanceMs.aggregateDimensions,
+      resolutionRows: aggregated.performanceMs.resolutionRows,
+      residualRows: residualLoad.ms,
     },
   };
 }
