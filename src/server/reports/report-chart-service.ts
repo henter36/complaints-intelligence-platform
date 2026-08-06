@@ -288,6 +288,127 @@ export type LineValueLabelPlacement = {
   fill: string;
 };
 
+const LINE_VALUE_LABEL_ABOVE_OFFSET = 12;
+const LINE_VALUE_LABEL_BELOW_OFFSET = 14;
+const LINE_VALUE_LABEL_BOTTOM_RESERVE = 14;
+
+type LineValueLabelContext = {
+  barTopY: number | null;
+  minTop: number;
+  maxBottom: number;
+  barPlacement: BarValueLabelPlacement | null;
+};
+
+type LineLabelInsideMode = "outside" | "inside" | "auto";
+
+type LineValueLabelCandidate = {
+  y: number;
+  insideMode: LineLabelInsideMode;
+};
+
+function createLineValueLabelContext(options: {
+  barTopY: number | null;
+  plotTop: number;
+  plotBottom: number;
+}): LineValueLabelContext {
+  const { barTopY, plotTop, plotBottom } = options;
+  const minTop = plotTop + BAR_VALUE_LABEL_MIN_TOP_OFFSET;
+  const maxBottom = plotBottom - LINE_VALUE_LABEL_BOTTOM_RESERVE;
+  if (barTopY === null) {
+    return { barTopY, minTop, maxBottom, barPlacement: null };
+  }
+  return {
+    barTopY,
+    minTop,
+    maxBottom,
+    barPlacement: resolveBarValueLabelPlacement({ barTopY, plotTop, plotBottom }),
+  };
+}
+
+function buildLineValueLabelCandidates(options: {
+  pointY: number;
+  barTopY: number | null;
+  barPlacement: BarValueLabelPlacement | null;
+  minTop: number;
+  maxBottom: number;
+}): LineValueLabelCandidate[] {
+  const { pointY, barTopY, barPlacement, minTop, maxBottom } = options;
+  const candidates: LineValueLabelCandidate[] = [
+    { y: pointY - LINE_VALUE_LABEL_ABOVE_OFFSET, insideMode: "outside" },
+    { y: pointY + LINE_VALUE_LABEL_BELOW_OFFSET, insideMode: "auto" },
+  ];
+
+  if (barTopY !== null) {
+    candidates.push({
+      y: Math.min(Math.max(barTopY + BAR_VALUE_LABEL_INSIDE_OFFSET, minTop), maxBottom),
+      insideMode: "inside",
+    });
+  }
+
+  if (barPlacement !== null) {
+    candidates.push({
+      y: Math.min(barPlacement.y + LINE_VALUE_LABEL_COLLISION_PX, maxBottom),
+      insideMode: "auto",
+    });
+    candidates.push({
+      y: Math.max(barPlacement.y - LINE_VALUE_LABEL_COLLISION_PX, minTop),
+      insideMode: "outside",
+    });
+  }
+
+  return candidates;
+}
+
+function conflictsWithBarValueLabel(
+  labelY: number,
+  barPlacement: BarValueLabelPlacement | null
+): boolean {
+  if (barPlacement === null) return false;
+  return Math.abs(labelY - barPlacement.y) < LINE_VALUE_LABEL_COLLISION_PX;
+}
+
+function isLineValueLabelCandidateValid(
+  candidate: LineValueLabelCandidate,
+  context: LineValueLabelContext
+): boolean {
+  if (candidate.y < context.minTop) return false;
+  if (candidate.y > context.maxBottom) return false;
+  if (conflictsWithBarValueLabel(candidate.y, context.barPlacement)) return false;
+  return true;
+}
+
+function isCandidateInsideBar(
+  candidate: LineValueLabelCandidate,
+  context: LineValueLabelContext
+): boolean {
+  if (candidate.insideMode === "inside") return true;
+  if (candidate.insideMode === "outside") return false;
+  return context.barTopY !== null && candidate.y > context.barTopY;
+}
+
+function toLineValueLabelPlacement(
+  candidate: LineValueLabelCandidate,
+  context: LineValueLabelContext
+): LineValueLabelPlacement {
+  const insideBar = isCandidateInsideBar(candidate, context);
+  if (insideBar) {
+    return { y: candidate.y, insideBar: true, fill: COLORS.white };
+  }
+  return { y: candidate.y, insideBar: false, fill: COLORS.gold };
+}
+
+function buildFallbackLineValueLabelPlacement(options: {
+  pointY: number;
+  context: LineValueLabelContext;
+}): LineValueLabelPlacement {
+  const preferredAbove = options.pointY - LINE_VALUE_LABEL_ABOVE_OFFSET;
+  const y = Math.min(
+    Math.max(preferredAbove, options.context.minTop),
+    options.context.maxBottom
+  );
+  return { y, insideBar: false, fill: COLORS.gold };
+}
+
 /**
  * Places a closed-line value label near its point while avoiding bar-value collisions
  * and staying inside the plot (above plotTop, clear of month labels at plotBottom).
@@ -298,63 +419,24 @@ export function resolveLineValueLabelPlacement(options: {
   plotTop: number;
   plotBottom: number;
 }): LineValueLabelPlacement {
-  const { pointY, barTopY, plotTop, plotBottom } = options;
-  const aboveOffset = 12;
-  const belowOffset = 14;
-  const minTop = plotTop + BAR_VALUE_LABEL_MIN_TOP_OFFSET;
-  const maxBottom = plotBottom - 14;
-  const defaultFill = COLORS.gold;
-  const insideFill = COLORS.white;
-
-  const barPlacement = barTopY === null
-    ? null
-    : resolveBarValueLabelPlacement({ barTopY, plotTop, plotBottom });
-  const conflictsWithBar = (labelY: number): boolean => {
-    if (barPlacement === null) return false;
-    return Math.abs(labelY - barPlacement.y) < LINE_VALUE_LABEL_COLLISION_PX;
-  };
-  const inBounds = (labelY: number): boolean => labelY >= minTop && labelY <= maxBottom;
-
-  const preferredAbove = pointY - aboveOffset;
-  if (inBounds(preferredAbove) && !conflictsWithBar(preferredAbove)) {
-    return { y: preferredAbove, insideBar: false, fill: defaultFill };
+  const context = createLineValueLabelContext(options);
+  const candidates = buildLineValueLabelCandidates({
+    pointY: options.pointY,
+    barTopY: options.barTopY,
+    barPlacement: context.barPlacement,
+    minTop: context.minTop,
+    maxBottom: context.maxBottom,
+  });
+  const selected = candidates.find((candidate) =>
+    isLineValueLabelCandidateValid(candidate, context)
+  );
+  if (selected) {
+    return toLineValueLabelPlacement(selected, context);
   }
-
-  const preferredBelow = pointY + belowOffset;
-  if (inBounds(preferredBelow) && !conflictsWithBar(preferredBelow)) {
-    const insideBar = barTopY !== null && preferredBelow > barTopY;
-    return {
-      y: preferredBelow,
-      insideBar,
-      fill: insideBar ? insideFill : defaultFill,
-    };
-  }
-
-  if (barTopY !== null) {
-    const insideY = Math.min(Math.max(barTopY + BAR_VALUE_LABEL_INSIDE_OFFSET, minTop), maxBottom);
-    if (inBounds(insideY) && !conflictsWithBar(insideY)) {
-      return { y: insideY, insideBar: true, fill: insideFill };
-    }
-  }
-
-  if (barPlacement !== null) {
-    const belowBarLabel = Math.min(barPlacement.y + LINE_VALUE_LABEL_COLLISION_PX, maxBottom);
-    if (inBounds(belowBarLabel) && !conflictsWithBar(belowBarLabel)) {
-      const insideBar = barTopY !== null && belowBarLabel > barTopY;
-      return {
-        y: belowBarLabel,
-        insideBar,
-        fill: insideBar ? insideFill : defaultFill,
-      };
-    }
-    const aboveBarLabel = Math.max(barPlacement.y - LINE_VALUE_LABEL_COLLISION_PX, minTop);
-    if (inBounds(aboveBarLabel) && !conflictsWithBar(aboveBarLabel)) {
-      return { y: aboveBarLabel, insideBar: false, fill: defaultFill };
-    }
-  }
-
-  const clamped = Math.min(Math.max(preferredAbove, minTop), maxBottom);
-  return { y: clamped, insideBar: false, fill: defaultFill };
+  return buildFallbackLineValueLabelPlacement({
+    pointY: options.pointY,
+    context,
+  });
 }
 
 /**

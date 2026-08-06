@@ -1,6 +1,7 @@
 // @vitest-environment node
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   escapeXml,
@@ -528,14 +529,64 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
   });
 
   it("avoids overlapping line and bar value labels on known fixtures", () => {
-    const above = resolveLineValueLabelPlacement({
-      pointY: 160,
-      barTopY: 100,
-      plotTop: 40,
-      plotBottom: 300,
-    });
-    expect(above.y).toBeLessThan(160);
-    expect(above.insideBar).toBe(false);
+    const fixtures: Array<{
+      name: string;
+      input: {
+        pointY: number;
+        barTopY: number | null;
+        plotTop: number;
+        plotBottom: number;
+      };
+      expected: { y: number; insideBar: boolean; fill: string };
+    }> = [
+      {
+        name: "above point when clear",
+        input: { pointY: 160, barTopY: 100, plotTop: 40, plotBottom: 300 },
+        expected: { y: 148, insideBar: false, fill: "#B88919" },
+      },
+      {
+        name: "below point when above is out of bounds",
+        input: { pointY: 55, barTopY: 100, plotTop: 40, plotBottom: 300 },
+        expected: { y: 69, insideBar: false, fill: "#B88919" },
+      },
+      {
+        name: "below point inside bar uses white fill",
+        input: { pointY: 103, barTopY: 100, plotTop: 40, plotBottom: 300 },
+        expected: { y: 117, insideBar: true, fill: "#FFFFFF" },
+      },
+      {
+        name: "below bar value label after tall clamp",
+        input: { pointY: 45, barTopY: 45, plotTop: 40, plotBottom: 300 },
+        expected: { y: 71, insideBar: true, fill: "#FFFFFF" },
+      },
+      {
+        name: "no bar uses below when above is tight",
+        input: { pointY: 60, barTopY: null, plotTop: 40, plotBottom: 300 },
+        expected: { y: 74, insideBar: false, fill: "#B88919" },
+      },
+      {
+        name: "above out of bounds then below outside bar",
+        input: { pointY: 40, barTopY: 100, plotTop: 40, plotBottom: 300 },
+        expected: { y: 54, insideBar: false, fill: "#B88919" },
+      },
+      {
+        name: "selects below clamped bar label",
+        input: { pointY: 48, barTopY: 45, plotTop: 40, plotBottom: 300 },
+        expected: { y: 71, insideBar: true, fill: "#FFFFFF" },
+      },
+      {
+        name: "tight plot still finds an in-bounds candidate",
+        input: { pointY: 200, barTopY: 100, plotTop: 190, plotBottom: 220 },
+        expected: { y: 200, insideBar: true, fill: "#FFFFFF" },
+      },
+    ];
+
+    for (const fixture of fixtures) {
+      expect(
+        resolveLineValueLabelPlacement(fixture.input),
+        fixture.name
+      ).toEqual(fixture.expected);
+    }
 
     const barPlacement = resolveBarValueLabelPlacement({
       barTopY: 45,
@@ -543,29 +594,26 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
       plotBottom: 300,
     });
     expect(barPlacement).toEqual({ y: 57, insideBar: true });
-
-    const linePlacement = resolveLineValueLabelPlacement({
+    const tallLine = resolveLineValueLabelPlacement({
       pointY: 45,
       barTopY: 45,
       plotTop: 40,
       plotBottom: 300,
     });
-    expect(
-      Math.abs(linePlacement.y - barPlacement.y)
-    ).toBeGreaterThanOrEqual(LINE_VALUE_LABEL_COLLISION_PX);
+    expect(Math.abs(tallLine.y - barPlacement.y)).toBeGreaterThanOrEqual(LINE_VALUE_LABEL_COLLISION_PX);
 
-    const colliding = resolveLineValueLabelPlacement({
-      pointY: 103,
-      barTopY: 100,
-      plotTop: 40,
-      plotBottom: 300,
-    });
     const normalBar = resolveBarValueLabelPlacement({
       barTopY: 100,
       plotTop: 40,
       plotBottom: 300,
     });
     expect(normalBar.insideBar).toBe(false);
+    const colliding = resolveLineValueLabelPlacement({
+      pointY: 103,
+      barTopY: 100,
+      plotTop: 40,
+      plotBottom: 300,
+    });
     expect(Math.abs(colliding.y - normalBar.y)).toBeGreaterThanOrEqual(LINE_VALUE_LABEL_COLLISION_PX);
 
     const svg = buildChartSvg(
@@ -588,6 +636,21 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
     expect(Math.abs(valueTexts[0]! - valueTexts[1]!)).toBeGreaterThanOrEqual(LINE_VALUE_LABEL_COLLISION_PX);
   });
 
+  it("uses clamped fallback when no candidate fits the plot", () => {
+    const placement = resolveLineValueLabelPlacement({
+      pointY: 100,
+      barTopY: 100,
+      plotTop: 95,
+      plotBottom: 120,
+    });
+    // minTop=105, maxBottom=106; preferredAbove=88 clamps to [105,106]
+    expect(placement).toEqual({
+      y: 105,
+      insideBar: false,
+      fill: "#B88919",
+    });
+  });
+
   it("keeps tall-bar and line labels apart when the bar label clamps inside", () => {
     // Helper-level clamp: preferred above would sit above plotTop+10.
     const barPlacement = resolveBarValueLabelPlacement({
@@ -608,6 +671,7 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
     ).toBeGreaterThanOrEqual(LINE_VALUE_LABEL_COLLISION_PX);
     expect(linePlacement.y).toBeGreaterThanOrEqual(50);
     expect(linePlacement.y).toBeLessThanOrEqual(286);
+    expect(linePlacement).toEqual({ y: 71, insideBar: true, fill: "#FFFFFF" });
 
     // SVG integration: same-value bar + line must keep middle-anchored labels apart.
     const section: ReportChartSection = {
@@ -630,6 +694,50 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
     expect(Math.abs(uniqueYs[0]! - uniqueYs[1]!)).toBeGreaterThanOrEqual(LINE_VALUE_LABEL_COLLISION_PX);
     expect(svg).toContain("أغسطس");
     expect(svg).toContain("2026");
+    expect(svg).toContain(`fill="${PRIMARY}"`);
+    expect(svg).toContain(`stroke="${GOLD}"`);
+  });
+
+  it("keeps fixed SVG hashes for registered/closed label fixtures", () => {
+    const hashSvg = (svg: string) => createHash("sha256").update(svg).digest("hex");
+
+    const equalValues = buildChartSvg(
+      {
+        id: "v2-monthly-flow",
+        kind: "chart",
+        chartType: "bar",
+        title: "",
+        series: [
+          { name: "المسجلة", renderAs: "bar", points: [{ x: "أغسطس 2026", y: 50 }] },
+          { name: "المغلقة", renderAs: "line", dash: "0", points: [{ x: "أغسطس 2026", y: 50 }] },
+        ],
+      },
+      600,
+      360,
+      { showLinePointValues: true }
+    );
+    expect(hashSvg(equalValues)).toBe(
+      "357633f6da93cd213b60fb00bafd963daab871cdee6cc7e06c86f917f5d784bc"
+    );
+
+    const tallValues = buildChartSvg(
+      {
+        id: "v2-monthly-flow",
+        kind: "chart",
+        chartType: "bar",
+        title: "",
+        series: [
+          { name: "المسجلة", renderAs: "bar", points: [{ x: "أغسطس 2026", y: 100 }] },
+          { name: "المغلقة", renderAs: "line", dash: "0", points: [{ x: "أغسطس 2026", y: 100 }] },
+        ],
+      },
+      600,
+      200,
+      { showLinePointValues: true }
+    );
+    expect(hashSvg(tallValues)).toBe(
+      "9528b44bb48ecc6fd10234fd84683cd70199157a8522bb2b20bd34a83e2c88c3"
+    );
   });
 
   it("builds valid SVG for 0, 1, and 13 monthly points", () => {
