@@ -30,6 +30,10 @@ import { normalizeRegionName } from "@/lib/reports/region-normalization";
 
 const UNSPECIFIED_DEPARTMENT_LABEL = "غير محدد";
 
+function isValidDate(value: Date | null | undefined): value is Date {
+  return value instanceof Date && Number.isFinite(value.getTime());
+}
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -107,6 +111,7 @@ export function resolveComplaintOpenStateAt(
   let priorEntry: ComplaintStatusHistoryEntry | null = null;
   let nextEntry: ComplaintStatusHistoryEntry | null = null;
   for (const entry of options.statusHistory) {
+    if (!isValidDate(entry.changedAt)) continue;
     const changedMs = entry.changedAt.getTime();
     if (changedMs < measuredMs) {
       if (!priorEntry || changedMs > priorEntry.changedAt.getTime()) {
@@ -186,6 +191,7 @@ export type SnapshotCandidate = {
 };
 
 function isWithinPeriod(instant: Date, period: PeriodRange): boolean {
+  if (!isValidDate(instant)) return false;
   const t = instant.getTime();
   return t >= period.from.getTime() && t < period.toExclusive.getTime();
 }
@@ -199,9 +205,19 @@ function isWithinPeriod(instant: Date, period: PeriodRange): boolean {
  * not that a closure happened at that instant. Counting those as closure
  * events would misdate every imported closed complaint to its import
  * timestamp instead of leaving it to the effective-closed-date fallback.
+ *
+ * A `changedAt` that fails to parse to a valid instant is treated the same
+ * way as a missing `fromStatus`: not genuine. Otherwise a corrupt timestamp
+ * would make {@link hasGenuineClosureTransition} report true and permanently
+ * disable the effective-closed-date fallback for that complaint, even though
+ * the corrupt entry itself can never satisfy {@link isWithinPeriod}.
  */
 function isGenuineClosureTransition(entry: ComplaintStatusHistoryEntry): boolean {
-  return entry.fromStatus !== null && isClosedComplaintStatus(entry.toStatus);
+  return (
+    entry.fromStatus !== null
+    && isClosedComplaintStatus(entry.toStatus)
+    && isValidDate(entry.changedAt)
+  );
 }
 
 /** Minimal shape {@link wasComplaintClosedInWindow} needs — any richer candidate (e.g. {@link SnapshotCandidate}) satisfies it structurally. */
@@ -291,14 +307,35 @@ function matchesStatusFilterAtEnd(
   return state.isOpen && isOpenComplaintStatus(statusFilter);
 }
 
+/**
+ * Shared across every aggregation pass within one {@link computeExecutiveReportSnapshot}
+ * call (current period, previous period, byRegion, byDepartment, byClassification) —
+ * a single complaint can be evaluated as "uncertain" in more than one of those
+ * passes, and `uncertainComplaintIds` ensures it only ever contributes one
+ * warning line, not one per pass.
+ */
+type SnapshotAggregationContext = {
+  statusFilter?: ComplaintStatus;
+  warnings: string[];
+  uncertainComplaintIds: Set<string>;
+};
+
+function addUncertainComplaintWarning(context: SnapshotAggregationContext, complaintId: string): void {
+  if (context.uncertainComplaintIds.has(complaintId)) return;
+  context.uncertainComplaintIds.add(complaintId);
+  context.warnings.push(
+    `تعذر تحديد حالة الشكوى ${complaintId} عند إحدى نقاط القياس بثقة؛ استُبعدت من مؤشرات المفتوحة والمتأخرة ذات الصلة.`
+  );
+}
+
 /** Builds one period's four indicators over a (possibly status-filtered) candidate set. */
 function buildPeriodGroupSnapshot(
   complaints: readonly SnapshotCandidate[],
   period: PeriodRange,
-  options: { statusFilter?: ComplaintStatus; warnings: string[] }
+  context: SnapshotAggregationContext
 ): ReportPeriodGroupSnapshot {
-  const scoped = options.statusFilter
-    ? complaints.filter((c) => matchesStatusFilterAtEnd(c, period, options.statusFilter!))
+  const scoped = context.statusFilter
+    ? complaints.filter((c) => matchesStatusFilterAtEnd(c, period, context.statusFilter!))
     : complaints;
 
   let receivedDuringPeriod = 0;
@@ -311,9 +348,7 @@ function buildPeriodGroupSnapshot(
     }
     const state = resolveOpenAndLateAtEnd(complaint, period);
     if (!state.certain) {
-      options.warnings.push(
-        `تعذر تحديد حالة الشكوى ${complaint.id} عند نهاية الفترة بثقة؛ استُبعدت من المفتوحة والمتأخرة.`
-      );
+      addUncertainComplaintWarning(context, complaint.id);
       continue;
     }
     if (state.isOpen) {
@@ -338,9 +373,9 @@ function buildPeriodGroupSnapshot(
 function buildPeriodSnapshot(
   complaints: readonly SnapshotCandidate[],
   period: PeriodRange,
-  options: { statusFilter?: ComplaintStatus; warnings: string[] }
+  context: SnapshotAggregationContext
 ): ReportPeriodSnapshot {
-  return { period, ...buildPeriodGroupSnapshot(complaints, period, options) };
+  return { period, ...buildPeriodGroupSnapshot(complaints, period, context) };
 }
 
 function regionGroupKey(complaint: SnapshotCandidate): string {
@@ -376,12 +411,12 @@ function buildGroupedSnapshot(
   complaints: readonly SnapshotCandidate[],
   period: PeriodRange,
   keyFn: (complaint: SnapshotCandidate) => string,
-  options: { statusFilter?: ComplaintStatus; warnings: string[] }
+  context: SnapshotAggregationContext
 ): Record<string, ReportPeriodGroupSnapshot> {
   const byKey = groupComplaints(complaints, keyFn);
   const result: Record<string, ReportPeriodGroupSnapshot> = {};
   for (const [key, group] of byKey) {
-    result[key] = buildPeriodGroupSnapshot(group, period, options);
+    result[key] = buildPeriodGroupSnapshot(group, period, context);
   }
   return result;
 }
@@ -487,17 +522,31 @@ function createdBeforeWhere(toExclusive: Date): Prisma.ComplaintWhereInput {
   };
 }
 
+/**
+ * Combines the report's own filters, the isDeleted guard, and the
+ * effective-created-before-period-end predicate under one `AND` array
+ * instead of an object spread. `baseWhere` (and `createdBeforeWhere`) may
+ * each carry their own top-level `OR`; spreading two objects that both set
+ * `OR` silently drops the first one's clause (the second spread overwrites
+ * the key). Wrapping each source clause as its own `AND` member keeps every
+ * OR intact regardless of how many of the inputs use one.
+ */
+export function composeSnapshotCandidateWhere(
+  baseWhere: Prisma.ComplaintWhereInput,
+  currentPeriodToExclusive: Date
+): Prisma.ComplaintWhereInput {
+  return {
+    AND: [baseWhere, { isDeleted: false }, createdBeforeWhere(currentPeriodToExclusive)],
+  };
+}
+
 export async function loadReportPeriodSnapshotCandidates(
   filters: ReportFilters,
   now: Date,
   currentPeriodToExclusive: Date
 ): Promise<SnapshotCandidate[]> {
   const baseWhere = snapshotBaseWhere(filters, now);
-  const where: Prisma.ComplaintWhereInput = {
-    ...baseWhere,
-    isDeleted: false,
-    ...createdBeforeWhere(currentPeriodToExclusive),
-  };
+  const where = composeSnapshotCandidateWhere(baseWhere, currentPeriodToExclusive);
   return db.complaint.findMany({ where, select: SNAPSHOT_CANDIDATE_SELECT });
 }
 
@@ -520,7 +569,11 @@ export function computeExecutiveReportSnapshot(
 ): ExecutiveReportSnapshotData {
   const warnings: string[] = [];
   const strict = options.strict ?? process.env.NODE_ENV === "test";
-  const snapshotOptions = { statusFilter: options.statusFilter, warnings };
+  const snapshotOptions: SnapshotAggregationContext = {
+    statusFilter: options.statusFilter,
+    warnings,
+    uncertainComplaintIds: new Set(),
+  };
 
   const current = buildPeriodSnapshot(candidates, periods.currentPeriod, snapshotOptions);
   const previous = periods.previousPeriod

@@ -181,11 +181,25 @@ describe("reference period 2026-07-26 → 2026-08-02 (spec section 21)", () => {
     expect(percentage).toBe(35.5);
   });
 
-  it("percentage change is null when previous is 0 (never 0% or Infinity)", () => {
-    const current = 12;
-    const previous = 0;
-    const percentage = previous > 0 ? roundToTenth(((current - previous) / previous) * 100) : null;
-    expect(percentage).toBeNull();
+  it("percentage change is null when previous is 0, via buildComparisonResult (not a re-implementation of the formula)", async () => {
+    const { buildComparisonResult } = await loadModule();
+    dbMocks.findMany.mockReset();
+    dbMocks.findMany.mockResolvedValueOnce([row({ region: R_MAKKAH })]).mockResolvedValueOnce([]);
+
+    const result = await buildComparisonResult(FILTERS, new Date("2026-07-31T00:00:00Z"));
+
+    const regionRow = result.regionChanges.find((r) => r.regionName === R_MAKKAH)!;
+    expect(regionRow).toMatchObject({
+      currentCount: 1,
+      previousCount: 0,
+      difference: 1,
+      changeRate: null,
+      direction: "جديد",
+    });
+
+    const summaryText = result.executiveSummaryPoints.join(" ");
+    expect(summaryText).not.toContain("Infinity");
+    expect(summaryText).not.toContain("NaN");
   });
 });
 

@@ -4,6 +4,7 @@ import { COMPLAINT_SLA_DURATION_MS } from "@/server/complaints/complaint-sla-tim
 import type { PeriodRange } from "./report-comparison";
 import {
   assertPeriodGroupReconciliation,
+  composeSnapshotCandidateWhere,
   computeExecutiveReportSnapshot,
   loadReportPeriodSnapshotCandidates,
   resolveComplaintOpenStateAt,
@@ -138,6 +139,140 @@ describe("resolveComplaintOpenStateAt", () => {
       measuredAt: CURRENT.toExclusive,
     });
     expect(result).toEqual({ isOpen: false, resolvedStatus: ComplaintStatus.CANCELLED, certain: true });
+  });
+});
+
+describe("resolveComplaintOpenStateAt — invalid changedAt (spec section 8/9)", () => {
+  const INVALID_DATE = new Date(NaN);
+
+  it("1. ignores an invalid-date entry and falls through to a valid prior entry", () => {
+    const result = resolveComplaintOpenStateAt({
+      status: ComplaintStatus.CLOSED,
+      complaintDate: new Date("2026-07-01T00:00:00.000Z"),
+      receivedAt: new Date("2026-07-01T00:00:00.000Z"),
+      closedAt: new Date("2026-07-28T00:00:00.000Z"),
+      sourceUpdatedAt: null,
+      statusHistory: [
+        { fromStatus: null, toStatus: ComplaintStatus.OPEN, changedAt: INVALID_DATE },
+        {
+          fromStatus: ComplaintStatus.OPEN,
+          toStatus: ComplaintStatus.CLOSED,
+          changedAt: new Date("2026-07-28T00:00:00.000Z"),
+        },
+      ],
+      measuredAt: CURRENT.toExclusive,
+    });
+    expect(result).toEqual({ isOpen: false, resolvedStatus: ComplaintStatus.CLOSED, certain: true });
+  });
+
+  it("2. ignores an invalid-date entry and falls through to a valid next entry", () => {
+    const result = resolveComplaintOpenStateAt({
+      status: ComplaintStatus.CLOSED,
+      complaintDate: new Date("2026-07-01T00:00:00.000Z"),
+      receivedAt: new Date("2026-07-01T00:00:00.000Z"),
+      closedAt: new Date("2026-08-10T00:00:00.000Z"),
+      sourceUpdatedAt: null,
+      statusHistory: [
+        { fromStatus: ComplaintStatus.CLOSED, toStatus: ComplaintStatus.OPEN, changedAt: INVALID_DATE },
+        {
+          fromStatus: ComplaintStatus.OPEN,
+          toStatus: ComplaintStatus.CLOSED,
+          changedAt: new Date("2026-08-10T00:00:00.000Z"),
+        },
+      ],
+      measuredAt: CURRENT.toExclusive,
+    });
+    expect(result).toEqual({ isOpen: true, resolvedStatus: ComplaintStatus.OPEN, certain: true });
+  });
+
+  it("3. uses the fallback when every history entry has an invalid date", () => {
+    const result = resolveComplaintOpenStateAt({
+      status: ComplaintStatus.OPEN,
+      complaintDate: new Date("2026-07-01T00:00:00.000Z"),
+      receivedAt: new Date("2026-07-01T00:00:00.000Z"),
+      closedAt: null,
+      sourceUpdatedAt: null,
+      statusHistory: [
+        { fromStatus: ComplaintStatus.OPEN, toStatus: ComplaintStatus.CLOSED, changedAt: INVALID_DATE },
+      ],
+      measuredAt: CURRENT.toExclusive,
+    });
+    expect(result).toEqual({ isOpen: true, resolvedStatus: ComplaintStatus.OPEN, certain: true });
+  });
+
+  it("6. never throws or produces a NaN-derived state for a mix of invalid and valid entries", () => {
+    expect(() =>
+      resolveComplaintOpenStateAt({
+        status: ComplaintStatus.CLOSED,
+        complaintDate: new Date("2026-07-01T00:00:00.000Z"),
+        receivedAt: new Date("2026-07-01T00:00:00.000Z"),
+        closedAt: INVALID_DATE,
+        sourceUpdatedAt: INVALID_DATE,
+        statusHistory: [
+          { fromStatus: null, toStatus: ComplaintStatus.OPEN, changedAt: INVALID_DATE },
+          { fromStatus: ComplaintStatus.OPEN, toStatus: ComplaintStatus.CLOSED, changedAt: INVALID_DATE },
+        ],
+        measuredAt: CURRENT.toExclusive,
+      })
+    ).not.toThrow();
+  });
+});
+
+describe("wasComplaintClosedInWindow via computeExecutiveReportSnapshot — invalid closure transitions (spec section 9)", () => {
+  const INVALID_DATE = new Date(NaN);
+
+  it("4. an invalid-date closure transition does not block the effectiveClosedAt fallback", () => {
+    const c = candidate({
+      id: "invalid-transition-with-fallback",
+      status: ComplaintStatus.CLOSED,
+      complaintDate: new Date("2026-07-01T00:00:00.000Z"),
+      closedAt: new Date("2026-07-28T00:00:00.000Z"),
+      statusHistory: [
+        { fromStatus: ComplaintStatus.OPEN, toStatus: ComplaintStatus.CLOSED, changedAt: INVALID_DATE },
+      ],
+    });
+    const snapshot = computeExecutiveReportSnapshot([c], { currentPeriod: CURRENT, previousPeriod: null });
+    expect(snapshot.current.closedDuringPeriod).toBe(1);
+  });
+
+  it("5. an invalid-date closure transition with no usable fallback does not count as a closure", () => {
+    const c = candidate({
+      id: "invalid-transition-no-fallback",
+      status: ComplaintStatus.CLOSED,
+      complaintDate: new Date("2026-07-01T00:00:00.000Z"),
+      closedAt: null,
+      sourceUpdatedAt: null,
+      statusHistory: [
+        { fromStatus: ComplaintStatus.OPEN, toStatus: ComplaintStatus.CLOSED, changedAt: INVALID_DATE },
+      ],
+    });
+    const snapshot = computeExecutiveReportSnapshot([c], { currentPeriod: CURRENT, previousPeriod: null });
+    expect(snapshot.current.closedDuringPeriod).toBe(0);
+  });
+
+  it("6. never throws for a candidate list mixing invalid and valid closure transitions", () => {
+    const candidates = [
+      candidate({
+        id: "mix-1",
+        status: ComplaintStatus.CLOSED,
+        complaintDate: new Date("2026-07-01T00:00:00.000Z"),
+        closedAt: new Date("2026-07-28T00:00:00.000Z"),
+        statusHistory: [
+          { fromStatus: ComplaintStatus.OPEN, toStatus: ComplaintStatus.CLOSED, changedAt: INVALID_DATE },
+        ],
+      }),
+      candidate({
+        id: "mix-2",
+        status: ComplaintStatus.CLOSED,
+        complaintDate: new Date("2026-07-01T00:00:00.000Z"),
+        statusHistory: [
+          { fromStatus: ComplaintStatus.OPEN, toStatus: ComplaintStatus.CLOSED, changedAt: new Date("2026-07-29T00:00:00.000Z") },
+        ],
+      }),
+    ];
+    expect(() =>
+      computeExecutiveReportSnapshot(candidates, { currentPeriod: CURRENT, previousPeriod: null })
+    ).not.toThrow();
   });
 });
 
@@ -406,6 +541,56 @@ describe("computeExecutiveReportSnapshot — functional scenarios (spec section 
   });
 });
 
+describe("computeExecutiveReportSnapshot — uncertain-complaint warning deduplication (spec section 11)", () => {
+  function uncertainCandidate(id: string, overrides: Partial<SnapshotCandidate> = {}): SnapshotCandidate {
+    // CLOSED with no closedAt, no sourceUpdatedAt, and no statusHistory: every
+    // aggregation pass (current, previous, byRegion, byDepartment,
+    // byClassification) independently resolves this complaint as "uncertain".
+    return candidate({
+      id,
+      status: ComplaintStatus.CLOSED,
+      complaintDate: new Date("2026-07-01T00:00:00.000Z"),
+      closedAt: null,
+      sourceUpdatedAt: null,
+      statusHistory: [],
+      region: "الرياض",
+      department: "الطوارئ",
+      classificationId: "cls-a",
+      ...overrides,
+    });
+  }
+
+  it("one uncertain complaint evaluated across the overall snapshot and three dimensions produces exactly one warning", () => {
+    const snapshot = computeExecutiveReportSnapshot(
+      [uncertainCandidate("uncertain-1")],
+      { currentPeriod: CURRENT, previousPeriod: PREVIOUS }
+    );
+    const matching = snapshot.warnings.filter((w) => w.includes("uncertain-1"));
+    expect(matching).toHaveLength(1);
+  });
+
+  it("two distinct uncertain complaints produce two distinct warning messages", () => {
+    const snapshot = computeExecutiveReportSnapshot(
+      [uncertainCandidate("uncertain-a"), uncertainCandidate("uncertain-b")],
+      { currentPeriod: CURRENT, previousPeriod: PREVIOUS }
+    );
+    expect(snapshot.warnings.filter((w) => w.includes("uncertain-a"))).toHaveLength(1);
+    expect(snapshot.warnings.filter((w) => w.includes("uncertain-b"))).toHaveLength(1);
+    expect(new Set(snapshot.warnings).size).toBe(snapshot.warnings.length);
+  });
+
+  it("reconciliation warnings are independent of the uncertain-complaint Set and still absent when sums naturally hold", () => {
+    const snapshot = computeExecutiveReportSnapshot(
+      [uncertainCandidate("uncertain-1"), uncertainCandidate("uncertain-2")],
+      { currentPeriod: CURRENT, previousPeriod: PREVIOUS },
+      { strict: false }
+    );
+    const reconciliationWarnings = snapshot.warnings.filter((w) => w.includes("مصالحة") || w.includes("مطابق"));
+    expect(reconciliationWarnings).toHaveLength(0);
+    expect(snapshot.warnings).toHaveLength(2);
+  });
+});
+
 describe("computeExecutiveReportSnapshot — reconciliation (spec section 20)", () => {
   it("lateAtEnd never exceeds openAtEnd for the overall, region, department, and classification snapshots", () => {
     const candidates = [
@@ -575,5 +760,70 @@ describe("loadReportPeriodSnapshotCandidates — query shape (spec section 7)", 
     ]) {
       expect(call.select).not.toHaveProperty(forbidden);
     }
+  });
+
+  it("composes the final where with AND so the base filter's own OR survives alongside the createdBefore OR (spec section 13)", async () => {
+    dbMocks.findMany.mockResolvedValue([]);
+    await loadReportPeriodSnapshotCandidates(baseFilters(), new Date(), CURRENT.toExclusive);
+
+    const call = dbMocks.findMany.mock.calls[0]![0];
+    expect(Array.isArray(call.where.AND)).toBe(true);
+    expect(call.where.AND).toHaveLength(3);
+    expect(call.where.AND[1]).toEqual({ isDeleted: false });
+    expect(call.where.AND[2]).toEqual({
+      OR: [
+        { complaintDate: { lt: CURRENT.toExclusive } },
+        { complaintDate: null, receivedAt: { lt: CURRENT.toExclusive } },
+      ],
+    });
+    // No top-level `where.OR`/`where.isDeleted` clobbering anything from baseWhere.
+    expect(call.where.OR).toBeUndefined();
+  });
+});
+
+describe("composeSnapshotCandidateWhere (spec section 12-13)", () => {
+  it("wraps baseWhere, isDeleted, and createdBeforeWhere in AND — never a spread that could drop an existing OR", () => {
+    const toExclusive = new Date("2026-08-03T00:00:00.000Z");
+    const baseWhere = {
+      OR: [{ subject: { contains: "نقل" } }, { description: { contains: "نقل" } }],
+      region: "الرياض",
+    };
+
+    const result = composeSnapshotCandidateWhere(baseWhere, toExclusive);
+
+    expect(result).toEqual({
+      AND: [
+        baseWhere,
+        { isDeleted: false },
+        {
+          OR: [
+            { complaintDate: { lt: toExclusive } },
+            { complaintDate: null, receivedAt: { lt: toExclusive } },
+          ],
+        },
+      ],
+    });
+    // baseWhere's own OR is preserved verbatim as the first AND member, not merged/overwritten.
+    expect((result.AND as unknown[])[0]).toBe(baseWhere);
+  });
+
+  it("still composes correctly when baseWhere has no OR of its own", () => {
+    const toExclusive = new Date("2026-08-03T00:00:00.000Z");
+    const baseWhere = { region: "الرياض", priority: "HIGH" as const };
+
+    const result = composeSnapshotCandidateWhere(baseWhere, toExclusive);
+
+    expect(result).toEqual({
+      AND: [
+        baseWhere,
+        { isDeleted: false },
+        {
+          OR: [
+            { complaintDate: { lt: toExclusive } },
+            { complaintDate: null, receivedAt: { lt: toExclusive } },
+          ],
+        },
+      ],
+    });
   });
 });

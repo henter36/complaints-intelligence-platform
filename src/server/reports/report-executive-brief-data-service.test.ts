@@ -1797,9 +1797,9 @@ describe("aggregateMonthlyComplaintTrend", () => {
     });
 
     it("does not count lateness that only occurs after 2026-08-02 in the August bucket", () => {
-      // Created 2026-08-01: deadline is 2026-08-08, which is after the natural
-      // August-31 month end too, but must specifically stay excluded once
-      // clamped to the report's actual end (2026-08-03).
+      // Created on 2026-07-27, so the seven-day SLA deadline is exactly
+      // 2026-08-03T00:00:00Z. Because lateness uses a strict `>` comparison,
+      // the complaint is open but not late at the report-end boundary.
       const created = new Date("2026-07-27T00:00:00.000Z"); // deadline 2026-08-03 (exclusive boundary, not late)
       const points = aggregateMonthlyComplaintTrend(
         [trend({ complaintDate: created, receivedAt: created, closedAt: null })],
@@ -2246,6 +2246,90 @@ describe("buildExecutiveBriefData — periodMetrics and snapshot contract (spec 
     const data = await buildExecutiveBriefData(BASE_FILTERS, kpiResult, makeComparison(), undefined, NOW);
     const row = (data.topDepartments ?? []).find((d) => d.name === "الطوارئ");
     expect(row?.open).toBe(1);
+  });
+
+  describe("backlog-only department (spec sections 5-6, 17)", () => {
+    // Department أ: registers complaints this period, low open balance.
+    // Department ب: registers nothing this period (absent from
+    // kpiResult.distributions.byDepartment entirely — not even a total:0
+    // row), but carries the highest open balance from before the period.
+    function makeBacklogDataset() {
+      return [
+        snapshotRow({ id: "reg-1", complaintDate: ISO("2026-07-02"), department: "الإدارة أ" }),
+        snapshotRow({ id: "reg-2", complaintDate: ISO("2026-07-02"), department: "الإدارة أ" }),
+        snapshotRow({ id: "reg-3", complaintDate: ISO("2026-07-02"), department: "الإدارة أ" }),
+        snapshotRow({ id: "reg-4", complaintDate: ISO("2026-07-02"), department: "الإدارة أ" }),
+        snapshotRow({ id: "reg-5", complaintDate: ISO("2026-07-02"), department: "الإدارة أ" }),
+        ...Array.from({ length: 20 }, (_, i) =>
+          snapshotRow({ id: `bl-${i}`, complaintDate: ISO("2026-01-01"), department: "إدارة الرصيد" })
+        ).map((row, i) =>
+          i < 10
+            ? {
+                ...row,
+                statusHistory: [
+                  { fromStatus: ComplaintStatus.OPEN, toStatus: ComplaintStatus.CLOSED, changedAt: ISO("2026-01-05") },
+                ],
+              }
+            : row
+        ),
+      ];
+    }
+
+    it("departmentPeriodMetrics contains both departments and topDepartments builds its candidate set from the snapshot (not distributions)", async () => {
+      dbMocks.complaintFindMany.mockResolvedValue(makeBacklogDataset());
+      const kpiResult = makeKpiResult();
+      // "إدارة الرصيد" is entirely absent here — mirrors a department with
+      // zero inflow this period, which never appears in distributions.
+      kpiResult.distributions.byDepartment = [
+        { name: "الإدارة أ", count: 5, total: 5, open: 4, closed: 1, currentlyLate: 0, closedLate: 0, withinDueDate: 1, complianceRate: null, averageResolutionDays: 0, averageResolutionEligibleCount: 0, slaEligibleCount: 0, closedWithoutTrustedDateCount: 0, highPriorityOpen: 0, unclassified: 0 },
+      ];
+      const data = await buildExecutiveBriefData(BASE_FILTERS, kpiResult, makeComparison(), undefined, NOW);
+
+      const deptMetrics = data.departmentPeriodMetrics ?? [];
+      expect(deptMetrics.some((d) => d.departmentName === "الإدارة أ")).toBe(true);
+      expect(deptMetrics.some((d) => d.departmentName === "إدارة الرصيد")).toBe(true);
+
+      const backlogRow = (data.topDepartments ?? []).find((d) => d.name === "إدارة الرصيد");
+      expect(backlogRow).toBeDefined();
+      expect(backlogRow!.total).toBe(0); // receivedDuringPeriod
+      expect(backlogRow!.open).toBe(10); // 20 backlog complaints, 10 closed via statusHistory, 10 still open
+      expect(backlogRow!.shareOfTotal).toBe(0);
+
+      // Overall receivedDuringPeriod is unaffected by the backlog-only department.
+      expect(data.periodMetrics!.current.receivedDuringPeriod).toBe(5);
+    });
+
+    it("names the backlog-only department as the highest in open complaints in conclusions", async () => {
+      dbMocks.complaintFindMany.mockResolvedValue(makeBacklogDataset());
+      const kpiResult = makeKpiResult();
+      kpiResult.distributions.byDepartment = [
+        { name: "الإدارة أ", count: 5, total: 5, open: 4, closed: 1, currentlyLate: 0, closedLate: 0, withinDueDate: 1, complianceRate: null, averageResolutionDays: 0, averageResolutionEligibleCount: 0, slaEligibleCount: 0, closedWithoutTrustedDateCount: 0, highPriorityOpen: 0, unclassified: 0 },
+      ];
+      const data = await buildExecutiveBriefData(BASE_FILTERS, kpiResult, makeComparison(), undefined, NOW);
+      const conclusionsText = (data.conclusions ?? []).join(" ");
+      expect(conclusionsText).toContain("إدارة الرصيد");
+      expect(conclusionsText).toContain("10"); // openAtEnd for إدارة الرصيد
+    });
+  });
+
+  describe("snapshot warnings reach ExecutiveBriefData.warnings (spec section 7, 18)", () => {
+    it("surfaces an uncertain-complaint snapshot warning in the report's warnings, without duplicates", async () => {
+      // CLOSED, no closedAt, no sourceUpdatedAt, no statusHistory: state at
+      // period end cannot be determined reliably.
+      dbMocks.complaintFindMany.mockResolvedValue([
+        snapshotRow({
+          id: "uncertain-1",
+          status: ComplaintStatus.CLOSED,
+          complaintDate: ISO("2026-07-02"),
+        }),
+      ]);
+      const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
+
+      expect(data.warnings).toEqual(
+        expect.arrayContaining([expect.stringContaining("تعذر تحديد حالة الشكوى")])
+      );
+      expect(new Set(data.warnings).size).toBe((data.warnings ?? []).length);
+    });
   });
 });
 

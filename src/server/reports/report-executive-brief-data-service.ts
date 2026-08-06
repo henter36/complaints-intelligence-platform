@@ -19,6 +19,7 @@ import { ComplaintStatus } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { buildComplaintWhere, parseComplaintQuery } from "@/server/complaints/complaint-query-service";
+import { comparisonWarningMessage } from "./report-comparison";
 import type { DeptClassPeriodCount, ComparisonResult, PeriodRange } from "./report-comparison";
 import { buildComplaintQueryParams, type ReportFilters } from "./report-definition-service";
 import type {
@@ -331,21 +332,41 @@ function buildAllRegionsTable(
  * backlog), lateAtEnd — sourced from the department period snapshot, not from
  * current-status distributions.
  */
+/** A department with only prior-period backlog (zero registrations this period) still has activity. */
+function hasDepartmentActivity(snapshot: ReportPeriodGroupSnapshot): boolean {
+  return (
+    snapshot.receivedDuringPeriod > 0
+    || snapshot.closedDuringPeriod > 0
+    || snapshot.openAtEnd > 0
+    || snapshot.lateAtEnd > 0
+  );
+}
+
+function compareExecutiveEntityRows(left: ExecutiveEntityRow, right: ExecutiveEntityRow): number {
+  return (
+    right.total - left.total
+    || right.open - left.open
+    || right.currentlyLate - left.currentlyLate
+    || right.closed - left.closed
+    || left.name.localeCompare(right.name, "ar")
+  );
+}
+
+/**
+ * Builds candidates directly from the period snapshot (not from
+ * result.distributions, which only contains entities with inflow this
+ * period) so a backlog-only department — zero registrations but open
+ * complaints carried over from before the period — is never dropped.
+ */
 function buildEntityRows(
-  groups: ComplaintGroupMetrics[],
   totalReceivedDuringPeriod: number,
   groupSnapshot: Record<string, ReportPeriodGroupSnapshot>,
   limit = 8
 ): ExecutiveEntityRow[] {
-  return groups.slice(0, limit).map((group) => {
-    const snapshot = groupSnapshot[group.name] ?? {
-      receivedDuringPeriod: 0,
-      closedDuringPeriod: 0,
-      openAtEnd: 0,
-      lateAtEnd: 0,
-    };
-    return {
-      name: group.name,
+  return Object.entries(groupSnapshot)
+    .filter(([, snapshot]) => hasDepartmentActivity(snapshot))
+    .map(([name, snapshot]) => ({
+      name,
       total: snapshot.receivedDuringPeriod,
       open: snapshot.openAtEnd,
       closed: snapshot.closedDuringPeriod,
@@ -354,8 +375,9 @@ function buildEntityRows(
         totalReceivedDuringPeriod > 0
           ? roundRate((snapshot.receivedDuringPeriod / totalReceivedDuringPeriod) * 100)
           : 0,
-    };
-  });
+    }))
+    .sort(compareExecutiveEntityRows)
+    .slice(0, limit);
 }
 
 function hasMeaningfulPreviousData(comparison: ComparisonResult): boolean {
@@ -364,6 +386,36 @@ function hasMeaningfulPreviousData(comparison: ComparisonResult): boolean {
     comparison.previousTotal !== null &&
     comparison.previousTotal > 0
   );
+}
+
+type OpenDepartmentCandidate = {
+  name: string;
+  openAtEnd: number;
+  lateAtEnd: number;
+  receivedDuringPeriod: number;
+};
+
+/** The department with the highest openAtEnd, over the full snapshot (backlog-only departments included). */
+function findMostOpenDepartment(
+  departmentSnapshot: Record<string, ReportPeriodGroupSnapshot>
+): OpenDepartmentCandidate | null {
+  const candidates = Object.entries(departmentSnapshot)
+    .map(([name, snapshot]) => ({
+      name,
+      openAtEnd: snapshot.openAtEnd,
+      lateAtEnd: snapshot.lateAtEnd,
+      receivedDuringPeriod: snapshot.receivedDuringPeriod,
+    }))
+    .filter((candidate) => candidate.openAtEnd > 0)
+    .sort(
+      (left, right) =>
+        right.openAtEnd - left.openAtEnd
+        || right.lateAtEnd - left.lateAtEnd
+        || right.receivedDuringPeriod - left.receivedDuringPeriod
+        || left.name.localeCompare(right.name, "ar")
+    );
+
+  return candidates[0] ?? null;
 }
 
 function buildConclusions(
@@ -389,12 +441,13 @@ function buildConclusions(
     if (rise) points.push(`أعلى زيادة في ${rise.regionName}: +${rise.difference} شكوى مقارنة بالفترة السابقة.`);
     if (fall) points.push(`أعلى انخفاض في ${fall.regionName}: ${Math.abs(fall.difference)} شكوى مقارنة بالفترة السابقة.`);
   }
-  // "Open"/"late" here mean openAtEnd/lateAtEnd (period-end stock), matching
-  // the department/classification tables, not current-status distributions.
-  const openDepartment = [...result.distributions.byDepartment]
-    .map((group) => ({ name: group.name, openAtEnd: departmentSnapshot[group.name]?.openAtEnd ?? 0 }))
-    .sort((a, b) => b.openAtEnd - a.openAtEnd)[0];
-  if (openDepartment?.openAtEnd) {
+  // "Open"/"late" here mean openAtEnd/lateAtEnd (period-end stock). Built
+  // from the full department snapshot (not result.distributions, which only
+  // covers departments with inflow this period) so a backlog-only department
+  // — no new registrations but a large carried-over open balance — is still
+  // eligible to be named here.
+  const openDepartment = findMostOpenDepartment(departmentSnapshot);
+  if (openDepartment) {
     points.push(`${openDepartment.name} الأعلى في الحالات المفتوحة نهاية الفترة بعدد ${openDepartment.openAtEnd}.`);
   }
   const lateClassification = [...result.distributions.byClassification]
@@ -882,6 +935,11 @@ function toClassificationSnapshotRows(
   }));
 }
 
+/** Trims, drops blanks, and dedupes by exact text — stable regardless of source order. */
+function deduplicateWarnings(warnings: readonly string[]): string[] {
+  return [...new Set(warnings.map((warning) => warning.trim()).filter(Boolean))];
+}
+
 export async function buildExecutiveBriefData(
   filters: ReportFilters,
   result: ComplaintKpiResult,
@@ -926,6 +984,11 @@ export async function buildExecutiveBriefData(
     computeConcentration(result.distributions.byDepartment, "department", result.volume.total),
   ];
 
+  const warnings = deduplicateWarnings([
+    ...comparison.warnings.map(comparisonWarningMessage),
+    ...snapshotData.warnings,
+  ]);
+
   return {
     briefKpis,
     allRegions,
@@ -933,12 +996,12 @@ export async function buildExecutiveBriefData(
     comparativeTimeline,
     concentrationBands,
     topDepartments: buildEntityRows(
-      result.distributions.byDepartment,
       periodMetrics.current.receivedDuringPeriod,
       snapshotData.byDepartment
     ),
     conclusions: buildConclusions(result, comparison, snapshotData.byDepartment, snapshotData.byClassification),
     notes: buildNotes(result, comparison),
+    warnings,
     periodMetrics,
     regionSnapshotAtEnd: toRegionSnapshotRows(snapshotData.byRegion),
     departmentPeriodMetrics: toDepartmentPeriodMetricsRows(snapshotData.byDepartment),

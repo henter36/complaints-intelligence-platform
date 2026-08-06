@@ -178,6 +178,8 @@ export type ExecutiveBriefData = {
   topDepartments?: ExecutiveEntityRow[];
   conclusions?: string[];
   notes?: string[];
+  /** Deduplicated union of comparison warnings and period-snapshot warnings (e.g. an uncertain complaint state). */
+  warnings?: string[];
   /** Cover-page flow/stock metrics: receivedDuringPeriod, closedDuringPeriod, openAtEnd, lateAtEnd. */
   periodMetrics?: ExecutivePeriodMetrics;
   /** Per-region openAtEnd/lateAtEnd at current period end (region currentCount/previousCount stay Inflow-based). */

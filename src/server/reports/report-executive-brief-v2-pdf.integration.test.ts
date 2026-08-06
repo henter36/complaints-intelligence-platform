@@ -101,13 +101,31 @@ beforeAll(async () => {
 }, 60_000);
 
 afterAll(async () => {
+  const teardownErrors: unknown[] = [];
+
   try {
     await dbHolder.client?.$disconnect();
-    if (tempDir) rmSync(tempDir, { recursive: true, force: true });
-  } finally {
-    if (DEV_DB_AVAILABLE && sourceShaAfterProbe !== sourceShaBefore) {
-      throw new Error("prisma/dev.db changed during the V2 PDF integration test run");
+  } catch (error) {
+    teardownErrors.push(error);
+  }
+
+  try {
+    if (tempDir) {
+      rmSync(tempDir, { recursive: true, force: true });
     }
+  } catch (error) {
+    teardownErrors.push(error);
+  }
+
+  if (DEV_DB_AVAILABLE && sourceShaAfterProbe !== sourceShaBefore) {
+    teardownErrors.push(new Error("prisma/dev.db changed during the V2 PDF integration test run"));
+  }
+
+  if (teardownErrors.length === 1) {
+    throw teardownErrors[0];
+  }
+  if (teardownErrors.length > 1) {
+    throw new AggregateError(teardownErrors, "V2 PDF integration test teardown failed");
   }
 });
 
