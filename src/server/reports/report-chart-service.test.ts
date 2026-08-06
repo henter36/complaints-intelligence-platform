@@ -16,6 +16,7 @@ import {
   resolveXAxisLabelStep,
   wrapCategoricalAxisLabel,
   resolveXAxisBottomReserve,
+  resolveLineValueLabelPlacement,
   MIN_PLOT_HEIGHT,
   CHART_LEGEND_GAP,
 } from "./report-chart-service";
@@ -396,10 +397,8 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
       chartType: "bar",
       title: "",
       series: [
-        { name: "الواردة", renderAs: "bar", points: pts(10) },
-        { name: "المغلقة", renderAs: "bar", points: pts(8) },
-        { name: "المفتوحة", renderAs: "line", points: pts(12) },
-        { name: "المتأخرة", renderAs: "line", dash: "6,4", points: pts(2) },
+        { name: "المسجلة", renderAs: "bar", points: pts(10) },
+        { name: "المغلقة", renderAs: "line", dash: "0", points: pts(8) },
       ],
       ...extra,
     };
@@ -413,30 +412,28 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
     expect(resolveLegendColumnCount(5)).toBe(2);
   });
 
-  it("bar series use solid dash and late line uses danger + dashed stroke", () => {
+  it("uses dark-green registered bars and a solid gold closed line", () => {
     const svg = buildChartSvg(monthlySection(), 800, 360);
-    // Four series present
-    expect(svg).toContain("الواردة");
+    expect(svg).toContain("المسجلة");
     expect(svg).toContain("المغلقة");
-    expect(svg).toContain("المفتوحة");
-    expect(svg).toContain("المتأخرة");
-    expect(svg).not.toContain("مفتوحة نهاية الشهر");
-    expect(svg).not.toContain("متأخرة نهاية الشهر");
-    // Two polylines (open + late); late dashed
-    expect(svg.match(/<polyline /g) ?? []).toHaveLength(2);
-    expect(svg).toMatch(/stroke-dasharray="6,4"/);
-    expect(svg).toContain(`stroke="${DANGER}"`);
-    // Bar swatches are solid gold/primary, not dashed via line
+    expect(svg).not.toContain("المفتوحة");
+    expect(svg).not.toContain("المتأخرة");
+    expect(svg).not.toContain("الواردة");
+    expect(svg.match(/<polyline /g) ?? []).toHaveLength(1);
+    expect(svg).not.toMatch(/stroke-dasharray=/);
+    expect(svg).toContain(`stroke="${GOLD}"`);
     expect(svg).toContain(`fill="${PRIMARY}"`);
-    expect(svg).toContain(`fill="${GOLD}"`);
+    expect(svg).toMatch(/<circle[^>]*r="2\.6"[^>]*fill="#FFFFFF"[^>]*stroke="#B88919"/);
+    expect((svg.match(/<rect x="[^"]+" y="[^"]+" width="[^"]+" height="[^"]+" fill="/g) ?? []).length).toBe(13);
+    expect((svg.match(/>10</g) ?? []).length).toBeGreaterThanOrEqual(13);
   });
 
   it("uses a single shared Y-axis (no right-axis dual scale)", () => {
     const svg = buildChartSvg(monthlySection(), 800, 360);
     expect(svg).not.toMatch(/stroke-dasharray="3,3"/);
-    expect(svg.match(/<polyline /g) ?? []).toHaveLength(2);
+    expect(svg.match(/<polyline /g) ?? []).toHaveLength(1);
     const barCount = (svg.match(/<rect x="[^"]+" y="[^"]+" width="[^"]+" height="[^"]+" fill="/g) ?? []).length;
-    expect(barCount).toBe(13 * 2); // 2 bar series × 13 months
+    expect(barCount).toBe(13);
   });
 
   it("Y max is driven by monthly series only — ignore a phantom 16,993 total", () => {
@@ -450,33 +447,28 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
     expect(svg).not.toMatch(/>10[,.]?000</);
   });
 
-  it("shows all four short legend labels without strike-through text deco", () => {
+  it("shows registered/closed legend labels without strike-through text deco", () => {
     const svg = buildChartSvg(monthlySection(), 800, 360);
-    for (const label of ["الواردة", "المغلقة", "المفتوحة", "المتأخرة"]) {
+    for (const label of ["المسجلة", "المغلقة"]) {
       expect(svg).toContain(label);
     }
     expect(svg).not.toContain("text-decoration");
     expect(svg).not.toContain("line-through");
-    // Bar swatches use rect fills (green + gold)
     expect(svg).toContain(`fill="${PRIMARY}"`);
-    expect(svg).toContain(`fill="${GOLD}"`);
-    // Late line uses danger
-    expect(svg).toContain(`stroke="${DANGER}"`);
+    expect(svg).toContain(`stroke="${GOLD}"`);
   });
 
   it("fits short legend labels into cells without overlapping swatches", () => {
     const items = [
-      { name: "الواردة", style: { color: PRIMARY, dash: "0", width: 2, mark: "bar" as const } },
-      { name: "المغلقة", style: { color: GOLD, dash: "0", width: 2, mark: "bar" as const } },
-      { name: "المفتوحة", style: { color: PRIMARY, dash: "0", width: 2, mark: "line" as const } },
-      { name: "المتأخرة", style: { color: DANGER, dash: "6,4", width: 2, mark: "line" as const } },
+      { name: "المسجلة", style: { color: PRIMARY, dash: "0", width: 2, mark: "bar" as const } },
+      { name: "المغلقة", style: { color: GOLD, dash: "0", width: 2.2, mark: "line" as const } },
     ];
     for (const width of [500, 320]) {
       const legend = drawChartLegend(items, { width, top: 10, columns: 2, fontSize: 11 });
-      expect(legend.labelBoxes).toHaveLength(4);
+      expect(legend.labelBoxes).toHaveLength(2);
       expect(legend.svg).toContain('text-anchor="middle"');
       expect(legend.svg).not.toContain('text-anchor="end"');
-      expect(legend.svg).toContain("الواردة");
+      expect(legend.svg).toContain("المسجلة");
       for (const box of legend.labelBoxes) {
         expect(box.measuredWidth).toBeLessThanOrEqual(box.availableWidth + 0.01);
         expect(box.truncated).toBe(false);
@@ -496,6 +488,126 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
         }
       }
     }
+  });
+
+  it("shows all 13 wrapped month labels and line values when requested", () => {
+    const months = [
+      "أغسطس 2025", "سبتمبر 2025", "أكتوبر 2025", "نوفمبر 2025", "ديسمبر 2025",
+      "يناير 2026", "فبراير 2026", "مارس 2026", "أبريل 2026", "مايو 2026",
+      "يونيو 2026", "يوليو 2026", "أغسطس 2026",
+    ];
+    const svg = buildChartSvg(monthlySection(), 900, 420, {
+      xLabelPolicy: "all",
+      xLabelLayout: "wrap-two-lines",
+      showLinePointValues: true,
+    });
+    for (const month of months) {
+      const [name, year] = month.split(" ");
+      expect(svg).toContain(name!);
+      expect(svg).toContain(year!);
+    }
+    expect(svg).toContain("<tspan");
+    expect((svg.match(/>8</g) ?? []).length).toBeGreaterThanOrEqual(13);
+  });
+
+  it("hides line point values by default and leaves other charts unchanged", () => {
+    const monthly = buildChartSvg(monthlySection(), 800, 360);
+    expect((monthly.match(/>8</g) ?? []).length).toBe(0);
+
+    const other: ReportChartSection = {
+      id: "other-line",
+      kind: "chart",
+      chartType: "line",
+      title: "أخرى",
+      series: [{ name: "سلسلة", points: [{ x: "أ", y: 8 }, { x: "ب", y: 8 }] }],
+    };
+    const otherSvg = buildChartSvg(other, 600, 300);
+    expect(otherSvg).not.toMatch(/<text[^>]*>8<\/text>/);
+  });
+
+  it("avoids overlapping line and bar value labels on known fixtures", () => {
+    const above = resolveLineValueLabelPlacement({
+      pointY: 160,
+      barTopY: 100,
+      plotTop: 40,
+      plotBottom: 300,
+    });
+    expect(above.y).toBeLessThan(160);
+    expect(above.insideBar).toBe(false);
+
+    const colliding = resolveLineValueLabelPlacement({
+      pointY: 103,
+      barTopY: 100,
+      plotTop: 40,
+      plotBottom: 300,
+    });
+    expect(Math.abs(colliding.y - (100 - 3))).toBeGreaterThanOrEqual(10);
+
+    const svg = buildChartSvg(
+      {
+        id: "v2-monthly-flow",
+        kind: "chart",
+        chartType: "bar",
+        title: "",
+        series: [
+          { name: "المسجلة", renderAs: "bar", points: [{ x: "أغسطس 2026", y: 50 }] },
+          { name: "المغلقة", renderAs: "line", dash: "0", points: [{ x: "أغسطس 2026", y: 50 }] },
+        ],
+      },
+      600,
+      360,
+      { showLinePointValues: true }
+    );
+    const valueTexts = [...svg.matchAll(/<text[^>]*y="([^"]+)"[^>]*>50<\/text>/g)].map((m) => Number(m[1]));
+    expect(valueTexts.length).toBeGreaterThanOrEqual(2);
+    expect(Math.abs(valueTexts[0]! - valueTexts[1]!)).toBeGreaterThanOrEqual(10);
+  });
+
+  it("builds valid SVG for 0, 1, and 13 monthly points", () => {
+    const empty = buildChartSvg(
+      {
+        id: "v2-monthly-flow",
+        kind: "chart",
+        chartType: "bar",
+        title: "",
+        series: [
+          { name: "المسجلة", renderAs: "bar", points: [] },
+          { name: "المغلقة", renderAs: "line", dash: "0", points: [] },
+        ],
+      },
+      600,
+      300
+    );
+    expect(empty).toContain("<svg");
+
+    const one = buildChartSvg(
+      {
+        id: "v2-monthly-flow",
+        kind: "chart",
+        chartType: "bar",
+        title: "",
+        series: [
+          { name: "المسجلة", renderAs: "bar", points: [{ x: "أغسطس 2026", y: 3 }] },
+          { name: "المغلقة", renderAs: "line", dash: "0", points: [{ x: "أغسطس 2026", y: 2 }] },
+        ],
+      },
+      600,
+      300,
+      { showLinePointValues: true }
+    );
+    expect(one).toContain("<polyline");
+    expect(one).toContain(">3<");
+    expect(one).toContain(">2<");
+
+    const thirteen = buildChartSvg(monthlySection(), 900, 360, {
+      xLabelPolicy: "all",
+      xLabelLayout: "wrap-two-lines",
+      showLinePointValues: true,
+    });
+    expect(
+      (thirteen.match(/<rect x="[^"]+" y="[^"]+" width="[^"]+" height="[^"]+" fill="/g) ?? []).length
+    ).toBe(13);
+    expect(thirteen.match(/<circle /g)?.length).toBeGreaterThanOrEqual(13);
   });
 
   it("region legend uses short names and middle text anchors", async () => {
@@ -816,13 +928,14 @@ describe("region categorical x-axis labels", () => {
       title: "",
       series: [
         {
-          name: "الواردة",
+          name: "المسجلة",
           renderAs: "bar",
           points: months.map((x, i) => ({ x, y: 10 + i })),
         },
         {
           name: "المغلقة",
-          renderAs: "bar",
+          renderAs: "line",
+          dash: "0",
           points: months.map((x, i) => ({ x, y: 8 + i })),
         },
       ],
@@ -842,9 +955,9 @@ describe("region categorical x-axis labels", () => {
     expect(countDateLabels(autoSvg)).toBeLessThan(countDateLabels(allSvg));
     expect(countDateLabels(autoSvg)).toBeLessThan(months.length);
     expect(countDateLabels(allSvg)).toBe(months.length);
-    expect(autoSvg).toContain("الواردة");
+    expect(autoSvg).toContain("المسجلة");
     expect(autoSvg).toContain("المغلقة");
     expect(autoSvg).toContain(`fill="${PRIMARY}"`);
-    expect(autoSvg).toContain(`fill="${GOLD}"`);
+    expect(autoSvg).toContain(`stroke="${GOLD}"`);
   });
 });

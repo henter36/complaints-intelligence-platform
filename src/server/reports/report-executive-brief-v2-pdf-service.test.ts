@@ -417,18 +417,16 @@ describe("V2 monthly chart contract + KPI packing", () => {
       const section = call![0] as {
         series: Array<{ name: string; points: Array<{ y: number }>; axis?: string }>;
       };
-      expect(section.series).toHaveLength(4);
+      expect(section.series).toHaveLength(2);
       expect(section.series.every((s) => s.axis !== "right")).toBe(true);
       const allY = section.series.flatMap((s) => s.points.map((p) => p.y));
       expect(allY.every((y) => y < 100)).toBe(true);
       expect(allY).not.toContain(16993);
       const names = section.series.map((s) => s.name);
-      expect(names).toEqual([
-        "الواردة",
-        "المغلقة",
-        "المفتوحة",
-        "المتأخرة",
-      ]);
+      expect(names).toEqual(["المسجلة", "المغلقة"]);
+      expect((section.series[0] as { renderAs?: string }).renderAs).toBe("bar");
+      expect((section.series[1] as { renderAs?: string; dash?: string }).renderAs).toBe("line");
+      expect((section.series[1] as { dash?: string }).dash).toBe("0");
     } finally {
       pngSpy.mockRestore();
     }
@@ -466,19 +464,61 @@ describe("V2 monthly chart contract + KPI packing", () => {
       expect(call).toBeTruthy();
       const section = call![0] as { series: unknown[]; emptyState?: string };
       expect(section.series).toEqual([]);
-      expect(section.emptyState).toBe("لا توجد بيانات للاتجاه الزمني.");
+      expect(section.emptyState).toBe("لا توجد بيانات شهرية للشكاوى المسجلة أو المغلقة.");
     } finally {
       pngSpy.mockRestore();
     }
   });
 
-  it("clamps monthly chart height to remaining page space", () => {
-    const tight = resolveV2MonthlyChartAvailableHeight(842, 42, 600);
-    expect(tight).toBeLessThan(320);
+  it("ignores open/late-only months for empty-state detection", async () => {
+    const pngSpy = vi.spyOn(await import("./report-chart-service"), "renderLineChartPng");
+    pngSpy.mockResolvedValue(Buffer.from("png"));
+    try {
+      await renderExecutiveBriefV2Pdf(
+        makeV2Report({
+          briefData: makeV2Brief({
+            monthlyStockFlow: [
+              {
+                monthKey: "2025-11",
+                monthLabel: "نوفمبر 2025",
+                receivedCount: 0,
+                closedDuringMonthCount: 0,
+                openAtMonthEndCount: 40,
+                lateAtMonthEndCount: 5,
+              },
+            ],
+          }),
+        })
+      );
+      const call = pngSpy.mock.calls.find((c) => (c[0] as { id?: string }).id === "v2-monthly-flow");
+      expect(call).toBeTruthy();
+      const section = call![0] as { series: unknown[]; emptyState?: string };
+      expect(section.series).toEqual([]);
+      expect(section.emptyState).toBe("لا توجد بيانات شهرية للشكاوى المسجلة أو المغلقة.");
+    } finally {
+      pngSpy.mockRestore();
+    }
+  });
+
+  it("clamps monthly chart height to remaining page space after notes", () => {
+    const tight = resolveV2MonthlyChartAvailableHeight({
+      pageHeight: 842,
+      margin: 42,
+      chartY: 600,
+      notesHeight: 90,
+      notesGap: 10,
+    });
+    expect(tight).toBeLessThan(120);
     expect(resolveV2MonthlyChartHeight(tight)).toBe(tight);
     expect(resolveV2MonthlyChartHeight(tight)).toBeLessThanOrEqual(tight);
 
-    const negativeSpace = resolveV2MonthlyChartAvailableHeight(842, 42, 900);
+    const negativeSpace = resolveV2MonthlyChartAvailableHeight({
+      pageHeight: 842,
+      margin: 42,
+      chartY: 900,
+      notesHeight: 90,
+      notesGap: 10,
+    });
     expect(negativeSpace).toBe(0);
     expect(resolveV2MonthlyChartHeight(negativeSpace)).toBe(0);
     expect(resolveV2MonthlyChartHeight(-40)).toBe(0);
@@ -546,7 +586,11 @@ describe("V2 monthly chart contract + KPI packing", () => {
         (call) => (call[0] as { id?: string }).id === "v2-monthly-flow"
       );
       expect(monthlyCall).toBeDefined();
-      expect(monthlyCall![3]).toBeUndefined();
+      expect(monthlyCall![3]).toEqual({
+        xLabelPolicy: "all",
+        xLabelLayout: "wrap-two-lines",
+        showLinePointValues: true,
+      });
     } finally {
       pngSpy.mockRestore();
     }
@@ -654,7 +698,8 @@ describe("V2 monthly chart contract + KPI packing", () => {
       const section = flowCall![0] as {
         series: Array<{ name: string; points: Array<{ x: string; y: number }> }>;
       };
-      expect(section.series).toHaveLength(4);
+      expect(section.series).toHaveLength(2);
+      expect(section.series.map((s) => s.name)).toEqual(["المسجلة", "المغلقة"]);
       const expectedLabels = ["يوليو 2026", "أغسطس 2026"];
       for (const series of section.series) {
         expect(series.points.map((p) => p.x)).toEqual(expectedLabels);
@@ -664,9 +709,12 @@ describe("V2 monthly chart contract + KPI packing", () => {
       const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
       expect(joined).not.toContain(preparePdfText(deletedMethodology));
       expect(joined).not.toContain(preparePdfText(policyNote));
-      // Page 2 must not draw the notes bullet-box title (prepared RTL form).
-      expect(joined).not.toContain(preparePdfText("ملاحظات"));
+      expect(joined).toContain(preparePdfText("ملاحظات رئيسية"));
+      expect(joined).toContain(preparePdfText("الاتجاه الزمني للشكاوى المسجلة والمغلقة"));
+      expect(joined).not.toContain(preparePdfText("ملخص المؤشرات والاتجاه الزمني"));
       expect(joined).not.toContain(preparePdfText("ملاحظات جودة البيانات وتأثيرها على المؤشرات"));
+      expect(joined).toContain(preparePdfText("إجمالي المسجلة"));
+      expect(joined).toContain(preparePdfText("إجمالي المغلقة"));
       // Page 3 info box stays short and present
       expect(joined).toContain(
         preparePdfText("يعرض الجدول التغير بين الفترتين حسب المنطقة، وتظهر «جديد» عند عدم وجود قيمة سابقة.")

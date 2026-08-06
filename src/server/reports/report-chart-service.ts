@@ -104,10 +104,10 @@ const RIGHT_AXIS_STYLES: SeriesStyle[] = [
   { color: COLORS.danger, dash: "0", width: 2, mark: "line" },
 ];
 
-/** V2 monthly stock/flow palette: green bars, gold bars, dark-green line, alert dashed. */
+/** V2 monthly palette: dark-green registered bars, gold closed line (legacy slots unused). */
 const MONTHLY_TREND_STYLES: SeriesStyle[] = [
   { color: COLORS.primary, dash: "0", width: 2, mark: "bar" },
-  { color: COLORS.gold, dash: "0", width: 2, mark: "bar" },
+  { color: COLORS.gold, dash: "0", width: 2.2, mark: "line" },
   { color: COLORS.primary, dash: "0", width: 2.2, mark: "line" },
   { color: COLORS.danger, dash: "6,4", width: 2.2, mark: "line" },
 ];
@@ -228,11 +228,13 @@ export type ChartLabelLayout = "single-line" | "wrap-two-lines";
 export type ChartRenderOptions = {
   xLabelPolicy?: ChartLabelPolicy;
   xLabelLayout?: ChartLabelLayout;
+  showLinePointValues?: boolean;
 };
 
 const DEFAULT_CHART_RENDER_OPTIONS: Required<ChartRenderOptions> = {
   xLabelPolicy: "auto",
   xLabelLayout: "single-line",
+  showLinePointValues: false,
 };
 
 export function resolveChartRenderOptions(
@@ -241,7 +243,67 @@ export function resolveChartRenderOptions(
   return {
     xLabelPolicy: options?.xLabelPolicy ?? DEFAULT_CHART_RENDER_OPTIONS.xLabelPolicy,
     xLabelLayout: options?.xLabelLayout ?? DEFAULT_CHART_RENDER_OPTIONS.xLabelLayout,
+    showLinePointValues:
+      options?.showLinePointValues ?? DEFAULT_CHART_RENDER_OPTIONS.showLinePointValues,
   };
+}
+
+export type LineValueLabelPlacement = {
+  y: number;
+  insideBar: boolean;
+  fill: string;
+};
+
+/**
+ * Places a closed-line value label near its point while avoiding bar-value collisions
+ * and staying inside the plot (above plotTop, clear of month labels at plotBottom).
+ */
+export function resolveLineValueLabelPlacement(options: {
+  pointY: number;
+  barTopY: number | null;
+  plotTop: number;
+  plotBottom: number;
+}): LineValueLabelPlacement {
+  const { pointY, barTopY, plotTop, plotBottom } = options;
+  const aboveOffset = 12;
+  const belowOffset = 14;
+  const collisionPx = 14;
+  const minTop = plotTop + 10;
+  const maxBottom = plotBottom - 14;
+  const defaultFill = COLORS.gold;
+  const insideFill = COLORS.white;
+
+  const barLabelY = barTopY === null ? null : barTopY - 3;
+  const conflictsWithBar = (labelY: number): boolean => {
+    if (barLabelY === null) return false;
+    return Math.abs(labelY - barLabelY) < collisionPx;
+  };
+  const inBounds = (labelY: number): boolean => labelY >= minTop && labelY <= maxBottom;
+
+  const preferredAbove = pointY - aboveOffset;
+  if (inBounds(preferredAbove) && !conflictsWithBar(preferredAbove)) {
+    return { y: preferredAbove, insideBar: false, fill: defaultFill };
+  }
+
+  const preferredBelow = pointY + belowOffset;
+  if (inBounds(preferredBelow) && !conflictsWithBar(preferredBelow)) {
+    const insideBar = barTopY !== null && preferredBelow > barTopY;
+    return {
+      y: preferredBelow,
+      insideBar,
+      fill: insideBar ? insideFill : defaultFill,
+    };
+  }
+
+  if (barTopY !== null) {
+    const insideY = Math.min(Math.max(barTopY + 12, minTop), maxBottom);
+    if (inBounds(insideY)) {
+      return { y: insideY, insideBar: true, fill: insideFill };
+    }
+  }
+
+  const clamped = Math.min(Math.max(preferredAbove, minTop), maxBottom);
+  return { y: clamped, insideBar: false, fill: defaultFill };
 }
 
 /**
@@ -569,20 +631,33 @@ export function drawChartLegend(
   };
 }
 
-function renderLineSeries(
-  geo: ChartGeometry,
-  seriesList: Array<{ series: ChartSeries; style: SeriesStyle }>,
-  yMax: number,
-  categories: string[],
-  chartType: ReportChartSection["chartType"]
-): string {
+type RenderLineSeriesOptions = {
+  geo: ChartGeometry;
+  seriesList: Array<{ series: ChartSeries; style: SeriesStyle }>;
+  yMax: number;
+  categories: string[];
+  chartType: ReportChartSection["chartType"];
+  showPointValues: boolean;
+  barTopYByCategory?: ReadonlyMap<string, number>;
+};
+
+function renderLineSeries(options: RenderLineSeriesOptions): string {
+  const {
+    geo,
+    seriesList,
+    yMax,
+    categories,
+    chartType,
+    showPointValues,
+    barTopYByCategory,
+  } = options;
   const parts: string[] = [];
   const catIndex = new Map(categories.map((c, i) => [c, i]));
   const catCount = Math.max(1, categories.length);
   const catWidth = (geo.plotRight - geo.plotLeft) / catCount;
 
   for (const { series, style } of seriesList) {
-    const points = series.points
+    const plotted = series.points
       .map((p) => {
         const idx = catIndex.get(p.x);
         if (idx === undefined) return null;
@@ -590,18 +665,31 @@ function renderLineSeries(
           ? geo.plotLeft + (idx + 0.5) * catWidth
           : xForIndex(geo, idx);
         const y = yForValue(geo, p.y, yMax);
-        return { x, y };
+        return { x, y, value: p.y, category: p.x };
       })
-      .filter((p): p is { x: number; y: number } => p !== null);
-    if (points.length === 0) continue;
-    const polyline = points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+      .filter(
+        (p): p is { x: number; y: number; value: number; category: string } => p !== null
+      );
+    if (plotted.length === 0) continue;
+    const polyline = plotted.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
     const dashAttr = style.dash && style.dash !== "0" ? ` stroke-dasharray="${style.dash}"` : "";
     parts.push(
       `<polyline fill="none" stroke="${style.color}" stroke-width="${style.width}"${dashAttr} points="${polyline}"/>`
     );
-    for (const p of points) {
+    for (const p of plotted) {
       parts.push(
         `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="2.6" fill="${COLORS.white}" stroke="${style.color}" stroke-width="1.4"/>`
+      );
+      if (!showPointValues || p.value <= 0) continue;
+      const barTopY = barTopYByCategory?.get(p.category) ?? null;
+      const placement = resolveLineValueLabelPlacement({
+        pointY: p.y,
+        barTopY,
+        plotTop: geo.plotTop,
+        plotBottom: geo.plotBottom,
+      });
+      parts.push(
+        `<text x="${p.x.toFixed(1)}" y="${placement.y.toFixed(1)}" text-anchor="middle" font-size="9" fill="${placement.fill}">${escapeXml(formatReportNumber(p.value, { maximumFractionDigits: 0 }))}</text>`
       );
     }
   }
@@ -685,7 +773,14 @@ function renderRightAxisLines(
     series,
     style: rightAxisStyle(si),
   }));
-  return renderLineSeries(geo, styled, yMaxRight, categories, chartType);
+  return renderLineSeries({
+    geo,
+    seriesList: styled,
+    yMax: yMaxRight,
+    categories,
+    chartType,
+    showPointValues: false,
+  });
 }
 
 function renderAxesWithOptionalSecondary(options: RenderAxesOptions): string {
@@ -1009,8 +1104,25 @@ function buildChartSvgBody(options: {
     ? `<text x="${width / 2}" y="24" text-anchor="middle" font-size="15" fill="${COLORS.primary}" direction="rtl" unicode-bidi="plaintext">${title}</text>`
     : "";
   const barsSvg = bars.length > 0 ? renderBarSeries(geo, bars, yMax, categories) : "";
+  const barTopYByCategory = new Map<string, number>();
+  for (const { series } of bars) {
+    for (const point of series.points) {
+      if (point.y <= 0) continue;
+      if (!barTopYByCategory.has(point.x)) {
+        barTopYByCategory.set(point.x, yForValue(geo, point.y, yMax));
+      }
+    }
+  }
   const linesSvg = lines.length > 0
-    ? renderLineSeries(geo, lines, yMax, categories, lineRenderType)
+    ? renderLineSeries({
+      geo,
+      seriesList: lines,
+      yMax,
+      categories,
+      chartType: lineRenderType,
+      showPointValues: renderOptions.showLinePointValues,
+      barTopYByCategory,
+    })
     : "";
   const dualSvg = hasDualAxis
     ? renderRightAxisLines(geo, rightSeries, yMaxRight, categories, section.chartType)
