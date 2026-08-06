@@ -31,6 +31,7 @@ import { resolve } from "node:path";
 const dbMocks = vi.hoisted(() => ({
   findMany: vi.fn(),
   groupBy: vi.fn(),
+  count: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -38,6 +39,7 @@ vi.mock("@/lib/db", () => ({
     complaint: {
       findMany: dbMocks.findMany,
       groupBy: dbMocks.groupBy,
+      count: dbMocks.count,
     },
   },
 }));
@@ -361,7 +363,9 @@ describe("staff actor privacy gating", () => {
   beforeEach(() => {
     dbMocks.findMany.mockReset();
     dbMocks.groupBy.mockReset();
+    dbMocks.count.mockReset();
     dbMocks.groupBy.mockResolvedValue([]);
+    dbMocks.count.mockResolvedValue(1);
   });
 
   function staffRow() {

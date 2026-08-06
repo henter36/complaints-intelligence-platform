@@ -152,4 +152,15 @@ describe("central complaint query service", () => {
       expect.arrayContaining([{ sourceUpdatedAt: { lte: sevenDaysAgo } }])
     );
   });
+
+  it("uses currently late helper for isLate=true", () => {
+    const now = new Date("2026-07-30T00:00:00Z");
+    const where = buildComplaintWhere(parseComplaintQuery(query("isLate=true")), now);
+    expect(where.AND).toEqual([
+      {
+        dueDate: { lt: now },
+        status: { in: expect.arrayContaining(["OPEN", "NEW", "IN_PROGRESS", "AWAITING_RESPONSE"]) },
+      },
+    ]);
+  });
 });
