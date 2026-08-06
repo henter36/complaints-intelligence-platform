@@ -39,6 +39,10 @@ import type {
   ContinuityRow,
   ExecutiveBriefPreviewPage,
   MonthlyComplaintTrendPoint,
+  ExecutivePeriodMetrics,
+  RegionSnapshotAtEndRow,
+  DepartmentPeriodMetricsRow,
+  ClassificationSnapshotAtEndRow,
 } from "@/lib/reports/report-contract";
 // Types that are only re-exported (not used locally) — direct re-export avoids a redundant import.
 export type { KpiAssessment, ComparativeTimelinePoint, ComparativeTimelineSeries } from "@/lib/reports/report-contract";
@@ -174,6 +178,16 @@ export type ExecutiveBriefData = {
   topDepartments?: ExecutiveEntityRow[];
   conclusions?: string[];
   notes?: string[];
+  /** Deduplicated union of comparison warnings and period-snapshot warnings (e.g. an uncertain complaint state). */
+  warnings?: string[];
+  /** Cover-page flow/stock metrics: receivedDuringPeriod, closedDuringPeriod, openAtEnd, lateAtEnd. */
+  periodMetrics?: ExecutivePeriodMetrics;
+  /** Per-region openAtEnd/lateAtEnd at current period end (region currentCount/previousCount stay Inflow-based). */
+  regionSnapshotAtEnd?: RegionSnapshotAtEndRow[];
+  /** Per-department receivedDuringPeriod/closedDuringPeriod/openAtEnd/lateAtEnd for the current period. */
+  departmentPeriodMetrics?: DepartmentPeriodMetricsRow[];
+  /** Per-classification openAtEnd/lateAtEnd at current period end, covering every classification. */
+  classificationSnapshotAtEnd?: ClassificationSnapshotAtEndRow[];
 };
 
 /** Extended payload for PRINT_EXECUTIVE_BRIEF_V2 (super-set of ExecutiveBriefData). */
@@ -222,6 +236,10 @@ export type {
   NetBacklogFlow,
   PerfVolumeRow,
   ContinuityRow,
+  ExecutivePeriodMetrics,
+  RegionSnapshotAtEndRow,
+  DepartmentPeriodMetricsRow,
+  ClassificationSnapshotAtEndRow,
 };
 const PREVIEW_TABLE_ROW_CAP = 100;
 

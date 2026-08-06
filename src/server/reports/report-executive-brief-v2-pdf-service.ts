@@ -24,6 +24,7 @@ import type {
   ClassificationBriefRow,
   ExecutiveEntityRow,
   ExecutiveBriefKpiCard,
+  PeriodSnapshotMetrics,
 } from "@/lib/reports/report-contract";
 import type { ExecutiveBriefV2Data, ReportData } from "./report-data-service";
 import { isExecutiveBriefV2Data } from "./report-data-service";
@@ -295,6 +296,22 @@ function formatKpiValue(card: ExecutiveBriefKpiCard): string {
   if (card.format === "percent") return formatReportNumber(card.value, { percent: true, maximumFractionDigits: 1 });
   if (card.format === "days") return `${formatReportNumber(card.value)} يوم`;
   return formatReportNumber(card.value, { maximumFractionDigits: 0 });
+}
+
+/**
+ * Cover-card comparison sub-text for a period-snapshot metric.
+ * previous === null → no comparison period at all (blank sub-text).
+ * previous === 0 && current > 0 → "جديد" (never 0% or Infinity — there is no
+ * meaningful percentage change from zero).
+ */
+function formatPeriodMetricSub(current: number, previous: number | null): string {
+  if (previous === null) return "";
+  if (previous === 0) {
+    return current > 0 ? `جديد | السابق 0` : `السابق 0`;
+  }
+  const difference = current - previous;
+  const changeRate = Math.round(((current - previous) / previous) * 1000) / 10;
+  return `(${formatReportNumber(changeRate, { sign: true, percent: true })}) ${formatReportNumber(difference, { sign: true })} | السابق ${formatReportNumber(previous)}`;
 }
 
 /** Measure prepared Arabic (or mixed) text width for the active font/size. */
@@ -667,25 +684,20 @@ function renderCoverPage(ctx: V2Context): void {
   const circR = 30;
 
   const coverCards: Array<{ key: string; icon: IconType; label: string; primary: string; sub: string }> = (() => {
-    const total = brief.briefKpis.find((k) => k.key === "total");
-    const closed = brief.briefKpis.find((k) => k.key === "closed");
-    const open = brief.briefKpis.find((k) => k.key === "open");
-    const late = brief.briefKpis.find((k) => k.key === "currentlyLate");
+    // Cover cards read directly from the period snapshot (flow: received/closed
+    // during the period; stock: open/late at period end) rather than the
+    // generic briefKpis grid, per the explicit periodMetrics contract.
+    const metrics = brief.periodMetrics ?? { current: EMPTY_PERIOD_SNAPSHOT_METRICS, previous: null };
+    const { current, previous } = metrics;
 
-    const totalVal = total ? formatKpiValue(total) : "—";
-    const totalSub = total?.difference !== null && total
-      ? `(${formatReportNumber(total.changeRate ?? 0, { sign: true, percent: true })}) ${formatReportNumber(total.difference ?? 0, { sign: true })} | السابق ${formatReportNumber(total.previousValue ?? 0)}`
-      : "";
+    const totalVal = formatReportNumber(current.receivedDuringPeriod, { maximumFractionDigits: 0 });
+    const totalSub = formatPeriodMetricSub(current.receivedDuringPeriod, previous?.receivedDuringPeriod ?? null);
 
-    const closedVal = closed ? formatKpiValue(closed) : "—";
-    const closedSub = closed?.difference !== null && closed
-      ? `(${formatReportNumber(closed.changeRate ?? 0, { sign: true, percent: true })}) ${formatReportNumber(closed.difference ?? 0, { sign: true })} | السابق ${formatReportNumber(closed.previousValue ?? 0)}`
-      : "";
+    const closedVal = formatReportNumber(current.closedDuringPeriod, { maximumFractionDigits: 0 });
+    const closedSub = formatPeriodMetricSub(current.closedDuringPeriod, previous?.closedDuringPeriod ?? null);
 
-    const openV = open?.value ?? 0;
-    const lateV = late?.value ?? 0;
-    const openLateVal = `${formatReportNumber(openV)} / ${formatReportNumber(lateV)}`;
-    const openLateSub = `مفتوحة ${formatReportNumber(openV)} | متأخرة ${formatReportNumber(lateV)}`;
+    const openLateVal = `${formatReportNumber(current.openAtEnd)} / ${formatReportNumber(current.lateAtEnd)}`;
+    const openLateSub = `مفتوحة ${formatReportNumber(current.openAtEnd)} | متأخرة ${formatReportNumber(current.lateAtEnd)}`;
 
     return [
       { key: "total", icon: "clipboard" as IconType, label: "شكاوى الفترة", primary: totalVal, sub: totalSub },
@@ -834,7 +846,18 @@ async function renderPage2(ctx: V2Context): Promise<void> {
     value: totals.registeredTotal,
     icon: "clipboard",
   });
-  y += cardH + 14;
+  y += cardH + 6;
+
+  // Clarifies that both totals are windowed to the displayed months (up to 13),
+  // not an absolute all-time total — see spec section 17.
+  doc.font("Body").fontSize(8.5).fillColor(COLORS.neutral).text(
+    preparePdfText("الإجماليان أعلاه يشملان الأشهر المعروضة في الرسم أدناه فقط (حتى 13 شهرًا)."),
+    margin,
+    y,
+    { width: contentWidth, align: "center", wordSpacing: WORD_SPACING, lineBreak: false }
+  );
+  resetInk(doc);
+  y += 16;
 
   const hasMonthlyRegisteredOrClosed = flow.some(
     (point) => point.receivedCount > 0 || point.closedDuringMonthCount > 0
@@ -1290,6 +1313,13 @@ function drawFooters(doc: PDFKit.PDFDocument, layout: V2Layout, warnings: string
 
 // ── Main entry point ─────────────────────────────────────────────────────────
 
+const EMPTY_PERIOD_SNAPSHOT_METRICS: PeriodSnapshotMetrics = {
+  receivedDuringPeriod: 0,
+  closedDuringPeriod: 0,
+  openAtEnd: 0,
+  lateAtEnd: 0,
+};
+
 const EMPTY_V2: ExecutiveBriefV2Data = {
   briefKpis: [],
   allRegions: [],
@@ -1302,6 +1332,10 @@ const EMPTY_V2: ExecutiveBriefV2Data = {
   allTimeTotal: 0,
   monthlyStockFlow: [],
   classificationOpenLate: {},
+  periodMetrics: { current: EMPTY_PERIOD_SNAPSHOT_METRICS, previous: null },
+  regionSnapshotAtEnd: [],
+  departmentPeriodMetrics: [],
+  classificationSnapshotAtEnd: [],
 };
 
 function buildFallbackBrief(rawBrief: ReportData["briefData"]): ExecutiveBriefV2Data {
