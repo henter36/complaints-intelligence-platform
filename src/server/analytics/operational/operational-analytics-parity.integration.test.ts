@@ -16,6 +16,10 @@ vi.mock("@/lib/db", () => ({
       if (!dbHolder.client) throw new Error("test prisma not ready");
       return dbHolder.client.complaint;
     },
+    get classification() {
+      if (!dbHolder.client) throw new Error("test prisma not ready");
+      return dbHolder.client.classification;
+    },
   },
 }));
 
@@ -298,5 +302,30 @@ describe("operational analytics DB aggregate integration", () => {
     const summary = await getOperationalAnalytics(params, { now: NOW });
     const list = await listComplaints(params, { now: NOW });
     expect(summary.totalInScope).toBe(list.pagination.total);
+  });
+
+  it("keeps wing drill-down pagination.total equal to each wing bucket count", async () => {
+    const base = new URLSearchParams("from=2026-07-01&to=2026-07-31");
+    const summary = await getOperationalAnalytics(base, { now: NOW });
+
+    for (const item of summary.wing.items) {
+      const drill = new URLSearchParams(base);
+      for (const [key, value] of Object.entries(item.drillDownFilters)) {
+        drill.set(key, value);
+      }
+      const list = await listComplaints(drill, { now: NOW });
+      expect(list.pagination.total, `wing:${item.key}`).toBe(item.count);
+    }
+  });
+
+  it("matches wing unspecifiedCount to listComplaints with wingCode unspecified", async () => {
+    const base = new URLSearchParams();
+    const summary = await getOperationalAnalytics(base, { now: NOW });
+    expect(summary.wing.unspecifiedCount).toBeGreaterThan(0);
+
+    const drill = new URLSearchParams(base);
+    drill.set("wingCode", OPERATIONAL_UNSPECIFIED);
+    const list = await listComplaints(drill, { now: NOW });
+    expect(list.pagination.total).toBe(summary.wing.unspecifiedCount);
   });
 });

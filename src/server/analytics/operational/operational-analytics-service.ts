@@ -4,7 +4,6 @@ import {
   buildComplaintWhere,
   parseComplaintQuery,
 } from "@/server/complaints/complaint-query-service";
-import { buildComplaintTiming } from "@/server/complaints/complaint-timing";
 import {
   CLOSED_COMPLAINT_STATUSES,
   OPEN_COMPLAINT_STATUSES,
@@ -15,6 +14,7 @@ import {
   resolveFreshnessBucket,
 } from "@/server/analytics/operational/operational-freshness";
 import { loadAggregatedOperationalDimensions } from "./operational-aggregate-service";
+import { loadWingOperationalMetrics } from "./operational-wing-aggregate-service";
 import {
   DATA_FRESHNESS_BUCKETS,
   OPERATIONAL_UNSPECIFIED,
@@ -25,14 +25,13 @@ import {
   type OperationalAnalyticsSummary,
   type OperationalDataQualitySignal,
   type StaffActorMetrics,
-  type WingOperationalMetrics,
 } from "./operational-analytics-types";
 
 const LONG_ACTION_TAKEN_CHARS = 80;
 const RARE_SHARE_THRESHOLD = 0.01;
 const RIYADH_TZ = "Asia/Riyadh";
 
-/** Residual metrics still computed in Node (wing/freshness/actionTaken/dataQuality/staff). */
+/** Residual metrics still computed in Node (freshness/actionTaken/dataQuality/staff). */
 type SlimOperationalRow = {
   id: string;
   status: ComplaintStatus;
@@ -51,7 +50,6 @@ type SlimOperationalRow = {
   receivedAt: Date;
   dueDate: Date | null;
   closedAt: Date | null;
-  classification: { nameAr: string } | null;
 };
 
 function timed<T>(fn: () => Promise<T>): Promise<{ ms: number; value: T }> {
@@ -88,14 +86,6 @@ function emptyStringOrNull(value: string | null | undefined): boolean {
   return value == null || value.trim() === "";
 }
 
-function categoricalKey(value: string | null | undefined): string {
-  return emptyStringOrNull(value) ? OPERATIONAL_UNSPECIFIED : value!.trim();
-}
-
-function categoricalLabel(key: string): string {
-  return key === OPERATIONAL_UNSPECIFIED ? OPERATIONAL_UNSPECIFIED_LABEL : key;
-}
-
 function maskActor(value: string): string {
   const trimmed = value.trim();
   if (trimmed.length <= 2) return "**";
@@ -129,7 +119,6 @@ const RESIDUAL_OPERATIONAL_SELECT = {
   receivedAt: true,
   dueDate: true,
   closedAt: true,
-  classification: { select: { nameAr: true } },
 } satisfies Prisma.ComplaintSelect;
 
 function buildActionTakenQuality(rows: SlimOperationalRow[]): ActionTakenQuality {
@@ -185,53 +174,6 @@ function buildActionTakenQuality(rows: SlimOperationalRow[]): ActionTakenQuality
     rareValueShare: pct(rareCount, rawCounts.size || 1),
     longTextShare: pct(longText, nonEmpty || 1),
     spellingVariantHints,
-  };
-}
-
-function buildWingMetrics(rows: SlimOperationalRow[], now: Date, total: number): WingOperationalMetrics {
-  const byWing = new Map<string, SlimOperationalRow[]>();
-  for (const row of rows) {
-    const key = categoricalKey(row.wingCode);
-    const list = byWing.get(key) ?? [];
-    list.push(row);
-    byWing.set(key, list);
-  }
-
-  const items = Array.from(byWing.entries())
-    .filter(([key]) => key !== OPERATIONAL_UNSPECIFIED)
-    .map(([key, itemsForWing]) => {
-      let open = 0;
-      let closed = 0;
-      let currentlyLate = 0;
-      const classCounts = new Map<string, number>();
-      for (const row of itemsForWing) {
-        if (OPEN_COMPLAINT_STATUSES.has(row.status)) open += 1;
-        if (CLOSED_COMPLAINT_STATUSES.has(row.status)) closed += 1;
-        if (buildComplaintTiming(row, now).isCurrentlyLate) currentlyLate += 1;
-        const className = row.classification?.nameAr;
-        if (className) classCounts.set(className, (classCounts.get(className) ?? 0) + 1);
-      }
-      const top = Array.from(classCounts.entries()).sort((a, b) => b[1] - a[1])[0] ?? null;
-      return {
-        key,
-        label: categoricalLabel(key),
-        count: itemsForWing.length,
-        percentage: pct(itemsForWing.length, total),
-        open,
-        closed,
-        currentlyLate,
-        topClassification: top?.[0] ?? null,
-        topClassificationCount: top?.[1] ?? 0,
-        drillDownFilters: { wingCode: key },
-      };
-    })
-    .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label, "ar"))
-    .slice(0, 40);
-
-  return {
-    items,
-    unspecifiedCount: byWing.get(OPERATIONAL_UNSPECIFIED)?.length ?? 0,
-    total,
   };
 }
 
@@ -603,20 +545,30 @@ export async function getOperationalAnalytics(
     ? buildComplaintWhere(parseComplaintQuery(prevParams), now)
     : null;
 
-  const [aggregated, residualLoad] = await Promise.all([
-    loadAggregatedOperationalDimensions({ where, previousWhere, now }),
-    timed(() =>
-      db.complaint.findMany({
-        where,
-        select: RESIDUAL_OPERATIONAL_SELECT,
-      })
-    ),
+  const aggregatedPromise = loadAggregatedOperationalDimensions({ where, previousWhere, now });
+  const residualPromise = timed(() =>
+    db.complaint.findMany({
+      where,
+      select: RESIDUAL_OPERATIONAL_SELECT,
+    })
+  );
+  const wingPromise = aggregatedPromise.then((aggregated) =>
+    loadWingOperationalMetrics({
+      where,
+      now,
+      total: aggregated.totalInScope,
+    })
+  );
+
+  const [aggregated, wingAggregated, residualLoad] = await Promise.all([
+    aggregatedPromise,
+    wingPromise,
+    residualPromise,
   ]);
 
   const rows = residualLoad.value as SlimOperationalRow[];
   const total = aggregated.totalInScope;
 
-  const wingTimed = await timed(async () => buildWingMetrics(rows, now, total));
   const freshnessTimed = await timed(async () => buildFreshness(rows, now));
   const actionQualityTimed = await timed(async () => buildActionTakenQuality(rows));
   const qualityTimed = await timed(async () => buildDataQuality(rows, total));
@@ -641,24 +593,26 @@ export async function getOperationalAnalytics(
     },
     channelIndependentCheck: aggregated.channelIndependentCheck,
     actionTakenQuality: actionQualityTimed.value,
-    wing: wingTimed.value,
+    wing: wingAggregated.metrics,
     freshness: freshnessTimed.value,
     dataQuality: qualityTimed.value,
     staffActors: staff,
     performanceMs: {
-      // Time to load residual rows only (wing/freshness/quality/staff) — not full analytics I/O.
+      // Time to load residual rows only (freshness/quality/staff) — not full analytics I/O.
       loadRows: residualLoad.ms,
       previousPeriod: aggregated.performanceMs.previousPeriod,
       sourceOrigin: aggregated.performanceMs.sourceOrigin,
       sourceStatus: aggregated.performanceMs.sourceStatus,
       sourceActionStatus: aggregated.performanceMs.sourceActionStatus,
-      wingCode: wingTimed.ms,
+      // Wing metrics now come from DB aggregates (not residual row scan).
+      wingCode: wingAggregated.performanceMs,
       freshness: freshnessTimed.ms,
       actionTakenQuality: actionQualityTimed.ms,
       dataQuality: qualityTimed.ms,
       aggregateDimensions: aggregated.performanceMs.aggregateDimensions,
       resolutionRows: aggregated.performanceMs.resolutionRows,
       residualRows: residualLoad.ms,
+      wingAggregate: wingAggregated.performanceMs,
     },
   };
 }

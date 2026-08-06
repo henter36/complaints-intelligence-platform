@@ -55,11 +55,19 @@ function filePathFromUrl(url: string): string | null {
 
 function installQueryCounter(client: {
   complaint: Record<string, (...args: unknown[]) => Promise<unknown>>;
+  classification?: Record<string, (...args: unknown[]) => Promise<unknown>>;
 }) {
   let count = 0;
   for (const method of ["findMany", "groupBy", "count"] as const) {
     const original = client.complaint[method]!.bind(client.complaint);
     client.complaint[method] = async (...args: unknown[]) => {
+      count += 1;
+      return original(...args);
+    };
+  }
+  if (client.classification?.findMany) {
+    const original = client.classification.findMany.bind(client.classification);
+    client.classification.findMany = async (...args: unknown[]) => {
       count += 1;
       return original(...args);
     };
