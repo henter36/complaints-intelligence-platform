@@ -11,11 +11,20 @@ export function activeSqliteSidecars(databasePath: string): string[] {
 
 export function assertSqliteSourceIsQuiescent(databasePath: string): void {
   const active = activeSqliteSidecars(databasePath);
-  if (active.length === 0) return;
-  const hasShm = existsSync(`${databasePath}-shm`);
-  const details = hasShm ? ` Active files: ${[...active, `${databasePath}-shm`].join(", ")}` : "";
+
+  if (active.length === 0) {
+    return;
+  }
+
+  const shmPath = `${databasePath}-shm`;
+  const hasShm = existsSync(shmPath);
+  const reportedFiles = hasShm ? [...active, shmPath] : active;
+  const details = ` Active files: ${reportedFiles.join(", ")}`;
+
   throw new Error(
-    `SQLite source has an active WAL or rollback journal. Stop writers and retry so the benchmark can create a consistent snapshot.${details}`
+    "SQLite source has an active WAL or rollback journal. "
+      + "Stop writers and retry so the benchmark can create "
+      + `a consistent snapshot.${details}`
   );
 }
 

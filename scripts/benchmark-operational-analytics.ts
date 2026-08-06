@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ComplaintPriority, ComplaintStatus, PrismaClient } from "@prisma/client";
+import { withPreparedBenchmark } from "./lib/benchmark-lifecycle";
 import {
   copyConsistentSqliteSnapshot,
 } from "./lib/benchmark-sqlite-snapshot";
@@ -162,83 +163,100 @@ async function prepareDatabase(mode: Mode): Promise<{
   const tempDir = mkdtempSync(join(tmpdir(), "op-analytics-synth-"));
   const dbPath = join(tempDir, "synthetic.db");
   const databaseUrl = `file:${dbPath}`;
-  runPrismaMigrateDeploy(databaseUrl);
-  const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+
   try {
-    await seedSynthetic(prisma, size);
-  } finally {
-    await prisma.$disconnect();
+    runPrismaMigrateDeploy(databaseUrl);
+    const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+    try {
+      await seedSynthetic(prisma, size);
+    } finally {
+      await prisma.$disconnect();
+    }
+    return { databaseUrl, tempDir, size };
+  } catch (error) {
+    rmSync(tempDir, { recursive: true, force: true });
+    throw error;
   }
-  return { databaseUrl, tempDir, size };
 }
 
-async function main() {
+async function main(): Promise<void> {
   const mode = resolveMode();
   const prepared = await prepareDatabase(mode);
-  process.env.DATABASE_URL = prepared.databaseUrl;
+  const originalDatabaseUrl = process.env.DATABASE_URL;
 
-  const { getOperationalAnalytics } = await import(
-    "../src/server/analytics/operational/operational-analytics-service"
-  );
-  const { db } = await import("../src/lib/db");
-  const rowCount = await db.complaint.count({ where: { isDeleted: false } });
-  const preflightQueries = 1;
-  const getQueryCount = installQueryCounter(db as never);
-  // Counts queries issued by getOperationalAnalytics only.
-  const params = new URLSearchParams(argValue("params") ?? "");
-  const heapBefore = process.memoryUsage();
-  const t0 = performance.now();
-  const result = await getOperationalAnalytics(params, {
-    now: new Date("2026-08-05T12:00:00.000Z"),
+  let benchmarkDb: typeof import("../src/lib/db").db | null = null;
+
+  await withPreparedBenchmark({
+    tempDir: prepared.tempDir,
+    originalDatabaseUrl,
+    disconnect: async () => {
+      await benchmarkDb?.$disconnect();
+    },
+    run: async () => {
+      process.env.DATABASE_URL = prepared.databaseUrl;
+
+      const { getOperationalAnalytics } = await import(
+        "../src/server/analytics/operational/operational-analytics-service"
+      );
+      const dbModule = await import("../src/lib/db");
+      benchmarkDb = dbModule.db;
+
+      const rowCount = await benchmarkDb.complaint.count({ where: { isDeleted: false } });
+      const preflightQueries = 1;
+      const getQueryCount = installQueryCounter(benchmarkDb as never);
+      // Counts queries issued by getOperationalAnalytics only.
+      const params = new URLSearchParams(argValue("params") ?? "");
+      const heapBefore = process.memoryUsage();
+      const t0 = performance.now();
+      const result = await getOperationalAnalytics(params, {
+        now: new Date("2026-08-05T12:00:00.000Z"),
+      });
+      const totalMs = Math.round(performance.now() - t0);
+      const heapAfter = process.memoryUsage();
+      const prismaQueries = getQueryCount();
+
+      let sourceShaAfter: string | undefined;
+      if (prepared.sourcePath && prepared.sourceSha) {
+        sourceShaAfter = sha256File(prepared.sourcePath);
+      }
+
+      const report = {
+        mode,
+        params: params.toString(),
+        size: prepared.size ?? rowCount,
+        rowCount,
+        totalInScope: result.totalInScope,
+        totalMs,
+        performanceMs: result.performanceMs,
+        heapBeforeMB: Math.round(heapBefore.heapUsed / 1024 / 1024),
+        heapAfterMB: Math.round(heapAfter.heapUsed / 1024 / 1024),
+        rssBeforeMB: Math.round(heapBefore.rss / 1024 / 1024),
+        rssAfterMB: Math.round(heapAfter.rss / 1024 / 1024),
+        preflightQueries,
+        prismaQueries,
+        channelIndependentCheck: result.channelIndependentCheck,
+        sourceOriginTop3: result.sourceOrigin.items.slice(0, 3).map((item) => ({
+          key: item.key,
+          count: item.count,
+          open: item.open,
+          closed: item.closed,
+          currentlyLate: item.currentlyLate,
+          averageResolutionDays: item.averageResolutionDays,
+        })),
+        sourceShaBefore: prepared.sourceSha,
+        sourceShaAfter,
+        sourceUnchanged:
+          prepared.sourceSha && sourceShaAfter ? prepared.sourceSha === sourceShaAfter : undefined,
+      };
+
+      const outPath = argValue("out");
+      const json = JSON.stringify(report, null, 2);
+      console.log(json);
+      if (outPath) {
+        writeFileSync(outPath, `${json}\n`);
+      }
+    },
   });
-  const totalMs = Math.round(performance.now() - t0);
-  const heapAfter = process.memoryUsage();
-  const prismaQueries = getQueryCount();
-
-  let sourceShaAfter: string | undefined;
-  if (prepared.sourcePath && prepared.sourceSha) {
-    sourceShaAfter = sha256File(prepared.sourcePath);
-  }
-
-  const report = {
-    mode,
-    params: params.toString(),
-    size: prepared.size ?? rowCount,
-    rowCount,
-    totalInScope: result.totalInScope,
-    totalMs,
-    performanceMs: result.performanceMs,
-    heapBeforeMB: Math.round(heapBefore.heapUsed / 1024 / 1024),
-    heapAfterMB: Math.round(heapAfter.heapUsed / 1024 / 1024),
-    rssBeforeMB: Math.round(heapBefore.rss / 1024 / 1024),
-    rssAfterMB: Math.round(heapAfter.rss / 1024 / 1024),
-    preflightQueries,
-    prismaQueries,
-    channelIndependentCheck: result.channelIndependentCheck,
-    sourceOriginTop3: result.sourceOrigin.items.slice(0, 3).map((item) => ({
-      key: item.key,
-      count: item.count,
-      open: item.open,
-      closed: item.closed,
-      currentlyLate: item.currentlyLate,
-      averageResolutionDays: item.averageResolutionDays,
-    })),
-    sourceShaBefore: prepared.sourceSha,
-    sourceShaAfter,
-    sourceUnchanged:
-      prepared.sourceSha && sourceShaAfter ? prepared.sourceSha === sourceShaAfter : undefined,
-  };
-
-  const outPath = argValue("out");
-  const json = JSON.stringify(report, null, 2);
-  console.log(json);
-  if (outPath) {
-    writeFileSync(outPath, `${json}\n`);
-  }
-
-  if (prepared.tempDir) {
-    rmSync(prepared.tempDir, { recursive: true, force: true });
-  }
 }
 
 main().catch((error) => {

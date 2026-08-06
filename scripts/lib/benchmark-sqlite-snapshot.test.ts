@@ -48,24 +48,87 @@ describe("benchmark sqlite snapshot safeguards", () => {
     }
   });
 
-  it("rejects non-empty WAL and keeps sidecar untouched", () => {
+  it("rejects non-empty WAL without SHM and keeps sidecar untouched", () => {
     const { dir, dbPath } = setupDbFixture();
     const wal = `${dbPath}-wal`;
+    const shm = `${dbPath}-shm`;
     try {
       writeFileSync(wal, "pending-wal-data");
       const beforeSize = statSync(wal).size;
-      expect(() => assertSqliteSourceIsQuiescent(dbPath)).toThrow(/active WAL or rollback journal/);
+      let thrown: Error | undefined;
+      try {
+        assertSqliteSourceIsQuiescent(dbPath);
+      } catch (error) {
+        thrown = error as Error;
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown!.message).toContain(wal);
+      expect(thrown!.message).not.toContain(shm);
       expect(statSync(wal).size).toBe(beforeSize);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("rejects non-empty rollback journal", () => {
+  it("rejects non-empty WAL with SHM and reports both paths", () => {
     const { dir, dbPath } = setupDbFixture();
+    const wal = `${dbPath}-wal`;
+    const shm = `${dbPath}-shm`;
     try {
-      writeFileSync(`${dbPath}-journal`, "pending-journal-data");
-      expect(() => assertSqliteSourceIsQuiescent(dbPath)).toThrow(/active WAL or rollback journal/);
+      writeFileSync(wal, "pending-wal-data");
+      writeFileSync(shm, "shm-bytes");
+      const walSize = statSync(wal).size;
+      const shmSize = statSync(shm).size;
+      let thrown: Error | undefined;
+      try {
+        assertSqliteSourceIsQuiescent(dbPath);
+      } catch (error) {
+        thrown = error as Error;
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown!.message).toContain(wal);
+      expect(thrown!.message).toContain(shm);
+      expect(statSync(wal).size).toBe(walSize);
+      expect(statSync(shm).size).toBe(shmSize);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects non-empty rollback journal and keeps sidecar untouched", () => {
+    const { dir, dbPath } = setupDbFixture();
+    const journal = `${dbPath}-journal`;
+    try {
+      writeFileSync(journal, "pending-journal-data");
+      const beforeSize = statSync(journal).size;
+      let thrown: Error | undefined;
+      try {
+        assertSqliteSourceIsQuiescent(dbPath);
+      } catch (error) {
+        thrown = error as Error;
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      expect(thrown!.message).toContain(journal);
+      expect(statSync(journal).size).toBe(beforeSize);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not reject when only SHM exists", () => {
+    const { dir, dbPath } = setupDbFixture();
+    const shm = `${dbPath}-shm`;
+    try {
+      writeFileSync(shm, "shm-only");
+      expect(activeSqliteSidecars(dbPath)).toEqual([]);
+      expect(() => assertSqliteSourceIsQuiescent(dbPath)).not.toThrow();
+      const result = copyConsistentSqliteSnapshot({
+        sourcePath: dbPath,
+        tempPrefix: "sqlite-copy-shm-only-",
+        hashFile: sha,
+      });
+      expect(statSync(shm).size).toBeGreaterThan(0);
+      rmSync(result.tempDir, { recursive: true, force: true });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
