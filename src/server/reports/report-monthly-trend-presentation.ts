@@ -119,10 +119,13 @@ function buildFlowInsight(
   const complete = points.filter((point) => point.monthKey !== partialKey);
   if (complete.length === 0) return null;
 
+  // Balanced convergence: closed within ±10% of received (90%-110%), not a
+  // one-sided "closed at least 90% of received" test — the latter also
+  // flags months where far more was closed than received as "converged".
   const proximate = complete.filter(
     (point) =>
       point.receivedCount > 0
-      && point.closedDuringMonthCount >= point.receivedCount * 0.9
+      && Math.abs(point.closedDuringMonthCount - point.receivedCount) / point.receivedCount <= 0.10
   );
   if (proximate.length >= Math.ceil(complete.length / 2)) {
     return {

@@ -300,6 +300,48 @@ export type ReportMatrixSection = {
 };
 
 // ---------------------------------------------------------------------------
+// Period snapshot metrics — flow (during the period) vs. stock (at period end)
+// ---------------------------------------------------------------------------
+
+/**
+ * The four period-snapshot indicators. `receivedDuringPeriod` and
+ * `closedDuringPeriod` are flow metrics (events inside [from, toExclusive)).
+ * `openAtEnd` and `lateAtEnd` are stock metrics (state at the instant
+ * `toExclusive`) and are NOT derivable as receivedDuringPeriod − closedDuringPeriod.
+ */
+export type PeriodSnapshotMetrics = {
+  receivedDuringPeriod: number;
+  closedDuringPeriod: number;
+  openAtEnd: number;
+  lateAtEnd: number;
+};
+
+/** Cover-page period metrics: current period plus (when available) the previous period. */
+export type ExecutivePeriodMetrics = {
+  current: PeriodSnapshotMetrics;
+  previous: PeriodSnapshotMetrics | null;
+};
+
+/** Region-level stock at current period end (currentCount/previousCount stay Inflow-based elsewhere). */
+export type RegionSnapshotAtEndRow = {
+  regionName: string;
+  openAtEnd: number;
+  lateAtEnd: number;
+};
+
+/** Department-level flow + stock metrics for the current period. */
+export type DepartmentPeriodMetricsRow = {
+  departmentName: string;
+} & PeriodSnapshotMetrics;
+
+/** Classification-level stock at current period end, covering every classification (not just top N). */
+export type ClassificationSnapshotAtEndRow = {
+  classificationId: string;
+  openAtEnd: number;
+  lateAtEnd: number;
+};
+
+// ---------------------------------------------------------------------------
 // Continuity row (re-occurrence of classification in a department)
 // ---------------------------------------------------------------------------
 

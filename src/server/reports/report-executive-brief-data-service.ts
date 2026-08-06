@@ -39,6 +39,10 @@ import type {
   PerfVolumeRow,
   ContinuityRow,
   ExecutiveEntityRow,
+  ExecutivePeriodMetrics,
+  RegionSnapshotAtEndRow,
+  DepartmentPeriodMetricsRow,
+  ClassificationSnapshotAtEndRow,
 } from "@/lib/reports/report-contract";
 import {
   buildClassificationPath,
@@ -50,6 +54,13 @@ import {
   displayRegionName,
   normalizeRegionName,
 } from "@/lib/reports/region-normalization";
+import {
+  buildExecutiveReportSnapshotData,
+  wasComplaintClosedInWindow,
+  type ComplaintStatusHistoryEntry,
+  type ExecutiveReportSnapshotData,
+  type ReportPeriodGroupSnapshot,
+} from "./report-period-snapshot-service";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TOP_CLASSIFICATIONS_LIMIT = 8;
@@ -135,7 +146,8 @@ function buildBriefKpiCard(spec: KpiSpec): ExecutiveBriefKpiCard {
 function buildBriefKpis(
   result: ComplaintKpiResult,
   previousResult: ComplaintKpiResult | undefined,
-  hasPrevious: boolean
+  hasPrevious: boolean,
+  periodMetrics: ExecutivePeriodMetrics
 ): ExecutiveBriefKpiCard[] {
   const p = hasPrevious;
   const kpis = result.kpis;
@@ -159,25 +171,25 @@ function buildBriefKpis(
     },
     {
       key: "open",
-      label: "المفتوحة",
-      value: vol.open,
-      previousValue: p ? (previousKpis?.openComplaints.currentValue ?? kpis.openComplaints.previousValue) : null,
+      label: "المفتوحة نهاية الفترة",
+      value: periodMetrics.current.openAtEnd,
+      previousValue: p ? (periodMetrics.previous?.openAtEnd ?? null) : null,
       format: "number",
       higherIsBetter: false,
     },
     {
       key: "closed",
-      label: "المغلقة حالياً من شكاوى الفترة",
-      value: vol.closed,
-      previousValue: p ? (previousKpis?.closedComplaints.currentValue ?? kpis.closedComplaints.previousValue) : null,
+      label: "المغلقة خلال الفترة",
+      value: periodMetrics.current.closedDuringPeriod,
+      previousValue: p ? (periodMetrics.previous?.closedDuringPeriod ?? null) : null,
       format: "number",
       higherIsBetter: true,
     },
     {
       key: "currentlyLate",
-      label: "المتأخرة حالياً",
-      value: kpis.currentlyLateComplaints.currentValue,
-      previousValue: p ? (previousKpis?.currentlyLateComplaints.currentValue ?? kpis.currentlyLateComplaints.previousValue) : null,
+      label: "المتأخرة نهاية الفترة",
+      value: periodMetrics.current.lateAtEnd,
+      previousValue: p ? (periodMetrics.previous?.lateAtEnd ?? null) : null,
       format: "number",
       higherIsBetter: false,
     },
@@ -266,7 +278,8 @@ function accumulateCanonicalRegionChanges(
 function buildAllRegionsTable(
   allTimeRegions: string[],
   comparison: ComparisonResult,
-  currentDistributions: ComplaintGroupMetrics[]
+  currentDistributions: ComplaintGroupMetrics[],
+  regionSnapshot: Record<string, ReportPeriodGroupSnapshot>
 ): RegionReferenceRow[] {
   const changeMap = accumulateCanonicalRegionChanges(comparison.regionChanges);
   const metricsMap = new Map(
@@ -276,12 +289,17 @@ function buildAllRegionsTable(
   const regionKeys = new Set<string>([
     ...allTimeRegions.map((name) => normalizeRegionName(name)),
     ...changeMap.keys(),
+    ...Object.keys(regionSnapshot),
   ]);
 
   const rows: RegionReferenceRow[] = [...regionKeys]
     .map((key) => {
       const change = changeMap.get(key);
       const metrics = metricsMap.get(key);
+      // openCount/currentlyLate are stock-at-period-end (include prior-period
+      // backlog); currentCount/previousCount/difference/changeRate stay
+      // Inflow-based (complaints registered within each period) — do not merge.
+      const snapshot = regionSnapshot[key];
       const currentCount = change?.currentCount ?? 0;
       const previousCount = change?.previousCount ?? 0;
       const difference = currentCount - previousCount;
@@ -296,9 +314,9 @@ function buildAllRegionsTable(
           (metrics?.averageResolutionEligibleCount ?? 0) > 0
             ? roundRate(metrics!.averageResolutionDays)
             : null,
-        openCount: metrics?.open ?? 0,
+        openCount: snapshot?.openAtEnd ?? 0,
         closedCount: metrics?.closed ?? 0,
-        currentlyLate: metrics?.currentlyLate ?? 0,
+        currentlyLate: snapshot?.lateAtEnd ?? 0,
         direction: directionLabel(currentCount, previousCount),
       };
     })
@@ -307,19 +325,37 @@ function buildAllRegionsTable(
   return rows;
 }
 
+/**
+ * `total`/`closed`/`open`/`currentlyLate` here mean, respectively:
+ * receivedDuringPeriod, closedDuringPeriod, openAtEnd (includes prior-period
+ * backlog), lateAtEnd — sourced from the department period snapshot, not from
+ * current-status distributions.
+ */
 function buildEntityRows(
   groups: ComplaintGroupMetrics[],
-  total: number,
+  totalReceivedDuringPeriod: number,
+  groupSnapshot: Record<string, ReportPeriodGroupSnapshot>,
   limit = 8
 ): ExecutiveEntityRow[] {
-  return groups.slice(0, limit).map((group) => ({
-    name: group.name,
-    total: group.total,
-    open: group.open,
-    closed: group.closed,
-    currentlyLate: group.currentlyLate,
-    shareOfTotal: total > 0 ? roundRate(group.total / total * 100) : 0,
-  }));
+  return groups.slice(0, limit).map((group) => {
+    const snapshot = groupSnapshot[group.name] ?? {
+      receivedDuringPeriod: 0,
+      closedDuringPeriod: 0,
+      openAtEnd: 0,
+      lateAtEnd: 0,
+    };
+    return {
+      name: group.name,
+      total: snapshot.receivedDuringPeriod,
+      open: snapshot.openAtEnd,
+      closed: snapshot.closedDuringPeriod,
+      currentlyLate: snapshot.lateAtEnd,
+      shareOfTotal:
+        totalReceivedDuringPeriod > 0
+          ? roundRate((snapshot.receivedDuringPeriod / totalReceivedDuringPeriod) * 100)
+          : 0,
+    };
+  });
 }
 
 function hasMeaningfulPreviousData(comparison: ComparisonResult): boolean {
@@ -332,7 +368,9 @@ function hasMeaningfulPreviousData(comparison: ComparisonResult): boolean {
 
 function buildConclusions(
   result: ComplaintKpiResult,
-  comparison: ComparisonResult
+  comparison: ComparisonResult,
+  departmentSnapshot: Record<string, ReportPeriodGroupSnapshot>,
+  classificationSnapshot: Record<string, ReportPeriodGroupSnapshot>
 ): string[] {
   const points: string[] = [];
   const topRegion = result.distributions.byRegion[0];
@@ -351,14 +389,22 @@ function buildConclusions(
     if (rise) points.push(`أعلى زيادة في ${rise.regionName}: +${rise.difference} شكوى مقارنة بالفترة السابقة.`);
     if (fall) points.push(`أعلى انخفاض في ${fall.regionName}: ${Math.abs(fall.difference)} شكوى مقارنة بالفترة السابقة.`);
   }
-  const openDepartment = [...result.distributions.byDepartment].sort((a, b) => b.open - a.open)[0];
-  if (openDepartment?.open) {
-    points.push(`${openDepartment.name} الأعلى في الحالات المفتوحة بعدد ${openDepartment.open}.`);
+  // "Open"/"late" here mean openAtEnd/lateAtEnd (period-end stock), matching
+  // the department/classification tables, not current-status distributions.
+  const openDepartment = [...result.distributions.byDepartment]
+    .map((group) => ({ name: group.name, openAtEnd: departmentSnapshot[group.name]?.openAtEnd ?? 0 }))
+    .sort((a, b) => b.openAtEnd - a.openAtEnd)[0];
+  if (openDepartment?.openAtEnd) {
+    points.push(`${openDepartment.name} الأعلى في الحالات المفتوحة نهاية الفترة بعدد ${openDepartment.openAtEnd}.`);
   }
   const lateClassification = [...result.distributions.byClassification]
-    .sort((a, b) => b.currentlyLate - a.currentlyLate)[0];
-  if (lateClassification?.currentlyLate) {
-    points.push(`${lateClassification.name} الأعلى في الحالات المتأخرة بعدد ${lateClassification.currentlyLate}.`);
+    .map((group) => {
+      const key = group.id ? classificationKey(group.id) : UNCLASSIFIED_CLASSIFICATION_KEY;
+      return { name: group.name, lateAtEnd: classificationSnapshot[key]?.lateAtEnd ?? 0 };
+    })
+    .sort((a, b) => b.lateAtEnd - a.lateAtEnd)[0];
+  if (lateClassification?.lateAtEnd) {
+    points.push(`${lateClassification.name} الأعلى في الحالات المتأخرة نهاية الفترة بعدد ${lateClassification.lateAtEnd}.`);
   }
   return points.slice(0, 5);
 }
@@ -790,6 +836,52 @@ function buildContinuityRows(allPairs: DeptClassPeriodCount[]): ContinuityRow[] 
 // Public API
 // ---------------------------------------------------------------------------
 
+function toExecutivePeriodMetrics(snapshot: ExecutiveReportSnapshotData): ExecutivePeriodMetrics {
+  return {
+    current: {
+      receivedDuringPeriod: snapshot.current.receivedDuringPeriod,
+      closedDuringPeriod: snapshot.current.closedDuringPeriod,
+      openAtEnd: snapshot.current.openAtEnd,
+      lateAtEnd: snapshot.current.lateAtEnd,
+    },
+    previous: snapshot.previous
+      ? {
+          receivedDuringPeriod: snapshot.previous.receivedDuringPeriod,
+          closedDuringPeriod: snapshot.previous.closedDuringPeriod,
+          openAtEnd: snapshot.previous.openAtEnd,
+          lateAtEnd: snapshot.previous.lateAtEnd,
+        }
+      : null,
+  };
+}
+
+function toRegionSnapshotRows(byRegion: Record<string, ReportPeriodGroupSnapshot>): RegionSnapshotAtEndRow[] {
+  return Object.entries(byRegion).map(([key, group]) => ({
+    regionName: displayRegionName(key),
+    openAtEnd: group.openAtEnd,
+    lateAtEnd: group.lateAtEnd,
+  }));
+}
+
+function toDepartmentPeriodMetricsRows(
+  byDepartment: Record<string, ReportPeriodGroupSnapshot>
+): DepartmentPeriodMetricsRow[] {
+  return Object.entries(byDepartment).map(([departmentName, group]) => ({
+    departmentName,
+    ...group,
+  }));
+}
+
+function toClassificationSnapshotRows(
+  byClassification: Record<string, ReportPeriodGroupSnapshot>
+): ClassificationSnapshotAtEndRow[] {
+  return Object.entries(byClassification).map(([classificationId, group]) => ({
+    classificationId,
+    openAtEnd: group.openAtEnd,
+    lateAtEnd: group.lateAtEnd,
+  }));
+}
+
 export async function buildExecutiveBriefData(
   filters: ReportFilters,
   result: ComplaintKpiResult,
@@ -803,13 +895,23 @@ export async function buildExecutiveBriefData(
     fetchAllTimeRegions(),
     buildComparativeTimeline(comparison, filters, now),
   ]);
+  // Sequenced after the timeline fetch (not folded into the Promise.all above)
+  // so this query's position in the call order stays stable regardless of the
+  // timeline's own (1 or 2, depending on whether a previous period exists) calls.
+  const snapshotData = await buildExecutiveReportSnapshotData(
+    filters,
+    { currentPeriod: comparison.currentPeriod, previousPeriod: comparison.previousPeriod },
+    now
+  );
 
-  const briefKpis = buildBriefKpis(result, previousResult, hasPrevious);
+  const periodMetrics = toExecutivePeriodMetrics(snapshotData);
+  const briefKpis = buildBriefKpis(result, previousResult, hasPrevious, periodMetrics);
 
   const allRegions = buildAllRegionsTable(
     allTimeRegions,
     comparison,
-    result.distributions.byRegion
+    result.distributions.byRegion,
+    snapshotData.byRegion
   );
 
   const topClassifications = buildTopClassifications(
@@ -830,9 +932,17 @@ export async function buildExecutiveBriefData(
     topClassifications,
     comparativeTimeline,
     concentrationBands,
-    topDepartments: buildEntityRows(result.distributions.byDepartment, result.volume.total),
-    conclusions: buildConclusions(result, comparison),
+    topDepartments: buildEntityRows(
+      result.distributions.byDepartment,
+      periodMetrics.current.receivedDuringPeriod,
+      snapshotData.byDepartment
+    ),
+    conclusions: buildConclusions(result, comparison, snapshotData.byDepartment, snapshotData.byClassification),
     notes: buildNotes(result, comparison),
+    periodMetrics,
+    regionSnapshotAtEnd: toRegionSnapshotRows(snapshotData.byRegion),
+    departmentPeriodMetrics: toDepartmentPeriodMetricsRows(snapshotData.byDepartment),
+    classificationSnapshotAtEnd: toClassificationSnapshotRows(snapshotData.byClassification),
   };
 }
 
@@ -878,6 +988,7 @@ type TrendComplaint = {
   closedAt: Date | null;
   /** Mapped from Complaint.sourceUpdatedAt — last-update closure fallback. */
   lastUpdatedAt: Date | null;
+  statusHistory: readonly ComplaintStatusHistoryEntry[];
 };
 
 const TREND_COMPLAINT_SELECT = {
@@ -887,6 +998,9 @@ const TREND_COMPLAINT_SELECT = {
   receivedAt: true,
   closedAt: true,
   sourceUpdatedAt: true,
+  statusHistory: {
+    select: { fromStatus: true, toStatus: true, changedAt: true },
+  },
 } as const;
 
 function toTrendComplaint(row: {
@@ -896,6 +1010,7 @@ function toTrendComplaint(row: {
   receivedAt: Date;
   closedAt: Date | null;
   sourceUpdatedAt: Date | null;
+  statusHistory: readonly ComplaintStatusHistoryEntry[];
 }): TrendComplaint & { id: string } {
   return {
     id: row.id,
@@ -904,6 +1019,7 @@ function toTrendComplaint(row: {
     receivedAt: row.receivedAt,
     closedAt: row.closedAt,
     lastUpdatedAt: row.sourceUpdatedAt,
+    statusHistory: row.statusHistory,
   };
 }
 
@@ -1048,14 +1164,29 @@ function wasReceivedDuringMonth(
   return createdMs >= monthStartMs && createdMs < monthEndExclusiveMs;
 }
 
+/**
+ * StatusHistory first (a genuine fromStatus-carrying transition to CLOSED/
+ * RESOLVED), effective-closed-date as fallback only when the complaint has
+ * no such transition anywhere — shared with the period-snapshot service so
+ * "closed during the period" and "closed during the month" can never drift
+ * on the same underlying data (spec section 15).
+ */
 function wasClosedDuringMonth(
-  trustedClosedAt: Date | null,
+  complaint: TrendComplaint,
   monthStartMs: number,
   monthEndExclusiveMs: number
 ): boolean {
-  if (!trustedClosedAt) return false;
-  const closedMs = trustedClosedAt.getTime();
-  return closedMs >= monthStartMs && closedMs < monthEndExclusiveMs;
+  return wasComplaintClosedInWindow(
+    {
+      status: complaint.status,
+      complaintDate: complaint.complaintDate,
+      receivedAt: complaint.receivedAt,
+      closedAt: complaint.closedAt,
+      sourceUpdatedAt: complaint.lastUpdatedAt,
+      statusHistory: complaint.statusHistory,
+    },
+    { from: new Date(monthStartMs), toExclusive: new Date(monthEndExclusiveMs) }
+  );
 }
 
 function wasOpenAtMonthEnd(
@@ -1090,7 +1221,7 @@ function accumulateComplaintForMonth(
   if (wasReceivedDuringMonth(createdMs, monthStartMs, monthEndExclusiveMs)) {
     accumulator.receivedCount += 1;
   }
-  if (wasClosedDuringMonth(trustedClosedAt, monthStartMs, monthEndExclusiveMs)) {
+  if (wasClosedDuringMonth(complaint, monthStartMs, monthEndExclusiveMs)) {
     accumulator.closedDuringMonthCount += 1;
   }
   if (!wasOpenAtMonthEnd(createdMs, trustedClosedAt, monthEndExclusiveMs)) {
@@ -1102,13 +1233,27 @@ function accumulateComplaintForMonth(
   }
 }
 
+/**
+ * `reportEndExclusive`, when given, clamps the LAST bucket's effective end to
+ * `min(bucket.toExclusive, reportEndExclusive)` — earlier (already-complete)
+ * buckets are never touched. Without this, the last calendar month always
+ * runs through its natural month boundary even when the report itself ends
+ * mid-month, letting activity after the report's actual end date (a
+ * complaint registered, closed, or newly late) leak into that month's counts.
+ */
 export function aggregateMonthlyComplaintTrend(
   complaints: readonly TrendComplaint[],
-  buckets: readonly MonthBucket[]
+  buckets: readonly MonthBucket[],
+  options: { reportEndExclusive?: Date } = {}
 ): MonthlyComplaintTrendPoint[] {
-  return buckets.map((bucket) => {
+  const lastIndex = buckets.length - 1;
+  return buckets.map((bucket, index) => {
     const monthStartMs = bucket.from.getTime();
-    const monthEndExclusiveMs = bucket.toExclusive.getTime();
+    const naturalEndMs = bucket.toExclusive.getTime();
+    const monthEndExclusiveMs =
+      index === lastIndex && options.reportEndExclusive
+        ? Math.min(naturalEndMs, options.reportEndExclusive.getTime())
+        : naturalEndMs;
     const accumulator = createMonthlyTrendAccumulator();
     for (const complaint of complaints) {
       accumulateComplaintForMonth(accumulator, complaint, monthStartMs, monthEndExclusiveMs);
@@ -1272,7 +1417,7 @@ async function buildMonthlyStockFlow(
     windowToExclusive
   );
 
-  return aggregateMonthlyComplaintTrend(complaints, buckets);
+  return aggregateMonthlyComplaintTrend(complaints, buckets, { reportEndExclusive: reportToExclusive });
 }
 
 // ---------------------------------------------------------------------------
@@ -1292,64 +1437,24 @@ async function fetchAllTimeTotal(
 }
 
 // ---------------------------------------------------------------------------
-// V2: open/late counts per classification at current period end
-// ---------------------------------------------------------------------------
-
-async function fetchClassificationOpenLate(
-  filters: ReportFilters,
-  comparison: ComparisonResult,
-  now: Date
-): Promise<Record<string, { openAtEnd: number; lateAtEnd: number }>> {
-  const params = buildComplaintQueryParams(filters);
-  params.delete("from");
-  params.delete("to");
-  const query = parseComplaintQuery(params);
-  const baseWhere = buildComplaintWhere(query, now);
-
-  const periodEndMs = comparison.currentPeriod.toExclusive.getTime();
-
-  const complaints = await db.complaint.findMany({
-    where: { ...baseWhere, isDeleted: false },
-    select: {
-      classificationId: true,
-      status: true,
-      complaintDate: true,
-      receivedAt: true,
-      closedAt: true,
-      sourceUpdatedAt: true,
-    },
-  });
-
-  const result: Record<string, { openAtEnd: number; lateAtEnd: number }> = {};
-
-  for (const c of complaints) {
-    const effectiveMs = (c.complaintDate ?? c.receivedAt).getTime();
-    if (effectiveMs >= periodEndMs) continue;
-
-    const effectiveClosedAt = resolveComplaintEffectiveClosedAt({
-      status: c.status,
-      complaintDate: c.complaintDate,
-      receivedAt: c.receivedAt,
-      closedAt: c.closedAt,
-      lastUpdatedAt: c.sourceUpdatedAt,
-    });
-    const closedBeforeEnd =
-      effectiveClosedAt !== null && effectiveClosedAt.getTime() < periodEndMs;
-    if (closedBeforeEnd) continue;
-
-    const key = classificationKey(c.classificationId);
-    if (!result[key]) result[key] = { openAtEnd: 0, lateAtEnd: 0 };
-    result[key].openAtEnd++;
-    const slaDeadlineMs = effectiveMs + COMPLAINT_SLA_DURATION_MS;
-    if (periodEndMs > slaDeadlineMs) result[key].lateAtEnd++;
-  }
-
-  return result;
-}
-
-// ---------------------------------------------------------------------------
 // V2 public API
 // ---------------------------------------------------------------------------
+
+/**
+ * classificationOpenLate is derived from `briefData.classificationSnapshotAtEnd`
+ * (itself backed by {@link resolveComplaintOpenStateAt}) instead of a separate
+ * query, so it can never disagree with the classification table or the
+ * openAtEnd/lateAtEnd reconciliation totals — see spec section 14.
+ */
+function toClassificationOpenLate(
+  rows: ClassificationSnapshotAtEndRow[]
+): Record<string, { openAtEnd: number; lateAtEnd: number }> {
+  const result: Record<string, { openAtEnd: number; lateAtEnd: number }> = {};
+  for (const row of rows) {
+    result[row.classificationId] = { openAtEnd: row.openAtEnd, lateAtEnd: row.lateAtEnd };
+  }
+  return result;
+}
 
 export async function buildExecutiveBriefV2Data(
   filters: ReportFilters,
@@ -1358,12 +1463,13 @@ export async function buildExecutiveBriefV2Data(
   previousResult?: ComplaintKpiResult,
   now: Date = new Date()
 ): Promise<ExecutiveBriefV2Data> {
-  const [briefData, allTimeTotal, monthlyStockFlow, classificationOpenLate] = await Promise.all([
+  const [briefData, allTimeTotal, monthlyStockFlow] = await Promise.all([
     buildExecutiveBriefData(filters, result, comparison, previousResult, now),
     fetchAllTimeTotal(filters, now),
     buildMonthlyStockFlow(filters, comparison, now),
-    fetchClassificationOpenLate(filters, comparison, now),
   ]);
+
+  const classificationOpenLate = toClassificationOpenLate(briefData.classificationSnapshotAtEnd ?? []);
 
   return { ...briefData, allTimeTotal, monthlyStockFlow, classificationOpenLate };
 }

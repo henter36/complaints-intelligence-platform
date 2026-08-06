@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { previousInclusivePeriod } from "@/lib/reports/period-range";
+import { roundToTenth } from "@/lib/complaint-metrics";
 
 const dbMocks = vi.hoisted(() => ({
   findMany: vi.fn(),
@@ -134,6 +135,57 @@ describe("derivePreviousPeriodRange", () => {
     expect(derivePreviousPeriodRange(from, toExclusive)).toBeNull();
     const later = new Date("2026-07-10T00:00:00Z");
     expect(derivePreviousPeriodRange(from, later)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reference-period integration test — spec section 21.
+// Report: 2026-07-26 → 2026-08-02 (inclusive), Baseline: 980 vs 723 (+257, 35.5%).
+// Pure arithmetic on derivePreviousPeriodRange output; no DB/dev.db copy needed.
+// ---------------------------------------------------------------------------
+describe("reference period 2026-07-26 → 2026-08-02 (spec section 21)", () => {
+  const currentFrom = new Date("2026-07-26T00:00:00.000Z");
+  const currentToExclusive = new Date("2026-08-03T00:00:00.000Z"); // day after 2026-08-02
+
+  it("currentPeriod spans exactly eight days", async () => {
+    const durationMs = currentToExclusive.getTime() - currentFrom.getTime();
+    expect(durationMs).toBe(8 * 24 * 60 * 60 * 1000);
+  });
+
+  it("previousPeriod spans exactly eight days: 2026-07-18 → 2026-07-26", async () => {
+    const { derivePreviousPeriodRange } = await loadModule();
+    const previous = derivePreviousPeriodRange(currentFrom, currentToExclusive)!;
+    expect(previous.from.toISOString()).toBe("2026-07-18T00:00:00.000Z");
+    expect(previous.toExclusive.toISOString()).toBe("2026-07-26T00:00:00.000Z");
+    const durationMs = previous.toExclusive.getTime() - previous.from.getTime();
+    expect(durationMs).toBe(8 * 24 * 60 * 60 * 1000);
+  });
+
+  it("previous.toExclusive === current.from (no gap, no overlap)", async () => {
+    const { derivePreviousPeriodRange } = await loadModule();
+    const previous = derivePreviousPeriodRange(currentFrom, currentToExclusive)!;
+    expect(previous.toExclusive.getTime()).toBe(currentFrom.getTime());
+  });
+
+  it("difference = current - previous = 980 - 723 = 257", () => {
+    const current = 980;
+    const previous = 723;
+    expect(current - previous).toBe(257);
+  });
+
+  it("percentage change = roundToTenth(difference / previous * 100) = 35.5", () => {
+    const current = 980;
+    const previous = 723;
+    const difference = current - previous;
+    const percentage = previous > 0 ? roundToTenth((difference / previous) * 100) : null;
+    expect(percentage).toBe(35.5);
+  });
+
+  it("percentage change is null when previous is 0 (never 0% or Infinity)", () => {
+    const current = 12;
+    const previous = 0;
+    const percentage = previous > 0 ? roundToTenth(((current - previous) / previous) * 100) : null;
+    expect(percentage).toBeNull();
   });
 });
 

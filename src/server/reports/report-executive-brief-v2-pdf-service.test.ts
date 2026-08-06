@@ -81,6 +81,23 @@ function makeV2Brief(overrides: Partial<ExecutiveBriefV2Data> = {}): ExecutiveBr
       c2: { openAtEnd: 4, lateAtEnd: 1 },
       [UNCLASSIFIED_CLASSIFICATION_KEY]: { openAtEnd: 163, lateAtEnd: 163 },
     },
+    periodMetrics: {
+      current: { receivedDuringPeriod: 100, closedDuringPeriod: 65, openAtEnd: 30, lateAtEnd: 8 },
+      previous: { receivedDuringPeriod: 80, closedDuringPeriod: 50, openAtEnd: 25, lateAtEnd: 10 },
+    },
+    regionSnapshotAtEnd: [
+      { regionName: "منطقة الرياض", openAtEnd: 10, lateAtEnd: 3 },
+      { regionName: "منطقة جدة", openAtEnd: 8, lateAtEnd: 2 },
+      { regionName: "منطقة مكة", openAtEnd: 5, lateAtEnd: 1 },
+    ],
+    departmentPeriodMetrics: [
+      { departmentName: "المتابعة", receivedDuringPeriod: 40, closedDuringPeriod: 30, openAtEnd: 10, lateAtEnd: 3 },
+    ],
+    classificationSnapshotAtEnd: [
+      { classificationId: "c1", openAtEnd: 12, lateAtEnd: 3 },
+      { classificationId: "c2", openAtEnd: 4, lateAtEnd: 1 },
+      { classificationId: UNCLASSIFIED_CLASSIFICATION_KEY, openAtEnd: 163, lateAtEnd: 163 },
+    ],
     ...overrides,
   };
 }
@@ -366,6 +383,79 @@ describe("renderExecutiveBriefV2Pdf", () => {
       const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
       expect(joined).not.toContain(preparePdfText(policyNote));
       expect(joined).not.toContain(policyNote);
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+});
+
+describe("V2 cover cards — periodMetrics (spec sections 10-11, 17)", () => {
+  it("cover cards read receivedDuringPeriod/closedDuringPeriod/openAtEnd/lateAtEnd from periodMetrics", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(makeV2Report());
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      // periodMetrics.current: received=100, closed=65, open=30, late=8 (fixture).
+      expect(joined).toContain("100");
+      expect(joined).toContain("65");
+      expect(joined).toContain("30 / 8");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("shows جديد (never 0% or Infinity) on the closed-period cover card when the previous period had zero closures", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(
+        makeV2Report({
+          briefData: makeV2Brief({
+            periodMetrics: {
+              current: { receivedDuringPeriod: 100, closedDuringPeriod: 12, openAtEnd: 30, lateAtEnd: 8 },
+              previous: { receivedDuringPeriod: 80, closedDuringPeriod: 0, openAtEnd: 25, lateAtEnd: 10 },
+            },
+          }),
+        })
+      );
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(joined).toContain("جديد");
+      expect(joined).not.toContain("0%");
+      expect(joined).not.toContain("Infinity");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("uses periodMetrics.previous.closedDuringPeriod for the closed-card comparison, not the previous period's currently-closed registration count", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(
+        makeV2Report({
+          briefData: makeV2Brief({
+            periodMetrics: {
+              current: { receivedDuringPeriod: 100, closedDuringPeriod: 65, openAtEnd: 30, lateAtEnd: 8 },
+              previous: { receivedDuringPeriod: 80, closedDuringPeriod: 40, openAtEnd: 25, lateAtEnd: 10 },
+            },
+          }),
+        })
+      );
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      // difference = 65 - 40 = 25, changeRate = +62.5%
+      expect(joined).toMatch(/\+25/);
+      expect(joined).toContain("62.5");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("renders the windowed-totals caption on the monthly trend page", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(makeV2Report());
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(joined).toContain(
+        preparePdfText("الإجماليان أعلاه يشملان الأشهر المعروضة في الرسم أدناه فقط (حتى 13 شهرًا).")
+      );
     } finally {
       textSpy.mockRestore();
     }

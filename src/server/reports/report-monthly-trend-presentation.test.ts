@@ -131,6 +131,31 @@ describe("buildMonthlyTrendInsights", () => {
     );
   });
 
+  it("balanced convergence: a month with far more closed than received is NOT flow-proximate (regression)", () => {
+    // Regression for the one-sided `closed >= received * 0.9` bug, which
+    // treated 4,947 closed vs. 1,991 received (closed ~248% of received) as
+    // "close" simply because closed comfortably exceeded 90% of received.
+    const insights = buildMonthlyTrendInsights({
+      points: [point("2026-01", 1991, 4947, "يناير 2026")],
+      reportEndDate: "2026-01-31",
+    });
+    expect(insights.find((item) => item.key === "flow-proximity")).toBeUndefined();
+  });
+
+  it("balanced convergence: within ±10% counts, just past ±10% does not", () => {
+    const withinTen = buildMonthlyTrendInsights({
+      points: [point("2026-01", 100, 110, "يناير 2026")], // +10% exactly
+      reportEndDate: "2026-01-31",
+    });
+    expect(withinTen.find((item) => item.key === "flow-proximity")).toBeDefined();
+
+    const pastTen = buildMonthlyTrendInsights({
+      points: [point("2026-01", 100, 111, "يناير 2026")], // +11%, outside the band
+      reportEndDate: "2026-01-31",
+    });
+    expect(pastTen.find((item) => item.key === "flow-proximity")).toBeUndefined();
+  });
+
   it("does not treat closed > registered as a defect gap", () => {
     const insights = buildMonthlyTrendInsights({
       points: [

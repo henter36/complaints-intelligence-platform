@@ -370,20 +370,52 @@ describe("buildExecutiveBriefData — KPI cards", () => {
     expect(data.briefKpis.find((kpi) => kpi.key === "complianceRate")?.value).toBeNull();
   });
 
-  it("closed KPI: fewer closed → negative assessment", async () => {
-    const result = makeKpiResult();
-    (result.kpis.closedComplaints as { currentValue: number; previousValue: number }).currentValue = 40;
-    (result.kpis.closedComplaints as { currentValue: number; previousValue: number }).previousValue = 50;
-    (result.volume as { closed: number }).closed = 40;
-    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
+  it("closed KPI: fewer closed during the current period → negative assessment", async () => {
+    // Closed once inside PREVIOUS_PERIOD only (closedDuringPeriod: current=0, previous=1).
+    dbMocks.complaintFindMany.mockResolvedValue([
+      {
+        id: "c-closed-prev",
+        status: ComplaintStatus.CLOSED,
+        complaintDate: ISO("2026-06-01"),
+        receivedAt: ISO("2026-06-01"),
+        closedAt: ISO("2026-06-26"),
+        sourceUpdatedAt: null,
+        region: null,
+        department: null,
+        classificationId: null,
+        statusHistory: [
+          { fromStatus: ComplaintStatus.OPEN, toStatus: ComplaintStatus.CLOSED, changedAt: ISO("2026-06-26") },
+        ],
+      },
+    ]);
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
+    expect(data.periodMetrics?.current.closedDuringPeriod).toBe(0);
+    expect(data.periodMetrics?.previous?.closedDuringPeriod).toBe(1);
     expect(data.briefKpis.find((k) => k.key === "closed")?.assessment).toBe("negative");
   });
 
-  it("currentlyLate KPI: fewer late → positive assessment", async () => {
-    const result = makeKpiResult();
-    (result.kpis.currentlyLateComplaints as { currentValue: number; previousValue: number }).currentValue = 5;
-    (result.kpis.currentlyLateComplaints as { currentValue: number; previousValue: number }).previousValue = 10;
-    const data = await buildExecutiveBriefData(BASE_FILTERS, result, makeComparison(), undefined, NOW);
+  it("currentlyLate KPI: fewer late at current period end → positive assessment", async () => {
+    // Old open complaint closed inside CURRENT_PERIOD, after PREVIOUS_PERIOD end:
+    // late+open at previous.toExclusive, closed (not late) at current.toExclusive.
+    dbMocks.complaintFindMany.mockResolvedValue([
+      {
+        id: "c-late-prev-only",
+        status: ComplaintStatus.CLOSED,
+        complaintDate: ISO("2026-01-01"),
+        receivedAt: ISO("2026-01-01"),
+        closedAt: ISO("2026-07-03"),
+        sourceUpdatedAt: null,
+        region: null,
+        department: null,
+        classificationId: null,
+        statusHistory: [
+          { fromStatus: ComplaintStatus.OPEN, toStatus: ComplaintStatus.CLOSED, changedAt: ISO("2026-07-03") },
+        ],
+      },
+    ]);
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
+    expect(data.periodMetrics?.current.lateAtEnd).toBe(0);
+    expect(data.periodMetrics?.previous?.lateAtEnd).toBe(1);
     expect(data.briefKpis.find((k) => k.key === "currentlyLate")?.assessment).toBe("positive");
   });
 
@@ -613,10 +645,11 @@ describe("buildExecutiveBriefData — comparativeTimeline", () => {
     expect(prevPoints[0].count).toBe(2);
   });
 
-  it("now is passed from caller — findMany is called for both current and previous periods", async () => {
-    // New: buildComparativeTimeline calls findMany twice (current + previous period)
+  it("now is passed from caller — findMany is called for current period, previous period, and snapshot candidates", async () => {
+    // buildComparativeTimeline calls findMany twice (current + previous period);
+    // the period-snapshot service adds one more fixed call (snapshot candidates).
     await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
-    expect(dbMocks.complaintFindMany).toHaveBeenCalledTimes(2);
+    expect(dbMocks.complaintFindMany).toHaveBeenCalledTimes(3);
   });
 
   it("complaintDate present but outside period is not counted by receivedAt", async () => {
@@ -624,8 +657,8 @@ describe("buildExecutiveBriefData — comparativeTimeline", () => {
     // Service relies on Prisma OR clause — our mock returns only what Prisma would return.
     // We verify that the mock was called with the OR clause for the current period.
     await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
-    // findMany called 2 times: current period + previous period
-    expect(dbMocks.complaintFindMany).toHaveBeenCalledTimes(2);
+    // findMany called 3 times: current period timeline, previous period timeline, snapshot candidates.
+    expect(dbMocks.complaintFindMany).toHaveBeenCalledTimes(3);
     // Verify the WHERE passed to first findMany (current period) includes the OR clause.
     const [[callArg]] = dbMocks.complaintFindMany.mock.calls;
     expect(callArg.where).toHaveProperty("OR");
@@ -1230,12 +1263,13 @@ describe("13-month window via buildExecutiveBriefData", () => {
 
   it("monthly sum equals total complaints returned by DB for that period", async () => {
     // DB returns 5 complaints, all in Jan 2026
+    // (also consumed by the period-snapshot query, which needs status/statusHistory to resolve state).
     dbMocks.complaintFindMany.mockResolvedValue([
-      { complaintDate: new Date("2026-01-05T00:00:00.000Z"), receivedAt: new Date("2026-01-05T00:00:00.000Z") },
-      { complaintDate: new Date("2026-01-10T00:00:00.000Z"), receivedAt: new Date("2026-01-10T00:00:00.000Z") },
-      { complaintDate: null, receivedAt: new Date("2026-01-15T00:00:00.000Z") },
-      { complaintDate: new Date("2026-01-20T00:00:00.000Z"), receivedAt: new Date("2026-01-20T00:00:00.000Z") },
-      { complaintDate: new Date("2026-01-25T00:00:00.000Z"), receivedAt: new Date("2026-01-25T00:00:00.000Z") },
+      { complaintDate: new Date("2026-01-05T00:00:00.000Z"), receivedAt: new Date("2026-01-05T00:00:00.000Z"), status: ComplaintStatus.OPEN, closedAt: null, sourceUpdatedAt: null, statusHistory: [] },
+      { complaintDate: new Date("2026-01-10T00:00:00.000Z"), receivedAt: new Date("2026-01-10T00:00:00.000Z"), status: ComplaintStatus.OPEN, closedAt: null, sourceUpdatedAt: null, statusHistory: [] },
+      { complaintDate: null, receivedAt: new Date("2026-01-15T00:00:00.000Z"), status: ComplaintStatus.OPEN, closedAt: null, sourceUpdatedAt: null, statusHistory: [] },
+      { complaintDate: new Date("2026-01-20T00:00:00.000Z"), receivedAt: new Date("2026-01-20T00:00:00.000Z"), status: ComplaintStatus.OPEN, closedAt: null, sourceUpdatedAt: null, statusHistory: [] },
+      { complaintDate: new Date("2026-01-25T00:00:00.000Z"), receivedAt: new Date("2026-01-25T00:00:00.000Z"), status: ComplaintStatus.OPEN, closedAt: null, sourceUpdatedAt: null, statusHistory: [] },
     ]);
     const comparison = makeComparison(false);
     comparison.currentPeriod = {
@@ -1450,7 +1484,7 @@ describe("buildExecutiveBriefData — seven-day SLA notes and KPIs", () => {
     const closedCard = data.briefKpis.find((k) => k.key === "closed");
 
     expect(closedCard?.label).toBe(
-      "المغلقة حالياً من شكاوى الفترة"
+      "المغلقة خلال الفترة"
     );
   });
 });
@@ -1559,6 +1593,7 @@ describe("aggregateMonthlyComplaintTrend", () => {
     closedAt: Date | null;
     status?: ComplaintStatus;
     lastUpdatedAt?: Date | null;
+    statusHistory?: Array<{ fromStatus: ComplaintStatus | null; toStatus: ComplaintStatus; changedAt: Date }>;
   }) {
     return {
       status: partial.status ?? OPEN,
@@ -1566,6 +1601,7 @@ describe("aggregateMonthlyComplaintTrend", () => {
       receivedAt: partial.receivedAt,
       closedAt: partial.closedAt,
       lastUpdatedAt: partial.lastUpdatedAt ?? null,
+      statusHistory: partial.statusHistory ?? [],
     };
   }
 
@@ -1630,6 +1666,51 @@ describe("aggregateMonthlyComplaintTrend", () => {
     expect(points.find((p) => p.monthKey === "2026-07")?.openAtMonthEndCount).toBe(0);
   });
 
+  it("closedDuringMonthCount prefers a genuine StatusHistory transition over closedAt (spec section 15)", () => {
+    const created = new Date("2026-07-01T00:00:00.000Z");
+    const points = aggregateMonthlyComplaintTrend(
+      [
+        trend({
+          status: CLOSED,
+          complaintDate: created,
+          receivedAt: created,
+          // closedAt suggests August, but the real transition happened in July.
+          closedAt: new Date("2026-08-05T00:00:00.000Z"),
+          statusHistory: [
+            { fromStatus: OPEN, toStatus: CLOSED, changedAt: new Date("2026-07-20T00:00:00.000Z") },
+          ],
+        }),
+      ],
+      buckets
+    );
+    expect(points.find((p) => p.monthKey === "2026-07")?.closedDuringMonthCount).toBe(1);
+    expect(points.find((p) => p.monthKey === "2026-08")?.closedDuringMonthCount).toBe(0);
+  });
+
+  it("regression: a bulk-import creation record (fromStatus: null) does not misdate closedDuringMonthCount to the import month", () => {
+    // Same real dev.db shape as the period-snapshot regression test: the only
+    // StatusHistory row is a creation record with fromStatus: null and
+    // changedAt = import processing time, not the real closure date.
+    const created = new Date("2026-07-01T00:00:00.000Z");
+    const points = aggregateMonthlyComplaintTrend(
+      [
+        trend({
+          status: CLOSED,
+          complaintDate: created,
+          receivedAt: created,
+          closedAt: new Date("2026-07-05T00:00:00.000Z"),
+          statusHistory: [
+            { fromStatus: null, toStatus: CLOSED, changedAt: new Date("2026-08-06T12:00:00.000Z") },
+          ],
+        }),
+      ],
+      buckets
+    );
+    // Falls back to closedAt (July), not the import month (August).
+    expect(points.find((p) => p.monthKey === "2026-07")?.closedDuringMonthCount).toBe(1);
+    expect(points.find((p) => p.monthKey === "2026-08")?.closedDuringMonthCount).toBe(0);
+  });
+
   it("openAtMonthEndCount rebuilds historic balance", () => {
     const created = new Date("2026-07-01T00:00:00.000Z");
     const points = aggregateMonthlyComplaintTrend(
@@ -1681,6 +1762,85 @@ describe("aggregateMonthlyComplaintTrend", () => {
     expect(aug!.receivedCount).toBe(0);
   });
 
+  describe("partial-month clamp (spec section 16, reference report 2026-07-26 → 2026-08-02)", () => {
+    // reportToExclusive = 2026-08-03T00:00:00.000Z (day after 2026-08-02).
+    const reportEndExclusive = new Date("2026-08-03T00:00:00.000Z");
+    const partialBuckets = computeMonthlyHistoryWindow({
+      reportEnd: new Date(reportEndExclusive.getTime() - 1),
+      earliestAvailableDate: new Date("2026-07-01T00:00:00.000Z"),
+      maxMonths: 13,
+    });
+
+    it("does not count a complaint registered after 2026-08-02 in the August bucket", () => {
+      const points = aggregateMonthlyComplaintTrend(
+        [
+          trend({
+            complaintDate: new Date("2026-08-05T00:00:00.000Z"),
+            receivedAt: new Date("2026-08-05T00:00:00.000Z"),
+            closedAt: null,
+          }),
+        ],
+        partialBuckets,
+        { reportEndExclusive }
+      );
+      expect(points.find((p) => p.monthKey === "2026-08")?.receivedCount).toBe(0);
+    });
+
+    it("does not count a complaint closed after 2026-08-02 in the August bucket", () => {
+      const created = new Date("2026-07-01T00:00:00.000Z");
+      const points = aggregateMonthlyComplaintTrend(
+        [trend({ status: CLOSED, complaintDate: created, receivedAt: created, closedAt: new Date("2026-08-10T00:00:00.000Z") })],
+        partialBuckets,
+        { reportEndExclusive }
+      );
+      expect(points.find((p) => p.monthKey === "2026-08")?.closedDuringMonthCount).toBe(0);
+    });
+
+    it("does not count lateness that only occurs after 2026-08-02 in the August bucket", () => {
+      // Created 2026-08-01: deadline is 2026-08-08, which is after the natural
+      // August-31 month end too, but must specifically stay excluded once
+      // clamped to the report's actual end (2026-08-03).
+      const created = new Date("2026-07-27T00:00:00.000Z"); // deadline 2026-08-03 (exclusive boundary, not late)
+      const points = aggregateMonthlyComplaintTrend(
+        [trend({ complaintDate: created, receivedAt: created, closedAt: null })],
+        partialBuckets,
+        { reportEndExclusive }
+      );
+      const aug = points.find((p) => p.monthKey === "2026-08")!;
+      expect(aug.openAtMonthEndCount).toBe(1);
+      expect(aug.lateAtMonthEndCount).toBe(0);
+    });
+
+    it("does not change earlier, already-complete buckets", () => {
+      const points = aggregateMonthlyComplaintTrend(
+        [
+          trend({
+            complaintDate: new Date("2026-07-05T00:00:00.000Z"),
+            receivedAt: new Date("2026-07-05T00:00:00.000Z"),
+            closedAt: null,
+          }),
+        ],
+        partialBuckets,
+        { reportEndExclusive }
+      );
+      expect(points.find((p) => p.monthKey === "2026-07")?.receivedCount).toBe(1);
+    });
+
+    it("without reportEndExclusive, falls back to the natural full-month boundary", () => {
+      const points = aggregateMonthlyComplaintTrend(
+        [
+          trend({
+            complaintDate: new Date("2026-08-05T00:00:00.000Z"),
+            receivedAt: new Date("2026-08-05T00:00:00.000Z"),
+            closedAt: null,
+          }),
+        ],
+        partialBuckets
+      );
+      expect(points.find((p) => p.monthKey === "2026-08")?.receivedCount).toBe(1);
+    });
+  });
+
   it("resolveTrustedClosedAt rejects dates before creation without lastUpdatedAt", () => {
     expect(
       resolveTrustedClosedAt({
@@ -1689,6 +1849,7 @@ describe("aggregateMonthlyComplaintTrend", () => {
         receivedAt: new Date("2026-07-10T00:00:00.000Z"),
         closedAt: new Date("2026-07-01T00:00:00.000Z"),
         lastUpdatedAt: null,
+        statusHistory: [],
       })
     ).toBeNull();
   });
@@ -1719,6 +1880,7 @@ describe("isComplaintAffectingMonthlyTrend — candidate filter", () => {
       receivedAt: partial.receivedAt,
       closedAt: partial.closedAt,
       lastUpdatedAt: partial.lastUpdatedAt ?? null,
+      statusHistory: [],
     };
   }
 
@@ -1860,6 +2022,7 @@ describe("isComplaintAffectingMonthlyTrend — candidate filter", () => {
         receivedAt: new Date("2026-01-01T00:00:00.000Z"),
         closedAt: null,
         lastUpdatedAt: null,
+        statusHistory: [],
       },
       {
         id: "a",
@@ -1868,6 +2031,7 @@ describe("isComplaintAffectingMonthlyTrend — candidate filter", () => {
         receivedAt: new Date("2026-01-01T00:00:00.000Z"),
         closedAt: null,
         lastUpdatedAt: null,
+        statusHistory: [],
       },
       {
         id: "b",
@@ -1876,6 +2040,7 @@ describe("isComplaintAffectingMonthlyTrend — candidate filter", () => {
         receivedAt: new Date("2026-01-03T00:00:00.000Z"),
         closedAt: null,
         lastUpdatedAt: null,
+        statusHistory: [],
       },
     ]);
     expect(rows).toHaveLength(2);
@@ -1932,6 +2097,155 @@ describe("MonthlyComplaintTrendPoint contract (no MonthlyStockFlowPoint alias)",
     expect(dataService).not.toMatch(/MonthlyStockFlowPoint/);
     expect(contract).toContain("MonthlyComplaintTrendPoint");
     expect(dataService).toContain("monthlyStockFlow: MonthlyComplaintTrendPoint[]");
+  });
+});
+
+describe("buildExecutiveBriefData — periodMetrics and snapshot contract (spec sections 10-14)", () => {
+  function snapshotRow(overrides: Partial<{
+    id: string;
+    status: ComplaintStatus;
+    complaintDate: Date | null;
+    receivedAt: Date;
+    closedAt: Date | null;
+    sourceUpdatedAt: Date | null;
+    region: string | null;
+    department: string | null;
+    classificationId: string | null;
+    statusHistory: Array<{ fromStatus: ComplaintStatus | null; toStatus: ComplaintStatus; changedAt: Date }>;
+  }> & { id: string }) {
+    return {
+      status: ComplaintStatus.OPEN,
+      complaintDate: null,
+      receivedAt: ISO("2026-06-01"),
+      closedAt: null,
+      sourceUpdatedAt: null,
+      region: null,
+      department: null,
+      classificationId: null,
+      statusHistory: [],
+      ...overrides,
+    };
+  }
+
+  it("exposes periodMetrics.current and periodMetrics.previous with the four snapshot indicators", async () => {
+    dbMocks.complaintFindMany.mockResolvedValue([
+      snapshotRow({ id: "p1", complaintDate: ISO("2026-06-25") }), // received during CURRENT_PERIOD
+    ]);
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
+    expect(data.periodMetrics).toBeDefined();
+    expect(data.periodMetrics!.current).toMatchObject({
+      receivedDuringPeriod: expect.any(Number),
+      closedDuringPeriod: expect.any(Number),
+      openAtEnd: expect.any(Number),
+      lateAtEnd: expect.any(Number),
+    });
+    expect(data.periodMetrics!.previous).not.toBeNull();
+  });
+
+  it("periodMetrics.previous is null when there is no comparison period", async () => {
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(false), undefined, NOW);
+    expect(data.periodMetrics!.previous).toBeNull();
+  });
+
+  it("a CANCELLED complaint with no closure transition is never counted as open at period end (regression: 12-vs-11 drift)", async () => {
+    dbMocks.complaintFindMany.mockResolvedValue([
+      snapshotRow({
+        id: "cancelled-1",
+        status: ComplaintStatus.CANCELLED,
+        complaintDate: ISO("2026-06-01"),
+        classificationId: "cls-x",
+      }),
+    ]);
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
+    expect(data.periodMetrics!.current.openAtEnd).toBe(0);
+    expect(data.periodMetrics!.current.lateAtEnd).toBe(0);
+    const classificationRow = (data.classificationSnapshotAtEnd ?? []).find((r) => r.classificationId === "cls-x");
+    expect(classificationRow?.openAtEnd ?? 0).toBe(0);
+  });
+
+  it("classificationSnapshotAtEnd covers every bucket, and its openAtEnd/lateAtEnd sums equal the overall snapshot", async () => {
+    dbMocks.complaintFindMany.mockResolvedValue([
+      snapshotRow({ id: "k1", complaintDate: ISO("2026-01-01"), classificationId: "cls-a" }),
+      snapshotRow({ id: "k2", complaintDate: ISO("2026-01-01"), classificationId: "cls-b" }),
+      snapshotRow({ id: "k3", complaintDate: ISO("2026-01-01"), classificationId: null }),
+      snapshotRow({
+        id: "k4",
+        status: ComplaintStatus.CANCELLED,
+        complaintDate: ISO("2026-01-01"),
+        classificationId: "cls-a",
+      }),
+    ]);
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
+    const rows = data.classificationSnapshotAtEnd ?? [];
+    // 3 buckets: cls-a, cls-b, unclassified — the cancelled complaint does not create a 4th.
+    expect(rows).toHaveLength(3);
+    const sumOpen = rows.reduce((s, r) => s + r.openAtEnd, 0);
+    const sumLate = rows.reduce((s, r) => s + r.lateAtEnd, 0);
+    expect(sumOpen).toBe(data.periodMetrics!.current.openAtEnd);
+    expect(sumLate).toBe(data.periodMetrics!.current.lateAtEnd);
+  });
+
+  it("regionSnapshotAtEnd openAtEnd/lateAtEnd sums equal the overall current snapshot", async () => {
+    dbMocks.complaintFindMany.mockResolvedValue([
+      snapshotRow({ id: "g1", complaintDate: ISO("2026-01-01"), region: "الرياض" }),
+      snapshotRow({ id: "g2", complaintDate: ISO("2026-01-01"), region: null }),
+    ]);
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
+    const rows = data.regionSnapshotAtEnd ?? [];
+    const sumOpen = rows.reduce((s, r) => s + r.openAtEnd, 0);
+    const sumLate = rows.reduce((s, r) => s + r.lateAtEnd, 0);
+    expect(sumOpen).toBe(data.periodMetrics!.current.openAtEnd);
+    expect(sumLate).toBe(data.periodMetrics!.current.lateAtEnd);
+  });
+
+  it("departmentPeriodMetrics rows sum receivedDuringPeriod/openAtEnd/lateAtEnd back to the overall snapshot", async () => {
+    dbMocks.complaintFindMany.mockResolvedValue([
+      snapshotRow({ id: "d1", complaintDate: ISO("2026-06-25"), department: "الطوارئ" }),
+      snapshotRow({ id: "d2", complaintDate: ISO("2026-06-25"), department: null }),
+    ]);
+    const data = await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
+    const rows = data.departmentPeriodMetrics ?? [];
+    const sums = rows.reduce(
+      (acc, r) => ({
+        receivedDuringPeriod: acc.receivedDuringPeriod + r.receivedDuringPeriod,
+        openAtEnd: acc.openAtEnd + r.openAtEnd,
+        lateAtEnd: acc.lateAtEnd + r.lateAtEnd,
+      }),
+      { receivedDuringPeriod: 0, openAtEnd: 0, lateAtEnd: 0 }
+    );
+    expect(sums.receivedDuringPeriod).toBe(data.periodMetrics!.current.receivedDuringPeriod);
+    expect(sums.openAtEnd).toBe(data.periodMetrics!.current.openAtEnd);
+    expect(sums.lateAtEnd).toBe(data.periodMetrics!.current.lateAtEnd);
+  });
+
+  it("topDepartments open/closed/currentlyLate come from the period snapshot, not current-status distributions", async () => {
+    // Department "الطوارئ": one complaint created before the period and still open (backlog).
+    dbMocks.complaintFindMany.mockResolvedValue([
+      snapshotRow({ id: "bl1", complaintDate: ISO("2026-01-01"), department: "الطوارئ" }),
+    ]);
+    const kpiResult = makeKpiResult();
+    kpiResult.distributions.byDepartment = [
+      {
+        name: "الطوارئ",
+        count: 0,
+        total: 0, // no complaints registered THIS period — but backlog is still open
+        open: 0,
+        closed: 0,
+        currentlyLate: 0,
+        closedLate: 0,
+        withinDueDate: 0,
+        complianceRate: null,
+        averageResolutionDays: 0,
+        averageResolutionEligibleCount: 0,
+        slaEligibleCount: 0,
+        closedWithoutTrustedDateCount: 0,
+        highPriorityOpen: 0,
+        unclassified: 0,
+      },
+    ];
+    const data = await buildExecutiveBriefData(BASE_FILTERS, kpiResult, makeComparison(), undefined, NOW);
+    const row = (data.topDepartments ?? []).find((d) => d.name === "الطوارئ");
+    expect(row?.open).toBe(1);
   });
 });
 
