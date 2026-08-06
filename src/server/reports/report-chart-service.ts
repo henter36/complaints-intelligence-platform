@@ -299,7 +299,7 @@ type LineValueLabelContext = {
   barPlacement: BarValueLabelPlacement | null;
 };
 
-type LineLabelInsideMode = "outside" | "inside" | "auto";
+type LineLabelInsideMode = "outside" | "auto";
 
 type LineValueLabelCandidate = {
   y: number;
@@ -325,6 +325,66 @@ function createLineValueLabelContext(options: {
   };
 }
 
+function buildPointRelativeLineLabelCandidates(
+  pointY: number
+): LineValueLabelCandidate[] {
+  return [
+    {
+      y: pointY - LINE_VALUE_LABEL_ABOVE_OFFSET,
+      insideMode: "outside",
+    },
+    {
+      y: pointY + LINE_VALUE_LABEL_BELOW_OFFSET,
+      insideMode: "auto",
+    },
+  ];
+}
+
+function buildClampedBarLineLabelCandidates(options: {
+  barTopY: number | null;
+  minTop: number;
+  maxBottom: number;
+}): LineValueLabelCandidate[] {
+  if (options.barTopY === null) {
+    return [];
+  }
+  return [
+    {
+      y: Math.min(
+        Math.max(options.barTopY + BAR_VALUE_LABEL_INSIDE_OFFSET, options.minTop),
+        options.maxBottom
+      ),
+      insideMode: "auto",
+    },
+  ];
+}
+
+function buildBarLabelRelativeCandidates(options: {
+  barPlacement: BarValueLabelPlacement | null;
+  minTop: number;
+  maxBottom: number;
+}): LineValueLabelCandidate[] {
+  if (options.barPlacement === null) {
+    return [];
+  }
+  return [
+    {
+      y: Math.min(
+        options.barPlacement.y + LINE_VALUE_LABEL_COLLISION_PX,
+        options.maxBottom
+      ),
+      insideMode: "auto",
+    },
+    {
+      y: Math.max(
+        options.barPlacement.y - LINE_VALUE_LABEL_COLLISION_PX,
+        options.minTop
+      ),
+      insideMode: "outside",
+    },
+  ];
+}
+
 function buildLineValueLabelCandidates(options: {
   pointY: number;
   barTopY: number | null;
@@ -332,31 +392,19 @@ function buildLineValueLabelCandidates(options: {
   minTop: number;
   maxBottom: number;
 }): LineValueLabelCandidate[] {
-  const { pointY, barTopY, barPlacement, minTop, maxBottom } = options;
-  const candidates: LineValueLabelCandidate[] = [
-    { y: pointY - LINE_VALUE_LABEL_ABOVE_OFFSET, insideMode: "outside" },
-    { y: pointY + LINE_VALUE_LABEL_BELOW_OFFSET, insideMode: "auto" },
+  return [
+    ...buildPointRelativeLineLabelCandidates(options.pointY),
+    ...buildClampedBarLineLabelCandidates({
+      barTopY: options.barTopY,
+      minTop: options.minTop,
+      maxBottom: options.maxBottom,
+    }),
+    ...buildBarLabelRelativeCandidates({
+      barPlacement: options.barPlacement,
+      minTop: options.minTop,
+      maxBottom: options.maxBottom,
+    }),
   ];
-
-  if (barTopY !== null) {
-    candidates.push({
-      y: Math.min(Math.max(barTopY + BAR_VALUE_LABEL_INSIDE_OFFSET, minTop), maxBottom),
-      insideMode: "inside",
-    });
-  }
-
-  if (barPlacement !== null) {
-    candidates.push({
-      y: Math.min(barPlacement.y + LINE_VALUE_LABEL_COLLISION_PX, maxBottom),
-      insideMode: "auto",
-    });
-    candidates.push({
-      y: Math.max(barPlacement.y - LINE_VALUE_LABEL_COLLISION_PX, minTop),
-      insideMode: "outside",
-    });
-  }
-
-  return candidates;
 }
 
 function conflictsWithBarValueLabel(
@@ -381,8 +429,9 @@ function isCandidateInsideBar(
   candidate: LineValueLabelCandidate,
   context: LineValueLabelContext
 ): boolean {
-  if (candidate.insideMode === "inside") return true;
-  if (candidate.insideMode === "outside") return false;
+  if (candidate.insideMode === "outside") {
+    return false;
+  }
   return context.barTopY !== null && candidate.y > context.barTopY;
 }
 

@@ -651,6 +651,81 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
     });
   });
 
+  it("derives insideBar from final Y relative to barTopY after clamp", () => {
+    const placement = resolveLineValueLabelPlacement({
+      pointY: 300,
+      barTopY: 290,
+      plotTop: 40,
+      plotBottom: 300,
+    });
+    if (placement.y <= 290) {
+      expect(placement.insideBar).toBe(false);
+      expect(placement.fill).toBe(GOLD);
+    }
+
+    // Clamped candidate ends at/below barTopY → gold outside, never forced white.
+    const clampedOutside = resolveLineValueLabelPlacement({
+      pointY: 200,
+      barTopY: 200,
+      plotTop: 40,
+      plotBottom: 194,
+    });
+    expect(clampedOutside.y).toBeLessThanOrEqual(200);
+    expect(clampedOutside.insideBar).toBe(false);
+    expect(clampedOutside.fill).toBe(GOLD);
+  });
+
+  it("uses auto inside/outside fill based on Y versus barTopY", () => {
+    const inside = resolveLineValueLabelPlacement({
+      pointY: 103,
+      barTopY: 100,
+      plotTop: 40,
+      plotBottom: 300,
+    });
+    expect(inside.y).toBeGreaterThan(100);
+    expect(inside.insideBar).toBe(true);
+    expect(inside.fill).toBe("#FFFFFF");
+
+    const outside = resolveLineValueLabelPlacement({
+      pointY: 40,
+      barTopY: 100,
+      plotTop: 40,
+      plotBottom: 300,
+    });
+    expect(outside.y).toBeLessThanOrEqual(100);
+    expect(outside.insideBar).toBe(false);
+    expect(outside.fill).toBe(GOLD);
+  });
+
+  it("keeps short-plot SVG line labels gold when outside the bar", () => {
+    const section: ReportChartSection = {
+      id: "v2-monthly-flow",
+      kind: "chart",
+      chartType: "bar",
+      title: "",
+      series: [
+        { name: "المسجلة", renderAs: "bar", points: [{ x: "أغسطس 2026", y: 20 }] },
+        { name: "المغلقة", renderAs: "line", dash: "0", points: [{ x: "أغسطس 2026", y: 5 }] },
+      ],
+    };
+    const svg = buildChartSvg(section, 600, 180, { showLinePointValues: true });
+    const lineValue = [...svg.matchAll(/<text[^>]*fill="([^"]+)"[^>]*>5<\/text>/g)]
+      .map((m) => m[1])
+      .find((fill) => fill === GOLD || fill === "#FFFFFF");
+    expect(lineValue).toBe(GOLD);
+    expect(svg).toContain(`stroke="${GOLD}"`);
+    expect(svg).toContain(`fill="${PRIMARY}"`);
+    expect(svg).toContain("أغسطس");
+    expect(svg).toContain("2026");
+
+    const midYs = [
+      ...svg.matchAll(/<text[^>]*text-anchor="middle"[^>]*y="([^"]+)"[^>]*>\d+<\/text>/g),
+      ...svg.matchAll(/<text[^>]*y="([^"]+)"[^>]*text-anchor="middle"[^>]*>\d+<\/text>/g),
+    ].map((m) => Number(m[1]));
+    expect(midYs.length).toBeGreaterThanOrEqual(2);
+    expect(Math.abs(midYs[0]! - midYs[1]!)).toBeGreaterThanOrEqual(LINE_VALUE_LABEL_COLLISION_PX);
+  });
+
   it("keeps tall-bar and line labels apart when the bar label clamps inside", () => {
     // Helper-level clamp: preferred above would sit above plotTop+10.
     const barPlacement = resolveBarValueLabelPlacement({
