@@ -35,6 +35,15 @@ import {
   evaluateComparison,
   type ComparisonState,
 } from "@/lib/analytics/comparison-evaluation";
+import {
+  apiErrorMessage,
+  isAnalyticsData,
+  isDashboardData,
+  isRecord,
+  readJsonResponse,
+  type AnalyticsData,
+  type DashboardData,
+} from "@/lib/analytics/analytics-api-contract";
 import { OperationalAnalyticsPanel } from "@/components/screens/operational-analytics-panel";
 
 // ---------- Comparison helpers ----------
@@ -61,67 +70,8 @@ export function formatComparisonDifference(difference: number | null): string {
 }
 
 // ---------- Types ----------
-interface DashboardData {
-  volume: {
-    total: number; open: number; inProgress: number; closed: number;
-    reopened: number; rejected: number; late: number; repeated: number;
-    validated: number; notValidated: number; potentialDuplicates: number;
-  };
-  performance: {
-    closureRate: number; onTimeRate: number | null; lateRate: number;
-    avgFirstResponseHours: number; avgProcessingHours: number; avgOpenAgeHours: number;
-    overdueNoAction: number; overdueNoActionRate: number; reopenRate: number;
-    validityRate: number; avgSatisfaction: number; satisfactionRate: number;
-  };
-  trend: {
-    previousTotal: number | null; growthRate: number | null;
-    trendData: { date: string; total: number; closed: number }[];
-  };
-  distributions: {
-    byRegion: { name: string; count: number }[];
-    byDepartment: { name: string; count: number }[];
-    byClassification: { name: string; count: number }[];
-    byChannel: { name: string; count: number }[];
-    byStatus: { name: string; count: number }[];
-    byPriority: { name: string; count: number }[];
-    bySeverity: { name: string; count: number }[];
-  };
-  alerts: {
-    criticalComplaints: number; lateCritical: number;
-    missingFields: number; dataQualityRate: number;
-  };
-}
-
-interface AnalyticsData {
-  crossTabs: {
-    classifications: string[];
-    regions: string[];
-    departments: string[];
-    classificationByRegion: Record<string, number | string>[];
-    classificationByDepartment: Record<string, number | string>[];
-  };
-  channelEffectiveness: {
-    channel: string; total: number; closed: number;
-    closureRate: number; lateRate: number; avgProcessingHours: number;
-  }[];
-  delayReasons: { name: string; count: number }[];
-  recurringSubjects: { name: string; count: number }[];
-  recurringClassifications: { name: string; count: number }[];
-  anomalies: {
-    regions: { name: string; count: number; average: number; deviation: number; isAnomaly: boolean }[];
-    departments: { name: string; count: number; average: number; deviation: number; isAnomaly: boolean }[];
-    classifications: { name: string; count: number }[];
-  };
-  previousDistributions: {
-    byRegion: { name: string; count: number }[];
-    byDepartment: { name: string; count: number }[];
-    byClassification: { name: string; count: number }[];
-    byChannel: { name: string; count: number }[];
-  } | null;
-  regionPriorityBreakdown: Record<string, number | string>[];
-  totalCount: number;
-}
-
+// DashboardData / AnalyticsData live in analytics-api-contract.ts alongside
+// the runtime guards that validate them — see isDashboardData/isAnalyticsData.
 interface FilterOption { id: string; name: string; }
 
 // ---------- Constants ----------
@@ -204,11 +154,15 @@ export function Analytics() {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [filtersError, setFiltersError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("trends");
   const filterRequestRef = useRef(0);
   const dataRequestRef = useRef(0);
 
-  // Load filter options once
+  // Load filter options once. A failure here must never crash the page and
+  // must never mask the primary dashboard/analytics error — regions and
+  // departments simply fall back to empty, safe arrays.
   useEffect(() => {
     const controller = new AbortController();
     const requestId = filterRequestRef.current + 1;
@@ -217,16 +171,27 @@ export function Analytics() {
 
     (async () => {
       try {
+        setFiltersError(null);
         const res = await fetch("/api/filters", { signal: controller.signal });
-        const json = await res.json();
+        const payload = await readJsonResponse(res);
+        if (!res.ok) {
+          throw new Error(apiErrorMessage(payload, "تعذر تحميل خيارات الفلاتر."));
+        }
+        const record = isRecord(payload) ? payload : {};
+        const nextRegions: FilterOption[] = Array.isArray(record.regions) ? record.regions : [];
+        const nextDepartments: FilterOption[] = Array.isArray(record.departments) ? record.departments : [];
         if (canUpdate()) {
-          setRegions(json.regions || []);
-          setDepartments(json.departments || []);
+          setRegions(nextRegions);
+          setDepartments(nextDepartments);
         }
       } catch (e) {
-        if (!isAbortError(e)) {
-          console.error(e);
+        if (isAbortError(e)) return;
+        if (canUpdate()) {
+          setRegions([]);
+          setDepartments([]);
+          setFiltersError(e instanceof Error ? e.message : "تعذر تحميل خيارات الفلاتر.");
         }
+        console.error("Filter options load failed:", e);
       }
     })();
     return () => {
@@ -248,6 +213,7 @@ export function Analytics() {
     dataRequestRef.current = requestId;
     const canUpdate = () => !signal?.aborted && dataRequestRef.current === requestId;
     setLoading(true);
+    setLoadError(null);
     const qs = buildQuery();
     let aborted = false;
     try {
@@ -255,15 +221,39 @@ export function Analytics() {
         fetch(`/api/dashboard?${qs}`, { signal }),
         fetch(`/api/analytics?${qs}`, { signal }),
       ]);
-      const [dashJson, anaJson] = await Promise.all([dashRes.json(), anaRes.json()]);
+      const [dashPayload, anaPayload] = await Promise.all([
+        readJsonResponse(dashRes),
+        readJsonResponse(anaRes),
+      ]);
+
+      if (!dashRes.ok) {
+        throw new Error(apiErrorMessage(dashPayload, "تعذر جلب مؤشرات لوحة التحكم."));
+      }
+      if (!anaRes.ok) {
+        throw new Error(apiErrorMessage(anaPayload, "تعذر جلب بيانات التحليلات."));
+      }
+      if (!isDashboardData(dashPayload)) {
+        throw new Error("استجابة لوحة التحكم غير مكتملة.");
+      }
+      if (!isAnalyticsData(anaPayload)) {
+        throw new Error("استجابة التحليلات غير مكتملة.");
+      }
+
+      // Atomic update: dashboard and analytics are only ever committed to
+      // state together, after both responses succeeded and matched their
+      // contract — insights and comparisons are built from both sources at
+      // once, so a partial update would desynchronize them.
       if (canUpdate()) {
-        setDashboard(dashJson);
-        setAnalytics(anaJson);
+        setDashboard(dashPayload);
+        setAnalytics(anaPayload);
+        setLoadError(null);
       }
     } catch (e) {
       aborted = isAbortError(e);
-      if (!aborted) {
-        console.error(e);
+      if (!aborted && canUpdate()) {
+        const message = e instanceof Error ? e.message : "تعذر تحميل بيانات التحليلات.";
+        setLoadError(message);
+        console.error("Analytics data load failed:", e);
       }
     } finally {
       if (!aborted && canUpdate()) {
@@ -322,6 +312,37 @@ export function Analytics() {
           </Button>
         }
       />
+
+      {/* ---------- Load error banner ---------- */}
+      {/* Kept above the content rather than replacing it: if a previous
+          successful load already populated dashboard/analytics, that data
+          stays visible while this alert reports the latest failed refresh. */}
+      {loadError !== null && (
+        <Card className="border-destructive/50 bg-destructive/5" role="alert">
+          <CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center">
+            <AlertTriangle className="h-5 w-5 text-destructive shrink-0" />
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-semibold">تعذر تحميل التحليلات</p>
+              <p className="text-sm text-muted-foreground mt-0.5">{loadError}</p>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="shrink-0"
+              onClick={() => void loadData()}
+            >
+              إعادة المحاولة
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {filtersError !== null && (
+        <p className="text-xs text-muted-foreground" role="status">
+          {filtersError}
+        </p>
+      )}
 
       {/* ---------- Filter Bar ---------- */}
       <Card className="border-border/60">
@@ -1435,28 +1456,35 @@ function buildInsights(dash: DashboardData | null, ana: AnalyticsData | null): I
 
   const insights: Insight[] = [];
 
-  // Growth rate insight
-  if (dash.trend.growthRate !== null && dash.trend.growthRate !== undefined) {
-    if (dash.trend.growthRate > 10) {
+  // Growth rate insight. Secondary defense only — `dash` is already validated
+  // by isDashboardData before it ever reaches state, so `trend` is always an
+  // object here; the optional chain guards against this function someday
+  // being called with unvalidated data, it does not replace that validation.
+  // A missing/undefined growthRate is treated the same as an absent value
+  // (no insight pushed) — never coerced to a number (no growth is not the
+  // same claim as zero growth).
+  const growthRate = dash.trend?.growthRate;
+  if (growthRate !== null && growthRate !== undefined) {
+    if (growthRate > 10) {
       insights.push({
         type: "negative",
         icon: "trending-up",
         title: "ارتفاع ملحوظ في الشكاوى",
-        text: `ارتفع إجمالي الشكاوى بنسبة ${formatPercent(dash.trend.growthRate)} مقارنة بالفترة السابقة، مما يستدعي مراجعة الأسباب المحتملة.`,
+        text: `ارتفع إجمالي الشكاوى بنسبة ${formatPercent(growthRate)} مقارنة بالفترة السابقة، مما يستدعي مراجعة الأسباب المحتملة.`,
       });
-    } else if (dash.trend.growthRate < -10) {
+    } else if (growthRate < -10) {
       insights.push({
         type: "positive",
         icon: "trending-down",
         title: "انخفاض إيجابي في الشكاوى",
-        text: `انخفض إجمالي الشكاوى بنسبة ${formatPercent(Math.abs(dash.trend.growthRate))} مقارنة بالفترة السابقة، وهو مؤشر إيجابي على تحسن الخدمات.`,
+        text: `انخفض إجمالي الشكاوى بنسبة ${formatPercent(Math.abs(growthRate))} مقارنة بالفترة السابقة، وهو مؤشر إيجابي على تحسن الخدمات.`,
       });
     } else {
       insights.push({
         type: "neutral",
         icon: "sparkles",
         title: "استقرار في حجم الشكاوى",
-        text: `بلغ التغير في حجم الشكاوى ${formatPercent(Math.abs(dash.trend.growthRate))} مقارنة بالفترة السابقة، مما يدل على استقرار نسبي.`,
+        text: `بلغ التغير في حجم الشكاوى ${formatPercent(Math.abs(growthRate))} مقارنة بالفترة السابقة، مما يدل على استقرار نسبي.`,
       });
     }
   }
@@ -1537,6 +1565,11 @@ function buildInsights(dash: DashboardData | null, ana: AnalyticsData | null): I
   return insights.slice(0, 3);
 }
 
+/** Secondary defense: coerces anything that isn't an array to empty, rather than letting `.map`/`.find` throw. */
+function toNameCountArray(value: unknown): { name: string; count: number }[] {
+  return Array.isArray(value) ? value : [];
+}
+
 function buildComparisonData(dash: DashboardData | null, ana: AnalyticsData | null) {
   const empty = { hasPrevious: false, byRegion: [], byDepartment: [], byClassification: [] };
   if (!dash || !ana || !ana.previousDistributions) return empty;
@@ -1545,10 +1578,12 @@ function buildComparisonData(dash: DashboardData | null, ana: AnalyticsData | nu
     current: { name: string; count: number }[],
     previous: { name: string; count: number }[],
   ) => {
-    const allNames = new Set<string>([...current.map(c => c.name), ...previous.map(p => p.name)]);
+    const safeCurrent = toNameCountArray(current);
+    const safePrevious = toNameCountArray(previous);
+    const allNames = new Set<string>([...safeCurrent.map(c => c.name), ...safePrevious.map(p => p.name)]);
     return Array.from(allNames).map(name => {
-      const c = current.find(x => x.name === name);
-      const p = previous.find(x => x.name === name);
+      const c = safeCurrent.find(x => x.name === name);
+      const p = safePrevious.find(x => x.name === name);
       return {
         name,
         current: c?.count || 0,
@@ -1559,9 +1594,9 @@ function buildComparisonData(dash: DashboardData | null, ana: AnalyticsData | nu
 
   return {
     hasPrevious: true,
-    byRegion: merge(dash.distributions.byRegion, ana.previousDistributions.byRegion),
-    byDepartment: merge(dash.distributions.byDepartment, ana.previousDistributions.byDepartment),
-    byClassification: merge(dash.distributions.byClassification, ana.previousDistributions.byClassification),
+    byRegion: merge(dash.distributions?.byRegion, ana.previousDistributions.byRegion),
+    byDepartment: merge(dash.distributions?.byDepartment, ana.previousDistributions.byDepartment),
+    byClassification: merge(dash.distributions?.byClassification, ana.previousDistributions.byClassification),
   };
 }
 
