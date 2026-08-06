@@ -104,10 +104,10 @@ const RIGHT_AXIS_STYLES: SeriesStyle[] = [
   { color: COLORS.danger, dash: "0", width: 2, mark: "line" },
 ];
 
-/** V2 monthly stock/flow palette: green bars, gold bars, dark-green line, alert dashed. */
+/** V2 monthly palette: dark-green registered bars, gold closed line (legacy slots unused). */
 const MONTHLY_TREND_STYLES: SeriesStyle[] = [
   { color: COLORS.primary, dash: "0", width: 2, mark: "bar" },
-  { color: COLORS.gold, dash: "0", width: 2, mark: "bar" },
+  { color: COLORS.gold, dash: "0", width: 2.2, mark: "line" },
   { color: COLORS.primary, dash: "0", width: 2.2, mark: "line" },
   { color: COLORS.danger, dash: "6,4", width: 2.2, mark: "line" },
 ];
@@ -228,11 +228,13 @@ export type ChartLabelLayout = "single-line" | "wrap-two-lines";
 export type ChartRenderOptions = {
   xLabelPolicy?: ChartLabelPolicy;
   xLabelLayout?: ChartLabelLayout;
+  showLinePointValues?: boolean;
 };
 
 const DEFAULT_CHART_RENDER_OPTIONS: Required<ChartRenderOptions> = {
   xLabelPolicy: "auto",
   xLabelLayout: "single-line",
+  showLinePointValues: false,
 };
 
 export function resolveChartRenderOptions(
@@ -241,7 +243,249 @@ export function resolveChartRenderOptions(
   return {
     xLabelPolicy: options?.xLabelPolicy ?? DEFAULT_CHART_RENDER_OPTIONS.xLabelPolicy,
     xLabelLayout: options?.xLabelLayout ?? DEFAULT_CHART_RENDER_OPTIONS.xLabelLayout,
+    showLinePointValues:
+      options?.showLinePointValues ?? DEFAULT_CHART_RENDER_OPTIONS.showLinePointValues,
   };
+}
+
+const BAR_VALUE_LABEL_ABOVE_OFFSET = 3;
+const BAR_VALUE_LABEL_MIN_TOP_OFFSET = 10;
+const BAR_VALUE_LABEL_INSIDE_OFFSET = 12;
+const BAR_VALUE_LABEL_BOTTOM_RESERVE = 2;
+
+/** Minimum vertical gap between a line value label and the bar value label. */
+export const LINE_VALUE_LABEL_COLLISION_PX = 14;
+
+export type BarValueLabelPlacement = {
+  y: number;
+  insideBar: boolean;
+};
+
+/**
+ * Shared bar-value label placement used by renderBarSeries and line-label collision checks.
+ * Preferred above the bar; clamps inside the bar when near plotTop.
+ */
+export function resolveBarValueLabelPlacement(options: {
+  barTopY: number;
+  plotTop: number;
+  plotBottom: number;
+}): BarValueLabelPlacement {
+  const { barTopY, plotTop, plotBottom } = options;
+  const preferredY = barTopY - BAR_VALUE_LABEL_ABOVE_OFFSET;
+  const minTop = plotTop + BAR_VALUE_LABEL_MIN_TOP_OFFSET;
+  if (preferredY < minTop) {
+    return {
+      y: Math.min(barTopY + BAR_VALUE_LABEL_INSIDE_OFFSET, plotBottom - BAR_VALUE_LABEL_BOTTOM_RESERVE),
+      insideBar: true,
+    };
+  }
+  return { y: preferredY, insideBar: false };
+}
+
+export type LineValueLabelPlacement = {
+  y: number;
+  insideBar: boolean;
+  fill: string;
+};
+
+const LINE_VALUE_LABEL_ABOVE_OFFSET = 12;
+const LINE_VALUE_LABEL_BELOW_OFFSET = 14;
+const LINE_VALUE_LABEL_BOTTOM_RESERVE = 14;
+
+type LineValueLabelContext = {
+  barTopY: number | null;
+  minTop: number;
+  maxBottom: number;
+  barPlacement: BarValueLabelPlacement | null;
+};
+
+type LineLabelInsideMode = "outside" | "auto";
+
+type LineValueLabelCandidate = {
+  y: number;
+  insideMode: LineLabelInsideMode;
+};
+
+function createLineValueLabelContext(options: {
+  barTopY: number | null;
+  plotTop: number;
+  plotBottom: number;
+}): LineValueLabelContext {
+  const { barTopY, plotTop, plotBottom } = options;
+  const minTop = plotTop + BAR_VALUE_LABEL_MIN_TOP_OFFSET;
+  const maxBottom = plotBottom - LINE_VALUE_LABEL_BOTTOM_RESERVE;
+  if (barTopY === null) {
+    return { barTopY, minTop, maxBottom, barPlacement: null };
+  }
+  return {
+    barTopY,
+    minTop,
+    maxBottom,
+    barPlacement: resolveBarValueLabelPlacement({ barTopY, plotTop, plotBottom }),
+  };
+}
+
+function buildPointRelativeLineLabelCandidates(
+  pointY: number
+): LineValueLabelCandidate[] {
+  return [
+    {
+      y: pointY - LINE_VALUE_LABEL_ABOVE_OFFSET,
+      insideMode: "outside",
+    },
+    {
+      y: pointY + LINE_VALUE_LABEL_BELOW_OFFSET,
+      insideMode: "auto",
+    },
+  ];
+}
+
+function buildClampedBarLineLabelCandidates(options: {
+  barTopY: number | null;
+  minTop: number;
+  maxBottom: number;
+}): LineValueLabelCandidate[] {
+  if (options.barTopY === null) {
+    return [];
+  }
+  return [
+    {
+      y: Math.min(
+        Math.max(options.barTopY + BAR_VALUE_LABEL_INSIDE_OFFSET, options.minTop),
+        options.maxBottom
+      ),
+      insideMode: "auto",
+    },
+  ];
+}
+
+function buildBarLabelRelativeCandidates(options: {
+  barPlacement: BarValueLabelPlacement | null;
+  minTop: number;
+  maxBottom: number;
+}): LineValueLabelCandidate[] {
+  if (options.barPlacement === null) {
+    return [];
+  }
+  return [
+    {
+      y: Math.min(
+        options.barPlacement.y + LINE_VALUE_LABEL_COLLISION_PX,
+        options.maxBottom
+      ),
+      insideMode: "auto",
+    },
+    {
+      y: Math.max(
+        options.barPlacement.y - LINE_VALUE_LABEL_COLLISION_PX,
+        options.minTop
+      ),
+      insideMode: "outside",
+    },
+  ];
+}
+
+function buildLineValueLabelCandidates(options: {
+  pointY: number;
+  barTopY: number | null;
+  barPlacement: BarValueLabelPlacement | null;
+  minTop: number;
+  maxBottom: number;
+}): LineValueLabelCandidate[] {
+  return [
+    ...buildPointRelativeLineLabelCandidates(options.pointY),
+    ...buildClampedBarLineLabelCandidates({
+      barTopY: options.barTopY,
+      minTop: options.minTop,
+      maxBottom: options.maxBottom,
+    }),
+    ...buildBarLabelRelativeCandidates({
+      barPlacement: options.barPlacement,
+      minTop: options.minTop,
+      maxBottom: options.maxBottom,
+    }),
+  ];
+}
+
+function conflictsWithBarValueLabel(
+  labelY: number,
+  barPlacement: BarValueLabelPlacement | null
+): boolean {
+  if (barPlacement === null) return false;
+  return Math.abs(labelY - barPlacement.y) < LINE_VALUE_LABEL_COLLISION_PX;
+}
+
+function isLineValueLabelCandidateValid(
+  candidate: LineValueLabelCandidate,
+  context: LineValueLabelContext
+): boolean {
+  if (candidate.y < context.minTop) return false;
+  if (candidate.y > context.maxBottom) return false;
+  if (conflictsWithBarValueLabel(candidate.y, context.barPlacement)) return false;
+  return true;
+}
+
+function isCandidateInsideBar(
+  candidate: LineValueLabelCandidate,
+  context: LineValueLabelContext
+): boolean {
+  if (candidate.insideMode === "outside") {
+    return false;
+  }
+  return context.barTopY !== null && candidate.y > context.barTopY;
+}
+
+function toLineValueLabelPlacement(
+  candidate: LineValueLabelCandidate,
+  context: LineValueLabelContext
+): LineValueLabelPlacement {
+  const insideBar = isCandidateInsideBar(candidate, context);
+  if (insideBar) {
+    return { y: candidate.y, insideBar: true, fill: COLORS.white };
+  }
+  return { y: candidate.y, insideBar: false, fill: COLORS.gold };
+}
+
+function buildFallbackLineValueLabelPlacement(options: {
+  pointY: number;
+  context: LineValueLabelContext;
+}): LineValueLabelPlacement {
+  const preferredAbove = options.pointY - LINE_VALUE_LABEL_ABOVE_OFFSET;
+  const y = Math.min(
+    Math.max(preferredAbove, options.context.minTop),
+    options.context.maxBottom
+  );
+  return { y, insideBar: false, fill: COLORS.gold };
+}
+
+/**
+ * Places a closed-line value label near its point while avoiding bar-value collisions
+ * and staying inside the plot (above plotTop, clear of month labels at plotBottom).
+ */
+export function resolveLineValueLabelPlacement(options: {
+  pointY: number;
+  barTopY: number | null;
+  plotTop: number;
+  plotBottom: number;
+}): LineValueLabelPlacement {
+  const context = createLineValueLabelContext(options);
+  const candidates = buildLineValueLabelCandidates({
+    pointY: options.pointY,
+    barTopY: options.barTopY,
+    barPlacement: context.barPlacement,
+    minTop: context.minTop,
+    maxBottom: context.maxBottom,
+  });
+  const selected = candidates.find((candidate) =>
+    isLineValueLabelCandidateValid(candidate, context)
+  );
+  if (selected) {
+    return toLineValueLabelPlacement(selected, context);
+  }
+  return buildFallbackLineValueLabelPlacement({
+    pointY: options.pointY,
+    context,
+  });
 }
 
 /**
@@ -569,20 +813,33 @@ export function drawChartLegend(
   };
 }
 
-function renderLineSeries(
-  geo: ChartGeometry,
-  seriesList: Array<{ series: ChartSeries; style: SeriesStyle }>,
-  yMax: number,
-  categories: string[],
-  chartType: ReportChartSection["chartType"]
-): string {
+type RenderLineSeriesOptions = {
+  geo: ChartGeometry;
+  seriesList: Array<{ series: ChartSeries; style: SeriesStyle }>;
+  yMax: number;
+  categories: string[];
+  chartType: ReportChartSection["chartType"];
+  showPointValues: boolean;
+  barTopYByCategory?: ReadonlyMap<string, number>;
+};
+
+function renderLineSeries(options: RenderLineSeriesOptions): string {
+  const {
+    geo,
+    seriesList,
+    yMax,
+    categories,
+    chartType,
+    showPointValues,
+    barTopYByCategory,
+  } = options;
   const parts: string[] = [];
   const catIndex = new Map(categories.map((c, i) => [c, i]));
   const catCount = Math.max(1, categories.length);
   const catWidth = (geo.plotRight - geo.plotLeft) / catCount;
 
   for (const { series, style } of seriesList) {
-    const points = series.points
+    const plotted = series.points
       .map((p) => {
         const idx = catIndex.get(p.x);
         if (idx === undefined) return null;
@@ -590,18 +847,31 @@ function renderLineSeries(
           ? geo.plotLeft + (idx + 0.5) * catWidth
           : xForIndex(geo, idx);
         const y = yForValue(geo, p.y, yMax);
-        return { x, y };
+        return { x, y, value: p.y, category: p.x };
       })
-      .filter((p): p is { x: number; y: number } => p !== null);
-    if (points.length === 0) continue;
-    const polyline = points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
+      .filter(
+        (p): p is { x: number; y: number; value: number; category: string } => p !== null
+      );
+    if (plotted.length === 0) continue;
+    const polyline = plotted.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(" ");
     const dashAttr = style.dash && style.dash !== "0" ? ` stroke-dasharray="${style.dash}"` : "";
     parts.push(
       `<polyline fill="none" stroke="${style.color}" stroke-width="${style.width}"${dashAttr} points="${polyline}"/>`
     );
-    for (const p of points) {
+    for (const p of plotted) {
       parts.push(
         `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="2.6" fill="${COLORS.white}" stroke="${style.color}" stroke-width="1.4"/>`
+      );
+      if (!showPointValues || p.value <= 0) continue;
+      const barTopY = barTopYByCategory?.get(p.category) ?? null;
+      const placement = resolveLineValueLabelPlacement({
+        pointY: p.y,
+        barTopY,
+        plotTop: geo.plotTop,
+        plotBottom: geo.plotBottom,
+      });
+      parts.push(
+        `<text x="${p.x.toFixed(1)}" y="${placement.y.toFixed(1)}" text-anchor="middle" font-size="9" fill="${placement.fill}">${escapeXml(formatReportNumber(p.value, { maximumFractionDigits: 0 }))}</text>`
       );
     }
   }
@@ -639,8 +909,6 @@ function renderBarSeries(
   const groupWidth = categoryWidth * 0.72;
   const barWidth = Math.max(2, groupWidth / seriesCount);
   const categoryIndex = new Map(categories.map((cat, i) => [cat, i]));
-  const preferredLabelY = (valueY: number) => valueY - 3;
-  const minLabelY = geo.plotTop + 10;
 
   seriesList.forEach(({ series, style }, seriesIndex) => {
     series.points.forEach((point) => {
@@ -658,14 +926,15 @@ function renderBarSeries(
       );
       if (point.y > 0) {
         const labelX = (x + bw / 2).toFixed(1);
-        const unclampedY = preferredLabelY(valueY);
-        const clampedInsideBar = unclampedY < minLabelY;
-        const labelY = (clampedInsideBar ? Math.min(valueY + 12, geo.plotBottom - 2) : unclampedY)
-          .toFixed(1);
-        const labelFill = clampedInsideBar ? COLORS.white : style.color;
+        const placement = resolveBarValueLabelPlacement({
+          barTopY: valueY,
+          plotTop: geo.plotTop,
+          plotBottom: geo.plotBottom,
+        });
+        const labelFill = placement.insideBar ? COLORS.white : style.color;
         const labelFs = Math.max(7, Math.min(10, Math.round(bw * 0.55)));
         parts.push(
-          `<text x="${labelX}" y="${labelY}" text-anchor="middle" font-size="${labelFs}" fill="${labelFill}">${escapeXml(formatReportNumber(point.y, { maximumFractionDigits: 0 }))}</text>`
+          `<text x="${labelX}" y="${placement.y.toFixed(1)}" text-anchor="middle" font-size="${labelFs}" fill="${labelFill}">${escapeXml(formatReportNumber(point.y, { maximumFractionDigits: 0 }))}</text>`
         );
       }
     });
@@ -685,7 +954,14 @@ function renderRightAxisLines(
     series,
     style: rightAxisStyle(si),
   }));
-  return renderLineSeries(geo, styled, yMaxRight, categories, chartType);
+  return renderLineSeries({
+    geo,
+    seriesList: styled,
+    yMax: yMaxRight,
+    categories,
+    chartType,
+    showPointValues: false,
+  });
 }
 
 function renderAxesWithOptionalSecondary(options: RenderAxesOptions): string {
@@ -1009,8 +1285,25 @@ function buildChartSvgBody(options: {
     ? `<text x="${width / 2}" y="24" text-anchor="middle" font-size="15" fill="${COLORS.primary}" direction="rtl" unicode-bidi="plaintext">${title}</text>`
     : "";
   const barsSvg = bars.length > 0 ? renderBarSeries(geo, bars, yMax, categories) : "";
+  const barTopYByCategory = new Map<string, number>();
+  for (const { series } of bars) {
+    for (const point of series.points) {
+      if (point.y <= 0) continue;
+      if (!barTopYByCategory.has(point.x)) {
+        barTopYByCategory.set(point.x, yForValue(geo, point.y, yMax));
+      }
+    }
+  }
   const linesSvg = lines.length > 0
-    ? renderLineSeries(geo, lines, yMax, categories, lineRenderType)
+    ? renderLineSeries({
+      geo,
+      seriesList: lines,
+      yMax,
+      categories,
+      chartType: lineRenderType,
+      showPointValues: renderOptions.showLinePointValues,
+      barTopYByCategory,
+    })
     : "";
   const dualSvg = hasDualAxis
     ? renderRightAxisLines(geo, rightSeries, yMaxRight, categories, section.chartType)

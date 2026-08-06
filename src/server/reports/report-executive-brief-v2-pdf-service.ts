@@ -5,7 +5,7 @@
  * expand the height when many regions need cards + table space so content fits.
  *
  *   1. Cover   — large title + 3 summary cards + all-time total
- *   2. KPIs    — 8 icon-KPI cards + monthly inflow/closed chart + notes
+ *   2. Trend   — registered/closed totals + monthly combo chart + key notes
  *   3. Regions — comparison chart + volume cards + delta/topic table
  *   4. Dept/Class — notable rises + classification table + department table + conclusions + data notes
  */
@@ -14,19 +14,16 @@ import fs from "node:fs";
 import path from "node:path";
 import PDFDocument from "pdfkit";
 import {
-  directionColor,
-  directionFromAssessment,
   formatNullableReportNumber,
   formatReportNumber,
   PRINT_EXECUTIVE_PAGE_SIZE,
   REPORT_DESIGN_TOKENS,
-  type ExecutiveDirection,
 } from "@/lib/reports/design-tokens";
 import type {
-  ExecutiveBriefKpiCard,
   RegionReferenceRow,
   ClassificationBriefRow,
   ExecutiveEntityRow,
+  ExecutiveBriefKpiCard,
 } from "@/lib/reports/report-contract";
 import type { ExecutiveBriefV2Data, ReportData } from "./report-data-service";
 import { isExecutiveBriefV2Data } from "./report-data-service";
@@ -38,6 +35,11 @@ import {
   monthKeyFromReportEndDate,
   sanitizeMonthlyTrendForReport,
 } from "./report-monthly-trend-sanitize";
+import {
+  buildMonthlyTrendInsights,
+  calculateMonthlyTrendTotals,
+  resolveReportMonthStatus,
+} from "./report-monthly-trend-presentation";
 
 export {
   sanitizeMonthlyTrendForReport,
@@ -89,13 +91,23 @@ function createV2Layout(regionCount: number): V2Layout {
   return { pageSize: [pw, pageH] as const, margin, contentWidth: pw - margin * 2 };
 }
 
-/** Remaining vertical space for the monthly chart (footer reserve 26 + gap 8). */
-export function resolveV2MonthlyChartAvailableHeight(
-  pageHeight: number,
-  margin: number,
-  y: number
-): number {
-  return Math.max(0, Math.floor(pageHeight - margin - 26 - y - 8));
+const FOOTER_RESERVE = 26;
+
+/** Remaining vertical space for the monthly chart after notes + footer reserve. */
+export function resolveV2MonthlyChartAvailableHeight(input: {
+  pageHeight: number;
+  margin: number;
+  chartY: number;
+  footerReserve?: number;
+  notesHeight: number;
+  notesGap: number;
+}): number {
+  const footerReserve = input.footerReserve ?? FOOTER_RESERVE;
+  const pageContentBottom = input.pageHeight - input.margin - footerReserve;
+  return Math.max(
+    0,
+    Math.floor(pageContentBottom - input.notesHeight - input.notesGap - input.chartY)
+  );
 }
 
 /** Cap chart height without forcing a floor that can overflow the page. */
@@ -113,6 +125,14 @@ export function resolveV2MonthlyChartRenderPlan(availableForChart: number): {
     chartHeight,
     canRenderChart: chartHeight >= MIN_CHART_HEIGHT,
   };
+}
+
+export function resolveMonthlyTrendNotesHeight(insightCount: number): number {
+  const hdrH = 30;
+  const lineH = 22;
+  const pad = 16;
+  const lines = Math.max(insightCount, 1);
+  return Math.max(hdrH + lineH + 12, hdrH + pad + lines * lineH);
 }
 
 /** Remaining height for conclusions; y is absolute from page top so top margin is not subtracted again. */
@@ -266,27 +286,6 @@ function drawIcon(doc: PDFKit.PDFDocument, type: IconType, cx: number, cy: numbe
   resetInk(doc);
 }
 
-// ── Direction arrow (same as V1) ─────────────────────────────────────────────
-
-function drawDirectionArrow(doc: PDFKit.PDFDocument, direction: ExecutiveDirection, x: number, y: number, size: number): void {
-  const cx = x + size / 2;
-  const wing = size * 0.28;
-  doc.lineWidth(Math.max(1.2, size * 0.12)).lineCap("round").strokeColor(directionColor(direction));
-  if (direction === "positive") {
-    doc.moveTo(cx, y + size - 2).lineTo(cx, y + 2).stroke();
-    doc.moveTo(cx, y + 2).lineTo(cx - wing, y + 2 + wing).stroke();
-    doc.moveTo(cx, y + 2).lineTo(cx + wing, y + 2 + wing).stroke();
-  } else if (direction === "negative") {
-    doc.moveTo(cx, y + 2).lineTo(cx, y + size - 2).stroke();
-    doc.moveTo(cx, y + size - 2).lineTo(cx - wing, y + size - 2 - wing).stroke();
-    doc.moveTo(cx, y + size - 2).lineTo(cx + wing, y + size - 2 - wing).stroke();
-  } else {
-    doc.moveTo(x + 2, y + size / 2).lineTo(x + size - 2, y + size / 2).stroke();
-  }
-  doc.lineWidth(1).lineCap("butt");
-  resetInk(doc);
-}
-
 // ── KPI formatting ─────────────────────────────────────────────────────────────
 
 const REPORT_UNAVAILABLE = "غير متاح";
@@ -296,13 +295,6 @@ function formatKpiValue(card: ExecutiveBriefKpiCard): string {
   if (card.format === "percent") return formatReportNumber(card.value, { percent: true, maximumFractionDigits: 1 });
   if (card.format === "days") return `${formatReportNumber(card.value)} يوم`;
   return formatReportNumber(card.value, { maximumFractionDigits: 0 });
-}
-
-function formatKpiDelta(card: ExecutiveBriefKpiCard): string {
-  if (card.difference === null) return "";
-  const diff = formatReportNumber(card.difference, { sign: true });
-  if (card.changeRate === null) return diff;
-  return `${diff}  (${formatReportNumber(card.changeRate, { sign: true, percent: true })})`;
 }
 
 /** Measure prepared Arabic (or mixed) text width for the active font/size. */
@@ -752,243 +744,42 @@ function renderCoverPage(ctx: V2Context): void {
   resetInk(doc);
 }
 
-// ── Page 2: KPIs + monthly chart + notes ─────────────────────────────────────
+// ── Page 2: registered/closed monthly trend ───────────────────────────────────
 
-const ICON_KEY_MAP: Record<string, IconType> = {
-  total: "clipboard",
-  closed: "check",
-  open: "folder",
-  currentlyLate: "hourglass",
-  netChange: "database",
-  allTimeTotal: "database",
-  closedLate: "clock-x",
-  complianceRate: "target",
-  averageResolutionDays: "calendar",
-  highPriorityOpen: "hourglass",
-};
-
-function kpiSpecialSubText(card: ExecutiveBriefKpiCard): string | null {
-  if (card.key === "allTimeTotal") return "منذ بدء التشغيل";
-  if (card.key === "complianceRate") return "مهلة 7 أيام من تاريخ الإنشاء";
-  return null;
-}
-
-type KpiCardLayout = {
-  pad: number;
-  innerX: number;
-  innerWidth: number;
-  iconCenterX: number;
-  iconCenterY: number;
-  iconRadius: number;
-  titleY: number;
-  titleHeight: number;
-  valueTop: number;
-  valueHeight: number;
-  metaY: number;
-  subtitleHeight: number;
-  hasComparison: boolean;
-  specialSub: string | null;
-};
-
-function resolveKpiMaxFontSize(
-  card: ExecutiveBriefKpiCard,
-  isUnavailable: boolean,
-  longNumber: boolean
-): number {
-  if (isUnavailable) return 12;
-  if (longNumber) return 16;
-  if (card.format === "percent") return 18;
-  return 20;
-}
-
-function resolveKpiMinFontSize(isUnavailable: boolean): number {
-  if (isUnavailable) return 9;
-  return 10;
-}
-
-function resolveKpiPreviousFractionDigits(
-  format: ExecutiveBriefKpiCard["format"]
-): number {
-  if (format === "number") return 0;
-  return 1;
-}
-
-function computeKpiCardLayout(
-  card: ExecutiveBriefKpiCard,
-  x: number,
-  y: number,
-  cardW: number,
-  cardH: number
-): KpiCardLayout {
-  const pad = 6;
-  const iconRadius = 16;
-  const iconCenterX = x + cardW / 2;
-  const iconCenterY = y + iconRadius + 6;
-  const titleY = iconCenterY + iconRadius + 3;
-  const titleHeight = 16;
-  const specialSub = kpiSpecialSubText(card);
-  const hasComparison = card.difference !== null && specialSub === null;
-  let comparisonReserve = 0;
-  if (hasComparison && card.previousValue !== null) {
-    comparisonReserve = 24;
-  } else if (hasComparison) {
-    comparisonReserve = 14;
-  }
-  const subtitleHeight = specialSub ? 16 : 0;
-  const bottomReserve = comparisonReserve + subtitleHeight + 6;
-  const valueTop = titleY + titleHeight + 1;
-  const valueBottom = y + cardH - bottomReserve;
-  return {
-    pad,
-    innerX: x + pad,
-    innerWidth: cardW - pad * 2,
-    iconCenterX,
-    iconCenterY,
-    iconRadius,
-    titleY,
-    titleHeight,
-    valueTop,
-    valueHeight: Math.max(18, valueBottom - valueTop),
-    metaY: valueBottom + 2,
-    subtitleHeight,
-    hasComparison,
-    specialSub,
-  };
-}
-
-function drawKpiCardFrameAndIcon(
+function drawMonthlyTrendTotalCard(
   doc: PDFKit.PDFDocument,
-  card: ExecutiveBriefKpiCard,
-  x: number,
-  y: number,
-  cardW: number,
-  cardH: number,
-  layout: KpiCardLayout
+  options: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    title: string;
+    value: number;
+    icon: IconType;
+  }
 ): void {
+  const { x, y, width, height, title, value, icon } = options;
   const r = REPORT_DESIGN_TOKENS.card.radius;
-  doc.roundedRect(x, y, cardW, cardH, r).fillAndStroke(COLORS.background, COLORS.border);
-  doc.circle(layout.iconCenterX, layout.iconCenterY, layout.iconRadius)
-    .lineWidth(1.5)
-    .strokeColor(COLORS.gold)
-    .stroke();
-  doc.lineWidth(1);
-  const iconType = ICON_KEY_MAP[card.key] ?? "clipboard";
-  drawIcon(doc, iconType, layout.iconCenterX, layout.iconCenterY, layout.iconRadius);
-}
+  doc.roundedRect(x, y, width, height, r).fillAndStroke(COLORS.background, COLORS.gold);
 
-function drawKpiCardTitle(
-  doc: PDFKit.PDFDocument,
-  card: ExecutiveBriefKpiCard,
-  layout: KpiCardLayout
-): void {
-  doc.font("Body").fontSize(8.5).fillColor(COLORS.neutral).text(
-    preparePdfText(card.label),
-    layout.innerX,
-    layout.titleY,
-    {
-      width: layout.innerWidth,
-      height: layout.titleHeight,
-      align: "center",
-      wordSpacing: WORD_SPACING,
-      ellipsis: true,
-    }
+  const circR = 16;
+  const circX = x + width - 28;
+  const circY = y + 30;
+  doc.circle(circX, circY, circR).strokeColor(COLORS.gold).lineWidth(1.5).stroke();
+  drawIcon(doc, icon, circX, circY, circR);
+
+  doc.font("Bold").fontSize(13).fillColor(COLORS.gold).text(
+    preparePdfText(title),
+    x + 12,
+    y + 18,
+    { width: width - 56, align: "right", wordSpacing: WORD_SPACING }
   );
-}
-
-function drawKpiCardPrimaryValue(
-  doc: PDFKit.PDFDocument,
-  card: ExecutiveBriefKpiCard,
-  layout: KpiCardLayout
-): void {
-  const valueText = formatKpiValue(card);
-  const isUnavailable = card.value === null;
-  const longNumber =
-    !isUnavailable && card.format === "number" && Math.abs(card.value ?? 0) >= 1000;
-  drawKpiValue(doc, valueText, layout.innerX, layout.valueTop, layout.innerWidth, layout.valueHeight, {
-    isUnavailable,
-    maxFontSize: resolveKpiMaxFontSize(card, isUnavailable, longNumber),
-    minFontSize: resolveKpiMinFontSize(isUnavailable),
-  });
-}
-
-function drawKpiCardSpecialSubtitle(
-  doc: PDFKit.PDFDocument,
-  specialSub: string,
-  layout: KpiCardLayout
-): void {
-  drawKpiMeta(doc, specialSub, layout.innerX, layout.metaY, layout.innerWidth, {
-    fontSize: 7,
-    height: layout.subtitleHeight - 1,
-  });
-}
-
-function drawKpiCardComparison(
-  doc: PDFKit.PDFDocument,
-  card: ExecutiveBriefKpiCard,
-  layout: KpiCardLayout,
-  cardW: number
-): void {
-  const dir = directionFromAssessment(card.assessment);
-  const deltaText = formatKpiDelta(card);
-  const arrowSize = 10;
-  const deltaSize = fitTextToBox(
-    doc,
-    deltaText,
-    layout.innerWidth - arrowSize - 6,
-    8.5,
-    7,
-    "Body"
+  doc.font("Bold").fontSize(28).fillColor(COLORS.primary).text(
+    formatReportNumber(value, { maximumFractionDigits: 0 }),
+    x + 12,
+    y + 48,
+    { width: width - 24, align: "right", wordSpacing: WORD_SPACING }
   );
-  const deltaW = measurePreparedArabicText(doc, deltaText, deltaSize, "Body");
-  const rowW = arrowSize + 4 + deltaW;
-  const cardLeft = layout.innerX - layout.pad;
-  const centeredStart = cardLeft + (cardW - rowW) / 2;
-  drawDirectionArrow(doc, dir, centeredStart, layout.metaY, arrowSize);
-  doc.font("Body").fontSize(deltaSize).fillColor(directionColor(dir)).text(
-    preparePdfText(deltaText),
-    centeredStart + arrowSize + 4,
-    layout.metaY,
-    {
-      width: deltaW + 2,
-      height: 11,
-      align: "left",
-      lineBreak: false,
-      wordSpacing: WORD_SPACING,
-    }
-  );
-  if (card.previousValue === null) return;
-  const previousFractionDigits = resolveKpiPreviousFractionDigits(card.format);
-  const prev = `السابق ${formatReportNumber(card.previousValue, {
-    maximumFractionDigits: previousFractionDigits,
-  })}`;
-  drawKpiMeta(doc, prev, layout.innerX, layout.metaY + 11, layout.innerWidth, {
-    fontSize: 7.5,
-    height: 11,
-  });
-}
-
-/**
- * Fixed-zone KPI card:
- * 1) icon  2) title  3) primary value  4) optional subtitle  5) comparison/trend
- * Never places value and subtitle on the same baseline.
- */
-function drawIconKpiCard(
-  doc: PDFKit.PDFDocument,
-  card: ExecutiveBriefKpiCard,
-  x: number,
-  y: number,
-  cardW: number,
-  cardH: number
-): void {
-  const layout = computeKpiCardLayout(card, x, y, cardW, cardH);
-  drawKpiCardFrameAndIcon(doc, card, x, y, cardW, cardH, layout);
-  drawKpiCardTitle(doc, card, layout);
-  drawKpiCardPrimaryValue(doc, card, layout);
-  if (layout.specialSub) {
-    drawKpiCardSpecialSubtitle(doc, layout.specialSub, layout);
-  } else if (layout.hasComparison) {
-    drawKpiCardComparison(doc, card, layout, cardW);
-  }
   resetInk(doc);
 }
 
@@ -996,54 +787,8 @@ async function renderPage2(ctx: V2Context): Promise<void> {
   const { doc, data, brief, layout, warnings } = ctx;
   const { margin, contentWidth } = layout;
 
-  let y = drawPageHeader(ctx, "ملخص المؤشرات والاتجاه الزمني");
-
-  // Sub-heading: brief comparison description (without date range)
-  const subHeader = resolveComparisonSubHeader(data);
-  doc.font("Bold").fontSize(12).fillColor(COLORS.primary).text(
-    preparePdfText(subHeader), margin, y,
-    { width: contentWidth, align: "right", wordSpacing: WORD_SPACING }
-  );
-  y += 28;
-
-  // 8 KPI cards in 4×2 grid — replace the netChange card with allTimeTotal for V2
-  const cols = 4;
-  const gap = 10;
-  const cardW = (contentWidth - gap * (cols - 1)) / cols;
-  const cardH = 136;
-  const cards = brief.briefKpis.slice(0, 8).map((card) => {
-    if (card.key === "netChange") {
-      return {
-        ...card,
-        key: "allTimeTotal",
-        label: "إجمالي الشكاوى في النظام",
-        value: brief.allTimeTotal,
-        difference: null,
-        changeRate: null,
-        previousValue: null,
-        format: "number" as const,
-      };
-    }
-    // Keep presentation labels explicit for compliance card
-    if (card.key === "complianceRate") {
-      return { ...card, label: "الالتزام ضمن المهلة" };
-    }
-    if (card.key === "averageResolutionDays") {
-      return { ...card, label: "متوسط الإغلاق" };
-    }
-    return card;
-  });
-  cards.forEach((card, idx) => {
-    const row = Math.floor(idx / cols);
-    const col = idx % cols;
-    const slot = cols - 1 - col;
-    drawIconKpiCard(doc, card, margin + slot * (cardW + gap), y + row * (cardH + gap), cardW, cardH);
-  });
-  const rows = Math.max(1, Math.ceil(cards.length / cols));
-  y += rows * cardH + (rows - 1) * gap + gap;
-
-  // Monthly chart section
-  y = drawSectionTitle(doc, "الاتجاه الزمني للشكاوى", margin, y, contentWidth);
+  let y = drawPageHeader(ctx, "الاتجاه الزمني للشكاوى المسجلة والمغلقة");
+  y += 8;
 
   const reportEndDate = data.period.to;
   const rawFlow = brief.monthlyStockFlow;
@@ -1056,44 +801,72 @@ async function renderPage2(ctx: V2Context): Promise<void> {
   if (droppedFuture) {
     warnings.push("تم تجاهل نقاط زمنية تتجاوز نهاية فترة التقرير.");
   }
-  const hasFlow = flow.some(
-    (p) =>
-      p.receivedCount > 0
-      || p.closedDuringMonthCount > 0
-      || p.openAtMonthEndCount > 0
-      || p.lateAtMonthEndCount > 0
+  if (resolveReportMonthStatus(reportEndDate) === null) {
+    warnings.push("تعذر تفسير تاريخ نهاية التقرير لحالة الشهر الأخير.");
+  }
+
+  const totals = calculateMonthlyTrendTotals(flow);
+  const insights = buildMonthlyTrendInsights({
+    points: flow,
+    reportEndDate,
+  });
+  const notesGap = 10;
+  const notesHeight = resolveMonthlyTrendNotesHeight(insights.length);
+
+  const cardGap = 12;
+  const cardH = 88;
+  const cardW = (contentWidth - cardGap) / 2;
+  drawMonthlyTrendTotalCard(doc, {
+    x: margin + cardW + cardGap,
+    y,
+    width: cardW,
+    height: cardH,
+    title: "إجمالي المغلقة",
+    value: totals.closedTotal,
+    icon: "check",
+  });
+  drawMonthlyTrendTotalCard(doc, {
+    x: margin,
+    y,
+    width: cardW,
+    height: cardH,
+    title: "إجمالي المسجلة",
+    value: totals.registeredTotal,
+    icon: "clipboard",
+  });
+  y += cardH + 14;
+
+  const hasMonthlyRegisteredOrClosed = flow.some(
+    (point) => point.receivedCount > 0 || point.closedDuringMonthCount > 0
   );
 
-  // Use remaining page space for the chart (notes / methodology boxes removed).
-  const availableForChart = resolveV2MonthlyChartAvailableHeight(
-    layout.pageSize[1],
-    layout.margin,
-    y
-  );
+  const availableForChart = resolveV2MonthlyChartAvailableHeight({
+    pageHeight: layout.pageSize[1],
+    margin: layout.margin,
+    chartY: y,
+    footerReserve: FOOTER_RESERVE,
+    notesHeight,
+    notesGap,
+  });
   const { chartHeight, canRenderChart } = resolveV2MonthlyChartRenderPlan(availableForChart);
 
   const monthlyChartSeries = [
     {
-      name: "الواردة",
+      name: "المسجلة",
       renderAs: "bar" as const,
-      points: flow.map((p) => ({ x: p.monthLabel, y: p.receivedCount })),
+      points: flow.map((point) => ({
+        x: point.monthLabel,
+        y: point.receivedCount,
+      })),
     },
     {
       name: "المغلقة",
-      renderAs: "bar" as const,
-      points: flow.map((p) => ({ x: p.monthLabel, y: p.closedDuringMonthCount })),
-    },
-    {
-      name: "المفتوحة",
       renderAs: "line" as const,
       dash: "0",
-      points: flow.map((p) => ({ x: p.monthLabel, y: p.openAtMonthEndCount })),
-    },
-    {
-      name: "المتأخرة",
-      renderAs: "line" as const,
-      dash: "6,4",
-      points: flow.map((p) => ({ x: p.monthLabel, y: p.lateAtMonthEndCount })),
+      points: flow.map((point) => ({
+        x: point.monthLabel,
+        y: point.closedDuringMonthCount,
+      })),
     },
   ];
 
@@ -1115,23 +888,40 @@ async function renderPage2(ctx: V2Context): Promise<void> {
     }
   } else {
     try {
-      // Single Y-axis combo chart — system total is intentionally excluded.
-      // Empty series triggers the chart emptyState when hasFlow is false.
-      // Pass the same chartHeight to renderer and doc.image so PNG is never compressed.
-      const png = await renderLineChartPng({
-        id: "v2-monthly-flow",
-        kind: "chart",
-        chartType: "bar",
-        title: "",
-        series: hasFlow ? monthlyChartSeries : [],
-        emptyState: "لا توجد بيانات للاتجاه الزمني.",
-      }, Math.round(contentWidth), chartHeight);
+      const png = await renderLineChartPng(
+        {
+          id: "v2-monthly-flow",
+          kind: "chart",
+          chartType: "bar",
+          title: "",
+          series: hasMonthlyRegisteredOrClosed ? monthlyChartSeries : [],
+          emptyState: "لا توجد بيانات شهرية للشكاوى المسجلة أو المغلقة.",
+        },
+        Math.round(contentWidth),
+        chartHeight,
+        {
+          xLabelPolicy: "all",
+          xLabelLayout: "wrap-two-lines",
+          showLinePointValues: true,
+        }
+      );
       doc.image(png, margin, y, { width: contentWidth, height: chartHeight });
     } catch (err) {
       warnings.push(`تعذر رسم مخطط الاتجاه الزمني: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  y += chartHeight + 8;
+  y += chartHeight + notesGap;
+
+  drawBulletBox({
+    doc,
+    title: "ملاحظات رئيسية",
+    icon: "info",
+    points: insights.map((insight) => insight.text),
+    x: margin,
+    y,
+    width: contentWidth,
+    height: notesHeight,
+  });
 }
 
 // ── Page 3: Regions ───────────────────────────────────────────────────────────
@@ -1153,16 +943,6 @@ type EnrichedClassificationRow = ClassificationBriefRow & {
   openAtEnd: number;
   lateAtEnd: number;
 };
-
-function resolveComparisonSubHeader(data: ReportData): string {
-  if (!data.previousPeriod) {
-    return "لا توجد فترة مقارنة";
-  }
-  if (data.comparisonMode === "SAME_PERIOD_LAST_YEAR") {
-    return "الفترة الحالية مقارنة بالفترة المماثلة من السنة السابقة";
-  }
-  return "الفترة الحالية مقارنة بالفترة السابقة المماثلة";
-}
 
 function formatRegionalSubjectChange(input: {
   currentCount: number;
