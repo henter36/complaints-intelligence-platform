@@ -109,33 +109,46 @@ export function applyWingClassificationGroups(
   return classificationIds;
 }
 
+export function aggregateClassificationCountsByName(options: {
+  classificationCounts: ReadonlyMap<string, number>;
+  namesById: ReadonlyMap<string, string>;
+}): Map<string, number> {
+  const countsByName = new Map<string, number>();
+
+  for (const [classificationId, count] of options.classificationCounts) {
+    const nameAr = options.namesById.get(classificationId)?.trim();
+
+    if (!nameAr) {
+      continue;
+    }
+
+    countsByName.set(nameAr, (countsByName.get(nameAr) ?? 0) + count);
+  }
+
+  return countsByName;
+}
+
 export function pickTopClassification(options: {
   classificationCounts: ReadonlyMap<string, number>;
   namesById: ReadonlyMap<string, string>;
 }): { topClassification: string | null; topClassificationCount: number } {
-  let bestId: string | null = null;
+  const countsByName = aggregateClassificationCountsByName(options);
+
+  let bestName: string | null = null;
   let bestCount = 0;
-  let bestName = "";
 
-  for (const [classificationId, count] of options.classificationCounts.entries()) {
-    const nameAr = options.namesById.get(classificationId);
-    if (!nameAr) continue;
-
+  for (const [nameAr, count] of countsByName) {
     if (
-      bestId == null
+      bestName == null
       || count > bestCount
       || (count === bestCount && nameAr.localeCompare(bestName, "ar") < 0)
-      || (count === bestCount
-        && nameAr.localeCompare(bestName, "ar") === 0
-        && classificationId.localeCompare(bestId) < 0)
     ) {
-      bestId = classificationId;
-      bestCount = count;
       bestName = nameAr;
+      bestCount = count;
     }
   }
 
-  if (bestId == null) {
+  if (bestName == null) {
     return { topClassification: null, topClassificationCount: 0 };
   }
   return { topClassification: bestName, topClassificationCount: bestCount };

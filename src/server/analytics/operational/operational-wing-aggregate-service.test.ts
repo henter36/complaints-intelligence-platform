@@ -11,6 +11,7 @@ import {
   type WingOperationalMetrics,
 } from "./operational-analytics-types";
 import {
+  aggregateClassificationCountsByName,
   applyWingClassificationGroups,
   applyWingLateGroups,
   buildWingMetricsFromAggregates,
@@ -69,31 +70,20 @@ function referenceBuildWingMetrics(
       let open = 0;
       let closed = 0;
       let currentlyLate = 0;
-      const classCounts = new Map<string, { count: number; id: string }>();
+      const classCounts = new Map<string, number>();
       for (const row of itemsForWing) {
         if (OPEN_COMPLAINT_STATUSES.has(row.status)) open += 1;
         if (CLOSED_COMPLAINT_STATUSES.has(row.status)) closed += 1;
         if (buildComplaintTiming(row, now).isCurrentlyLate) currentlyLate += 1;
-        const className = row.classification?.nameAr;
-        const classId = row.classification?.id;
-        if (className && classId) {
-          const existing = classCounts.get(className);
-          if (existing) {
-            existing.count += 1;
-          } else {
-            classCounts.set(className, { count: 1, id: classId });
-          }
+        const className = row.classification?.nameAr?.trim();
+        if (className) {
+          classCounts.set(className, (classCounts.get(className) ?? 0) + 1);
         }
       }
       const top =
         Array.from(classCounts.entries())
-          .map(([nameAr, entry]) => ({ nameAr, ...entry }))
-          .sort(
-            (a, b) =>
-              b.count - a.count
-              || a.nameAr.localeCompare(b.nameAr, "ar")
-              || a.id.localeCompare(b.id)
-          )[0] ?? null;
+          .map(([nameAr, count]) => ({ nameAr, count }))
+          .sort((a, b) => b.count - a.count || a.nameAr.localeCompare(b.nameAr, "ar"))[0] ?? null;
       return {
         key,
         label: categoricalLabel(key),
@@ -193,6 +183,28 @@ function createParityDataset(): ReferenceWingRow[] {
       dueDate: null,
       closedAt: new Date("2026-07-05T00:00:00.000Z"),
     },
+    // cls-d shares nameAr "سلوك" with cls-b: a system where the same Arabic
+    // classification name is reachable via more than one classificationId.
+    // Merged by name, "سلوك" (1 + 2 = 3) outranks "مواعيد" (2), which a
+    // per-classificationId comparison would miss.
+    {
+      status: ComplaintStatus.OPEN,
+      wingCode: "W1",
+      classification: { id: "cls-d", nameAr: "سلوك" },
+      complaintDate: receivedAt,
+      receivedAt,
+      dueDate: new Date("2026-08-05T00:00:00.000Z"),
+      closedAt: null,
+    },
+    {
+      status: ComplaintStatus.IN_PROGRESS,
+      wingCode: "W1",
+      classification: { id: "cls-d", nameAr: "سلوك" },
+      complaintDate: receivedAt,
+      receivedAt,
+      dueDate: new Date("2026-08-15T00:00:00.000Z"),
+      closedAt: null,
+    },
     {
       status: ComplaintStatus.OPEN,
       wingCode: "W2",
@@ -272,7 +284,7 @@ describe("operational wing aggregate helpers", () => {
     expect(buckets.get("W1")!.currentlyLate).toBe(2);
   });
 
-  it("picks top classification by count then Arabic name then id", () => {
+  it("picks top classification by count then Arabic name", () => {
     const result = pickTopClassification({
       classificationCounts: new Map([
         ["cls-b", 2],
@@ -295,6 +307,133 @@ describe("operational wing aggregate helpers", () => {
         namesById: new Map(),
       })
     ).toEqual({ topClassification: null, topClassificationCount: 0 });
+  });
+
+  it("sums counts across classificationIds that share the same Arabic name", () => {
+    const classificationCounts = new Map([
+      ["class-a", 6],
+      ["class-b", 5],
+      ["class-c", 9],
+    ]);
+
+    const namesById = new Map([
+      ["class-a", "طلبات النقل"],
+      ["class-b", "طلبات النقل"],
+      ["class-c", "الرعاية الصحية"],
+    ]);
+
+    expect(
+      pickTopClassification({
+        classificationCounts,
+        namesById,
+      })
+    ).toEqual({
+      topClassification: "طلبات النقل",
+      topClassificationCount: 11,
+    });
+  });
+
+  describe("aggregateClassificationCountsByName", () => {
+    it("merges counts for classificationIds sharing the same Arabic name", () => {
+      const result = aggregateClassificationCountsByName({
+        classificationCounts: new Map([
+          ["class-a", 6],
+          ["class-b", 5],
+          ["class-c", 9],
+        ]),
+        namesById: new Map([
+          ["class-a", "طلبات النقل"],
+          ["class-b", "طلبات النقل"],
+          ["class-c", "الرعاية الصحية"],
+        ]),
+      });
+      expect(result).toEqual(
+        new Map([
+          ["طلبات النقل", 11],
+          ["الرعاية الصحية", 9],
+        ])
+      );
+    });
+
+    it("treats names as equal after trimming whitespace", () => {
+      const result = aggregateClassificationCountsByName({
+        classificationCounts: new Map([
+          ["class-a", 3],
+          ["class-b", 4],
+        ]),
+        namesById: new Map([
+          ["class-a", "مواعيد"],
+          ["class-b", "  مواعيد  "],
+        ]),
+      });
+      expect(result).toEqual(new Map([["مواعيد", 7]]));
+    });
+
+    it("skips classificationIds with no matching name", () => {
+      const result = aggregateClassificationCountsByName({
+        classificationCounts: new Map([
+          ["class-a", 3],
+          ["class-missing", 10],
+        ]),
+        namesById: new Map([["class-a", "مواعيد"]]),
+      });
+      expect(result).toEqual(new Map([["مواعيد", 3]]));
+    });
+
+    it("skips classificationIds whose name is empty or whitespace-only", () => {
+      const result = aggregateClassificationCountsByName({
+        classificationCounts: new Map([
+          ["class-a", 3],
+          ["class-b", 2],
+        ]),
+        namesById: new Map([
+          ["class-a", "مواعيد"],
+          ["class-b", "   "],
+        ]),
+      });
+      expect(result).toEqual(new Map([["مواعيد", 3]]));
+    });
+
+    it("does not mutate the input classificationCounts or namesById maps", () => {
+      const classificationCounts = new Map([["class-a", 3]]);
+      const namesById = new Map([["class-a", "مواعيد"]]);
+      const countsSnapshot = new Map(classificationCounts);
+      const namesSnapshot = new Map(namesById);
+
+      aggregateClassificationCountsByName({ classificationCounts, namesById });
+
+      expect(classificationCounts).toEqual(countsSnapshot);
+      expect(namesById).toEqual(namesSnapshot);
+    });
+  });
+
+  it("breaks ties between merged names by Arabic name ascending, not classificationId", () => {
+    const result = pickTopClassification({
+      classificationCounts: new Map([
+        ["z-id", 3],
+        ["a-id", 2],
+        ["m-id", 1],
+      ]),
+      namesById: new Map([
+        ["z-id", "أخرى"],
+        ["a-id", "أخرى"],
+        ["m-id", "سلوك"],
+      ]),
+    });
+    // "z-id" + "a-id" both map to "أخرى" (3 + 2 = 5), which outranks "سلوك" (1)
+    // even though "a-id" and "m-id" would sort ahead of "z-id" by id alone.
+    expect(result).toEqual({ topClassification: "أخرى", topClassificationCount: 5 });
+  });
+
+  it("returns no top classification when every classificationId lacks a usable name", () => {
+    const result = pickTopClassification({
+      classificationCounts: new Map([
+        ["class-a", 5],
+        ["class-b", 2],
+      ]),
+      namesById: new Map([["class-b", "   "]]),
+    });
+    expect(result).toEqual({ topClassification: null, topClassificationCount: 0 });
   });
 
   it("excludes unspecified from items, sorts, and caps at 40", () => {
@@ -371,6 +510,18 @@ describe("wing aggregate vs reference parity", () => {
     const { buckets, namesById } = aggregatesFromRows(rows, NOW);
     const actual = buildWingMetricsFromAggregates({ buckets, namesById, total });
     expect(actual).toEqual(expected);
+  });
+
+  it("merges cls-b and cls-d (both nameAr \"سلوك\") into a single top classification for W1", () => {
+    const rows = createParityDataset();
+    const total = rows.length;
+    const { buckets, namesById } = aggregatesFromRows(rows, NOW);
+    const actual = buildWingMetricsFromAggregates({ buckets, namesById, total });
+
+    const w1 = actual.items.find((item) => item.key === "W1");
+    expect(w1).toBeDefined();
+    expect(w1!.topClassification).toBe("سلوك");
+    expect(w1!.topClassificationCount).toBe(3);
   });
 });
 
