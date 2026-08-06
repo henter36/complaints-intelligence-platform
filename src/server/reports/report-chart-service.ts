@@ -248,6 +248,40 @@ export function resolveChartRenderOptions(
   };
 }
 
+const BAR_VALUE_LABEL_ABOVE_OFFSET = 3;
+const BAR_VALUE_LABEL_MIN_TOP_OFFSET = 10;
+const BAR_VALUE_LABEL_INSIDE_OFFSET = 12;
+const BAR_VALUE_LABEL_BOTTOM_RESERVE = 2;
+
+/** Minimum vertical gap between a line value label and the bar value label. */
+export const LINE_VALUE_LABEL_COLLISION_PX = 14;
+
+export type BarValueLabelPlacement = {
+  y: number;
+  insideBar: boolean;
+};
+
+/**
+ * Shared bar-value label placement used by renderBarSeries and line-label collision checks.
+ * Preferred above the bar; clamps inside the bar when near plotTop.
+ */
+export function resolveBarValueLabelPlacement(options: {
+  barTopY: number;
+  plotTop: number;
+  plotBottom: number;
+}): BarValueLabelPlacement {
+  const { barTopY, plotTop, plotBottom } = options;
+  const preferredY = barTopY - BAR_VALUE_LABEL_ABOVE_OFFSET;
+  const minTop = plotTop + BAR_VALUE_LABEL_MIN_TOP_OFFSET;
+  if (preferredY < minTop) {
+    return {
+      y: Math.min(barTopY + BAR_VALUE_LABEL_INSIDE_OFFSET, plotBottom - BAR_VALUE_LABEL_BOTTOM_RESERVE),
+      insideBar: true,
+    };
+  }
+  return { y: preferredY, insideBar: false };
+}
+
 export type LineValueLabelPlacement = {
   y: number;
   insideBar: boolean;
@@ -267,16 +301,17 @@ export function resolveLineValueLabelPlacement(options: {
   const { pointY, barTopY, plotTop, plotBottom } = options;
   const aboveOffset = 12;
   const belowOffset = 14;
-  const collisionPx = 14;
-  const minTop = plotTop + 10;
+  const minTop = plotTop + BAR_VALUE_LABEL_MIN_TOP_OFFSET;
   const maxBottom = plotBottom - 14;
   const defaultFill = COLORS.gold;
   const insideFill = COLORS.white;
 
-  const barLabelY = barTopY === null ? null : barTopY - 3;
+  const barPlacement = barTopY === null
+    ? null
+    : resolveBarValueLabelPlacement({ barTopY, plotTop, plotBottom });
   const conflictsWithBar = (labelY: number): boolean => {
-    if (barLabelY === null) return false;
-    return Math.abs(labelY - barLabelY) < collisionPx;
+    if (barPlacement === null) return false;
+    return Math.abs(labelY - barPlacement.y) < LINE_VALUE_LABEL_COLLISION_PX;
   };
   const inBounds = (labelY: number): boolean => labelY >= minTop && labelY <= maxBottom;
 
@@ -296,9 +331,25 @@ export function resolveLineValueLabelPlacement(options: {
   }
 
   if (barTopY !== null) {
-    const insideY = Math.min(Math.max(barTopY + 12, minTop), maxBottom);
-    if (inBounds(insideY)) {
+    const insideY = Math.min(Math.max(barTopY + BAR_VALUE_LABEL_INSIDE_OFFSET, minTop), maxBottom);
+    if (inBounds(insideY) && !conflictsWithBar(insideY)) {
       return { y: insideY, insideBar: true, fill: insideFill };
+    }
+  }
+
+  if (barPlacement !== null) {
+    const belowBarLabel = Math.min(barPlacement.y + LINE_VALUE_LABEL_COLLISION_PX, maxBottom);
+    if (inBounds(belowBarLabel) && !conflictsWithBar(belowBarLabel)) {
+      const insideBar = barTopY !== null && belowBarLabel > barTopY;
+      return {
+        y: belowBarLabel,
+        insideBar,
+        fill: insideBar ? insideFill : defaultFill,
+      };
+    }
+    const aboveBarLabel = Math.max(barPlacement.y - LINE_VALUE_LABEL_COLLISION_PX, minTop);
+    if (inBounds(aboveBarLabel) && !conflictsWithBar(aboveBarLabel)) {
+      return { y: aboveBarLabel, insideBar: false, fill: defaultFill };
     }
   }
 
@@ -727,8 +778,6 @@ function renderBarSeries(
   const groupWidth = categoryWidth * 0.72;
   const barWidth = Math.max(2, groupWidth / seriesCount);
   const categoryIndex = new Map(categories.map((cat, i) => [cat, i]));
-  const preferredLabelY = (valueY: number) => valueY - 3;
-  const minLabelY = geo.plotTop + 10;
 
   seriesList.forEach(({ series, style }, seriesIndex) => {
     series.points.forEach((point) => {
@@ -746,14 +795,15 @@ function renderBarSeries(
       );
       if (point.y > 0) {
         const labelX = (x + bw / 2).toFixed(1);
-        const unclampedY = preferredLabelY(valueY);
-        const clampedInsideBar = unclampedY < minLabelY;
-        const labelY = (clampedInsideBar ? Math.min(valueY + 12, geo.plotBottom - 2) : unclampedY)
-          .toFixed(1);
-        const labelFill = clampedInsideBar ? COLORS.white : style.color;
+        const placement = resolveBarValueLabelPlacement({
+          barTopY: valueY,
+          plotTop: geo.plotTop,
+          plotBottom: geo.plotBottom,
+        });
+        const labelFill = placement.insideBar ? COLORS.white : style.color;
         const labelFs = Math.max(7, Math.min(10, Math.round(bw * 0.55)));
         parts.push(
-          `<text x="${labelX}" y="${labelY}" text-anchor="middle" font-size="${labelFs}" fill="${labelFill}">${escapeXml(formatReportNumber(point.y, { maximumFractionDigits: 0 }))}</text>`
+          `<text x="${labelX}" y="${placement.y.toFixed(1)}" text-anchor="middle" font-size="${labelFs}" fill="${labelFill}">${escapeXml(formatReportNumber(point.y, { maximumFractionDigits: 0 }))}</text>`
         );
       }
     });

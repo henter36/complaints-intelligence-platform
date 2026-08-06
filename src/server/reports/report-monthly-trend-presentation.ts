@@ -102,6 +102,7 @@ function buildPeakRegistrationInsight(
       best = point;
     }
   }
+  if (best.receivedCount <= 0) return null;
   return {
     key: "peak-registration",
     text: `أعلى حجم تسجيل كان في ${best.monthLabel} بعدد ${best.receivedCount} شكوى.`,

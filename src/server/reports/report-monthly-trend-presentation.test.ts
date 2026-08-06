@@ -172,6 +172,34 @@ describe("buildMonthlyTrendInsights", () => {
       })
     ).toEqual([]);
   });
+
+  it("omits peak-registration when every month has zero registrations", () => {
+    const insights = buildMonthlyTrendInsights({
+      points: [
+        point("2026-01", 0, 5, "يناير 2026"),
+        point("2026-02", 0, 0, "فبراير 2026"),
+        point("2026-03", 0, 8, "مارس 2026"),
+      ],
+      reportEndDate: "2026-03-31",
+    });
+    expect(insights.some((item) => item.key === "peak-registration")).toBe(false);
+    expect(insights.some((item) => item.key === "complete-month")).toBe(true);
+  });
+
+  it("picks the positive peak when mixed with zero months", () => {
+    const insights = buildMonthlyTrendInsights({
+      points: [
+        point("2026-01", 0, 2, "يناير 2026"),
+        point("2026-02", 12, 10, "فبراير 2026"),
+        point("2026-03", 0, 1, "مارس 2026"),
+      ],
+      reportEndDate: "2026-03-31",
+    });
+    expect(insights[0]).toEqual({
+      key: "peak-registration",
+      text: "أعلى حجم تسجيل كان في فبراير 2026 بعدد 12 شكوى.",
+    });
+  });
 });
 
 describe("resolveReportMonthStatus", () => {

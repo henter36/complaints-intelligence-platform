@@ -16,7 +16,9 @@ import {
   resolveXAxisLabelStep,
   wrapCategoricalAxisLabel,
   resolveXAxisBottomReserve,
+  resolveBarValueLabelPlacement,
   resolveLineValueLabelPlacement,
+  LINE_VALUE_LABEL_COLLISION_PX,
   MIN_PLOT_HEIGHT,
   CHART_LEGEND_GAP,
 } from "./report-chart-service";
@@ -424,7 +426,7 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
     expect(svg).toContain(`stroke="${GOLD}"`);
     expect(svg).toContain(`fill="${PRIMARY}"`);
     expect(svg).toMatch(/<circle[^>]*r="2\.6"[^>]*fill="#FFFFFF"[^>]*stroke="#B88919"/);
-    expect((svg.match(/<rect x="[^"]+" y="[^"]+" width="[^"]+" height="[^"]+" fill="/g) ?? []).length).toBe(13);
+    expect(svg.match(/<rect x="[^"]+" y="[^"]+" width="[^"]+" height="[^"]+" fill="/g) ?? []).toHaveLength(13);
     expect((svg.match(/>10</g) ?? []).length).toBeGreaterThanOrEqual(13);
   });
 
@@ -512,7 +514,7 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
 
   it("hides line point values by default and leaves other charts unchanged", () => {
     const monthly = buildChartSvg(monthlySection(), 800, 360);
-    expect((monthly.match(/>8</g) ?? []).length).toBe(0);
+    expect(monthly.match(/>8</g) ?? []).toHaveLength(0);
 
     const other: ReportChartSection = {
       id: "other-line",
@@ -535,13 +537,36 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
     expect(above.y).toBeLessThan(160);
     expect(above.insideBar).toBe(false);
 
+    const barPlacement = resolveBarValueLabelPlacement({
+      barTopY: 45,
+      plotTop: 40,
+      plotBottom: 300,
+    });
+    expect(barPlacement).toEqual({ y: 57, insideBar: true });
+
+    const linePlacement = resolveLineValueLabelPlacement({
+      pointY: 45,
+      barTopY: 45,
+      plotTop: 40,
+      plotBottom: 300,
+    });
+    expect(
+      Math.abs(linePlacement.y - barPlacement.y)
+    ).toBeGreaterThanOrEqual(LINE_VALUE_LABEL_COLLISION_PX);
+
     const colliding = resolveLineValueLabelPlacement({
       pointY: 103,
       barTopY: 100,
       plotTop: 40,
       plotBottom: 300,
     });
-    expect(Math.abs(colliding.y - (100 - 3))).toBeGreaterThanOrEqual(10);
+    const normalBar = resolveBarValueLabelPlacement({
+      barTopY: 100,
+      plotTop: 40,
+      plotBottom: 300,
+    });
+    expect(normalBar.insideBar).toBe(false);
+    expect(Math.abs(colliding.y - normalBar.y)).toBeGreaterThanOrEqual(LINE_VALUE_LABEL_COLLISION_PX);
 
     const svg = buildChartSvg(
       {
@@ -560,7 +585,51 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
     );
     const valueTexts = [...svg.matchAll(/<text[^>]*y="([^"]+)"[^>]*>50<\/text>/g)].map((m) => Number(m[1]));
     expect(valueTexts.length).toBeGreaterThanOrEqual(2);
-    expect(Math.abs(valueTexts[0]! - valueTexts[1]!)).toBeGreaterThanOrEqual(10);
+    expect(Math.abs(valueTexts[0]! - valueTexts[1]!)).toBeGreaterThanOrEqual(LINE_VALUE_LABEL_COLLISION_PX);
+  });
+
+  it("keeps tall-bar and line labels apart when the bar label clamps inside", () => {
+    // Helper-level clamp: preferred above would sit above plotTop+10.
+    const barPlacement = resolveBarValueLabelPlacement({
+      barTopY: 45,
+      plotTop: 40,
+      plotBottom: 300,
+    });
+    expect(barPlacement).toEqual({ y: 57, insideBar: true });
+
+    const linePlacement = resolveLineValueLabelPlacement({
+      pointY: 45,
+      barTopY: 45,
+      plotTop: 40,
+      plotBottom: 300,
+    });
+    expect(
+      Math.abs(linePlacement.y - barPlacement.y)
+    ).toBeGreaterThanOrEqual(LINE_VALUE_LABEL_COLLISION_PX);
+    expect(linePlacement.y).toBeGreaterThanOrEqual(50);
+    expect(linePlacement.y).toBeLessThanOrEqual(286);
+
+    // SVG integration: same-value bar + line must keep middle-anchored labels apart.
+    const section: ReportChartSection = {
+      id: "v2-monthly-flow",
+      kind: "chart",
+      chartType: "bar",
+      title: "",
+      series: [
+        { name: "المسجلة", renderAs: "bar", points: [{ x: "أغسطس 2026", y: 100 }] },
+        { name: "المغلقة", renderAs: "line", dash: "0", points: [{ x: "أغسطس 2026", y: 100 }] },
+      ],
+    };
+    const svg = buildChartSvg(section, 600, 200, { showLinePointValues: true });
+    const plotValueYs = [
+      ...svg.matchAll(/<text[^>]*text-anchor="middle"[^>]*y="([^"]+)"[^>]*>100<\/text>/g),
+      ...svg.matchAll(/<text[^>]*y="([^"]+)"[^>]*text-anchor="middle"[^>]*>100<\/text>/g),
+    ].map((m) => Number(m[1]));
+    const uniqueYs = [...new Set(plotValueYs)];
+    expect(uniqueYs.length).toBeGreaterThanOrEqual(2);
+    expect(Math.abs(uniqueYs[0]! - uniqueYs[1]!)).toBeGreaterThanOrEqual(LINE_VALUE_LABEL_COLLISION_PX);
+    expect(svg).toContain("أغسطس");
+    expect(svg).toContain("2026");
   });
 
   it("builds valid SVG for 0, 1, and 13 monthly points", () => {
@@ -605,8 +674,8 @@ describe("monthly combo chart — single Y-axis, legend layout", () => {
       showLinePointValues: true,
     });
     expect(
-      (thirteen.match(/<rect x="[^"]+" y="[^"]+" width="[^"]+" height="[^"]+" fill="/g) ?? []).length
-    ).toBe(13);
+      thirteen.match(/<rect x="[^"]+" y="[^"]+" width="[^"]+" height="[^"]+" fill="/g) ?? []
+    ).toHaveLength(13);
     expect(thirteen.match(/<circle /g)?.length).toBeGreaterThanOrEqual(13);
   });
 
