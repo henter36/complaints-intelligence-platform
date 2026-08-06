@@ -297,6 +297,14 @@ describe("buildChartSvg — dual-axis and legend", () => {
     // Right-axis first series uses primary, second uses danger
     expect(svg).toContain(`stroke="${PRIMARY}"`);
     expect(svg).toContain(`stroke="${DANGER}"`);
+    // Primary Y labels (right side) and secondary Y labels (left side, danger).
+    expect(svg).toMatch(/text-anchor="start"[^>]*>0</);
+    expect(svg).toContain(`text-anchor="end" font-size="11" fill="${DANGER}"`);
+    // Axes remain in the SVG body before series polylines.
+    const axesIdx = svg.indexOf('stroke-dasharray="3,3"');
+    const firstPolylineIdx = svg.indexOf("<polyline ");
+    expect(axesIdx).toBeGreaterThan(-1);
+    expect(firstPolylineIdx).toBeGreaterThan(axesIdx);
   });
 
   it("dual-axis line: right-axis points use xForIndex spacing", () => {

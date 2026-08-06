@@ -318,6 +318,22 @@ type ChartGeometry = {
   xCount: number;
 };
 
+type ChartAxisScale = {
+  ticks: number[];
+  max: number;
+};
+
+type SecondaryChartAxisScale = ChartAxisScale | null;
+
+type RenderAxesOptions = {
+  geo: ChartGeometry;
+  primaryScale: ChartAxisScale;
+  labels: string[];
+  chartType: ReportChartSection["chartType"];
+  secondaryScale: SecondaryChartAxisScale;
+  renderOptions: Required<ChartRenderOptions>;
+};
+
 function xForIndex(geo: ChartGeometry, index: number): number {
   if (geo.xCount <= 1) return (geo.plotLeft + geo.plotRight) / 2;
   const t = index / (geo.xCount - 1);
@@ -672,16 +688,17 @@ function renderRightAxisLines(
   return renderLineSeries(geo, styled, yMaxRight, categories, chartType);
 }
 
-function renderAxesWithOptionalSecondary(
-  geo: ChartGeometry,
-  yTicks: number[],
-  yMax: number,
-  labels: string[],
-  chartType: ReportChartSection["chartType"],
-  rightTicks: number[] | null,
-  yMaxRight: number | null,
-  renderOptions: Required<ChartRenderOptions>
-): string {
+function renderAxesWithOptionalSecondary(options: RenderAxesOptions): string {
+  const {
+    geo,
+    primaryScale,
+    labels,
+    chartType,
+    secondaryScale,
+    renderOptions,
+  } = options;
+  const { ticks: yTicks, max: yMax } = primaryScale;
+
   const parts: string[] = [];
   parts.push(
     `<line x1="${geo.plotLeft}" y1="${geo.plotTop}" x2="${geo.plotLeft}" y2="${geo.plotBottom}" stroke="${COLORS.border}" stroke-width="1"/>`,
@@ -694,7 +711,11 @@ function renderAxesWithOptionalSecondary(
       `<text x="${geo.plotRight + 6}" y="${y + 4}" text-anchor="start" font-size="11" fill="${COLORS.neutral}">${formatReportNumber(tick, { maximumFractionDigits: 0 })}</text>`
     );
   }
-  if (rightTicks && yMaxRight !== null) {
+  if (secondaryScale !== null) {
+    const {
+      ticks: rightTicks,
+      max: yMaxRight,
+    } = secondaryScale;
     parts.push(
       `<line x1="${geo.plotLeft}" y1="${geo.plotTop}" x2="${geo.plotLeft}" y2="${geo.plotBottom}" stroke="${COLORS.border}" stroke-width="1" stroke-dasharray="3,3"/>`
     );
@@ -994,12 +1015,30 @@ function buildChartSvgBody(options: {
   const dualSvg = hasDualAxis
     ? renderRightAxisLines(geo, rightSeries, yMaxRight, categories, section.chartType)
     : "";
+  const secondaryScale: SecondaryChartAxisScale =
+    hasDualAxis && ticksRight !== null
+      ? {
+          ticks: ticksRight,
+          max: yMaxRight,
+        }
+      : null;
+  const axesSvg = renderAxesWithOptionalSecondary({
+    geo,
+    primaryScale: {
+      ticks,
+      max: yMax,
+    },
+    labels: categories,
+    chartType: axisChartType,
+    secondaryScale,
+    renderOptions,
+  });
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
     ${fontStyleBlock()}
     <rect width="${width}" height="${height}" fill="${COLORS.white}" stroke="${COLORS.border}"/>
     ${titleSvg}
     ${legendSvg}
-    ${renderAxesWithOptionalSecondary(geo, ticks, yMax, categories, axisChartType, ticksRight, hasDualAxis ? yMaxRight : null, renderOptions)}
+    ${axesSvg}
     ${barsSvg}
     ${linesSvg}
     ${dualSvg}
