@@ -16,6 +16,10 @@ vi.mock("@/lib/db", () => ({
       if (!dbHolder.client) throw new Error("test prisma not ready");
       return dbHolder.client.complaint;
     },
+    get classification() {
+      if (!dbHolder.client) throw new Error("test prisma not ready");
+      return dbHolder.client.classification;
+    },
   },
 }));
 
@@ -69,6 +73,33 @@ async function seedParityDataset(prisma: PrismaClient) {
       categoryId: category.id,
       nameAr: "مواعيد",
       nameEn: "Appointments",
+      isActive: true,
+    },
+  });
+  // nameAr is only unique per category (@@unique([categoryId, nameAr])), so a
+  // second category can hold a classificationId with the same Arabic name as
+  // `classification`. This proves wing top-classification aggregation groups
+  // by nameAr rather than by classificationId.
+  const categorySameName = await prisma.category.create({
+    data: {
+      nameAr: "تصنيف اختبار ٢",
+      nameEn: "Test category 2",
+      isActive: true,
+    },
+  });
+  const classificationSameName = await prisma.classification.create({
+    data: {
+      categoryId: categorySameName.id,
+      nameAr: "مواعيد",
+      nameEn: "Appointments (duplicate name)",
+      isActive: true,
+    },
+  });
+  const classificationOther = await prisma.classification.create({
+    data: {
+      categoryId: category.id,
+      nameAr: "سلوك",
+      nameEn: "Conduct",
       isActive: true,
     },
   });
@@ -170,6 +201,10 @@ async function seedParityDataset(prisma: PrismaClient) {
       },
       {
         ...base,
+        // Assigned to the classificationId that shares nameAr "مواعيد" with
+        // `classification`, so W1's "مواعيد" total must be split across two
+        // classificationIds and only recombine when grouped by name.
+        classificationId: classificationSameName.id,
         externalId: "parity-6",
         status: ComplaintStatus.CLOSED,
         sourceOrigin: "منصة إلكترونية",
@@ -187,6 +222,7 @@ async function seedParityDataset(prisma: PrismaClient) {
       },
       {
         ...base,
+        classificationId: classificationSameName.id,
         externalId: "parity-prev-1",
         status: ComplaintStatus.CLOSED,
         sourceOrigin: "الجهاز الرئيسي",
@@ -201,6 +237,64 @@ async function seedParityDataset(prisma: PrismaClient) {
         receivedAt: new Date("2026-06-15T08:00:00.000Z"),
         closedAt: new Date("2026-06-18T00:00:00.000Z"),
         sourceUpdatedAt: new Date(NOW.getTime() - 20 * DAY_MS),
+      },
+      // Three complaints on a third classificationId with a distinct name
+      // ("سلوك"). Individually it outnumbers each of the two "مواعيد" ids
+      // (2 vs 2), but the correctly name-merged "مواعيد" total (2 + 2 = 4)
+      // must still win over "سلوك" (3).
+      {
+        ...base,
+        classificationId: classificationOther.id,
+        externalId: "parity-cls-1",
+        status: ComplaintStatus.OPEN,
+        sourceOrigin: "قناة اختبار",
+        sourceStatus: "مبدئي",
+        sourceActionStatus: "جديد",
+        channel: "الهاتف",
+        region: "الرياض",
+        facility: "مستشفى أ",
+        department: "الطوارئ",
+        wingCode: "W1",
+        complaintDate: null,
+        receivedAt: new Date("2026-06-20T08:00:00.000Z"),
+        dueDate: new Date("2026-08-25T00:00:00.000Z"),
+        sourceUpdatedAt: new Date(NOW.getTime() - 6 * DAY_MS),
+      },
+      {
+        ...base,
+        classificationId: classificationOther.id,
+        externalId: "parity-cls-2",
+        status: ComplaintStatus.CLOSED,
+        sourceOrigin: "قناة اختبار",
+        sourceStatus: "مغلقة",
+        sourceActionStatus: "منتهية",
+        channel: "الهاتف",
+        region: "الرياض",
+        facility: "مستشفى أ",
+        department: "الطوارئ",
+        wingCode: "W1",
+        complaintDate: null,
+        receivedAt: new Date("2026-06-21T08:00:00.000Z"),
+        closedAt: new Date("2026-06-22T00:00:00.000Z"),
+        sourceUpdatedAt: new Date(NOW.getTime() - 6 * DAY_MS),
+      },
+      {
+        ...base,
+        classificationId: classificationOther.id,
+        externalId: "parity-cls-3",
+        status: ComplaintStatus.CLOSED,
+        sourceOrigin: "قناة اختبار",
+        sourceStatus: "مغلقة",
+        sourceActionStatus: "منتهية",
+        channel: "الهاتف",
+        region: "الرياض",
+        facility: "مستشفى أ",
+        department: "الطوارئ",
+        wingCode: "W1",
+        complaintDate: null,
+        receivedAt: new Date("2026-06-22T08:00:00.000Z"),
+        closedAt: new Date("2026-06-23T00:00:00.000Z"),
+        sourceUpdatedAt: new Date(NOW.getTime() - 6 * DAY_MS),
       },
     ],
   });
@@ -298,5 +392,40 @@ describe("operational analytics DB aggregate integration", () => {
     const summary = await getOperationalAnalytics(params, { now: NOW });
     const list = await listComplaints(params, { now: NOW });
     expect(summary.totalInScope).toBe(list.pagination.total);
+  });
+
+  it("keeps wing drill-down pagination.total equal to each wing bucket count", async () => {
+    const base = new URLSearchParams("from=2026-07-01&to=2026-07-31");
+    const summary = await getOperationalAnalytics(base, { now: NOW });
+
+    for (const item of summary.wing.items) {
+      const drill = new URLSearchParams(base);
+      for (const [key, value] of Object.entries(item.drillDownFilters)) {
+        drill.set(key, value);
+      }
+      const list = await listComplaints(drill, { now: NOW });
+      expect(list.pagination.total, `wing:${item.key}`).toBe(item.count);
+    }
+  });
+
+  it("matches wing unspecifiedCount to listComplaints with wingCode unspecified", async () => {
+    const base = new URLSearchParams();
+    const summary = await getOperationalAnalytics(base, { now: NOW });
+    expect(summary.wing.unspecifiedCount).toBeGreaterThan(0);
+
+    const drill = new URLSearchParams(base);
+    drill.set("wingCode", OPERATIONAL_UNSPECIFIED);
+    const list = await listComplaints(drill, { now: NOW });
+    expect(list.pagination.total).toBe(summary.wing.unspecifiedCount);
+  });
+
+  it("merges W1's top classification by Arabic name across two classificationIds sharing \"مواعيد\"", async () => {
+    const summary = await getOperationalAnalytics(new URLSearchParams(), { now: NOW });
+    const w1 = summary.wing.items.find((item) => item.key === "W1");
+    expect(w1).toBeDefined();
+    // "مواعيد" is split across two classificationIds (2 + 2 = 4) and must
+    // outrank the single-id "سلوك" classification (3) once merged by name.
+    expect(w1!.topClassification).toBe("مواعيد");
+    expect(w1!.topClassificationCount).toBe(4);
   });
 });
