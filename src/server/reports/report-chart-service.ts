@@ -222,6 +222,85 @@ function shortDateLabel(iso: string): string {
   return iso;
 }
 
+export type ChartLabelPolicy = "auto" | "all";
+export type ChartLabelLayout = "single-line" | "wrap-two-lines";
+
+export type ChartRenderOptions = {
+  xLabelPolicy?: ChartLabelPolicy;
+  xLabelLayout?: ChartLabelLayout;
+};
+
+const DEFAULT_CHART_RENDER_OPTIONS: Required<ChartRenderOptions> = {
+  xLabelPolicy: "auto",
+  xLabelLayout: "single-line",
+};
+
+export function resolveChartRenderOptions(
+  options?: ChartRenderOptions
+): Required<ChartRenderOptions> {
+  return {
+    xLabelPolicy: options?.xLabelPolicy ?? DEFAULT_CHART_RENDER_OPTIONS.xLabelPolicy,
+    xLabelLayout: options?.xLabelLayout ?? DEFAULT_CHART_RENDER_OPTIONS.xLabelLayout,
+  };
+}
+
+/**
+ * Temporal charts may skip every other label when crowded.
+ * Categorical charts (regions) pass policy="all" so every category keeps a label.
+ */
+export function resolveXAxisLabelStep(
+  labelCount: number,
+  policy: ChartLabelPolicy
+): number {
+  if (policy === "all") return 1;
+  if (labelCount <= 0) return 1;
+  if (labelCount >= 12) return 2;
+  return Math.max(1, Math.ceil(labelCount / 12));
+}
+
+/** Split long categorical labels into at most `maxLines` lines on whitespace. */
+export function wrapCategoricalAxisLabel(label: string, maxLines: number): string[] {
+  const trimmed = label.trim();
+  if (!trimmed) return [""];
+  if (maxLines <= 1) return [trimmed];
+  const parts = trimmed.split(/\s+/).filter(Boolean);
+  if (parts.length <= 1) return [trimmed];
+  if (parts.length === 2 || maxLines === 2) {
+    const mid = Math.ceil(parts.length / 2);
+    return [parts.slice(0, mid).join(" "), parts.slice(mid).join(" ")].filter(Boolean);
+  }
+  const lines: string[] = [];
+  const perLine = Math.ceil(parts.length / maxLines);
+  for (let i = 0; i < parts.length && lines.length < maxLines; i += perLine) {
+    lines.push(parts.slice(i, i + perLine).join(" "));
+  }
+  return lines;
+}
+
+export function resolveXAxisBottomReserve(layout: ChartLabelLayout): number {
+  return layout === "wrap-two-lines" ? 50 : 36;
+}
+
+function renderXAxisLabelText(options: {
+  x: number;
+  y: number;
+  lines: string[];
+  fontSize: number;
+  lineGap: number;
+}): string {
+  const { x, y, lines, fontSize, lineGap } = options;
+  if (lines.length <= 1) {
+    return `<text x="${x}" y="${y}" text-anchor="middle" font-size="${fontSize}" fill="${COLORS.neutral}" direction="rtl" unicode-bidi="plaintext">${escapeXml(lines[0] ?? "")}</text>`;
+  }
+  const tspans = lines
+    .map((line, index) => {
+      const dy = index === 0 ? 0 : lineGap;
+      return `<tspan x="${x}" dy="${dy}">${escapeXml(line)}</tspan>`;
+    })
+    .join("");
+  return `<text x="${x}" y="${y}" text-anchor="middle" font-size="${fontSize}" fill="${COLORS.neutral}" direction="rtl" unicode-bidi="plaintext">${tspans}</text>`;
+}
+
 /** Inline CSS that declares Amiri as the font family.
  * Fontconfig (set up by configureReportFontconfig) makes the actual TTF
  * available to librsvg — no base64 embedding is needed or used. */
@@ -237,6 +316,22 @@ type ChartGeometry = {
   plotTop: number;
   plotBottom: number;
   xCount: number;
+};
+
+type ChartAxisScale = {
+  ticks: number[];
+  max: number;
+};
+
+type SecondaryChartAxisScale = ChartAxisScale | null;
+
+type RenderAxesOptions = {
+  geo: ChartGeometry;
+  primaryScale: ChartAxisScale;
+  labels: string[];
+  chartType: ReportChartSection["chartType"];
+  secondaryScale: SecondaryChartAxisScale;
+  renderOptions: Required<ChartRenderOptions>;
 };
 
 function xForIndex(geo: ChartGeometry, index: number): number {
@@ -259,6 +354,16 @@ function estimateTextWidth(text: string, fontSize: number): number {
     else units += 1.05;
   }
   return units * fontSize;
+}
+
+function resolveCategoricalLabelFontSize(lines: string[], slotWidth: number): number {
+  const preferred = 9;
+  const minimum = 8;
+  const widest = Math.max(...lines.map((line) => estimateTextWidth(line, preferred)), 0);
+  if (widest <= slotWidth) return preferred;
+  const widestMin = Math.max(...lines.map((line) => estimateTextWidth(line, minimum)), 0);
+  if (widestMin <= slotWidth) return minimum;
+  return minimum;
 }
 
 export type FittedLegendLabel = {
@@ -583,15 +688,17 @@ function renderRightAxisLines(
   return renderLineSeries(geo, styled, yMaxRight, categories, chartType);
 }
 
-function renderAxesWithOptionalSecondary(
-  geo: ChartGeometry,
-  yTicks: number[],
-  yMax: number,
-  dates: string[],
-  chartType: ReportChartSection["chartType"],
-  rightTicks: number[] | null,
-  yMaxRight: number | null
-): string {
+function renderAxesWithOptionalSecondary(options: RenderAxesOptions): string {
+  const {
+    geo,
+    primaryScale,
+    labels,
+    chartType,
+    secondaryScale,
+    renderOptions,
+  } = options;
+  const { ticks: yTicks, max: yMax } = primaryScale;
+
   const parts: string[] = [];
   parts.push(
     `<line x1="${geo.plotLeft}" y1="${geo.plotTop}" x2="${geo.plotLeft}" y2="${geo.plotBottom}" stroke="${COLORS.border}" stroke-width="1"/>`,
@@ -604,7 +711,11 @@ function renderAxesWithOptionalSecondary(
       `<text x="${geo.plotRight + 6}" y="${y + 4}" text-anchor="start" font-size="11" fill="${COLORS.neutral}">${formatReportNumber(tick, { maximumFractionDigits: 0 })}</text>`
     );
   }
-  if (rightTicks && yMaxRight !== null) {
+  if (secondaryScale !== null) {
+    const {
+      ticks: rightTicks,
+      max: yMaxRight,
+    } = secondaryScale;
     parts.push(
       `<line x1="${geo.plotLeft}" y1="${geo.plotTop}" x2="${geo.plotLeft}" y2="${geo.plotBottom}" stroke="${COLORS.border}" stroke-width="1" stroke-dasharray="3,3"/>`
     );
@@ -615,17 +726,27 @@ function renderAxesWithOptionalSecondary(
       );
     }
   }
-  // X labels: for long monthly windows label every other month to reduce clutter
-  // without dropping data points.
-  const step = dates.length >= 12 ? 2 : Math.max(1, Math.ceil(dates.length / 12));
-  dates.forEach((date, index) => {
-    if (index % step !== 0 && index !== dates.length - 1) return;
+
+  const labelCount = labels.length;
+  const step = resolveXAxisLabelStep(labelCount, renderOptions.xLabelPolicy);
+  const slotWidth = (geo.plotRight - geo.plotLeft) / Math.max(1, labelCount);
+  const wrapLines = renderOptions.xLabelLayout === "wrap-two-lines" ? 2 : 1;
+  const lineGap = 11;
+  const baseY = geo.plotBottom + (wrapLines > 1 ? 16 : 18);
+
+  labels.forEach((rawLabel, index) => {
+    if (index % step !== 0 && index !== labelCount - 1) return;
     const x = chartType === "bar"
-      ? geo.plotLeft + (index + 0.5) * (geo.plotRight - geo.plotLeft) / Math.max(1, dates.length)
+      ? geo.plotLeft + (index + 0.5) * (geo.plotRight - geo.plotLeft) / Math.max(1, labelCount)
       : xForIndex(geo, index);
-    parts.push(
-      `<text x="${x}" y="${geo.plotBottom + 18}" text-anchor="middle" font-size="10" fill="${COLORS.neutral}" direction="rtl" unicode-bidi="plaintext">${escapeXml(shortDateLabel(date))}</text>`
-    );
+    const display = shortDateLabel(rawLabel);
+    const lines = wrapLines > 1
+      ? wrapCategoricalAxisLabel(display, wrapLines)
+      : [display];
+    const fontSize = wrapLines > 1
+      ? resolveCategoricalLabelFontSize(lines, Math.max(8, slotWidth - 2))
+      : 10;
+    parts.push(renderXAxisLabelText({ x, y: baseY, lines, fontSize, lineGap }));
   });
   return parts.join("\n");
 }
@@ -755,8 +876,10 @@ export function resolveChartGeometry(options: {
   hasDualAxis: boolean;
   plotTop: number;
   xCount: number;
+  bottomReserve?: number;
 }): ChartGeometry {
-  const requestedPlotBottom = options.height - 36;
+  const bottomReserve = options.bottomReserve ?? resolveXAxisBottomReserve("single-line");
+  const requestedPlotBottom = options.height - bottomReserve;
   const safePlotBottom = Number.isFinite(requestedPlotBottom)
     ? Math.max(1, requestedPlotBottom)
     : 1;
@@ -860,6 +983,7 @@ function buildChartSvgBody(options: {
   lines: StyledSeries[];
   legendSvg: string;
   rightSeries: ChartSeries[];
+  renderOptions: Required<ChartRenderOptions>;
 }): string {
   const {
     section,
@@ -876,6 +1000,7 @@ function buildChartSvgBody(options: {
     lines,
     legendSvg,
     rightSeries,
+    renderOptions,
   } = options;
   const title = escapeXml(section.title);
   const axisChartType = resolveAxisChartType(section.chartType, bars.length);
@@ -890,12 +1015,30 @@ function buildChartSvgBody(options: {
   const dualSvg = hasDualAxis
     ? renderRightAxisLines(geo, rightSeries, yMaxRight, categories, section.chartType)
     : "";
+  const secondaryScale: SecondaryChartAxisScale =
+    hasDualAxis && ticksRight !== null
+      ? {
+          ticks: ticksRight,
+          max: yMaxRight,
+        }
+      : null;
+  const axesSvg = renderAxesWithOptionalSecondary({
+    geo,
+    primaryScale: {
+      ticks,
+      max: yMax,
+    },
+    labels: categories,
+    chartType: axisChartType,
+    secondaryScale,
+    renderOptions,
+  });
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
     ${fontStyleBlock()}
     <rect width="${width}" height="${height}" fill="${COLORS.white}" stroke="${COLORS.border}"/>
     ${titleSvg}
     ${legendSvg}
-    ${renderAxesWithOptionalSecondary(geo, ticks, yMax, categories, axisChartType, ticksRight, hasDualAxis ? yMaxRight : null)}
+    ${axesSvg}
     ${barsSvg}
     ${linesSvg}
     ${dualSvg}
@@ -903,7 +1046,13 @@ function buildChartSvgBody(options: {
 }
 
 /** Exported for snapshot tests; not part of the public rendering API. */
-export function buildChartSvg(section: ReportChartSection, width: number, height: number): string {
+export function buildChartSvg(
+  section: ReportChartSection,
+  width: number,
+  height: number,
+  options?: ChartRenderOptions
+): string {
+  const renderOptions = resolveChartRenderOptions(options);
   const { leftSeries, rightSeries, hasDualAxis } = resolveAxisSeries(section);
   const categories = resolveChartCategories(section, leftSeries);
   const scales = computeChartAxisScales(leftSeries, rightSeries, hasDualAxis);
@@ -920,6 +1069,7 @@ export function buildChartSvg(section: ReportChartSection, width: number, height
     hasDualAxis,
     plotTop: legendTop + legend.height + 6,
     xCount: categories.length,
+    bottomReserve: resolveXAxisBottomReserve(renderOptions.xLabelLayout),
   });
   const { bars, lines } = splitRenderableSeries(section, leftSeries);
   return buildChartSvgBody({
@@ -937,6 +1087,7 @@ export function buildChartSvg(section: ReportChartSection, width: number, height
     lines,
     legendSvg: legend.svg,
     rightSeries,
+    renderOptions,
   });
 }
 
@@ -958,7 +1109,8 @@ function emptyChartSvg(section: ReportChartSection, width: number, height: numbe
 export async function renderLineChartPng(
   section: ReportChartSection,
   widthPx: number,
-  heightPx: number
+  heightPx: number,
+  options?: ChartRenderOptions
 ): Promise<Buffer> {
   configureReportFontconfig();
 
@@ -966,7 +1118,9 @@ export async function renderLineChartPng(
   const height = Math.max(MIN_CHART_HEIGHT, Math.round(heightPx));
 
   const hasData = section.series.some((series) => series.points.length > 0);
-  const svg = hasData ? buildChartSvg(section, width, height) : emptyChartSvg(section, width, height);
+  const svg = hasData
+    ? buildChartSvg(section, width, height, options)
+    : emptyChartSvg(section, width, height);
 
   try {
     return await sharp(Buffer.from(svg)).png().toBuffer();

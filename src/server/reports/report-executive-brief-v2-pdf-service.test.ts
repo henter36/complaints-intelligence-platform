@@ -527,6 +527,31 @@ describe("V2 monthly chart contract + KPI packing", () => {
     }
   });
 
+  it("requests all wrapped region labels for the region comparison chart", async () => {
+    const chartService = await import("./report-chart-service");
+    const pngSpy = vi.spyOn(chartService, "renderLineChartPng").mockResolvedValue(Buffer.from("png"));
+    try {
+      await renderExecutiveBriefV2Pdf(makeV2Report());
+      const regionCall = pngSpy.mock.calls.find(
+        (call) => (call[0] as { id?: string }).id === "v2-region-bar"
+      );
+      expect(regionCall).toBeDefined();
+      expect(regionCall![3]).toEqual({
+        xLabelPolicy: "all",
+        xLabelLayout: "wrap-two-lines",
+      });
+      expect(regionCall![2]).toBe(296);
+
+      const monthlyCall = pngSpy.mock.calls.find(
+        (call) => (call[0] as { id?: string }).id === "v2-monthly-flow"
+      );
+      expect(monthlyCall).toBeDefined();
+      expect(monthlyCall![3]).toBeUndefined();
+    } finally {
+      pngSpy.mockRestore();
+    }
+  });
+
   it("keeps conclusions available height non-negative and skips the box at zero", () => {
     expect(resolveV2ConclusionsAvailableHeight(842, 42, 520)).toBeGreaterThan(0);
     expect(resolveV2ConclusionsAvailableHeight(842, 42, 816)).toBe(0);

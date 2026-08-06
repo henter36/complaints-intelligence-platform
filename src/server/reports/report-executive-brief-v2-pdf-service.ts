@@ -1236,7 +1236,7 @@ async function renderPage3(ctx: V2Context): Promise<void> {
   if (hasPrev) {
     series.push({ name: "السابقة", points: regions.map((r) => ({ x: stripPrefix(r.regionName), y: r.previousCount })) });
   }
-  const chartH = 280;
+  const chartH = 296;
   try {
     const png = await renderLineChartPng({
       id: "v2-region-bar",
@@ -1245,7 +1245,10 @@ async function renderPage3(ctx: V2Context): Promise<void> {
       title: hasPrev ? "مقارنة شكاوى الفترة الحالية مقابل الفترة السابقة حسب المنطقة" : "إجمالي الفترة الحالية حسب المنطقة",
       series,
       emptyState: "لا توجد بيانات مناطق.",
-    }, Math.round(contentWidth), chartH);
+    }, Math.round(contentWidth), chartH, {
+      xLabelPolicy: "all",
+      xLabelLayout: "wrap-two-lines",
+    });
     doc.image(png, margin, y, { width: contentWidth, height: chartH });
   } catch (err) {
     warnings.push(`تعذر رسم مقارنة المناطق: ${err instanceof Error ? err.message : String(err)}`);
