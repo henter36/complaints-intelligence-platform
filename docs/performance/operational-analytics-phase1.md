@@ -56,22 +56,26 @@ Script: `scripts/benchmark-operational-analytics.ts --mode=read-only-current`.
 | Field | Value |
 | --- | --- |
 | In-scope complaints | 16,993 |
-| Wall `totalMs` | 1,862 ms |
-| `performanceMs.loadRows` / `residualRows` | 1,694 ms |
-| `aggregateDimensions` | 229 ms |
-| `resolutionRows` | 29 ms |
-| Heap before → after | 15 → 79 MB |
-| RSS before → after | 87 → 289 MB |
-| Prisma queries | **12** (fixed; independent of bucket cardinality) |
+| Wall `totalMs` | 1,600 ms |
+| `performanceMs.loadRows` / `residualRows` | 1,455 ms |
+| `aggregateDimensions` | 176 ms |
+| `resolutionRows` | 23 ms |
+| Heap before → after | 17 → 85 MB |
+| RSS before → after | 645 → 269 MB |
+| Preflight queries | 1 |
+| Prisma queries (analytics only) | **11** |
 | `dev.db` SHA-256 | unchanged (`sourceUnchanged: true`) |
 
 ### Interpretation
 
 - Numeric parity for migrated dimensions matches the before probe (counts/open/closed/late/averages/channel keys).
 - Peak heap did not increase (86 → 79 MB).
-- Wall time did not increase by more than 20% (~2,045 → 1,862 ms).
+- Wall time did not increase by more than 20% (~2,045 → 1,600 ms).
 - Residual `findMany` still dominates cost; migrated dimensions no longer drive that load.
-- Query count rose from ~1–2 to 12 but is **O(1)** vs bucket count (no N+1).
+- Query count is fixed and **O(1)** vs bucket count (no N+1):
+- 11 analytics queries for default (no previous-period comparison).
+- 12 analytics queries when previous-period aggregation is active.
+- The preflight row-count query is reported separately and is excluded from `prismaQueries`.
 
 ## Synthetic 20k (temporary DB)
 
@@ -80,13 +84,14 @@ Script: `scripts/benchmark-operational-analytics.ts --mode=read-only-current`.
 | Field | Value |
 | --- | --- |
 | Rows | 20,000 |
-| Wall `totalMs` | 1,691 ms |
-| `aggregateDimensions` | 118 ms |
-| `resolutionRows` | 533 ms |
-| `residualRows` | 1,566 ms |
-| Heap before → after | 36 → 97 MB |
-| RSS before → after | 186 → 321 MB |
-| Prisma queries | 12 |
+| Wall `totalMs` | 1,874 ms |
+| `aggregateDimensions` | 156 ms |
+| `resolutionRows` | 536 ms |
+| `residualRows` | 1,741 ms |
+| Heap before → after | 28 → 97 MB |
+| RSS before → after | 155 → 323 MB |
+| Preflight queries | 1 |
+| Prisma queries (analytics only) | 11 |
 
 Sizes `100000` and `500000` are supported by the script flags but are **not** run in CI.
 

@@ -1,3 +1,4 @@
+import { ComplaintStatus } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildComplaintWhere,
@@ -159,7 +160,14 @@ describe("central complaint query service", () => {
     expect(where.AND).toEqual([
       {
         dueDate: { lt: now },
-        status: { in: expect.arrayContaining(["OPEN", "NEW", "IN_PROGRESS", "AWAITING_RESPONSE"]) },
+        status: {
+          in: [
+            ComplaintStatus.NEW,
+            ComplaintStatus.OPEN,
+            ComplaintStatus.IN_PROGRESS,
+            ComplaintStatus.AWAITING_RESPONSE,
+          ],
+        },
       },
     ]);
   });

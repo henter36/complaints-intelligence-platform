@@ -12,12 +12,16 @@
  *   - Read-only-current never writes to the source file (uses a temp copy when source is a file: URL).
  */
 
-import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ComplaintPriority, ComplaintStatus, PrismaClient } from "@prisma/client";
+import {
+  copyConsistentSqliteSnapshot,
+} from "./lib/benchmark-sqlite-snapshot";
+import { isDevDbUrl } from "./lib/benchmark-paths";
+import { runPrismaMigrateDeploy } from "./lib/prisma-cli-runner";
 
 type Mode = "read-only-current" | "synthetic";
 
@@ -41,16 +45,6 @@ function resolveMode(): Mode {
     throw new Error(`Unsupported mode: ${mode}`);
   }
   return mode;
-}
-
-function isDevDbUrl(url: string): boolean {
-  const normalized = url.replace(/^file:/, "");
-  return (
-    normalized.endsWith("/prisma/dev.db") ||
-    normalized.endsWith("\\prisma\\dev.db") ||
-    normalized === "prisma/dev.db" ||
-    normalized.endsWith("prisma/dev.db")
-  );
 }
 
 function filePathFromUrl(url: string): string | null {
@@ -141,15 +135,19 @@ async function prepareDatabase(mode: Mode): Promise<{
       return { databaseUrl };
     }
     const absolute = resolve(sourcePath);
-    const sourceSha = sha256File(absolute);
-    const tempDir = mkdtempSync(join(tmpdir(), "op-analytics-bench-"));
-    const copyPath = join(tempDir, "bench.db");
-    copyFileSync(absolute, copyPath);
-    return {
-      databaseUrl: `file:${copyPath}`,
-      sourceSha,
+    if (!existsSync(absolute)) {
+      throw new Error(`SQLite source file not found: ${absolute}`);
+    }
+    const snapshot = copyConsistentSqliteSnapshot({
       sourcePath: absolute,
-      tempDir,
+      tempPrefix: "op-analytics-bench-",
+      hashFile: sha256File,
+    });
+    return {
+      databaseUrl: `file:${snapshot.copyPath}`,
+      sourceSha: snapshot.sourceSha,
+      sourcePath: absolute,
+      tempDir: snapshot.tempDir,
     };
   }
 
@@ -164,11 +162,7 @@ async function prepareDatabase(mode: Mode): Promise<{
   const tempDir = mkdtempSync(join(tmpdir(), "op-analytics-synth-"));
   const dbPath = join(tempDir, "synthetic.db");
   const databaseUrl = `file:${dbPath}`;
-  execFileSync("npx", ["prisma", "migrate", "deploy"], {
-    cwd: process.cwd(),
-    env: { ...process.env, DATABASE_URL: databaseUrl },
-    stdio: "pipe",
-  });
+  runPrismaMigrateDeploy(databaseUrl);
   const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
   try {
     await seedSynthetic(prisma, size);
@@ -187,12 +181,14 @@ async function main() {
     "../src/server/analytics/operational/operational-analytics-service"
   );
   const { db } = await import("../src/lib/db");
-  const getQueryCount = installQueryCounter(db as never);
-
   const rowCount = await db.complaint.count({ where: { isDeleted: false } });
+  const preflightQueries = 1;
+  const getQueryCount = installQueryCounter(db as never);
+  // Counts queries issued by getOperationalAnalytics only.
+  const params = new URLSearchParams(argValue("params") ?? "");
   const heapBefore = process.memoryUsage();
   const t0 = performance.now();
-  const result = await getOperationalAnalytics(new URLSearchParams(), {
+  const result = await getOperationalAnalytics(params, {
     now: new Date("2026-08-05T12:00:00.000Z"),
   });
   const totalMs = Math.round(performance.now() - t0);
@@ -206,6 +202,7 @@ async function main() {
 
   const report = {
     mode,
+    params: params.toString(),
     size: prepared.size ?? rowCount,
     rowCount,
     totalInScope: result.totalInScope,
@@ -215,6 +212,7 @@ async function main() {
     heapAfterMB: Math.round(heapAfter.heapUsed / 1024 / 1024),
     rssBeforeMB: Math.round(heapBefore.rss / 1024 / 1024),
     rssAfterMB: Math.round(heapAfter.rss / 1024 / 1024),
+    preflightQueries,
     prismaQueries,
     channelIndependentCheck: result.channelIndependentCheck,
     sourceOriginTop3: result.sourceOrigin.items.slice(0, 3).map((item) => ({

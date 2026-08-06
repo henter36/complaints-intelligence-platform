@@ -34,8 +34,6 @@ export type ResolutionAggregateInput = {
   closedAt: Date;
 };
 
-type ResolutionRow = ResolutionAggregateInput;
-
 type StatusGroupRow = {
   dimensionValue: string | null;
   status: ComplaintStatus;
@@ -113,7 +111,7 @@ export function mergeLateGroupsIntoAggregates(
   return aggregates;
 }
 
-export function buildResolutionAverageByDimensions(rows: readonly ResolutionRow[]): {
+export function buildResolutionAverageByDimensions(rows: readonly ResolutionAggregateInput[]): {
   sourceOrigin: Map<string, number>;
   sourceStatus: Map<string, number>;
   sourceActionStatus: Map<string, number>;

@@ -1,10 +1,10 @@
-import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ComplaintPriority, ComplaintStatus, PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { OPERATIONAL_UNSPECIFIED } from "./operational-analytics-types";
+import { runPrismaMigrateDeploy } from "../../../../scripts/lib/prisma-cli-runner";
 
 const dbHolder = vi.hoisted(() => ({
   client: null as PrismaClient | null,
@@ -24,25 +24,36 @@ import { listComplaints } from "@/server/complaints/complaint-query-service";
 
 const NOW = new Date("2026-08-05T12:00:00.000Z");
 const DAY_MS = 24 * 60 * 60 * 1000;
+const ORIGINAL_DATABASE_URL = process.env.DATABASE_URL;
 
-let tempDir: string;
+let tempDir: string | null = null;
+
+function restoreDatabaseUrl(originalValue: string | undefined): void {
+  if (originalValue === undefined) {
+    delete process.env.DATABASE_URL;
+    return;
+  }
+  process.env.DATABASE_URL = originalValue;
+}
 
 beforeAll(async () => {
   tempDir = mkdtempSync(join(tmpdir(), "cip-op-agg-"));
   const dbPath = join(tempDir, "test.db");
   process.env.DATABASE_URL = `file:${dbPath}`;
-  execFileSync("npx", ["prisma", "migrate", "deploy"], {
-    cwd: process.cwd(),
-    env: { ...process.env, DATABASE_URL: `file:${dbPath}` },
-    stdio: "pipe",
-  });
+  runPrismaMigrateDeploy(`file:${dbPath}`);
   dbHolder.client = new PrismaClient();
   await seedParityDataset(dbHolder.client);
 }, 60_000);
 
 afterAll(async () => {
-  await dbHolder.client?.$disconnect();
-  rmSync(tempDir, { recursive: true, force: true });
+  try {
+    await dbHolder.client?.$disconnect();
+    if (tempDir) {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  } finally {
+    restoreDatabaseUrl(ORIGINAL_DATABASE_URL);
+  }
 });
 
 async function seedParityDataset(prisma: PrismaClient) {
@@ -196,6 +207,29 @@ async function seedParityDataset(prisma: PrismaClient) {
 }
 
 describe("operational analytics DB aggregate integration", () => {
+  it("restoreDatabaseUrl removes DATABASE_URL when original is undefined", () => {
+    const before = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "file:/tmp/test.db";
+    restoreDatabaseUrl(undefined);
+    expect(process.env.DATABASE_URL).toBeUndefined();
+    restoreDatabaseUrl(before);
+  });
+
+  it("restoreDatabaseUrl restores DATABASE_URL when original exists", () => {
+    const before = process.env.DATABASE_URL;
+    process.env.DATABASE_URL = "file:/tmp/test.db";
+    restoreDatabaseUrl("file:/tmp/original.db");
+    expect(process.env.DATABASE_URL).toBe("file:/tmp/original.db");
+    restoreDatabaseUrl(before);
+  });
+
+  it("restores DATABASE_URL ownership to the suite bootstrap", () => {
+    expect(process.env.DATABASE_URL).toMatch(/^file:/);
+    if (tempDir) {
+      expect(process.env.DATABASE_URL).toContain(tempDir);
+    }
+  });
+
   it("matches totalInScope to listComplaints pagination.total", async () => {
     const params = new URLSearchParams("from=2026-07-01&to=2026-07-31&regionId=الرياض");
     const summary = await getOperationalAnalytics(params, { now: NOW });
