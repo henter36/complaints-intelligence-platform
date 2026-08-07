@@ -534,4 +534,42 @@ describe("operational analytics DB aggregate integration", () => {
       }
     }
   });
+
+  it("matches explicit expected counts for the 7 data-quality signals migrated to DB aggregates in Issue #63 phase 4, on the shared fixture", async () => {
+    // Computed by hand from the existing seeded rows (no new rows added,
+    // to avoid disturbing any other test's exact-count assertions):
+    // - missing_source_origin: parity-4 (null) + parity-5 ("") = 2
+    // - missing_wing_code: parity-4 + parity-modified-after-updated +
+    //   parity-modified-before-updated (all null) = 3
+    // - closed_without_closed_at: every CLOSED/RESOLVED seeded row already
+    //   has closedAt set = 0 (a true-negative check; positive-case coverage
+    //   lives in operational-data-quality-aggregate-service.test.ts)
+    // - source_status_vs_internal_mismatch / action_status_vs_closure_mismatch:
+    //   no seeded row's sourceStatus/sourceActionStatus happens to conflict
+    //   with its internal status = 0 (also a true-negative check)
+    const summary = await getOperationalAnalytics(new URLSearchParams(), { now: NOW });
+    const byId = new Map(summary.dataQuality.map((s) => [s.id, s]));
+
+    expect(byId.get("missing_source_origin")?.count).toBe(2);
+    expect(byId.get("missing_wing_code")?.count).toBe(3);
+    expect(byId.get("closed_without_closed_at")?.count).toBe(0);
+    expect(byId.get("source_status_vs_internal_mismatch")?.count).toBe(0);
+    expect(byId.get("action_status_vs_closure_mismatch")?.count).toBe(0);
+  });
+
+  it("keeps missing_source_origin and missing_wing_code drill-down parity on the shared fixture (no whitespace-only rows here)", async () => {
+    const base = new URLSearchParams();
+    const summary = await getOperationalAnalytics(base, { now: NOW });
+    const byId = new Map(summary.dataQuality.map((s) => [s.id, s]));
+
+    for (const id of ["missing_source_origin", "missing_wing_code"] as const) {
+      const signal = byId.get(id)!;
+      const drill = new URLSearchParams(base);
+      for (const [key, value] of Object.entries(signal.drillDownFilters)) {
+        drill.set(key, value);
+      }
+      const list = await listComplaints(drill, { now: NOW });
+      expect(list.pagination.total, id).toBe(signal.count);
+    }
+  });
 });

@@ -4,10 +4,7 @@ import {
   buildComplaintWhere,
   parseComplaintQuery,
 } from "@/server/complaints/complaint-query-service";
-import {
-  CLOSED_COMPLAINT_STATUSES,
-  OPEN_COMPLAINT_STATUSES,
-} from "@/server/complaints/status";
+import { CLOSED_COMPLAINT_STATUSES } from "@/server/complaints/status";
 import {
   DAY_MS,
   FRESHNESS_BUCKET_LABELS,
@@ -19,14 +16,20 @@ import { loadAggregatedFreshnessMetrics } from "./operational-freshness-aggregat
 import { loadAggregatedOperationalDimensions } from "./operational-aggregate-service";
 import { loadWingOperationalMetrics } from "./operational-wing-aggregate-service";
 import {
+  buildAggregatedDataQualityCounts,
+  loadClosedWithoutClosedAtCount,
+  type AggregatedDataQualityCounts,
+} from "./operational-data-quality-aggregate-service";
+import {
   DATA_FRESHNESS_BUCKETS,
   OPERATIONAL_UNSPECIFIED,
-  OPERATIONAL_UNSPECIFIED_LABEL,
   type ActionTakenQuality,
   type DataFreshnessBucket,
   type DataFreshnessMetrics,
   type OperationalAnalyticsSummary,
   type OperationalDataQualitySignal,
+  type SourceStatusDistribution,
+  type ActionStatusDistribution,
   type StaffActorMetrics,
 } from "./operational-analytics-types";
 
@@ -34,38 +37,28 @@ const LONG_ACTION_TAKEN_CHARS = 80;
 const RARE_SHARE_THRESHOLD = 0.01;
 
 /**
- * Residual metrics still computed in Node (actionTaken/dataQuality/staff).
- * Freshness (and the 3 data-quality signals derived from the same two
- * timestamps) now comes from loadAggregatedFreshnessMetrics — sourceUpdatedAt
- * and sourceModifiedAt are deliberately not selected here anymore.
+ * Residual metrics still computed in Node: actionTakenQuality, the 3
+ * data-quality signals that need per-row text fields
+ * (closed_without_source_closed_by / action_taken_without_description /
+ * resolution_without_closed), and staffActors. Every other data-quality
+ * signal — including the 3 freshness-derived ones and the 7 migrated in
+ * Issue #63 phase 4 — is now computed entirely from DB aggregates, so their
+ * source columns (id, sourceOrigin, sourceStatus, sourceActionStatus,
+ * wingCode, sourceUpdatedAt, sourceModifiedAt, complaintDate, receivedAt,
+ * dueDate, closedAt) are deliberately not selected here.
  */
 type SlimOperationalRow = {
-  id: string;
   status: ComplaintStatus;
-  sourceOrigin: string | null;
-  sourceStatus: string | null;
-  sourceActionStatus: string | null;
-  wingCode: string | null;
   actionTaken: string | null;
   actionDescription: string | null;
   resolution: string | null;
   sourceClosedBy: string | null;
   sourceUpdatedBy: string | null;
-  complaintDate: Date | null;
-  receivedAt: Date;
-  dueDate: Date | null;
-  closedAt: Date | null;
 };
 
 function timed<T>(fn: () => Promise<T>): Promise<{ ms: number; value: T }> {
   const t0 = performance.now();
   return fn().then((value) => ({ ms: Math.round(performance.now() - t0), value }));
-}
-
-export function normalizeOperationalLabel(value: string | null | undefined): string {
-  if (value == null) return OPERATIONAL_UNSPECIFIED_LABEL;
-  const trimmed = value.replace(/\s+/g, " ").trim();
-  return trimmed.length === 0 ? OPERATIONAL_UNSPECIFIED_LABEL : trimmed;
 }
 
 export function normalizeActionTakenKey(value: string): string {
@@ -100,21 +93,12 @@ function pct(part: number, total: number): number {
  */
 /** Exported for benchmark/diagnostic field-count reporting only — not a public analytics contract. */
 export const RESIDUAL_OPERATIONAL_SELECT = {
-  id: true,
   status: true,
-  sourceOrigin: true,
-  sourceStatus: true,
-  sourceActionStatus: true,
-  wingCode: true,
   actionTaken: true,
   actionDescription: true,
   resolution: true,
   sourceClosedBy: true,
   sourceUpdatedBy: true,
-  complaintDate: true,
-  receivedAt: true,
-  dueDate: true,
-  closedAt: true,
 } satisfies Prisma.ComplaintSelect;
 
 function buildActionTakenQuality(rows: SlimOperationalRow[]): ActionTakenQuality {
@@ -318,170 +302,205 @@ export function buildFreshness(rows: FreshnessRow[], now: Date): DataFreshnessMe
   return buildFreshnessMetrics(accumulator, rows.length);
 }
 
-/**
- * The three signals derived from sourceUpdatedAt/sourceModifiedAt are
- * precomputed by loadAggregatedFreshnessMetrics — those columns are no
- * longer selected into SlimOperationalRow, so they can't be row-scanned here.
- */
-type PrecomputedDataQualityCounts = {
-  missingSourceUpdatedAt: number;
-  missingSourceModifiedAt: number;
-  modifiedAfterUpdated: number;
+const DATA_QUALITY_SIGNAL_IDS = [
+  "missing_source_origin",
+  "missing_source_status",
+  "missing_source_action_status",
+  "missing_wing_code",
+  "missing_source_updated_at",
+  "missing_source_modified_at",
+  "closed_without_closed_at",
+  "closed_without_source_closed_by",
+  "source_status_vs_internal_mismatch",
+  "action_status_vs_closure_mismatch",
+  "modified_after_updated",
+  "action_taken_without_description",
+  "resolution_without_closed",
+] as const;
+
+type DataQualitySignalId = (typeof DATA_QUALITY_SIGNAL_IDS)[number];
+
+type DataQualitySignalDefinition = {
+  id: DataQualitySignalId;
+  label: string;
+  severity: OperationalDataQualitySignal["severity"];
+  explanation: string;
+  drillDownFilters: Record<string, string>;
 };
 
-function buildDataQuality(
-  rows: SlimOperationalRow[],
-  total: number,
-  precomputed: PrecomputedDataQualityCounts
-): OperationalDataQualitySignal[] {
-  const closed = (r: SlimOperationalRow) => CLOSED_COMPLAINT_STATUSES.has(r.status);
-  type SignalDef = Omit<OperationalDataQualitySignal, "percentage" | "count"> & {
-    test: (r: SlimOperationalRow) => boolean;
-    count: number;
-  };
+/** Order here is the public, contractual order of OperationalAnalyticsSummary.dataQuality — see the id/order regression test. */
+const DATA_QUALITY_SIGNAL_DEFINITIONS: readonly DataQualitySignalDefinition[] = [
+  {
+    id: "missing_source_origin",
+    label: "بلا مصدر ورود",
+    severity: "warning",
+    explanation: "السجل بلا sourceOrigin بعد الاستيراد.",
+    drillDownFilters: { sourceOrigin: OPERATIONAL_UNSPECIFIED },
+  },
+  {
+    id: "missing_source_status",
+    label: "بلا حالة مصدرية",
+    severity: "warning",
+    explanation: "السجل بلا sourceStatus.",
+    drillDownFilters: { sourceStatus: OPERATIONAL_UNSPECIFIED },
+  },
+  {
+    id: "missing_source_action_status",
+    label: "بلا حالة إجراء مصدرية",
+    severity: "info",
+    explanation: "السجل بلا sourceActionStatus.",
+    drillDownFilters: { sourceActionStatus: OPERATIONAL_UNSPECIFIED },
+  },
+  {
+    id: "missing_wing_code",
+    label: "بلا جناح",
+    severity: "info",
+    explanation: "السجل بلا wingCode.",
+    drillDownFilters: { wingCode: OPERATIONAL_UNSPECIFIED },
+  },
+  {
+    id: "missing_source_updated_at",
+    label: "بلا تاريخ تحديث مصدر",
+    severity: "warning",
+    explanation: "السجل بلا sourceUpdatedAt.",
+    drillDownFilters: { dataFreshnessBucket: "missing" },
+  },
+  {
+    id: "missing_source_modified_at",
+    label: "بلا تاريخ تعديل مصدر",
+    severity: "info",
+    explanation: "السجل بلا sourceModifiedAt.",
+    drillDownFilters: { hasSourceModifiedAt: "false" },
+  },
+  {
+    id: "closed_without_closed_at",
+    label: "مغلقة بلا closedAt",
+    severity: "critical",
+    explanation: "الحالة الداخلية مغلقة دون طابع إغلاق موثوق.",
+    drillDownFilters: { isClosed: "true", hasClosedAt: "false" },
+  },
+  {
+    id: "closed_without_source_closed_by",
+    label: "مغلقة بلا مصدر إغلاق",
+    severity: "warning",
+    explanation: "إغلاق داخلي دون sourceClosedBy (لا تُعرض هويات المستخدمين).",
+    drillDownFilters: { isClosed: "true" },
+  },
+  {
+    id: "source_status_vs_internal_mismatch",
+    label: "تعارض حالة مصدرية/داخلية",
+    severity: "warning",
+    explanation: "sourceStatus يشير للإغلاق بينما الحالة الداخلية مفتوحة، أو العكس.",
+    drillDownFilters: {},
+  },
+  {
+    id: "action_status_vs_closure_mismatch",
+    label: "تعارض حالة الإجراء مع الإغلاق",
+    severity: "info",
+    explanation: "sourceActionStatus ما زال «جديد» رغم الإغلاق الداخلي.",
+    drillDownFilters: { sourceActionStatus: "جديد", isClosed: "true" },
+  },
+  {
+    id: "modified_after_updated",
+    label: "تعديل مصدر بعد التحديث",
+    severity: "warning",
+    explanation: "sourceModifiedAt أحدث من sourceUpdatedAt بصورة غير متوقعة.",
+    drillDownFilters: {},
+  },
+  {
+    id: "action_taken_without_description",
+    label: "إجراء دون وصف",
+    severity: "info",
+    explanation: "actionTaken موجود بينما actionDescription فارغ.",
+    drillDownFilters: { hasActionTaken: "true", hasActionDescription: "false" },
+  },
+  {
+    id: "resolution_without_closed",
+    label: "نتيجة دون إغلاق",
+    severity: "warning",
+    explanation: "resolution موجود والحالة الداخلية غير مغلقة.",
+    drillDownFilters: { hasResolution: "true", isClosed: "false" },
+  },
+];
 
-  const signals: SignalDef[] = [
-    {
-      id: "missing_source_origin",
-      label: "بلا مصدر ورود",
-      severity: "warning",
-      explanation: "السجل بلا sourceOrigin بعد الاستيراد.",
-      drillDownFilters: { sourceOrigin: OPERATIONAL_UNSPECIFIED },
-      test: (r) => emptyStringOrNull(r.sourceOrigin),
-      count: 0,
-    },
-    {
-      id: "missing_source_status",
-      label: "بلا حالة مصدرية",
-      severity: "warning",
-      explanation: "السجل بلا sourceStatus.",
-      drillDownFilters: { sourceStatus: OPERATIONAL_UNSPECIFIED },
-      test: (r) => emptyStringOrNull(r.sourceStatus),
-      count: 0,
-    },
-    {
-      id: "missing_source_action_status",
-      label: "بلا حالة إجراء مصدرية",
-      severity: "info",
-      explanation: "السجل بلا sourceActionStatus.",
-      drillDownFilters: { sourceActionStatus: OPERATIONAL_UNSPECIFIED },
-      test: (r) => emptyStringOrNull(r.sourceActionStatus),
-      count: 0,
-    },
-    {
-      id: "missing_wing_code",
-      label: "بلا جناح",
-      severity: "info",
-      explanation: "السجل بلا wingCode.",
-      drillDownFilters: { wingCode: OPERATIONAL_UNSPECIFIED },
-      test: (r) => emptyStringOrNull(r.wingCode),
-      count: 0,
-    },
-    {
-      id: "missing_source_updated_at",
-      label: "بلا تاريخ تحديث مصدر",
-      severity: "warning",
-      explanation: "السجل بلا sourceUpdatedAt.",
-      drillDownFilters: { dataFreshnessBucket: "missing" },
-      // Precomputed from the freshness DB aggregate (bucketCounts.missing).
-      test: () => false,
-      count: precomputed.missingSourceUpdatedAt,
-    },
-    {
-      id: "missing_source_modified_at",
-      label: "بلا تاريخ تعديل مصدر",
-      severity: "info",
-      explanation: "السجل بلا sourceModifiedAt.",
-      drillDownFilters: { hasSourceModifiedAt: "false" },
-      // Precomputed from the freshness DB aggregate (missingModifiedAt).
-      test: () => false,
-      count: precomputed.missingSourceModifiedAt,
-    },
-    {
-      id: "closed_without_closed_at",
-      label: "مغلقة بلا closedAt",
-      severity: "critical",
-      explanation: "الحالة الداخلية مغلقة دون طابع إغلاق موثوق.",
-      drillDownFilters: { isClosed: "true", hasClosedAt: "false" },
-      test: (r) => closed(r) && r.closedAt == null,
-      count: 0,
-    },
-    {
-      id: "closed_without_source_closed_by",
-      label: "مغلقة بلا مصدر إغلاق",
-      severity: "warning",
-      explanation: "إغلاق داخلي دون sourceClosedBy (لا تُعرض هويات المستخدمين).",
-      drillDownFilters: { isClosed: "true" },
-      test: (r) => closed(r) && emptyStringOrNull(r.sourceClosedBy),
-      count: 0,
-    },
-    {
-      id: "source_status_vs_internal_mismatch",
-      label: "تعارض حالة مصدرية/داخلية",
-      severity: "warning",
-      explanation: "sourceStatus يشير للإغلاق بينما الحالة الداخلية مفتوحة، أو العكس.",
-      drillDownFilters: {},
-      test: (r) => {
-        if (emptyStringOrNull(r.sourceStatus)) return false;
-        const src = r.sourceStatus!.trim();
-        const looksClosed = /مغلق|مغلقة|closed/i.test(src);
-        const looksOpen = /مبدئي|جديد|مفتوح|open|progress|إرسال/i.test(src);
-        if (looksClosed && OPEN_COMPLAINT_STATUSES.has(r.status)) return true;
-        if (looksOpen && CLOSED_COMPLAINT_STATUSES.has(r.status)) return true;
-        return false;
-      },
-      count: 0,
-    },
-    {
-      id: "action_status_vs_closure_mismatch",
-      label: "تعارض حالة الإجراء مع الإغلاق",
-      severity: "info",
-      explanation: "sourceActionStatus ما زال «جديد» رغم الإغلاق الداخلي.",
-      drillDownFilters: { sourceActionStatus: "جديد", isClosed: "true" },
-      test: (r) => closed(r) && normalizeOperationalLabel(r.sourceActionStatus) === "جديد",
-      count: 0,
-    },
-    {
-      id: "modified_after_updated",
-      label: "تعديل مصدر بعد التحديث",
-      severity: "warning",
-      explanation: "sourceModifiedAt أحدث من sourceUpdatedAt بصورة غير متوقعة.",
-      drillDownFilters: {},
-      // Precomputed from the freshness DB aggregate (modifiedBeforeUpdated —
-      // legacy name, same sourceModifiedAt > sourceUpdatedAt condition).
-      test: () => false,
-      count: precomputed.modifiedAfterUpdated,
-    },
-    {
-      id: "action_taken_without_description",
-      label: "إجراء دون وصف",
-      severity: "info",
-      explanation: "actionTaken موجود بينما actionDescription فارغ.",
-      drillDownFilters: { hasActionTaken: "true", hasActionDescription: "false" },
-      test: (r) => !emptyStringOrNull(r.actionTaken) && emptyStringOrNull(r.actionDescription),
-      count: 0,
-    },
-    {
-      id: "resolution_without_closed",
-      label: "نتيجة دون إغلاق",
-      severity: "warning",
-      explanation: "resolution موجود والحالة الداخلية غير مغلقة.",
-      drillDownFilters: { hasResolution: "true", isClosed: "false" },
-      test: (r) => !emptyStringOrNull(r.resolution) && !closed(r),
-      count: 0,
-    },
-  ];
+function buildDataQualitySignal(
+  definition: DataQualitySignalDefinition,
+  count: number,
+  total: number
+): OperationalDataQualitySignal {
+  return { ...definition, count, percentage: pct(count, total) };
+}
+
+/**
+ * Row shape needed for the 3 data-quality signals that still require a
+ * per-row text-field scan (closed_without_source_closed_by depends on
+ * status + sourceClosedBy; the other two on actionTaken/actionDescription/
+ * resolution + status). Every other signal is DB-aggregated — see
+ * operational-data-quality-aggregate-service.ts.
+ */
+type ResidualDataQualityRow = {
+  status: ComplaintStatus;
+  actionTaken: string | null;
+  actionDescription: string | null;
+  resolution: string | null;
+  sourceClosedBy: string | null;
+};
+
+type ResidualDataQualityCounts = {
+  closedWithoutSourceClosedBy: number;
+  actionTakenWithoutDescription: number;
+  resolutionWithoutClosed: number;
+};
+
+function buildResidualDataQualityCounts(
+  rows: readonly ResidualDataQualityRow[]
+): ResidualDataQualityCounts {
+  let closedWithoutSourceClosedBy = 0;
+  let actionTakenWithoutDescription = 0;
+  let resolutionWithoutClosed = 0;
 
   for (const row of rows) {
-    for (const signal of signals) {
-      if (signal.test(row)) signal.count += 1;
+    const closed = CLOSED_COMPLAINT_STATUSES.has(row.status);
+    if (closed && emptyStringOrNull(row.sourceClosedBy)) closedWithoutSourceClosedBy += 1;
+    if (!emptyStringOrNull(row.actionTaken) && emptyStringOrNull(row.actionDescription)) {
+      actionTakenWithoutDescription += 1;
     }
+    if (!emptyStringOrNull(row.resolution) && !closed) resolutionWithoutClosed += 1;
   }
 
-  return signals.map(({ test: _test, ...rest }) => ({
-    ...rest,
-    percentage: pct(rest.count, total),
-  }));
+  return { closedWithoutSourceClosedBy, actionTakenWithoutDescription, resolutionWithoutClosed };
+}
+
+function dataQualityCountsById(
+  aggregated: AggregatedDataQualityCounts,
+  residual: ResidualDataQualityCounts
+): Record<DataQualitySignalId, number> {
+  return {
+    missing_source_origin: aggregated.missingSourceOrigin,
+    missing_source_status: aggregated.missingSourceStatus,
+    missing_source_action_status: aggregated.missingSourceActionStatus,
+    missing_wing_code: aggregated.missingWingCode,
+    missing_source_updated_at: aggregated.missingSourceUpdatedAt,
+    missing_source_modified_at: aggregated.missingSourceModifiedAt,
+    closed_without_closed_at: aggregated.closedWithoutClosedAt,
+    closed_without_source_closed_by: residual.closedWithoutSourceClosedBy,
+    source_status_vs_internal_mismatch: aggregated.sourceStatusVsInternalMismatch,
+    action_status_vs_closure_mismatch: aggregated.actionStatusVsClosureMismatch,
+    modified_after_updated: aggregated.modifiedAfterUpdated,
+    action_taken_without_description: residual.actionTakenWithoutDescription,
+    resolution_without_closed: residual.resolutionWithoutClosed,
+  };
+}
+
+function buildDataQuality(
+  aggregated: AggregatedDataQualityCounts,
+  residual: ResidualDataQualityCounts,
+  total: number
+): OperationalDataQualitySignal[] {
+  const counts = dataQualityCountsById(aggregated, residual);
+  return DATA_QUALITY_SIGNAL_DEFINITIONS.map((definition) =>
+    buildDataQualitySignal(definition, counts[definition.id], total)
+  );
 }
 
 function buildStaffActors(rows: SlimOperationalRow[], enabled: boolean): StaffActorMetrics {
@@ -583,24 +602,51 @@ export async function getOperationalAnalytics(
       total: aggregated.totalInScope,
     })
   );
+  // Depends only on `where` — starts immediately, in parallel with
+  // aggregatedPromise/residualPromise, not after dimension aggregation.
+  const closedWithoutClosedAtPromise = timed(() => loadClosedWithoutClosedAtCount(where));
 
-  const [aggregated, wingAggregated, freshnessAggregated, residualLoad] = await Promise.all([
-    aggregatedPromise,
-    wingPromise,
-    freshnessPromise,
-    residualPromise,
-  ]);
+  const [aggregated, wingAggregated, freshnessAggregated, residualLoad, closedWithoutClosedAtLoad] =
+    await Promise.all([
+      aggregatedPromise,
+      wingPromise,
+      freshnessPromise,
+      residualPromise,
+      closedWithoutClosedAtPromise,
+    ]);
 
   const rows = residualLoad.value as SlimOperationalRow[];
   const total = aggregated.totalInScope;
 
+  const sourceStatusDistribution: SourceStatusDistribution = {
+    items: aggregated.sourceStatus,
+    total,
+    unspecifiedCount:
+      aggregated.sourceStatus.find((i) => i.key === OPERATIONAL_UNSPECIFIED)?.count ?? 0,
+  };
+  const sourceActionStatusDistribution: ActionStatusDistribution = {
+    items: aggregated.sourceActionStatus,
+    total,
+    unspecifiedCount:
+      aggregated.sourceActionStatus.find((i) => i.key === OPERATIONAL_UNSPECIFIED)?.count ?? 0,
+  };
+
+  const dataQualityAggregated: AggregatedDataQualityCounts = {
+    ...buildAggregatedDataQualityCounts({
+      sourceOrigin: aggregated.sourceOrigin,
+      sourceStatus: sourceStatusDistribution,
+      sourceActionStatus: sourceActionStatusDistribution,
+      wing: wingAggregated.metrics,
+      closedWithoutClosedAt: closedWithoutClosedAtLoad.value,
+    }),
+    missingSourceUpdatedAt: freshnessAggregated.metrics.missingUpdatedAt,
+    missingSourceModifiedAt: freshnessAggregated.metrics.missingModifiedAt,
+    modifiedAfterUpdated: freshnessAggregated.metrics.modifiedBeforeUpdated,
+  };
+
   const actionQualityTimed = await timed(async () => buildActionTakenQuality(rows));
   const qualityTimed = await timed(async () =>
-    buildDataQuality(rows, total, {
-      missingSourceUpdatedAt: freshnessAggregated.metrics.missingUpdatedAt,
-      missingSourceModifiedAt: freshnessAggregated.metrics.missingModifiedAt,
-      modifiedAfterUpdated: freshnessAggregated.metrics.modifiedBeforeUpdated,
-    })
+    buildDataQuality(dataQualityAggregated, buildResidualDataQualityCounts(rows), total)
   );
   const staff = buildStaffActors(rows, includeStaffActors);
 
@@ -609,18 +655,8 @@ export async function getOperationalAnalytics(
     generatedAt: now.toISOString(),
     timezoneDisplay: RIYADH_TZ,
     sourceOrigin: { items: aggregated.sourceOrigin, total },
-    sourceStatus: {
-      items: aggregated.sourceStatus,
-      total,
-      unspecifiedCount:
-        aggregated.sourceStatus.find((i) => i.key === OPERATIONAL_UNSPECIFIED)?.count ?? 0,
-    },
-    sourceActionStatus: {
-      items: aggregated.sourceActionStatus,
-      total,
-      unspecifiedCount:
-        aggregated.sourceActionStatus.find((i) => i.key === OPERATIONAL_UNSPECIFIED)?.count ?? 0,
-    },
+    sourceStatus: sourceStatusDistribution,
+    sourceActionStatus: sourceActionStatusDistribution,
     channelIndependentCheck: aggregated.channelIndependentCheck,
     actionTakenQuality: actionQualityTimed.value,
     wing: wingAggregated.metrics,
@@ -638,7 +674,10 @@ export async function getOperationalAnalytics(
       wingCode: wingAggregated.performanceMs,
       freshness: freshnessAggregated.performanceMs,
       actionTakenQuality: actionQualityTimed.ms,
+      // Pure in-memory signal building only — the one new DB query's own
+      // time is reported separately as dataQualityAggregate.
       dataQuality: qualityTimed.ms,
+      dataQualityAggregate: closedWithoutClosedAtLoad.ms,
       aggregateDimensions: aggregated.performanceMs.aggregateDimensions,
       resolutionRows: aggregated.performanceMs.resolutionRows,
       residualRows: residualLoad.ms,
