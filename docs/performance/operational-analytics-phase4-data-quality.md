@@ -33,7 +33,7 @@ The prior PR #67 description said "8 من 11" — that was stale. Before making 
 regression test (`operational-analytics.test.ts`, "data quality signal registry — ids and order")
 was written against the **actual pre-refactor code** and asserts the real list:
 
-```
+```text
 missing_source_origin
 missing_source_status
 missing_source_action_status
@@ -81,7 +81,7 @@ parallel with `aggregatedPromise`/`residualPromise` — not after dimension aggr
 duplicated. The where clause combines with the caller's filters via an explicit `{ AND: [where,
 condition] }`, never an object spread.
 
-## Signals still Residual (3)
+## Signals still residual (3)
 
 `closed_without_source_closed_by`, `action_taken_without_description`, `resolution_without_closed`
 still need per-row text fields (`sourceClosedBy` / `actionTaken` / `actionDescription` /
@@ -229,7 +229,7 @@ memory — matches the 15→6 target exactly).
   (no schema changes this phase). It remains one query regardless of row count (no N+1), and it
   runs in parallel with the other aggregate work rather than serializing after it, which is why the
   overall `totalMs` win is still large despite this one query's own cost growing with scale.
-- **`prismaQueries` moved from 23 to 24`** — a deliberate, fixed +1 replacing what was previously
+- **`prismaQueries` moved from 23 to 24** — a deliberate, fixed +1 replacing what was previously
   part of an unbounded, row-count-scaling Node loop (`closed_without_closed_at`'s row test), not a
   regression.
 
