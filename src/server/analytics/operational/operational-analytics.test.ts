@@ -434,6 +434,122 @@ describe("staff actor privacy gating", () => {
   });
 });
 
+describe("data quality signal registry — ids and order (Issue #63 phase 4)", () => {
+  beforeEach(() => {
+    dbMocks.findMany.mockReset();
+    dbMocks.groupBy.mockReset();
+    dbMocks.count.mockReset();
+    dbMocks.classificationFindMany.mockReset();
+    dbMocks.findMany.mockResolvedValue([]);
+    dbMocks.groupBy.mockResolvedValue([]);
+    dbMocks.count.mockResolvedValue(0);
+    dbMocks.classificationFindMany.mockResolvedValue([]);
+  });
+
+  it("keeps exactly the 13 signal ids in their current order, regardless of which are DB-aggregated vs residual-scanned", async () => {
+    const summary = await getOperationalAnalytics(new URLSearchParams(), { now: FRESHNESS_NOW });
+    expect(summary.dataQuality.map((s) => s.id)).toEqual([
+      "missing_source_origin",
+      "missing_source_status",
+      "missing_source_action_status",
+      "missing_wing_code",
+      "missing_source_updated_at",
+      "missing_source_modified_at",
+      "closed_without_closed_at",
+      "closed_without_source_closed_by",
+      "source_status_vs_internal_mismatch",
+      "action_status_vs_closure_mismatch",
+      "modified_after_updated",
+      "action_taken_without_description",
+      "resolution_without_closed",
+    ]);
+  });
+
+  it("keeps label/severity/explanation/drillDownFilters unchanged for every signal", async () => {
+    const summary = await getOperationalAnalytics(new URLSearchParams(), { now: FRESHNESS_NOW });
+    const byId = new Map(summary.dataQuality.map((s) => [s.id, s]));
+
+    expect(byId.get("missing_source_origin")).toMatchObject({
+      label: "بلا مصدر ورود",
+      severity: "warning",
+      explanation: "السجل بلا sourceOrigin بعد الاستيراد.",
+      drillDownFilters: { sourceOrigin: OPERATIONAL_UNSPECIFIED },
+    });
+    expect(byId.get("missing_source_status")).toMatchObject({
+      label: "بلا حالة مصدرية",
+      severity: "warning",
+      explanation: "السجل بلا sourceStatus.",
+      drillDownFilters: { sourceStatus: OPERATIONAL_UNSPECIFIED },
+    });
+    expect(byId.get("missing_source_action_status")).toMatchObject({
+      label: "بلا حالة إجراء مصدرية",
+      severity: "info",
+      explanation: "السجل بلا sourceActionStatus.",
+      drillDownFilters: { sourceActionStatus: OPERATIONAL_UNSPECIFIED },
+    });
+    expect(byId.get("missing_wing_code")).toMatchObject({
+      label: "بلا جناح",
+      severity: "info",
+      explanation: "السجل بلا wingCode.",
+      drillDownFilters: { wingCode: OPERATIONAL_UNSPECIFIED },
+    });
+    expect(byId.get("missing_source_updated_at")).toMatchObject({
+      label: "بلا تاريخ تحديث مصدر",
+      severity: "warning",
+      explanation: "السجل بلا sourceUpdatedAt.",
+      drillDownFilters: { dataFreshnessBucket: "missing" },
+    });
+    expect(byId.get("missing_source_modified_at")).toMatchObject({
+      label: "بلا تاريخ تعديل مصدر",
+      severity: "info",
+      explanation: "السجل بلا sourceModifiedAt.",
+      drillDownFilters: { hasSourceModifiedAt: "false" },
+    });
+    expect(byId.get("closed_without_closed_at")).toMatchObject({
+      label: "مغلقة بلا closedAt",
+      severity: "critical",
+      explanation: "الحالة الداخلية مغلقة دون طابع إغلاق موثوق.",
+      drillDownFilters: { isClosed: "true", hasClosedAt: "false" },
+    });
+    expect(byId.get("closed_without_source_closed_by")).toMatchObject({
+      label: "مغلقة بلا مصدر إغلاق",
+      severity: "warning",
+      explanation: "إغلاق داخلي دون sourceClosedBy (لا تُعرض هويات المستخدمين).",
+      drillDownFilters: { isClosed: "true" },
+    });
+    expect(byId.get("source_status_vs_internal_mismatch")).toMatchObject({
+      label: "تعارض حالة مصدرية/داخلية",
+      severity: "warning",
+      explanation: "sourceStatus يشير للإغلاق بينما الحالة الداخلية مفتوحة، أو العكس.",
+      drillDownFilters: {},
+    });
+    expect(byId.get("action_status_vs_closure_mismatch")).toMatchObject({
+      label: "تعارض حالة الإجراء مع الإغلاق",
+      severity: "info",
+      explanation: "sourceActionStatus ما زال «جديد» رغم الإغلاق الداخلي.",
+      drillDownFilters: { sourceActionStatus: "جديد", isClosed: "true" },
+    });
+    expect(byId.get("modified_after_updated")).toMatchObject({
+      label: "تعديل مصدر بعد التحديث",
+      severity: "warning",
+      explanation: "sourceModifiedAt أحدث من sourceUpdatedAt بصورة غير متوقعة.",
+      drillDownFilters: {},
+    });
+    expect(byId.get("action_taken_without_description")).toMatchObject({
+      label: "إجراء دون وصف",
+      severity: "info",
+      explanation: "actionTaken موجود بينما actionDescription فارغ.",
+      drillDownFilters: { hasActionTaken: "true", hasActionDescription: "false" },
+    });
+    expect(byId.get("resolution_without_closed")).toMatchObject({
+      label: "نتيجة دون إغلاق",
+      severity: "warning",
+      explanation: "resolution موجود والحالة الداخلية غير مغلقة.",
+      drillDownFilters: { hasResolution: "true", isClosed: "false" },
+    });
+  });
+});
+
 describe("reports and export regression — operational fields excluded", () => {
   const forbidden = [
     "sourceOrigin",
