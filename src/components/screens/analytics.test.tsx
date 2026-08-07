@@ -365,12 +365,11 @@ describe("Analytics — API error response handling", () => {
       await Promise.resolve();
     });
 
-    // Not asserted via the DOM (the tree is torn down after unmount) — the
-    // only meaningful signal here is that the cancellation was never logged
-    // as a load failure.
-    for (const call of consoleError.mock.calls) {
-      expect(String(call[0])).not.toContain("Analytics data load failed");
-    }
+    // Not asserted via the DOM (the tree is torn down after unmount) — an
+    // abort triggered by unmounting must be swallowed entirely: no load
+    // failure logged, no React "state update on unmounted component" or
+    // unhandled-rejection warning either.
+    expect(consoleError).not.toHaveBeenCalled();
   });
 
   it("11. invalid JSON response body: no crash, shows the invalid-response message", async () => {

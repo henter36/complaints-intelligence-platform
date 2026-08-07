@@ -339,9 +339,9 @@ export function Analytics() {
       )}
 
       {filtersError !== null && (
-        <p className="text-xs text-muted-foreground" role="status">
+        <output className="block text-xs text-muted-foreground">
           {filtersError}
-        </p>
+        </output>
       )}
 
       {/* ---------- Filter Bar ---------- */}

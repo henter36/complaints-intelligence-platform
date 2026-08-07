@@ -199,6 +199,42 @@ describe("isDashboardData", () => {
     const payload = dashboardRecord();
     expect(isDashboardData(payload)).toBe(true);
   });
+
+  it("rejects a volume field with the wrong type", () => {
+    const payload = dashboardRecord();
+    asRecord(payload.volume).total = "10";
+    expect(isDashboardData(payload)).toBe(false);
+  });
+
+  it("rejects a payload with a performance field missing", () => {
+    const payload = dashboardRecord();
+    delete asRecord(payload.performance).closureRate;
+    expect(isDashboardData(payload)).toBe(false);
+  });
+
+  it("accepts performance.onTimeRate: null but rejects it as a string", () => {
+    const nullable = dashboardRecord();
+    asRecord(nullable.performance).onTimeRate = null;
+    expect(isDashboardData(nullable)).toBe(true);
+
+    const invalid = dashboardRecord();
+    asRecord(invalid.performance).onTimeRate = "75";
+    expect(isDashboardData(invalid)).toBe(false);
+  });
+
+  it("rejects trendData containing a malformed point", () => {
+    for (const point of [{ date: "2026-07-29" }, { date: "2026-07-29", total: "10", closed: 5 }, { total: 10, closed: 5 }]) {
+      const payload = dashboardRecord();
+      asRecord(payload.trend).trendData = [point];
+      expect(isDashboardData(payload)).toBe(false);
+    }
+  });
+
+  it("rejects an alerts field with a malformed item", () => {
+    const payload = dashboardRecord();
+    asRecord(payload.alerts).criticalComplaints = "0";
+    expect(isDashboardData(payload)).toBe(false);
+  });
 });
 
 describe("isAnalyticsData", () => {
@@ -253,6 +289,49 @@ describe("isAnalyticsData", () => {
     const payload = analyticsRecord();
     asRecord(payload.crossTabs).classifications = ["ok", 5];
     expect(isAnalyticsData(payload)).toBe(false);
+  });
+
+  it("rejects a crossTabs row whose cell value is neither a number nor a string", () => {
+    const payload = analyticsRecord();
+    asRecord(payload.crossTabs).classificationByRegion = [{ classification: "الخدمة", الرياض: { nested: true } }];
+    expect(isAnalyticsData(payload)).toBe(false);
+  });
+
+  it("accepts a well-formed crossTabs row with dynamic region/department columns", () => {
+    const payload = analyticsRecord();
+    asRecord(payload.crossTabs).classificationByRegion = [{ classification: "الخدمة", الرياض: 5 }];
+    expect(isAnalyticsData(payload)).toBe(true);
+  });
+
+  it("rejects a channelEffectiveness item missing required fields", () => {
+    const payload = analyticsRecord();
+    payload.channelEffectiveness = [{ channel: "هاتف", total: 10 }];
+    expect(isAnalyticsData(payload)).toBe(false);
+  });
+
+  it.each(["delayReasons", "recurringSubjects", "recurringClassifications"])(
+    "rejects %s when it contains an item missing count",
+    (key) => {
+      const payload = analyticsRecord();
+      payload[key] = [{ name: "سبب" }];
+      expect(isAnalyticsData(payload)).toBe(false);
+    }
+  );
+
+  it("rejects a regionPriorityBreakdown row whose cell value is not a number or string", () => {
+    const payload = analyticsRecord();
+    payload.regionPriorityBreakdown = [{ region: "الرياض", "حرجة": [1, 2] }];
+    expect(isAnalyticsData(payload)).toBe(false);
+  });
+
+  it("rejects totalCount with the wrong type or missing", () => {
+    const wrongType = analyticsRecord();
+    wrongType.totalCount = "10";
+    expect(isAnalyticsData(wrongType)).toBe(false);
+
+    const missing = analyticsRecord();
+    delete missing.totalCount;
+    expect(isAnalyticsData(missing)).toBe(false);
   });
 
   it.each(["regions", "departments", "classifications"])(

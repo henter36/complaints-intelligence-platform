@@ -132,13 +132,20 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every(isString);
 }
 
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isNullableFiniteNumber(value: unknown): value is number | null {
+  return value === null || isFiniteNumber(value);
+}
+
+function hasFiniteNumberFields(record: Record<string, unknown>, keys: readonly string[]): boolean {
+  return keys.every((key) => isFiniteNumber(record[key]));
+}
+
 export function isNameCountItem(value: unknown): value is NameCountItem {
-  return (
-    isRecord(value)
-    && typeof value.name === "string"
-    && typeof value.count === "number"
-    && Number.isFinite(value.count)
-  );
+  return isRecord(value) && typeof value.name === "string" && isFiniteNumber(value.count);
 }
 
 export function isNameCountArray(value: unknown): value is NameCountItem[] {
@@ -149,16 +156,24 @@ function isAnalyticsAnomalyItem(value: unknown): value is AnalyticsAnomalyItem {
   return (
     isRecord(value)
     && typeof value.name === "string"
-    && typeof value.count === "number"
-    && Number.isFinite(value.count)
-    && typeof value.average === "number"
-    && typeof value.deviation === "number"
+    && isFiniteNumber(value.count)
+    && isFiniteNumber(value.average)
+    && isFiniteNumber(value.deviation)
     && typeof value.isAnomaly === "boolean"
   );
 }
 
 function isAnomalyArray(value: unknown): value is AnalyticsAnomalyItem[] {
   return Array.isArray(value) && value.every(isAnalyticsAnomalyItem);
+}
+
+/** A cross-tab / regional-priority row: dynamic column keys, each a number or a label string. */
+function isCrossTabRow(value: unknown): value is CrossTabRow {
+  return isRecord(value) && Object.values(value).every((cell) => typeof cell === "number" || typeof cell === "string");
+}
+
+function isCrossTabRowArray(value: unknown): value is CrossTabRow[] {
+  return Array.isArray(value) && value.every(isCrossTabRow);
 }
 
 const CORE_DISTRIBUTION_KEYS = ["byRegion", "byDepartment", "byClassification", "byChannel"] as const;
@@ -172,49 +187,121 @@ function isDistributionRecord(value: unknown, keys: readonly string[]): value is
   return isRecord(value) && hasValidDistributionArrays(value, keys);
 }
 
+// ---------- DashboardData field validators ----------
+
+const DASHBOARD_VOLUME_KEYS = [
+  "total", "open", "inProgress", "closed", "reopened", "rejected",
+  "late", "repeated", "validated", "notValidated", "potentialDuplicates",
+] as const;
+
+function isDashboardVolume(value: unknown): value is DashboardData["volume"] {
+  return isRecord(value) && hasFiniteNumberFields(value, DASHBOARD_VOLUME_KEYS);
+}
+
+const DASHBOARD_PERFORMANCE_NUMBER_KEYS = [
+  "closureRate", "lateRate", "avgFirstResponseHours", "avgProcessingHours", "avgOpenAgeHours",
+  "overdueNoAction", "overdueNoActionRate", "reopenRate", "validityRate", "avgSatisfaction", "satisfactionRate",
+] as const;
+
+function isDashboardPerformance(value: unknown): value is DashboardData["performance"] {
+  return (
+    isRecord(value)
+    && isNullableFiniteNumber(value.onTimeRate)
+    && hasFiniteNumberFields(value, DASHBOARD_PERFORMANCE_NUMBER_KEYS)
+  );
+}
+
+function isTrendPoint(value: unknown): value is DashboardData["trend"]["trendData"][number] {
+  return isRecord(value) && typeof value.date === "string" && isFiniteNumber(value.total) && isFiniteNumber(value.closed);
+}
+
+function isDashboardTrend(value: unknown): value is DashboardData["trend"] {
+  return (
+    isRecord(value)
+    && isNullableFiniteNumber(value.previousTotal)
+    && isNullableFiniteNumber(value.growthRate)
+    && Array.isArray(value.trendData)
+    && value.trendData.every(isTrendPoint)
+  );
+}
+
+const DASHBOARD_ALERTS_KEYS = ["criticalComplaints", "lateCritical", "missingFields", "dataQualityRate"] as const;
+
+function isDashboardAlerts(value: unknown): value is DashboardData["alerts"] {
+  return isRecord(value) && hasFiniteNumberFields(value, DASHBOARD_ALERTS_KEYS);
+}
+
 export function isDashboardData(value: unknown): value is DashboardData {
-  if (!isRecord(value)) return false;
-  if (!isRecord(value.volume)) return false;
-  if (!isRecord(value.performance)) return false;
-  if (!isRecord(value.trend)) return false;
+  return (
+    isRecord(value)
+    && isDashboardVolume(value.volume)
+    && isDashboardPerformance(value.performance)
+    && isDashboardTrend(value.trend)
+    && isDistributionRecord(value.distributions, DASHBOARD_DISTRIBUTION_KEYS)
+    && isDashboardAlerts(value.alerts)
+  );
+}
 
-  const growthRate = value.trend.growthRate;
-  if (typeof growthRate !== "number" && growthRate !== null) return false;
-  if (!Array.isArray(value.trend.trendData)) return false;
+// ---------- AnalyticsData field validators ----------
 
-  if (!isDistributionRecord(value.distributions, DASHBOARD_DISTRIBUTION_KEYS)) return false;
-  if (!isRecord(value.alerts)) return false;
+function isChannelEffectivenessItem(value: unknown): value is AnalyticsData["channelEffectiveness"][number] {
+  return (
+    isRecord(value)
+    && typeof value.channel === "string"
+    && isFiniteNumber(value.total)
+    && isFiniteNumber(value.closed)
+    && isFiniteNumber(value.closureRate)
+    && isFiniteNumber(value.lateRate)
+    && isFiniteNumber(value.avgProcessingHours)
+  );
+}
 
-  return true;
+function isChannelEffectivenessArray(value: unknown): value is AnalyticsData["channelEffectiveness"] {
+  return Array.isArray(value) && value.every(isChannelEffectivenessItem);
+}
+
+function isCrossTabs(value: unknown): value is AnalyticsData["crossTabs"] {
+  return (
+    isRecord(value)
+    && isStringArray(value.classifications)
+    && isStringArray(value.regions)
+    && isStringArray(value.departments)
+    && isCrossTabRowArray(value.classificationByRegion)
+    && isCrossTabRowArray(value.classificationByDepartment)
+  );
+}
+
+function isAnalyticsCollections(value: Record<string, unknown>): boolean {
+  return (
+    isChannelEffectivenessArray(value.channelEffectiveness)
+    && isNameCountArray(value.delayReasons)
+    && isNameCountArray(value.recurringSubjects)
+    && isNameCountArray(value.recurringClassifications)
+  );
+}
+
+function isAnomalies(value: unknown): value is AnalyticsData["anomalies"] {
+  return (
+    isRecord(value)
+    && isAnomalyArray(value.regions)
+    && isAnomalyArray(value.departments)
+    && isNameCountArray(value.classifications)
+  );
+}
+
+function isPreviousDistributions(value: unknown): value is AnalyticsData["previousDistributions"] {
+  return value === null || isDistributionRecord(value, CORE_DISTRIBUTION_KEYS);
 }
 
 export function isAnalyticsData(value: unknown): value is AnalyticsData {
   if (!isRecord(value)) return false;
 
-  if (!isRecord(value.crossTabs)) return false;
-  if (!isStringArray(value.crossTabs.classifications)) return false;
-  if (!isStringArray(value.crossTabs.regions)) return false;
-  if (!isStringArray(value.crossTabs.departments)) return false;
-  if (!Array.isArray(value.crossTabs.classificationByRegion)) return false;
-  if (!Array.isArray(value.crossTabs.classificationByDepartment)) return false;
-
-  if (!Array.isArray(value.channelEffectiveness)) return false;
-  if (!Array.isArray(value.delayReasons)) return false;
-  if (!Array.isArray(value.recurringSubjects)) return false;
-  if (!Array.isArray(value.recurringClassifications)) return false;
-  if (!Array.isArray(value.regionPriorityBreakdown)) return false;
-
-  if (!isRecord(value.anomalies)) return false;
-  if (!isAnomalyArray(value.anomalies.regions)) return false;
-  if (!isAnomalyArray(value.anomalies.departments)) return false;
-  if (!isNameCountArray(value.anomalies.classifications)) return false;
-
-  if (
-    value.previousDistributions !== null
-    && !isDistributionRecord(value.previousDistributions, CORE_DISTRIBUTION_KEYS)
-  ) {
-    return false;
-  }
-
-  return true;
+  return (
+    isCrossTabs(value.crossTabs)
+    && isAnalyticsCollections(value)
+    && isCrossTabRowArray(value.regionPriorityBreakdown)
+    && isAnomalies(value.anomalies)
+    && isPreviousDistributions(value.previousDistributions)
+    && isFiniteNumber(value.totalCount)
+  );
 }
