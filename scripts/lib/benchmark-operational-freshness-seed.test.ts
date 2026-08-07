@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   BENCHMARK_NOW,
   DAY_MS,
+  HOUR_MS,
+  MAX_HIGH_CARDINALITY_ROWS,
+  assertSupportedSyntheticCardinality,
   sourceModifiedAtForRow,
   sourceUpdatedAtForRow,
 } from "./benchmark-operational-freshness-seed";
@@ -76,6 +79,49 @@ describe("sourceUpdatedAtForRow", () => {
     // offset — so distinct count == number of non-missing rows exactly.
     expect(countDistinctUpdatedTimestamps(100_000, "high")).toBe(80_000);
     expect(countDistinctUpdatedTimestamps(500_000, "high")).toBe(400_000);
+  });
+
+  it("MAX_HIGH_CARDINALITY_ROWS boundary: the last safe bucket-0 (fresh_1d) index stays fresh, the first unsafe index does not", () => {
+    // The largest bucket-0 (i % 5 === 0) index within a MAX_HIGH_CARDINALITY_ROWS-sized
+    // dataset (indices 0..MAX_HIGH_CARDINALITY_ROWS - 1) is
+    // MAX_HIGH_CARDINALITY_ROWS - 5, since MAX_HIGH_CARDINALITY_ROWS - 1 itself
+    // is bucket 4 (missing). It must still resolve to fresh_1d (age < 24h).
+    const lastSafeIndex = MAX_HIGH_CARDINALITY_ROWS - 5;
+    expect(lastSafeIndex % 5).toBe(0);
+    const lastSafeValue = sourceUpdatedAtForRow(lastSafeIndex, "high");
+    expect(lastSafeValue).not.toBeNull();
+    const lastSafeAgeMs = BENCHMARK_NOW.getTime() - lastSafeValue!.getTime();
+    expect(lastSafeAgeMs).toBeLessThan(DAY_MS);
+    expect(lastSafeAgeMs).toBeGreaterThan(DAY_MS - HOUR_MS / 60); // within a minute of the 24h boundary
+
+    // Index MAX_HIGH_CARDINALITY_ROWS itself (only reachable by a dataset of
+    // MAX_HIGH_CARDINALITY_ROWS + 1 rows or more — exactly what
+    // assertSupportedSyntheticCardinality rejects) breaks the boundary: it
+    // lands in stale_1_3d instead of fresh_1d. This is *why* the limit exists.
+    expect(MAX_HIGH_CARDINALITY_ROWS % 5).toBe(0);
+    const firstUnsafeValue = sourceUpdatedAtForRow(MAX_HIGH_CARDINALITY_ROWS, "high");
+    expect(firstUnsafeValue).not.toBeNull();
+    const firstUnsafeAgeMs = BENCHMARK_NOW.getTime() - firstUnsafeValue!.getTime();
+    expect(firstUnsafeAgeMs).toBeGreaterThanOrEqual(DAY_MS);
+  });
+});
+
+describe("assertSupportedSyntheticCardinality", () => {
+  it("never throws for normal cardinality, at any size", () => {
+    expect(() => assertSupportedSyntheticCardinality(MAX_HIGH_CARDINALITY_ROWS, "normal")).not.toThrow();
+    expect(() => assertSupportedSyntheticCardinality(MAX_HIGH_CARDINALITY_ROWS + 1, "normal")).not.toThrow();
+    expect(() => assertSupportedSyntheticCardinality(Number.MAX_SAFE_INTEGER, "normal")).not.toThrow();
+  });
+
+  it("allows high cardinality up to and including MAX_HIGH_CARDINALITY_ROWS", () => {
+    expect(() => assertSupportedSyntheticCardinality(500_000, "high")).not.toThrow();
+    expect(() => assertSupportedSyntheticCardinality(MAX_HIGH_CARDINALITY_ROWS, "high")).not.toThrow();
+  });
+
+  it("rejects high cardinality above MAX_HIGH_CARDINALITY_ROWS", () => {
+    expect(() => assertSupportedSyntheticCardinality(MAX_HIGH_CARDINALITY_ROWS + 1, "high")).toThrow(
+      `high-cardinality synthetic benchmark supports at most ${MAX_HIGH_CARDINALITY_ROWS} rows to preserve freshness bucket boundaries`
+    );
   });
 });
 

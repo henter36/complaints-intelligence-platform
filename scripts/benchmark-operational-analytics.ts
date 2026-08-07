@@ -27,6 +27,7 @@ import {
   BENCHMARK_NOW,
   DAY_MS,
   type Cardinality,
+  assertSupportedSyntheticCardinality,
   sourceModifiedAtForRow,
   sourceUpdatedAtForRow,
 } from "./lib/benchmark-operational-freshness-seed";
@@ -188,6 +189,9 @@ async function prepareDatabase(mode: Mode): Promise<PreparedDatabase> {
   if (cardinality !== "normal" && cardinality !== "high") {
     throw new Error("--cardinality must be normal or high");
   }
+  // Applies even under --allow-custom-size: high-cardinality seeding beyond
+  // this size would silently push rows across a freshness bucket boundary.
+  assertSupportedSyntheticCardinality(size, cardinality);
   if (process.env.DATABASE_URL && isDevDbUrl(process.env.DATABASE_URL)) {
     throw new Error("Refusing synthetic seed against prisma/dev.db");
   }

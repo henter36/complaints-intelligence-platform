@@ -258,12 +258,19 @@ table (80,000 groups, 0.16 ratio) was consequently not a 500k-row worst case at 
 risk exactly as flagged in review.
 
 **Fix**: the offset is now `Math.floor(i / 5) * 100` — the row's own 0-based sequence number
-*within its bucket* (no modulo, so it never wraps around and never re-collides two distinct rows
-onto the same timestamp, at any dataset size). See
+*within its bucket* (no modulo, so uniqueness never wraps around and never re-collides two
+distinct rows onto the same timestamp, **up to the enforced high-cardinality synthetic limit of
+2,160,000 total rows** — `MAX_HIGH_CARDINALITY_ROWS` in
+`scripts/lib/benchmark-operational-freshness-seed.ts`). That limit is not a production, database,
+or freshness-aggregate-service limit — it is only where the *synthetic benchmark generator's* own
+offset arithmetic would start crossing a freshness bucket boundary (derived and documented next to
+the constant). Every high-cardinality benchmark actually run for Issue #63 phase 3 tops out at
+500,000 rows, well under this ceiling; `assertSupportedSyntheticCardinality` throws before seeding
+if a future benchmark run ever requests more. See
 `scripts/lib/benchmark-operational-freshness-seed.ts::sourceUpdatedAtForRow` for the implementation
-and `scripts/lib/benchmark-operational-freshness-seed.test.ts` for a regression test that fails
-if a capping modulo is ever reintroduced (it asserts distinct-timestamp cardinality scales
-linearly with row count up to 500,000).
+and `scripts/lib/benchmark-operational-freshness-seed.test.ts` for regression tests that fail if a
+capping modulo is ever reintroduced, or if the boundary math at
+`MAX_HIGH_CARDINALITY_ROWS` ever regresses.
 
 The numbers below **supersede** the earlier (capped) 100k/500k high-cardinality measurements in
 prior revisions of this document and in the original PR benchmark run.
