@@ -14,6 +14,9 @@ import {
 
 const HOUR_MS = 60 * 60 * 1000;
 
+/** Narrow client shape so tests can inject a query-instrumented PrismaClient without changing production callers. */
+export type FreshnessDbClient = Pick<typeof db, "complaint">;
+
 export type AggregatedFreshnessResult = {
   metrics: DataFreshnessMetrics;
   performanceMs: number;
@@ -190,30 +193,33 @@ export function buildFreshnessMetricsFromAggregates(options: {
  * queries (sourceUpdatedAt alone, and the sourceUpdatedAt/sourceModifiedAt
  * pair) = 8 queries, all issued in parallel.
  */
-export async function loadAggregatedFreshnessMetrics(options: {
-  where: Prisma.ComplaintWhereInput;
-  now: Date;
-  total: number;
-}): Promise<AggregatedFreshnessResult> {
+export async function loadAggregatedFreshnessMetrics(
+  options: {
+    where: Prisma.ComplaintWhereInput;
+    now: Date;
+    total: number;
+  },
+  client: FreshnessDbClient = db
+): Promise<AggregatedFreshnessResult> {
   const t0 = performance.now();
 
   const bucketCountPromises = DATA_FRESHNESS_BUCKETS.map((bucket) =>
-    db.complaint.count({
+    client.complaint.count({
       where: andWhere(options.where, freshnessBucketWhere(bucket, options.now)),
     })
   );
 
-  const missingModifiedAtPromise = db.complaint.count({
+  const missingModifiedAtPromise = client.complaint.count({
     where: andWhere(options.where, { sourceModifiedAt: null }),
   });
 
-  const updatedGroupsPromise = db.complaint.groupBy({
+  const updatedGroupsPromise = client.complaint.groupBy({
     by: ["sourceUpdatedAt"],
     where: andWhere(options.where, { sourceUpdatedAt: { not: null } }),
     _count: { _all: true },
   });
 
-  const pairGroupsPromise = db.complaint.groupBy({
+  const pairGroupsPromise = client.complaint.groupBy({
     by: ["sourceUpdatedAt", "sourceModifiedAt"],
     where: andWhere(options.where, {
       AND: [{ sourceUpdatedAt: { not: null } }, { sourceModifiedAt: { not: null } }],

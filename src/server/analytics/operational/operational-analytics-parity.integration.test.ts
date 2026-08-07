@@ -296,6 +296,50 @@ async function seedParityDataset(prisma: PrismaClient) {
         closedAt: new Date("2026-06-23T00:00:00.000Z"),
         sourceUpdatedAt: new Date(NOW.getTime() - 6 * DAY_MS),
       },
+      // Data Quality parity requires modifiedBeforeUpdated / diff-hours to be
+      // genuinely non-zero somewhere in the fixture — every other row above
+      // leaves sourceModifiedAt unset (null), so a hard-coded-zero
+      // implementation would pass parity checks undetected without these.
+      // Dated in August (outside the July current/previous-period windows
+      // used by other tests) and region "مكة" / wingCode null, so they never
+      // affect any of the from/to- or W1-scoped assertions above.
+      {
+        ...base,
+        externalId: "parity-modified-after-updated",
+        status: ComplaintStatus.OPEN,
+        sourceOrigin: "قناة اختبار",
+        sourceStatus: "مبدئي",
+        sourceActionStatus: "جديد",
+        channel: "الهاتف",
+        region: "مكة",
+        facility: "مستشفى ب",
+        department: "العيادات",
+        wingCode: null,
+        complaintDate: new Date("2026-08-01T00:00:00.000Z"),
+        receivedAt: new Date("2026-08-01T08:00:00.000Z"),
+        sourceUpdatedAt: new Date(NOW.getTime() - 2 * DAY_MS),
+        // +2h after updated -> counts toward modifiedBeforeUpdated (legacy semantics).
+        sourceModifiedAt: new Date(NOW.getTime() - 2 * DAY_MS + 2 * 60 * 60 * 1000),
+      },
+      {
+        ...base,
+        externalId: "parity-modified-before-updated",
+        status: ComplaintStatus.OPEN,
+        sourceOrigin: "قناة اختبار",
+        sourceStatus: "مبدئي",
+        sourceActionStatus: "جديد",
+        channel: "الهاتف",
+        region: "مكة",
+        facility: "مستشفى ب",
+        department: "العيادات",
+        wingCode: null,
+        complaintDate: new Date("2026-08-02T00:00:00.000Z"),
+        receivedAt: new Date("2026-08-02T08:00:00.000Z"),
+        sourceUpdatedAt: new Date(NOW.getTime() - 2 * DAY_MS),
+        // -3h before updated -> does NOT count toward modifiedBeforeUpdated,
+        // but does contribute to the diff-hours average with the opposite sign.
+        sourceModifiedAt: new Date(NOW.getTime() - 2 * DAY_MS - 3 * 60 * 60 * 1000),
+      },
     ],
   });
 }
@@ -446,27 +490,41 @@ describe("operational analytics DB aggregate integration", () => {
     expect(sumOfBuckets).toBe(summary.totalInScope);
   });
 
-  it("matches the three sourceUpdatedAt/sourceModifiedAt data-quality signal counts to the freshness aggregate", async () => {
+  it("matches the three sourceUpdatedAt/sourceModifiedAt data-quality signal counts to the freshness aggregate, with explicit non-zero expected values", async () => {
     const summary = await getOperationalAnalytics(new URLSearchParams(), { now: NOW });
     const byId = new Map(summary.dataQuality.map((signal) => [signal.id, signal]));
 
+    // Explicit expected values from the fixture (not just cross-field
+    // equality — a hard-coded-zero implementation would pass a
+    // signal-vs-freshness-field comparison undetected if both sides were
+    // wrong the same way):
+    // - 10 of the 12 seeded rows never set sourceModifiedAt.
+    // - Only "parity-modified-after-updated" has sourceModifiedAt > sourceUpdatedAt.
+    expect(summary.freshness.missingModifiedAt).toBe(10);
+    expect(summary.freshness.modifiedBeforeUpdated).toBe(1);
+
+    // Wiring: the data-quality signal must reflect the same freshness values,
+    // not just happen to also be correct independently.
     expect(byId.get("missing_source_updated_at")?.count).toBe(summary.freshness.missingUpdatedAt);
     expect(byId.get("missing_source_modified_at")?.count).toBe(summary.freshness.missingModifiedAt);
     expect(byId.get("modified_after_updated")?.count).toBe(summary.freshness.modifiedBeforeUpdated);
   });
 
   it("keeps freshness in the same scope as a base query that already filters dataFreshnessBucket, across many combined filters", async () => {
-    // parity-6 is the only seeded row matching every one of these filters:
-    // region/facility/department/channel/status all set, plus stale_7d_plus
-    // (sourceUpdatedAt = NOW - 8 days).
+    // Two seeded rows match every one of these filters simultaneously —
+    // region/facility/department/channel/status, plus stale_7d_plus:
+    // parity-6 (sourceUpdatedAt = NOW - 8 days) and parity-prev-1
+    // (sourceUpdatedAt = NOW - 20 days). Both are CLOSED, "الرياض" /
+    // "مستشفى أ" / "الطوارئ" / "الهاتف".
     const params = new URLSearchParams(
       "region=الرياض&facility=مستشفى أ&department=الطوارئ&channel=الهاتف&status=CLOSED&dataFreshnessBucket=stale_7d_plus"
     );
     const summary = await getOperationalAnalytics(params, { now: NOW });
     const list = await listComplaints(params, { now: NOW });
 
+    expect(summary.totalInScope).toBe(2);
+    expect(list.pagination.total).toBe(2);
     expect(summary.totalInScope).toBe(list.pagination.total);
-    expect(summary.totalInScope).toBeGreaterThan(0);
 
     for (const bucket of summary.freshness.buckets) {
       if (bucket.bucket === "stale_7d_plus") {

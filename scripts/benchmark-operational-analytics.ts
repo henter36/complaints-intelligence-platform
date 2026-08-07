@@ -23,6 +23,13 @@ import {
 } from "./lib/benchmark-sqlite-snapshot";
 import { isDevDbUrl } from "./lib/benchmark-paths";
 import { runPrismaMigrateDeploy } from "./lib/prisma-cli-runner";
+import {
+  BENCHMARK_NOW,
+  DAY_MS,
+  type Cardinality,
+  sourceModifiedAtForRow,
+  sourceUpdatedAtForRow,
+} from "./lib/benchmark-operational-freshness-seed";
 
 type Mode = "read-only-current" | "synthetic";
 
@@ -73,53 +80,6 @@ function installQueryCounter(client: {
     };
   }
   return () => count;
-}
-
-const DAY_MS = 24 * 60 * 60 * 1000;
-const HOUR_MS = 60 * 60 * 1000;
-/** Fixed "now" for both seeding math and the benchmarked getOperationalAnalytics call, so
- *  freshness bucket distribution is deterministic regardless of when the script runs. */
-export const BENCHMARK_NOW = new Date("2026-08-05T12:00:00.000Z");
-
-type Cardinality = "normal" | "high";
-
-/**
- * Deterministically places row `i` in one of the 5 freshness buckets
- * (i % 5) and returns a sourceUpdatedAt landing in that bucket.
- *   - normal cardinality: timestamps repeat in chunks of 200 within a bucket
- *     (simulates realistic import batches sharing an update run).
- *   - high cardinality: every row gets its own millisecond-unique timestamp,
- *     stressing the groupBy(sourceUpdatedAt) cardinality (Issue #63 phase 3
- *     stop-condition check — see docs/performance/operational-analytics-phase3-freshness.md).
- */
-function sourceUpdatedAtForRow(i: number, cardinality: Cardinality): Date | null {
-  const bucket = i % 5;
-  if (bucket === 4) return null; // missing
-
-  // Bounded well under the tightest bucket margin (fresh_1d's 12h base sits
-  // 12h from its 24h boundary) so the offset can never push a row into the
-  // next, older bucket — regardless of dataset size.
-  const offsetMs =
-    cardinality === "high"
-      ? (i * 400) % 40_000_000 // ~unique per row up to ~100k rows/bucket (500k rows / 5 buckets)
-      : (Math.floor(i / 200) % 100) * 300_000; // ~100 repeated groups, 5 minutes apart
-
-  if (bucket === 0) return new Date(BENCHMARK_NOW.getTime() - 12 * HOUR_MS - offsetMs); // fresh_1d
-  if (bucket === 1) return new Date(BENCHMARK_NOW.getTime() - 2 * DAY_MS - offsetMs); // stale_1_3d
-  if (bucket === 2) return new Date(BENCHMARK_NOW.getTime() - 5 * DAY_MS - offsetMs); // stale_3_7d
-  return new Date(BENCHMARK_NOW.getTime() - 10 * DAY_MS - offsetMs); // stale_7d_plus
-}
-
-/**
- * sourceModifiedAt variety: ~30% missing, ~10% modified after updated
- * (exercises modifiedBeforeUpdated), ~60% modified before/at updated.
- */
-function sourceModifiedAtForRow(i: number, sourceUpdatedAt: Date | null): Date | null {
-  if (sourceUpdatedAt === null) return null;
-  const bucket = i % 10;
-  if (bucket < 3) return null; // ~30% missing
-  if (bucket < 4) return new Date(sourceUpdatedAt.getTime() + 2 * HOUR_MS); // ~10% modified after updated
-  return new Date(sourceUpdatedAt.getTime() - ((i % 5) + 1) * HOUR_MS); // ~60% modified before updated
 }
 
 async function seedSynthetic(
@@ -180,13 +140,19 @@ async function seedSynthetic(
   }
 }
 
-async function prepareDatabase(mode: Mode): Promise<{
+type PreparedDatabase = {
   databaseUrl: string;
   sourceSha?: string;
   sourcePath?: string;
   tempDir?: string;
   size?: number;
-}> {
+  /** The cardinality actually applied to the seeded data — null when no synthetic
+   *  seeding happened (read-only-current), so the report can never claim a
+   *  --cardinality value was applied when the generator was never invoked. */
+  cardinality: Cardinality | null;
+};
+
+async function prepareDatabase(mode: Mode): Promise<PreparedDatabase> {
   if (mode === "read-only-current") {
     const databaseUrl = process.env.DATABASE_URL ?? argValue("database-url");
     if (!databaseUrl) {
@@ -194,7 +160,7 @@ async function prepareDatabase(mode: Mode): Promise<{
     }
     const sourcePath = filePathFromUrl(databaseUrl);
     if (!sourcePath) {
-      return { databaseUrl };
+      return { databaseUrl, cardinality: null };
     }
     const absolute = resolve(sourcePath);
     if (!existsSync(absolute)) {
@@ -210,6 +176,7 @@ async function prepareDatabase(mode: Mode): Promise<{
       sourceSha: snapshot.sourceSha,
       sourcePath: absolute,
       tempDir: snapshot.tempDir,
+      cardinality: null,
     };
   }
 
@@ -237,7 +204,7 @@ async function prepareDatabase(mode: Mode): Promise<{
     } finally {
       await prisma.$disconnect();
     }
-    return { databaseUrl, tempDir, size };
+    return { databaseUrl, tempDir, size, cardinality };
   } catch (error) {
     rmSync(tempDir, { recursive: true, force: true });
     throw error;
@@ -326,7 +293,7 @@ async function main(): Promise<void> {
       const report = {
         mode,
         params: params.toString(),
-        cardinality: argValue("cardinality") ?? "normal",
+        cardinality: prepared.cardinality ?? "not-applicable",
         size: prepared.size ?? rowCount,
         rowCount,
         totalInScope: result.totalInScope,

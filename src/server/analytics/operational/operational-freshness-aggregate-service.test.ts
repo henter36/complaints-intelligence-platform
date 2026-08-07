@@ -38,6 +38,7 @@ import {
 
 let prisma: PrismaClient | null = null;
 let tempDir: string | null = null;
+let testDatabaseUrl = "";
 let classificationId = "";
 
 /** All rows below are tagged by `department` so each scenario can scope its own `where`. */
@@ -46,6 +47,7 @@ const DEPT_AVG_AGE = "freshness-avg-age";
 const DEPT_DIAGNOSTICS = "freshness-diagnostics";
 const DEPT_QUERY_COUNT_SMALL = "freshness-qcount-small";
 const DEPT_QUERY_COUNT_LARGE = "freshness-qcount-large";
+const DEPT_NEGATIVE_DIFF = "freshness-negative-diff";
 
 type SeedRow = {
   externalId: string;
@@ -111,6 +113,21 @@ const weightedPairRows: SeedRow[] = [
   },
 ];
 
+// A scope whose weighted diff-hours average is net NEGATIVE — a scenario
+// dominated by a positive-leaning average (like DEPT_DIAGNOSTICS above)
+// cannot distinguish a correct signed average from an accidental Math.abs():
+// abs() of a positive number is unchanged. This scope would fail loudly
+// under an abs() regression (it would flip from -1.0 to +1.0).
+const NEGATIVE_DIFF_UPDATED = new Date("2026-08-03T10:00:00.000Z");
+const negativeDiffRows: SeedRow[] = [
+  // A: modified 12:00, updated 10:00 -> diff = updated - modified = -2h; modifiedBeforeUpdated.
+  { externalId: "neg-a", department: DEPT_NEGATIVE_DIFF, sourceUpdatedAt: NEGATIVE_DIFF_UPDATED, sourceModifiedAt: new Date(NEGATIVE_DIFF_UPDATED.getTime() + 2 * HOUR_MS) },
+  // B: same pair as A (-2h) -> weighted, not a duplicate no-op.
+  { externalId: "neg-b", department: DEPT_NEGATIVE_DIFF, sourceUpdatedAt: NEGATIVE_DIFF_UPDATED, sourceModifiedAt: new Date(NEGATIVE_DIFF_UPDATED.getTime() + 2 * HOUR_MS) },
+  // C: modified 09:00, updated 10:00 -> diff = +1h; not modifiedBeforeUpdated.
+  { externalId: "neg-c", department: DEPT_NEGATIVE_DIFF, sourceUpdatedAt: NEGATIVE_DIFF_UPDATED, sourceModifiedAt: new Date(NEGATIVE_DIFF_UPDATED.getTime() - HOUR_MS) },
+];
+
 function buildLargeQueryCountRows(count: number): SeedRow[] {
   return Array.from({ length: count }, (_, i) => ({
     externalId: `qcount-large-${i}`,
@@ -144,6 +161,7 @@ async function seed(client: PrismaClient) {
     ...avgAgeRows,
     ...diagnosticsRows,
     ...weightedPairRows,
+    ...negativeDiffRows,
     ...smallQueryCountRows,
     ...largeQueryCountRows,
   ];
@@ -176,9 +194,9 @@ async function seed(client: PrismaClient) {
 beforeAll(async () => {
   tempDir = mkdtempSync(join(tmpdir(), "cip-freshness-agg-"));
   const dbPath = join(tempDir, "test.db");
-  const databaseUrl = `file:${dbPath}`;
-  runPrismaMigrateDeploy(databaseUrl);
-  prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
+  testDatabaseUrl = `file:${dbPath}`;
+  runPrismaMigrateDeploy(testDatabaseUrl);
+  prisma = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
   dbHolder.client = prisma;
   await seed(prisma);
 }, 120_000);
@@ -344,19 +362,19 @@ describe("loadAggregatedFreshnessMetrics — updated/modified diagnostics", () =
     expect(result.metrics.missingModifiedAt).toBe(2);
   });
 
-  it("never uses Math.abs on the diff-hours average — a negative-leaning scope stays negative", async () => {
-    // Isolate just the outlier-heavy relationship: build an ad hoc where that
-    // only spans rows whose modified is strictly after updated more often than not.
-    const total = await countInDepartment(DEPT_DIAGNOSTICS);
+  it("never uses Math.abs on the diff-hours average — a net-negative scope stays negative", async () => {
+    const total = await countInDepartment(DEPT_NEGATIVE_DIFF);
     const result = await loadAggregatedFreshnessMetrics({
-      where: departmentWhere(DEPT_DIAGNOSTICS),
+      where: departmentWhere(DEPT_NEGATIVE_DIFF),
       now: NOW,
       total,
     });
-    // The scope is dominated by +1h contributions (101 rows) vs -2 rows at -1h,
-    // so the average must be positive — this assertion would also catch an
-    // accidental abs() flip on the opposite-signed minority contributions.
-    expect(result.metrics.updatedVsModifiedDiffHoursAvg).toBeGreaterThan(0);
+    // (-2 + -2 + 1) / 3 = -1.0. An accidental Math.abs() would flip this to
+    // +1.0 — unlike a positive-leaning scope, abs() cannot leave this value
+    // unchanged, so this genuinely detects the regression the earlier
+    // (now-removed) positive-only assertion could not.
+    expect(result.metrics.updatedVsModifiedDiffHoursAvg).toBe(-1);
+    expect(result.metrics.modifiedBeforeUpdated).toBe(2);
   });
 });
 
@@ -380,5 +398,51 @@ describe("loadAggregatedFreshnessMetrics — fixed query count", () => {
     });
     expect(largeResult.prismaQueries).toBe(8);
     expect(largeResult.prismaQueries).toBe(smallResult.prismaQueries);
+  });
+});
+
+describe("loadAggregatedFreshnessMetrics — actual SQL query events (not derived arithmetic)", () => {
+  /**
+   * `result.prismaQueries` (tested above) is metadata the service computes
+   * about itself — it would report 8 even if the implementation issued a
+   * different number of real queries. This measures actual Prisma "query"
+   * events fired against a real PrismaClient, via loadAggregatedFreshnessMetrics'
+   * injectable client parameter (production code is unaffected — it still
+   * calls the function with no second argument and gets the default `db`).
+   */
+  async function countRealQueries(where: Prisma.ComplaintWhereInput, total: number): Promise<number> {
+    const measuredClient = new PrismaClient({
+      datasources: { db: { url: testDatabaseUrl } },
+      log: [{ emit: "event", level: "query" }],
+    });
+    let queryCount = 0;
+    (measuredClient as unknown as { $on: (event: "query", cb: () => void) => void }).$on(
+      "query",
+      () => {
+        queryCount += 1;
+      }
+    );
+
+    try {
+      // All setup (seeding, count-for-total) already happened in beforeAll /
+      // the caller — queryCount starts at 0 for this fresh client and only
+      // counts what loadAggregatedFreshnessMetrics itself issues.
+      await loadAggregatedFreshnessMetrics({ where, now: NOW, total }, measuredClient);
+      return queryCount;
+    } finally {
+      await measuredClient.$disconnect();
+    }
+  }
+
+  it("fires exactly 8 real SQL queries at 10 rows and at 1000 rows, measured independently per scope", async () => {
+    const smallTotal = await countInDepartment(DEPT_QUERY_COUNT_SMALL);
+    const smallQueryCount = await countRealQueries(departmentWhere(DEPT_QUERY_COUNT_SMALL), smallTotal);
+    expect(smallQueryCount).toBe(8);
+
+    const largeTotal = await countInDepartment(DEPT_QUERY_COUNT_LARGE);
+    const largeQueryCount = await countRealQueries(departmentWhere(DEPT_QUERY_COUNT_LARGE), largeTotal);
+    expect(largeQueryCount).toBe(8);
+
+    expect(largeQueryCount).toBe(smallQueryCount);
   });
 });
