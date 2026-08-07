@@ -23,6 +23,14 @@ import {
 } from "./lib/benchmark-sqlite-snapshot";
 import { isDevDbUrl } from "./lib/benchmark-paths";
 import { runPrismaMigrateDeploy } from "./lib/prisma-cli-runner";
+import {
+  BENCHMARK_NOW,
+  DAY_MS,
+  type Cardinality,
+  assertSupportedSyntheticCardinality,
+  sourceModifiedAtForRow,
+  sourceUpdatedAtForRow,
+} from "./lib/benchmark-operational-freshness-seed";
 
 type Mode = "read-only-current" | "synthetic";
 
@@ -75,7 +83,11 @@ function installQueryCounter(client: {
   return () => count;
 }
 
-async function seedSynthetic(prisma: PrismaClient, size: number): Promise<void> {
+async function seedSynthetic(
+  prisma: PrismaClient,
+  size: number,
+  cardinality: Cardinality
+): Promise<void> {
   const category = await prisma.category.create({
     data: { nameAr: `benchmark-cat-${Date.now()}`, isActive: true },
   });
@@ -92,16 +104,17 @@ async function seedSynthetic(prisma: PrismaClient, size: number): Promise<void> 
   const actionStatuses = ["منتهية", "جديد", null, ""];
   const channels = ["الهاتف", "المنصة", "البريد", null];
   const batchSize = 1000;
-  const now = Date.now();
+  const now = BENCHMARK_NOW.getTime();
 
   for (let offset = 0; offset < size; offset += batchSize) {
     const chunk = Math.min(batchSize, size - offset);
     const rows = Array.from({ length: chunk }, (_, index) => {
       const i = offset + index;
       const closed = i % 5 !== 0;
-      const receivedAt = new Date(now - (i % 400) * 24 * 60 * 60 * 1000);
+      const receivedAt = new Date(now - (i % 400) * DAY_MS);
+      const sourceUpdatedAt = sourceUpdatedAtForRow(i, cardinality);
       return {
-        externalId: `bench-${size}-${i}`,
+        externalId: `bench-${size}-${cardinality}-${i}`,
         subject: `Benchmark ${i}`,
         status: closed ? ComplaintStatus.CLOSED : ComplaintStatus.OPEN,
         priority: ComplaintPriority.MEDIUM,
@@ -117,9 +130,10 @@ async function seedSynthetic(prisma: PrismaClient, size: number): Promise<void> 
         classificationId: classification.id,
         complaintDate: receivedAt,
         receivedAt,
-        dueDate: closed ? null : new Date(receivedAt.getTime() + 7 * 24 * 60 * 60 * 1000),
-        closedAt: closed ? new Date(receivedAt.getTime() + ((i % 10) + 1) * 24 * 60 * 60 * 1000) : null,
-        sourceUpdatedAt: new Date(receivedAt.getTime() + 60 * 60 * 1000),
+        dueDate: closed ? null : new Date(receivedAt.getTime() + 7 * DAY_MS),
+        closedAt: closed ? new Date(receivedAt.getTime() + ((i % 10) + 1) * DAY_MS) : null,
+        sourceUpdatedAt,
+        sourceModifiedAt: sourceModifiedAtForRow(i, sourceUpdatedAt),
         isDeleted: false,
       };
     });
@@ -127,13 +141,19 @@ async function seedSynthetic(prisma: PrismaClient, size: number): Promise<void> 
   }
 }
 
-async function prepareDatabase(mode: Mode): Promise<{
+type PreparedDatabase = {
   databaseUrl: string;
   sourceSha?: string;
   sourcePath?: string;
   tempDir?: string;
   size?: number;
-}> {
+  /** The cardinality actually applied to the seeded data — null when no synthetic
+   *  seeding happened (read-only-current), so the report can never claim a
+   *  --cardinality value was applied when the generator was never invoked. */
+  cardinality: Cardinality | null;
+};
+
+async function prepareDatabase(mode: Mode): Promise<PreparedDatabase> {
   if (mode === "read-only-current") {
     const databaseUrl = process.env.DATABASE_URL ?? argValue("database-url");
     if (!databaseUrl) {
@@ -141,7 +161,7 @@ async function prepareDatabase(mode: Mode): Promise<{
     }
     const sourcePath = filePathFromUrl(databaseUrl);
     if (!sourcePath) {
-      return { databaseUrl };
+      return { databaseUrl, cardinality: null };
     }
     const absolute = resolve(sourcePath);
     if (!existsSync(absolute)) {
@@ -157,6 +177,7 @@ async function prepareDatabase(mode: Mode): Promise<{
       sourceSha: snapshot.sourceSha,
       sourcePath: absolute,
       tempDir: snapshot.tempDir,
+      cardinality: null,
     };
   }
 
@@ -164,6 +185,13 @@ async function prepareDatabase(mode: Mode): Promise<{
   if (![20_000, 100_000, 500_000].includes(size) && !hasFlag("allow-custom-size")) {
     throw new Error("synthetic --size must be 20000, 100000, or 500000 (or pass --allow-custom-size)");
   }
+  const cardinality = (argValue("cardinality") ?? "normal") as Cardinality;
+  if (cardinality !== "normal" && cardinality !== "high") {
+    throw new Error("--cardinality must be normal or high");
+  }
+  // Applies even under --allow-custom-size: high-cardinality seeding beyond
+  // this size would silently push rows across a freshness bucket boundary.
+  assertSupportedSyntheticCardinality(size, cardinality);
   if (process.env.DATABASE_URL && isDevDbUrl(process.env.DATABASE_URL)) {
     throw new Error("Refusing synthetic seed against prisma/dev.db");
   }
@@ -176,11 +204,11 @@ async function prepareDatabase(mode: Mode): Promise<{
     runPrismaMigrateDeploy(databaseUrl);
     const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
     try {
-      await seedSynthetic(prisma, size);
+      await seedSynthetic(prisma, size, cardinality);
     } finally {
       await prisma.$disconnect();
     }
-    return { databaseUrl, tempDir, size };
+    return { databaseUrl, tempDir, size, cardinality };
   } catch (error) {
     rmSync(tempDir, { recursive: true, force: true });
     throw error;
@@ -203,8 +231,15 @@ async function main(): Promise<void> {
     run: async () => {
       process.env.DATABASE_URL = prepared.databaseUrl;
 
-      const { getOperationalAnalytics } = await import(
-        "../src/server/analytics/operational/operational-analytics-service"
+      const {
+        getOperationalAnalytics,
+        RESIDUAL_OPERATIONAL_SELECT,
+      } = await import("../src/server/analytics/operational/operational-analytics-service");
+      const { loadAggregatedFreshnessMetrics } = await import(
+        "../src/server/analytics/operational/operational-freshness-aggregate-service"
+      );
+      const { buildComplaintWhere, parseComplaintQuery } = await import(
+        "../src/server/complaints/complaint-query-service"
       );
       const dbModule = await import("../src/lib/db");
       benchmarkDb = dbModule.db;
@@ -217,11 +252,42 @@ async function main(): Promise<void> {
       const heapBefore = process.memoryUsage();
       const t0 = performance.now();
       const result = await getOperationalAnalytics(params, {
-        now: new Date("2026-08-05T12:00:00.000Z"),
+        now: BENCHMARK_NOW,
       });
       const totalMs = Math.round(performance.now() - t0);
       const heapAfter = process.memoryUsage();
       const prismaQueries = getQueryCount();
+
+      // Isolated freshness-only measurement (diagnostics — never surfaced
+      // through OperationalAnalyticsSummary). Reuses the same where/now/total
+      // getOperationalAnalytics used internally, with its own query counter
+      // so it doesn't double-count against `prismaQueries` above.
+      const freshnessQueryCounter = installQueryCounter(benchmarkDb as never);
+      const where = buildComplaintWhere(parseComplaintQuery(params), BENCHMARK_NOW);
+      const freshnessHeapBefore = process.memoryUsage();
+      const freshnessResult = await loadAggregatedFreshnessMetrics({
+        where,
+        now: BENCHMARK_NOW,
+        total: result.totalInScope,
+      });
+      const freshnessHeapAfter = process.memoryUsage();
+      const freshnessDiagnostics = {
+        ms: freshnessResult.performanceMs,
+        queries: freshnessResult.prismaQueries,
+        queriesMeasured: freshnessQueryCounter(),
+        updatedTimestampGroupCount: freshnessResult.updatedTimestampGroupCount,
+        updatedModifiedPairGroupCount: freshnessResult.updatedModifiedPairGroupCount,
+        totalRows: result.totalInScope,
+        updatedGroupToRowRatio:
+          result.totalInScope > 0
+            ? Math.round((freshnessResult.updatedTimestampGroupCount / result.totalInScope) * 1000) / 1000
+            : 0,
+        pairGroupToRowRatio:
+          result.totalInScope > 0
+            ? Math.round((freshnessResult.updatedModifiedPairGroupCount / result.totalInScope) * 1000) / 1000
+            : 0,
+        heapDeltaMB: Math.round((freshnessHeapAfter.heapUsed - freshnessHeapBefore.heapUsed) / 1024 / 1024),
+      };
 
       let sourceShaAfter: string | undefined;
       if (prepared.sourcePath && prepared.sourceSha) {
@@ -231,6 +297,7 @@ async function main(): Promise<void> {
       const report = {
         mode,
         params: params.toString(),
+        cardinality: prepared.cardinality ?? "not-applicable",
         size: prepared.size ?? rowCount,
         rowCount,
         totalInScope: result.totalInScope,
@@ -242,6 +309,8 @@ async function main(): Promise<void> {
         rssAfterMB: Math.round(heapAfter.rss / 1024 / 1024),
         preflightQueries,
         prismaQueries,
+        residualSelectFieldCount: Object.keys(RESIDUAL_OPERATIONAL_SELECT).length,
+        freshnessDiagnostics,
         channelIndependentCheck: result.channelIndependentCheck,
         sourceOriginTop3: result.sourceOrigin.items.slice(0, 3).map((item) => ({
           key: item.key,

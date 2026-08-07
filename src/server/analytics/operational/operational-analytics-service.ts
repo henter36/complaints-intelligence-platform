@@ -11,8 +11,11 @@ import {
 import {
   DAY_MS,
   FRESHNESS_BUCKET_LABELS,
+  RIYADH_TZ,
+  formatInstantInRiyadh,
   resolveFreshnessBucket,
 } from "@/server/analytics/operational/operational-freshness";
+import { loadAggregatedFreshnessMetrics } from "./operational-freshness-aggregate-service";
 import { loadAggregatedOperationalDimensions } from "./operational-aggregate-service";
 import { loadWingOperationalMetrics } from "./operational-wing-aggregate-service";
 import {
@@ -29,9 +32,13 @@ import {
 
 const LONG_ACTION_TAKEN_CHARS = 80;
 const RARE_SHARE_THRESHOLD = 0.01;
-const RIYADH_TZ = "Asia/Riyadh";
 
-/** Residual metrics still computed in Node (freshness/actionTaken/dataQuality/staff). */
+/**
+ * Residual metrics still computed in Node (actionTaken/dataQuality/staff).
+ * Freshness (and the 3 data-quality signals derived from the same two
+ * timestamps) now comes from loadAggregatedFreshnessMetrics — sourceUpdatedAt
+ * and sourceModifiedAt are deliberately not selected here anymore.
+ */
 type SlimOperationalRow = {
   id: string;
   status: ComplaintStatus;
@@ -42,8 +49,6 @@ type SlimOperationalRow = {
   actionTaken: string | null;
   actionDescription: string | null;
   resolution: string | null;
-  sourceUpdatedAt: Date | null;
-  sourceModifiedAt: Date | null;
   sourceClosedBy: string | null;
   sourceUpdatedBy: string | null;
   complaintDate: Date | null;
@@ -67,20 +72,12 @@ export function normalizeActionTakenKey(value: string): string {
   return value.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
-export function formatInstantInRiyadh(value: Date | null): string | null {
-  if (!value) return null;
-  return new Intl.DateTimeFormat("ar-SA", {
-    timeZone: RIYADH_TZ,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(value);
-}
-
-export { resolveFreshnessBucket, FRESHNESS_BUCKET_LABELS, DAY_MS } from "./operational-freshness";
+export {
+  resolveFreshnessBucket,
+  FRESHNESS_BUCKET_LABELS,
+  DAY_MS,
+  formatInstantInRiyadh,
+} from "./operational-freshness";
 
 function emptyStringOrNull(value: string | null | undefined): boolean {
   return value == null || value.trim() === "";
@@ -101,7 +98,8 @@ function pct(part: number, total: number): number {
  * Narrow select for residual (non-aggregated) metrics only.
  * Migrated dimensions use Prisma groupBy/count — do not interpret loadRows as full analytics I/O.
  */
-const RESIDUAL_OPERATIONAL_SELECT = {
+/** Exported for benchmark/diagnostic field-count reporting only — not a public analytics contract. */
+export const RESIDUAL_OPERATIONAL_SELECT = {
   id: true,
   status: true,
   sourceOrigin: true,
@@ -111,8 +109,6 @@ const RESIDUAL_OPERATIONAL_SELECT = {
   actionTaken: true,
   actionDescription: true,
   resolution: true,
-  sourceUpdatedAt: true,
-  sourceModifiedAt: true,
   sourceClosedBy: true,
   sourceUpdatedBy: true,
   complaintDate: true,
@@ -322,7 +318,22 @@ export function buildFreshness(rows: FreshnessRow[], now: Date): DataFreshnessMe
   return buildFreshnessMetrics(accumulator, rows.length);
 }
 
-function buildDataQuality(rows: SlimOperationalRow[], total: number): OperationalDataQualitySignal[] {
+/**
+ * The three signals derived from sourceUpdatedAt/sourceModifiedAt are
+ * precomputed by loadAggregatedFreshnessMetrics — those columns are no
+ * longer selected into SlimOperationalRow, so they can't be row-scanned here.
+ */
+type PrecomputedDataQualityCounts = {
+  missingSourceUpdatedAt: number;
+  missingSourceModifiedAt: number;
+  modifiedAfterUpdated: number;
+};
+
+function buildDataQuality(
+  rows: SlimOperationalRow[],
+  total: number,
+  precomputed: PrecomputedDataQualityCounts
+): OperationalDataQualitySignal[] {
   const closed = (r: SlimOperationalRow) => CLOSED_COMPLAINT_STATUSES.has(r.status);
   type SignalDef = Omit<OperationalDataQualitySignal, "percentage" | "count"> & {
     test: (r: SlimOperationalRow) => boolean;
@@ -372,8 +383,9 @@ function buildDataQuality(rows: SlimOperationalRow[], total: number): Operationa
       severity: "warning",
       explanation: "السجل بلا sourceUpdatedAt.",
       drillDownFilters: { dataFreshnessBucket: "missing" },
-      test: (r) => r.sourceUpdatedAt == null,
-      count: 0,
+      // Precomputed from the freshness DB aggregate (bucketCounts.missing).
+      test: () => false,
+      count: precomputed.missingSourceUpdatedAt,
     },
     {
       id: "missing_source_modified_at",
@@ -381,8 +393,9 @@ function buildDataQuality(rows: SlimOperationalRow[], total: number): Operationa
       severity: "info",
       explanation: "السجل بلا sourceModifiedAt.",
       drillDownFilters: { hasSourceModifiedAt: "false" },
-      test: (r) => r.sourceModifiedAt == null,
-      count: 0,
+      // Precomputed from the freshness DB aggregate (missingModifiedAt).
+      test: () => false,
+      count: precomputed.missingSourceModifiedAt,
     },
     {
       id: "closed_without_closed_at",
@@ -434,9 +447,10 @@ function buildDataQuality(rows: SlimOperationalRow[], total: number): Operationa
       severity: "warning",
       explanation: "sourceModifiedAt أحدث من sourceUpdatedAt بصورة غير متوقعة.",
       drillDownFilters: {},
-      test: (r) =>
-        Boolean(r.sourceUpdatedAt && r.sourceModifiedAt && r.sourceModifiedAt > r.sourceUpdatedAt),
-      count: 0,
+      // Precomputed from the freshness DB aggregate (modifiedBeforeUpdated —
+      // legacy name, same sourceModifiedAt > sourceUpdatedAt condition).
+      test: () => false,
+      count: precomputed.modifiedAfterUpdated,
     },
     {
       id: "action_taken_without_description",
@@ -559,19 +573,35 @@ export async function getOperationalAnalytics(
       total: aggregated.totalInScope,
     })
   );
+  // Depends only on totalInScope (for percentages), not on residual rows —
+  // starts as soon as aggregatedPromise resolves, in parallel with wing and
+  // the residual findMany, never waiting on the latter.
+  const freshnessPromise = aggregatedPromise.then((aggregated) =>
+    loadAggregatedFreshnessMetrics({
+      where,
+      now,
+      total: aggregated.totalInScope,
+    })
+  );
 
-  const [aggregated, wingAggregated, residualLoad] = await Promise.all([
+  const [aggregated, wingAggregated, freshnessAggregated, residualLoad] = await Promise.all([
     aggregatedPromise,
     wingPromise,
+    freshnessPromise,
     residualPromise,
   ]);
 
   const rows = residualLoad.value as SlimOperationalRow[];
   const total = aggregated.totalInScope;
 
-  const freshnessTimed = await timed(async () => buildFreshness(rows, now));
   const actionQualityTimed = await timed(async () => buildActionTakenQuality(rows));
-  const qualityTimed = await timed(async () => buildDataQuality(rows, total));
+  const qualityTimed = await timed(async () =>
+    buildDataQuality(rows, total, {
+      missingSourceUpdatedAt: freshnessAggregated.metrics.missingUpdatedAt,
+      missingSourceModifiedAt: freshnessAggregated.metrics.missingModifiedAt,
+      modifiedAfterUpdated: freshnessAggregated.metrics.modifiedBeforeUpdated,
+    })
+  );
   const staff = buildStaffActors(rows, includeStaffActors);
 
   return {
@@ -594,19 +624,19 @@ export async function getOperationalAnalytics(
     channelIndependentCheck: aggregated.channelIndependentCheck,
     actionTakenQuality: actionQualityTimed.value,
     wing: wingAggregated.metrics,
-    freshness: freshnessTimed.value,
+    freshness: freshnessAggregated.metrics,
     dataQuality: qualityTimed.value,
     staffActors: staff,
     performanceMs: {
-      // Time to load residual rows only (freshness/quality/staff) — not full analytics I/O.
+      // Time to load residual rows only (actionTaken/quality/staff) — not full analytics I/O.
       loadRows: residualLoad.ms,
       previousPeriod: aggregated.performanceMs.previousPeriod,
       sourceOrigin: aggregated.performanceMs.sourceOrigin,
       sourceStatus: aggregated.performanceMs.sourceStatus,
       sourceActionStatus: aggregated.performanceMs.sourceActionStatus,
-      // Wing metrics now come from DB aggregates (not residual row scan).
+      // Wing and freshness metrics now come from DB aggregates (not residual row scan).
       wingCode: wingAggregated.performanceMs,
-      freshness: freshnessTimed.ms,
+      freshness: freshnessAggregated.performanceMs,
       actionTakenQuality: actionQualityTimed.ms,
       dataQuality: qualityTimed.ms,
       aggregateDimensions: aggregated.performanceMs.aggregateDimensions,
