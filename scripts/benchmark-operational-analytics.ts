@@ -75,7 +75,58 @@ function installQueryCounter(client: {
   return () => count;
 }
 
-async function seedSynthetic(prisma: PrismaClient, size: number): Promise<void> {
+const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+/** Fixed "now" for both seeding math and the benchmarked getOperationalAnalytics call, so
+ *  freshness bucket distribution is deterministic regardless of when the script runs. */
+export const BENCHMARK_NOW = new Date("2026-08-05T12:00:00.000Z");
+
+type Cardinality = "normal" | "high";
+
+/**
+ * Deterministically places row `i` in one of the 5 freshness buckets
+ * (i % 5) and returns a sourceUpdatedAt landing in that bucket.
+ *   - normal cardinality: timestamps repeat in chunks of 200 within a bucket
+ *     (simulates realistic import batches sharing an update run).
+ *   - high cardinality: every row gets its own millisecond-unique timestamp,
+ *     stressing the groupBy(sourceUpdatedAt) cardinality (Issue #63 phase 3
+ *     stop-condition check — see docs/performance/operational-analytics-phase3-freshness.md).
+ */
+function sourceUpdatedAtForRow(i: number, cardinality: Cardinality): Date | null {
+  const bucket = i % 5;
+  if (bucket === 4) return null; // missing
+
+  // Bounded well under the tightest bucket margin (fresh_1d's 12h base sits
+  // 12h from its 24h boundary) so the offset can never push a row into the
+  // next, older bucket — regardless of dataset size.
+  const offsetMs =
+    cardinality === "high"
+      ? (i * 400) % 40_000_000 // ~unique per row up to ~100k rows/bucket (500k rows / 5 buckets)
+      : (Math.floor(i / 200) % 100) * 300_000; // ~100 repeated groups, 5 minutes apart
+
+  if (bucket === 0) return new Date(BENCHMARK_NOW.getTime() - 12 * HOUR_MS - offsetMs); // fresh_1d
+  if (bucket === 1) return new Date(BENCHMARK_NOW.getTime() - 2 * DAY_MS - offsetMs); // stale_1_3d
+  if (bucket === 2) return new Date(BENCHMARK_NOW.getTime() - 5 * DAY_MS - offsetMs); // stale_3_7d
+  return new Date(BENCHMARK_NOW.getTime() - 10 * DAY_MS - offsetMs); // stale_7d_plus
+}
+
+/**
+ * sourceModifiedAt variety: ~30% missing, ~10% modified after updated
+ * (exercises modifiedBeforeUpdated), ~60% modified before/at updated.
+ */
+function sourceModifiedAtForRow(i: number, sourceUpdatedAt: Date | null): Date | null {
+  if (sourceUpdatedAt === null) return null;
+  const bucket = i % 10;
+  if (bucket < 3) return null; // ~30% missing
+  if (bucket < 4) return new Date(sourceUpdatedAt.getTime() + 2 * HOUR_MS); // ~10% modified after updated
+  return new Date(sourceUpdatedAt.getTime() - ((i % 5) + 1) * HOUR_MS); // ~60% modified before updated
+}
+
+async function seedSynthetic(
+  prisma: PrismaClient,
+  size: number,
+  cardinality: Cardinality
+): Promise<void> {
   const category = await prisma.category.create({
     data: { nameAr: `benchmark-cat-${Date.now()}`, isActive: true },
   });
@@ -92,16 +143,17 @@ async function seedSynthetic(prisma: PrismaClient, size: number): Promise<void> 
   const actionStatuses = ["منتهية", "جديد", null, ""];
   const channels = ["الهاتف", "المنصة", "البريد", null];
   const batchSize = 1000;
-  const now = Date.now();
+  const now = BENCHMARK_NOW.getTime();
 
   for (let offset = 0; offset < size; offset += batchSize) {
     const chunk = Math.min(batchSize, size - offset);
     const rows = Array.from({ length: chunk }, (_, index) => {
       const i = offset + index;
       const closed = i % 5 !== 0;
-      const receivedAt = new Date(now - (i % 400) * 24 * 60 * 60 * 1000);
+      const receivedAt = new Date(now - (i % 400) * DAY_MS);
+      const sourceUpdatedAt = sourceUpdatedAtForRow(i, cardinality);
       return {
-        externalId: `bench-${size}-${i}`,
+        externalId: `bench-${size}-${cardinality}-${i}`,
         subject: `Benchmark ${i}`,
         status: closed ? ComplaintStatus.CLOSED : ComplaintStatus.OPEN,
         priority: ComplaintPriority.MEDIUM,
@@ -117,9 +169,10 @@ async function seedSynthetic(prisma: PrismaClient, size: number): Promise<void> 
         classificationId: classification.id,
         complaintDate: receivedAt,
         receivedAt,
-        dueDate: closed ? null : new Date(receivedAt.getTime() + 7 * 24 * 60 * 60 * 1000),
-        closedAt: closed ? new Date(receivedAt.getTime() + ((i % 10) + 1) * 24 * 60 * 60 * 1000) : null,
-        sourceUpdatedAt: new Date(receivedAt.getTime() + 60 * 60 * 1000),
+        dueDate: closed ? null : new Date(receivedAt.getTime() + 7 * DAY_MS),
+        closedAt: closed ? new Date(receivedAt.getTime() + ((i % 10) + 1) * DAY_MS) : null,
+        sourceUpdatedAt,
+        sourceModifiedAt: sourceModifiedAtForRow(i, sourceUpdatedAt),
         isDeleted: false,
       };
     });
@@ -164,6 +217,10 @@ async function prepareDatabase(mode: Mode): Promise<{
   if (![20_000, 100_000, 500_000].includes(size) && !hasFlag("allow-custom-size")) {
     throw new Error("synthetic --size must be 20000, 100000, or 500000 (or pass --allow-custom-size)");
   }
+  const cardinality = (argValue("cardinality") ?? "normal") as Cardinality;
+  if (cardinality !== "normal" && cardinality !== "high") {
+    throw new Error("--cardinality must be normal or high");
+  }
   if (process.env.DATABASE_URL && isDevDbUrl(process.env.DATABASE_URL)) {
     throw new Error("Refusing synthetic seed against prisma/dev.db");
   }
@@ -176,7 +233,7 @@ async function prepareDatabase(mode: Mode): Promise<{
     runPrismaMigrateDeploy(databaseUrl);
     const prisma = new PrismaClient({ datasources: { db: { url: databaseUrl } } });
     try {
-      await seedSynthetic(prisma, size);
+      await seedSynthetic(prisma, size, cardinality);
     } finally {
       await prisma.$disconnect();
     }
@@ -203,8 +260,15 @@ async function main(): Promise<void> {
     run: async () => {
       process.env.DATABASE_URL = prepared.databaseUrl;
 
-      const { getOperationalAnalytics } = await import(
-        "../src/server/analytics/operational/operational-analytics-service"
+      const {
+        getOperationalAnalytics,
+        RESIDUAL_OPERATIONAL_SELECT,
+      } = await import("../src/server/analytics/operational/operational-analytics-service");
+      const { loadAggregatedFreshnessMetrics } = await import(
+        "../src/server/analytics/operational/operational-freshness-aggregate-service"
+      );
+      const { buildComplaintWhere, parseComplaintQuery } = await import(
+        "../src/server/complaints/complaint-query-service"
       );
       const dbModule = await import("../src/lib/db");
       benchmarkDb = dbModule.db;
@@ -217,11 +281,42 @@ async function main(): Promise<void> {
       const heapBefore = process.memoryUsage();
       const t0 = performance.now();
       const result = await getOperationalAnalytics(params, {
-        now: new Date("2026-08-05T12:00:00.000Z"),
+        now: BENCHMARK_NOW,
       });
       const totalMs = Math.round(performance.now() - t0);
       const heapAfter = process.memoryUsage();
       const prismaQueries = getQueryCount();
+
+      // Isolated freshness-only measurement (diagnostics — never surfaced
+      // through OperationalAnalyticsSummary). Reuses the same where/now/total
+      // getOperationalAnalytics used internally, with its own query counter
+      // so it doesn't double-count against `prismaQueries` above.
+      const freshnessQueryCounter = installQueryCounter(benchmarkDb as never);
+      const where = buildComplaintWhere(parseComplaintQuery(params), BENCHMARK_NOW);
+      const freshnessHeapBefore = process.memoryUsage();
+      const freshnessResult = await loadAggregatedFreshnessMetrics({
+        where,
+        now: BENCHMARK_NOW,
+        total: result.totalInScope,
+      });
+      const freshnessHeapAfter = process.memoryUsage();
+      const freshnessDiagnostics = {
+        ms: freshnessResult.performanceMs,
+        queries: freshnessResult.prismaQueries,
+        queriesMeasured: freshnessQueryCounter(),
+        updatedTimestampGroupCount: freshnessResult.updatedTimestampGroupCount,
+        updatedModifiedPairGroupCount: freshnessResult.updatedModifiedPairGroupCount,
+        totalRows: result.totalInScope,
+        updatedGroupToRowRatio:
+          result.totalInScope > 0
+            ? Math.round((freshnessResult.updatedTimestampGroupCount / result.totalInScope) * 1000) / 1000
+            : 0,
+        pairGroupToRowRatio:
+          result.totalInScope > 0
+            ? Math.round((freshnessResult.updatedModifiedPairGroupCount / result.totalInScope) * 1000) / 1000
+            : 0,
+        heapDeltaMB: Math.round((freshnessHeapAfter.heapUsed - freshnessHeapBefore.heapUsed) / 1024 / 1024),
+      };
 
       let sourceShaAfter: string | undefined;
       if (prepared.sourcePath && prepared.sourceSha) {
@@ -231,6 +326,7 @@ async function main(): Promise<void> {
       const report = {
         mode,
         params: params.toString(),
+        cardinality: argValue("cardinality") ?? "normal",
         size: prepared.size ?? rowCount,
         rowCount,
         totalInScope: result.totalInScope,
@@ -242,6 +338,8 @@ async function main(): Promise<void> {
         rssAfterMB: Math.round(heapAfter.rss / 1024 / 1024),
         preflightQueries,
         prismaQueries,
+        residualSelectFieldCount: Object.keys(RESIDUAL_OPERATIONAL_SELECT).length,
+        freshnessDiagnostics,
         channelIndependentCheck: result.channelIndependentCheck,
         sourceOriginTop3: result.sourceOrigin.items.slice(0, 3).map((item) => ({
           key: item.key,

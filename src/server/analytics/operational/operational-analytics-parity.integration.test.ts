@@ -428,4 +428,52 @@ describe("operational analytics DB aggregate integration", () => {
     expect(w1!.topClassification).toBe("مواعيد");
     expect(w1!.topClassificationCount).toBe(4);
   });
+
+  it("keeps freshness drill-down pagination.total equal to each bucket count, and bucket counts sum to totalInScope", async () => {
+    const base = new URLSearchParams();
+    const summary = await getOperationalAnalytics(base, { now: NOW });
+
+    let sumOfBuckets = 0;
+    for (const bucket of summary.freshness.buckets) {
+      sumOfBuckets += bucket.count;
+      const drill = new URLSearchParams(base);
+      for (const [key, value] of Object.entries(bucket.drillDownFilters)) {
+        drill.set(key, value);
+      }
+      const list = await listComplaints(drill, { now: NOW });
+      expect(list.pagination.total, `freshness:${bucket.bucket}`).toBe(bucket.count);
+    }
+    expect(sumOfBuckets).toBe(summary.totalInScope);
+  });
+
+  it("matches the three sourceUpdatedAt/sourceModifiedAt data-quality signal counts to the freshness aggregate", async () => {
+    const summary = await getOperationalAnalytics(new URLSearchParams(), { now: NOW });
+    const byId = new Map(summary.dataQuality.map((signal) => [signal.id, signal]));
+
+    expect(byId.get("missing_source_updated_at")?.count).toBe(summary.freshness.missingUpdatedAt);
+    expect(byId.get("missing_source_modified_at")?.count).toBe(summary.freshness.missingModifiedAt);
+    expect(byId.get("modified_after_updated")?.count).toBe(summary.freshness.modifiedBeforeUpdated);
+  });
+
+  it("keeps freshness in the same scope as a base query that already filters dataFreshnessBucket, across many combined filters", async () => {
+    // parity-6 is the only seeded row matching every one of these filters:
+    // region/facility/department/channel/status all set, plus stale_7d_plus
+    // (sourceUpdatedAt = NOW - 8 days).
+    const params = new URLSearchParams(
+      "region=الرياض&facility=مستشفى أ&department=الطوارئ&channel=الهاتف&status=CLOSED&dataFreshnessBucket=stale_7d_plus"
+    );
+    const summary = await getOperationalAnalytics(params, { now: NOW });
+    const list = await listComplaints(params, { now: NOW });
+
+    expect(summary.totalInScope).toBe(list.pagination.total);
+    expect(summary.totalInScope).toBeGreaterThan(0);
+
+    for (const bucket of summary.freshness.buckets) {
+      if (bucket.bucket === "stale_7d_plus") {
+        expect(bucket.count).toBe(summary.totalInScope);
+      } else {
+        expect(bucket.count, bucket.bucket).toBe(0);
+      }
+    }
+  });
 });

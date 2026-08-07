@@ -3,6 +3,22 @@ import type { DataFreshnessBucket } from "@/server/analytics/operational/operati
 
 export const DAY_MS = 24 * 60 * 60 * 1000;
 
+export const RIYADH_TZ = "Asia/Riyadh";
+
+/** Display-only formatting; storage stays ISO UTC (see DataFreshnessMetrics). */
+export function formatInstantInRiyadh(value: Date | null): string | null {
+  if (!value) return null;
+  return new Intl.DateTimeFormat("ar-SA", {
+    timeZone: RIYADH_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(value);
+}
+
 export const FRESHNESS_BUCKET_LABELS: Record<DataFreshnessBucket, string> = {
   fresh_1d: "خلال يوم",
   stale_1_3d: "1–3 أيام",
