@@ -184,6 +184,30 @@ export type ExecutiveEntityRow = {
 };
 
 // ---------------------------------------------------------------------------
+// Classification change row (V2-only "أبرز تحولات التصنيفات")
+// ---------------------------------------------------------------------------
+
+export type ClassificationChangeDirection = "ارتفاع" | "انخفاض" | "جديد" | "انخفاض إلى صفر";
+
+/**
+ * One classification's change vs. the previous period — built from the union
+ * of current- and previous-period classifications (not just the current
+ * period's top N), so a classification that existed previously but has zero
+ * complaints now is never silently dropped. V2-only; independent of
+ * ClassificationBriefRow, which only covers the current period's top N.
+ */
+export type ClassificationChangeRow = {
+  classificationId: string;
+  classificationName: string;
+  classificationPath: string;
+  currentCount: number;
+  previousCount: number;
+  difference: number;
+  changeRate: number | null;
+  direction: ClassificationChangeDirection;
+};
+
+// ---------------------------------------------------------------------------
 // Comparative timeline chart (current vs previous, relative day axis)
 // ---------------------------------------------------------------------------
 

@@ -79,6 +79,12 @@ function makeV2Brief(overrides: Partial<ExecutiveBriefV2Data> = {}): ExecutiveBr
       { name: "سجن الدمام", total: 2, open: 0, closed: 2, currentlyLate: 0, shareOfTotal: 2 },
       { name: "سجن أبها", total: 3, open: 1, closed: 2, currentlyLate: 0, shareOfTotal: 3 },
     ],
+    classificationChanges: [
+      { classificationId: "c1", classificationName: "نقل", classificationPath: "فئة اختبار / نقل", currentCount: 60, previousCount: 20, difference: 40, changeRate: 200, direction: "ارتفاع" },
+      { classificationId: "c3", classificationName: "استفسار", classificationPath: "فئة اختبار / استفسار", currentCount: 12, previousCount: 0, difference: 12, changeRate: null, direction: "جديد" },
+      { classificationId: "c4", classificationName: "صيانة", classificationPath: "فئة اختبار / صيانة", currentCount: 5, previousCount: 30, difference: -25, changeRate: -83.3, direction: "انخفاض" },
+      { classificationId: "c5", classificationName: "شكوى إدارية قديمة", classificationPath: "فئة اختبار / شكوى إدارية قديمة", currentCount: 0, previousCount: 18, difference: -18, changeRate: -100, direction: "انخفاض إلى صفر" },
+    ],
     conclusions: ["استنتاج تجريبي."],
     notes: ["ملاحظة جودة بيانات تجريبية."],
     allTimeTotal: 18560,
@@ -369,13 +375,17 @@ describe("renderExecutiveBriefV2Pdf", () => {
         "الدمام",
         "الاستنتاجات",
         "استنتاج",
-        "المتابعة",
+        "تحولات",
         "نقل",
+        "صيانة",
       ]) {
         expect(joined).toContain(token);
       }
       expect(joined).not.toContain("[object Object]");
       expect(joined).not.toContain("الإدارة");
+      // "المتابعة" only ever appeared via the old department×classification
+      // rises box; it must never render on V2's page 4 anymore.
+      expect(joined).not.toContain("المتابعة");
       expect(joined).not.toContain(preparePdfText("ملاحظات جودة البيانات وتأثيرها على المؤشرات"));
       expect(joined).not.toContain("ملاحظات جودة البيانات وتأثيرها على المؤشرات");
     } finally {
@@ -464,6 +474,126 @@ describe("V2 page 4 — facilities replace departments (spec sections 5-9, 14-16
     } finally {
       textSpy.mockRestore();
     }
+  });
+});
+
+describe("V2 page 4 — classification shifts replace notable rises (spec sections 1-2, 9, 14-16)", () => {
+  it("renders 'أبرز تحولات التصنيفات' and every classification name/direction label, never the old rises heading or its department-based text", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(makeV2Report());
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      // "أبرز تحولات التصنيفات" reorders under RTL shaping; check the
+      // distinctive single word rather than the exact phrase.
+      expect(joined).toContain("تحولات");
+      for (const token of ["نقل", "استفسار", "صيانة"]) {
+        expect(joined).toContain(token);
+      }
+      expect(joined).not.toContain("الارتفاعات الملحوظة");
+      expect(joined).not.toContain("لا توجد ارتفاعات إدارية حادة في هذه الفترة");
+      // "المتابعة" is the department name in makeV2Report()'s deptClassRises
+      // fixture (still a valid ComparisonResult field — just unused by V2
+      // page 4 now). It must never leak into the rendered page text.
+      expect(joined).not.toContain("المتابعة");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("1/2/16. never reads comparisonData.deptClassRises for page 4, even when it has real department data and classificationChanges is empty", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(
+        makeV2Report({
+          briefData: makeV2Brief({ classificationChanges: [] }),
+          comparisonData: {
+            ...makeV2Report().comparisonData!,
+            deptClassRises: [
+              {
+                departmentId: "d-leak",
+                departmentName: "إدارة يجب ألا تظهر",
+                classificationId: "c-leak",
+                classificationName: "تصنيف تسريب",
+                classificationPath: "فئة / تصنيف تسريب",
+                currentCount: 99,
+                previousCount: 1,
+                difference: 98,
+                changeRate: 9800,
+                classificationContribution: 100,
+              },
+            ],
+          },
+        })
+      );
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(joined).not.toContain("إدارة يجب ألا تظهر");
+      expect(joined).not.toContain("تصنيف تسريب");
+      // classificationChanges is explicitly empty with a previous period
+      // present. "تغيرات" is the distinctive word from the message (RTL
+      // shaping reorders whole-phrase word order, so check a single word).
+      expect(joined).toContain("تغيرات");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("shows the no-previous-period empty state when previousPeriod is absent", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(
+        makeV2Report({
+          previousPeriod: null,
+          briefData: makeV2Brief({ classificationChanges: [] }),
+        })
+      );
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      // "لاستخراج" is the distinctive word from the no-previous-period
+      // message (RTL shaping reorders whole-phrase word order).
+      expect(joined).toContain("لاستخراج");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("renders direction labels for rise/decline/new/drop-to-zero rows", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(makeV2Report());
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      // makeV2Brief()'s classificationChanges fixture covers all 4 directions.
+      expect(joined).toContain("ارتفاع");
+      expect(joined).toContain("انخفاض");
+      expect(joined).toContain("جديد");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("20/21. stays exactly 4 pages with no warnings when classificationChanges has 5 rows", async () => {
+    const fiveChanges = [
+      { classificationId: "c1", classificationName: "أ", classificationPath: "فئة / أ", currentCount: 60, previousCount: 20, difference: 40, changeRate: 200, direction: "ارتفاع" as const },
+      { classificationId: "c2", classificationName: "ب", classificationPath: "فئة / ب", currentCount: 50, previousCount: 15, difference: 35, changeRate: 233.3, direction: "ارتفاع" as const },
+      { classificationId: "c3", classificationName: "ج", classificationPath: "فئة / ج", currentCount: 10, previousCount: 0, difference: 10, changeRate: null, direction: "جديد" as const },
+      { classificationId: "c4", classificationName: "د", classificationPath: "فئة / د", currentCount: 5, previousCount: 40, difference: -35, changeRate: -87.5, direction: "انخفاض" as const },
+      { classificationId: "c5", classificationName: "هـ", classificationPath: "فئة / هـ", currentCount: 0, previousCount: 22, difference: -22, changeRate: -100, direction: "انخفاض إلى صفر" as const },
+    ];
+    const result = await renderExecutiveBriefV2Pdf(
+      makeV2Report({ briefData: makeV2Brief({ classificationChanges: fiveChanges }) })
+    );
+    expect(countPageObjects(result.buffer)).toBe(4);
+    expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
+    expect(result.warnings.every((w) => !w.includes("بدلًا من"))).toBe(true);
+  });
+
+  it("still renders a valid 4-page PDF when classificationChanges is undefined (older/fallback brief shape)", async () => {
+    const brief = makeV2Brief();
+    const withoutChanges = { ...brief } as Partial<ExecutiveBriefV2Data>;
+    delete withoutChanges.classificationChanges;
+    const result = await renderExecutiveBriefV2Pdf(
+      makeV2Report({ briefData: withoutChanges as ExecutiveBriefV2Data })
+    );
+    expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
+    expect(countPageObjects(result.buffer)).toBe(4);
   });
 });
 

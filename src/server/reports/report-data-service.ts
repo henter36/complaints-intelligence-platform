@@ -43,6 +43,7 @@ import type {
   RegionSnapshotAtEndRow,
   DepartmentPeriodMetricsRow,
   ClassificationSnapshotAtEndRow,
+  ClassificationChangeRow,
 } from "@/lib/reports/report-contract";
 // Types that are only re-exported (not used locally) — direct re-export avoids a redundant import.
 export type { KpiAssessment, ComparativeTimelinePoint, ComparativeTimelineSeries } from "@/lib/reports/report-contract";
@@ -200,6 +201,8 @@ export type ExecutiveBriefV2Data = ExecutiveBriefData & {
   topFacilities?: ExecutiveEntityRow[];
   /** V2-only: facilities with the lowest (non-zero) complaint volume this period (page 4 "أقل السجون"). Never overlaps topFacilities. */
   bottomFacilities?: ExecutiveEntityRow[];
+  /** V2-only: classifications with the biggest shift vs. the previous period (page 4 "أبرز تحولات التصنيفات"). Built from the current/previous union, never department-based. */
+  classificationChanges?: ClassificationChangeRow[];
 };
 
 /** Extended payload for FULL_ANALYTICAL mode (super-set of ExecutiveBriefData). */
