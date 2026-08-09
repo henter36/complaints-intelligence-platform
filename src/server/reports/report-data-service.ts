@@ -196,6 +196,10 @@ export type ExecutiveBriefV2Data = ExecutiveBriefData & {
   monthlyStockFlow: MonthlyComplaintTrendPoint[];
   /** Per-classificationId open and late counts at current period end. */
   classificationOpenLate: Record<string, { openAtEnd: number; lateAtEnd: number }>;
+  /** V2-only: facilities with the highest complaint volume this period (page 4 "أعلى السجون"). Not used by other report modes. */
+  topFacilities?: ExecutiveEntityRow[];
+  /** V2-only: facilities with the lowest (non-zero) complaint volume this period (page 4 "أقل السجون"). Never overlaps topFacilities. */
+  bottomFacilities?: ExecutiveEntityRow[];
 };
 
 /** Extended payload for FULL_ANALYTICAL mode (super-set of ExecutiveBriefData). */

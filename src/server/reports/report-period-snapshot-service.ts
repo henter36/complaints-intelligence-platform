@@ -28,7 +28,8 @@ import type { PeriodRange } from "./report-comparison";
 import { classificationKey } from "@/lib/reports/classification-keys";
 import { normalizeRegionName } from "@/lib/reports/region-normalization";
 
-const UNSPECIFIED_DEPARTMENT_LABEL = "غير محدد";
+/** Shared "missing value" bucket label reused across every dimension grouping (department, facility, ...). */
+export const UNSPECIFIED_GROUP_LABEL = "غير محدد";
 
 function isValidDate(value: Date | null | undefined): value is Date {
   return value instanceof Date && Number.isFinite(value.getTime());
@@ -59,6 +60,7 @@ export type ExecutiveReportSnapshotData = {
   byRegion: Record<string, ReportPeriodGroupSnapshot>;
   byDepartment: Record<string, ReportPeriodGroupSnapshot>;
   byClassification: Record<string, ReportPeriodGroupSnapshot>;
+  byFacility: Record<string, ReportPeriodGroupSnapshot>;
   warnings: string[];
 };
 
@@ -187,6 +189,7 @@ export type SnapshotCandidate = {
   region: string | null;
   department: string | null;
   classificationId: string | null;
+  facility: string | null;
   statusHistory: readonly ComplaintStatusHistoryEntry[];
 };
 
@@ -383,11 +386,15 @@ function regionGroupKey(complaint: SnapshotCandidate): string {
 }
 
 function departmentGroupKey(complaint: SnapshotCandidate): string {
-  return complaint.department ?? UNSPECIFIED_DEPARTMENT_LABEL;
+  return complaint.department ?? UNSPECIFIED_GROUP_LABEL;
 }
 
 function classificationGroupKey(complaint: SnapshotCandidate): string {
   return classificationKey(complaint.classificationId);
+}
+
+function facilityGroupKey(complaint: SnapshotCandidate): string {
+  return complaint.facility ?? UNSPECIFIED_GROUP_LABEL;
 }
 
 function groupComplaints(
@@ -497,6 +504,7 @@ const SNAPSHOT_CANDIDATE_SELECT = {
   region: true,
   department: true,
   classificationId: true,
+  facility: true,
   statusHistory: {
     select: { fromStatus: true, toStatus: true, changedAt: true },
   },
@@ -593,6 +601,7 @@ export function computeExecutiveReportSnapshot(
     classificationGroupKey,
     snapshotOptions
   );
+  const byFacility = buildGroupedSnapshot(candidates, periods.currentPeriod, facilityGroupKey, snapshotOptions);
 
   const overallGroup: ReportPeriodGroupSnapshot = {
     receivedDuringPeriod: current.receivedDuringPeriod,
@@ -603,8 +612,9 @@ export function computeExecutiveReportSnapshot(
   reconcileOrWarn("المناطق", overallGroup, byRegion, warnings, strict);
   reconcileOrWarn("الإدارات", overallGroup, byDepartment, warnings, strict);
   reconcileOrWarn("التصنيفات", overallGroup, byClassification, warnings, strict);
+  reconcileOrWarn("السجون", overallGroup, byFacility, warnings, strict);
 
-  return { current, previous, byRegion, byDepartment, byClassification, warnings };
+  return { current, previous, byRegion, byDepartment, byClassification, byFacility, warnings };
 }
 
 // ---------------------------------------------------------------------------

@@ -20,7 +20,7 @@ import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { buildComplaintWhere, parseComplaintQuery } from "@/server/complaints/complaint-query-service";
 import { comparisonWarningMessage } from "./report-comparison";
-import type { DeptClassPeriodCount, ComparisonResult, PeriodRange } from "./report-comparison";
+import type { DeptClassPeriodCount, ComparisonResult, PeriodRange, RegionChangeRow } from "./report-comparison";
 import { buildComplaintQueryParams, type ReportFilters } from "./report-definition-service";
 import type {
   ExecutiveBriefData,
@@ -58,6 +58,7 @@ import {
 import {
   buildExecutiveReportSnapshotData,
   wasComplaintClosedInWindow,
+  UNSPECIFIED_GROUP_LABEL,
   type ComplaintStatusHistoryEntry,
   type ExecutiveReportSnapshotData,
   type ReportPeriodGroupSnapshot,
@@ -332,8 +333,8 @@ function buildAllRegionsTable(
  * backlog), lateAtEnd — sourced from the department period snapshot, not from
  * current-status distributions.
  */
-/** A department with only prior-period backlog (zero registrations this period) still has activity. */
-function hasDepartmentActivity(snapshot: ReportPeriodGroupSnapshot): boolean {
+/** An entity (department, facility, ...) with only prior-period backlog (zero registrations this period) still has activity. */
+function hasEntityActivity(snapshot: ReportPeriodGroupSnapshot): boolean {
   return (
     snapshot.receivedDuringPeriod > 0
     || snapshot.closedDuringPeriod > 0
@@ -352,6 +353,17 @@ function compareExecutiveEntityRows(left: ExecutiveEntityRow, right: ExecutiveEn
   );
 }
 
+/** Mirror image of {@link compareExecutiveEntityRows} for "lowest volume" listings — the name tiebreak stays ascending. */
+function compareExecutiveEntityRowsAscending(left: ExecutiveEntityRow, right: ExecutiveEntityRow): number {
+  return (
+    left.total - right.total
+    || left.open - right.open
+    || left.currentlyLate - right.currentlyLate
+    || left.closed - right.closed
+    || left.name.localeCompare(right.name, "ar")
+  );
+}
+
 /**
  * Builds candidates directly from the period snapshot (not from
  * result.distributions, which only contains entities with inflow this
@@ -364,7 +376,7 @@ function buildEntityRows(
   limit = 8
 ): ExecutiveEntityRow[] {
   return Object.entries(groupSnapshot)
-    .filter(([, snapshot]) => hasDepartmentActivity(snapshot))
+    .filter(([, snapshot]) => hasEntityActivity(snapshot))
     .map(([name, snapshot]) => ({
       name,
       total: snapshot.receivedDuringPeriod,
@@ -378,6 +390,189 @@ function buildEntityRows(
     }))
     .sort(compareExecutiveEntityRows)
     .slice(0, limit);
+}
+
+// ---------------------------------------------------------------------------
+// V2: top/bottom facilities (page 4 "أعلى السجون" / "أقل السجون")
+// ---------------------------------------------------------------------------
+
+const FACILITY_ROWS_LIMIT = 5;
+
+function isUnspecifiedOrEmptyFacilityName(name: string): boolean {
+  return name === UNSPECIFIED_GROUP_LABEL || name.trim() === "";
+}
+
+function toFacilityEntityRow(
+  totalReceivedDuringPeriod: number,
+  name: string,
+  snapshot: ReportPeriodGroupSnapshot
+): ExecutiveEntityRow {
+  return {
+    name,
+    total: snapshot.receivedDuringPeriod,
+    open: snapshot.openAtEnd,
+    closed: snapshot.closedDuringPeriod,
+    currentlyLate: snapshot.lateAtEnd,
+    shareOfTotal:
+      totalReceivedDuringPeriod > 0
+        ? roundRate((snapshot.receivedDuringPeriod / totalReceivedDuringPeriod) * 100)
+        : 0,
+  };
+}
+
+/**
+ * Eligible for "highest volume": any facility with activity this period,
+ * including a backlog-only facility (zero registrations, but complaints
+ * carried over from before the period are still open/late).
+ */
+function buildTopFacilityCandidates(
+  totalReceivedDuringPeriod: number,
+  byFacility: Record<string, ReportPeriodGroupSnapshot>
+): ExecutiveEntityRow[] {
+  return Object.entries(byFacility)
+    .filter(([name, snapshot]) => !isUnspecifiedOrEmptyFacilityName(name) && hasEntityActivity(snapshot))
+    .map(([name, snapshot]) => toFacilityEntityRow(totalReceivedDuringPeriod, name, snapshot))
+    .sort(compareExecutiveEntityRows);
+}
+
+/**
+ * Eligible for "lowest volume": only facilities that actually received
+ * complaints this period (receivedDuringPeriod > 0) — a facility's mere
+ * absence from this period's activity is never proof of zero complaints, so
+ * it must not appear here just because it has no other group presence.
+ */
+function buildBottomFacilityCandidates(
+  totalReceivedDuringPeriod: number,
+  byFacility: Record<string, ReportPeriodGroupSnapshot>
+): ExecutiveEntityRow[] {
+  return Object.entries(byFacility)
+    .filter(([name, snapshot]) => !isUnspecifiedOrEmptyFacilityName(name) && snapshot.receivedDuringPeriod > 0)
+    .map(([name, snapshot]) => toFacilityEntityRow(totalReceivedDuringPeriod, name, snapshot))
+    .sort(compareExecutiveEntityRowsAscending);
+}
+
+/**
+ * Builds the V2-only top/bottom facility lists. The two lists are always
+ * disjoint: a facility already shown as highest-volume must never also be
+ * shown as lowest-volume, so when the facility pool is small, the bottom
+ * list shrinks (down to zero) rather than repeating a top entry.
+ */
+export function buildTopAndBottomFacilities(
+  totalReceivedDuringPeriod: number,
+  byFacility: Record<string, ReportPeriodGroupSnapshot>
+): { topFacilities: ExecutiveEntityRow[]; bottomFacilities: ExecutiveEntityRow[] } {
+  const topFacilities = buildTopFacilityCandidates(totalReceivedDuringPeriod, byFacility).slice(
+    0,
+    FACILITY_ROWS_LIMIT
+  );
+  const topNames = new Set(topFacilities.map((row) => row.name));
+  const bottomFacilities = buildBottomFacilityCandidates(totalReceivedDuringPeriod, byFacility)
+    .filter((row) => !topNames.has(row.name))
+    .slice(0, FACILITY_ROWS_LIMIT);
+
+  return { topFacilities, bottomFacilities };
+}
+
+// ---------------------------------------------------------------------------
+// V2: region-only conclusions (page 4 "الاستنتاجات")
+// ---------------------------------------------------------------------------
+
+const MAX_REGION_CONCLUSIONS = 5;
+
+function compareRisingRegionChanges(a: RegionChangeRow, b: RegionChangeRow): number {
+  return (
+    b.difference - a.difference
+    || (b.changeRate ?? -Infinity) - (a.changeRate ?? -Infinity)
+    || a.regionName.localeCompare(b.regionName, "ar")
+  );
+}
+
+function compareDecliningRegionChanges(a: RegionChangeRow, b: RegionChangeRow): number {
+  return (
+    Math.abs(b.difference) - Math.abs(a.difference)
+    || Math.abs(b.changeRate ?? 0) - Math.abs(a.changeRate ?? 0)
+    || a.regionName.localeCompare(b.regionName, "ar")
+  );
+}
+
+/** previousCount === 0 (direction "جديد") never fabricates a change rate — worded as a fresh appearance instead. */
+function formatRisingRegionConclusion(row: RegionChangeRow): string {
+  if (row.previousCount === 0 && row.currentCount > 0) {
+    return `سجلت ${row.regionName} ${row.currentCount} شكوى خلال الفترة الحالية بعد عدم تسجيل شكاوى في الفترة السابقة.`;
+  }
+  const rateSuffix = row.changeRate === null ? "" : `، بنسبة تغير ${Math.abs(row.changeRate)}%`;
+  return `سجلت ${row.regionName} ارتفاعًا قدره ${row.difference} شكوى مقارنة بالفترة السابقة${rateSuffix}.`;
+}
+
+function formatDecliningRegionConclusion(row: RegionChangeRow): string {
+  const rateSuffix = row.changeRate === null ? "" : `، بنسبة تغير ${Math.abs(row.changeRate)}%`;
+  return `سجلت ${row.regionName} انخفاضًا قدره ${Math.abs(row.difference)} شكوى مقارنة بالفترة السابقة${rateSuffix}.`;
+}
+
+/**
+ * Guarantees both directions are represented (when both exist) instead of
+ * letting whichever direction has more rows consume every slot: each
+ * direction gets up to 2 guaranteed rows first, then remaining slots (up to
+ * {@link MAX_REGION_CONCLUSIONS}) go to whichever side's next-strongest
+ * unselected row has the larger magnitude of change.
+ */
+function selectBalancedRegionConclusions(
+  rising: readonly RegionChangeRow[],
+  declining: readonly RegionChangeRow[]
+): RegionChangeRow[] {
+  if (declining.length === 0) return rising.slice(0, MAX_REGION_CONCLUSIONS);
+  if (rising.length === 0) return declining.slice(0, MAX_REGION_CONCLUSIONS);
+
+  const guaranteedEach = Math.min(2, rising.length, declining.length);
+  const selected: RegionChangeRow[] = [
+    ...rising.slice(0, guaranteedEach),
+    ...declining.slice(0, guaranteedEach),
+  ];
+
+  let nextRisingIndex = guaranteedEach;
+  let nextDecliningIndex = guaranteedEach;
+  while (
+    selected.length < MAX_REGION_CONCLUSIONS
+    && (nextRisingIndex < rising.length || nextDecliningIndex < declining.length)
+  ) {
+    const nextRising = rising[nextRisingIndex];
+    const nextDeclining = declining[nextDecliningIndex];
+    if (nextRising && (!nextDeclining || nextRising.difference >= Math.abs(nextDeclining.difference))) {
+      selected.push(nextRising);
+      nextRisingIndex++;
+    } else if (nextDeclining) {
+      selected.push(nextDeclining);
+      nextDecliningIndex++;
+    }
+  }
+  return selected;
+}
+
+/**
+ * V2's conclusions are built ONLY from region rise/decline vs. the previous
+ * period — never departments, facilities, classifications, or channels. See
+ * {@link buildConclusions} for the department/classification-based version
+ * still used by the other (non-V2) executive brief modes.
+ */
+export function buildRegionOnlyConclusions(comparison: ComparisonResult): string[] {
+  if (!comparison.previousPeriod) {
+    return ["لا تتوفر فترة سابقة صالحة لاستخراج استنتاجات مقارنة للمناطق."];
+  }
+
+  const rising = comparison.regionChanges
+    .filter((row) => row.difference > 0)
+    .sort(compareRisingRegionChanges);
+  const declining = comparison.regionChanges
+    .filter((row) => row.difference < 0)
+    .sort(compareDecliningRegionChanges);
+
+  if (rising.length === 0 && declining.length === 0) {
+    return ["لم تسجل المناطق تغيرات في أعداد الشكاوى مقارنة بالفترة السابقة."];
+  }
+
+  return selectBalancedRegionConclusions(rising, declining).map((row) =>
+    row.difference > 0 ? formatRisingRegionConclusion(row) : formatDecliningRegionConclusion(row)
+  );
 }
 
 function hasMeaningfulPreviousData(comparison: ComparisonResult): boolean {
@@ -940,13 +1135,19 @@ function deduplicateWarnings(warnings: readonly string[]): string[] {
   return [...new Set(warnings.map((warning) => warning.trim()).filter(Boolean))];
 }
 
-export async function buildExecutiveBriefData(
+/**
+ * Shared core for {@link buildExecutiveBriefData} and
+ * {@link buildExecutiveBriefV2Data}. Returns the already-computed
+ * {@link ExecutiveReportSnapshotData} alongside the built brief so V2 can
+ * read `snapshotData.byFacility` without re-running the snapshot query.
+ */
+async function buildExecutiveBriefDataWithSnapshot(
   filters: ReportFilters,
   result: ComplaintKpiResult,
   comparison: ComparisonResult,
-  previousResult?: ComplaintKpiResult,
-  now: Date = new Date()
-): Promise<ExecutiveBriefData> {
+  previousResult: ComplaintKpiResult | undefined,
+  now: Date
+): Promise<{ briefData: ExecutiveBriefData; snapshotData: ExecutiveReportSnapshotData }> {
   const hasPrevious = comparison.previousPeriod !== null;
 
   const [allTimeRegions, comparativeTimeline] = await Promise.all([
@@ -989,7 +1190,7 @@ export async function buildExecutiveBriefData(
     ...snapshotData.warnings,
   ]);
 
-  return {
+  const briefData: ExecutiveBriefData = {
     briefKpis,
     allRegions,
     topClassifications,
@@ -1007,6 +1208,19 @@ export async function buildExecutiveBriefData(
     departmentPeriodMetrics: toDepartmentPeriodMetricsRows(snapshotData.byDepartment),
     classificationSnapshotAtEnd: toClassificationSnapshotRows(snapshotData.byClassification),
   };
+
+  return { briefData, snapshotData };
+}
+
+export async function buildExecutiveBriefData(
+  filters: ReportFilters,
+  result: ComplaintKpiResult,
+  comparison: ComparisonResult,
+  previousResult?: ComplaintKpiResult,
+  now: Date = new Date()
+): Promise<ExecutiveBriefData> {
+  const { briefData } = await buildExecutiveBriefDataWithSnapshot(filters, result, comparison, previousResult, now);
+  return briefData;
 }
 
 export async function buildFullAnalyticalData(
@@ -1526,13 +1740,27 @@ export async function buildExecutiveBriefV2Data(
   previousResult?: ComplaintKpiResult,
   now: Date = new Date()
 ): Promise<ExecutiveBriefV2Data> {
-  const [briefData, allTimeTotal, monthlyStockFlow] = await Promise.all([
-    buildExecutiveBriefData(filters, result, comparison, previousResult, now),
+  const [{ briefData, snapshotData }, allTimeTotal, monthlyStockFlow] = await Promise.all([
+    buildExecutiveBriefDataWithSnapshot(filters, result, comparison, previousResult, now),
     fetchAllTimeTotal(filters, now),
     buildMonthlyStockFlow(filters, comparison, now),
   ]);
 
   const classificationOpenLate = toClassificationOpenLate(briefData.classificationSnapshotAtEnd ?? []);
 
-  return { ...briefData, allTimeTotal, monthlyStockFlow, classificationOpenLate };
+  const { topFacilities, bottomFacilities } = buildTopAndBottomFacilities(
+    snapshotData.current.receivedDuringPeriod,
+    snapshotData.byFacility
+  );
+
+  return {
+    ...briefData,
+    allTimeTotal,
+    monthlyStockFlow,
+    classificationOpenLate,
+    topFacilities,
+    bottomFacilities,
+    // V2-only: region-only conclusions replace the department/classification-based base conclusions.
+    conclusions: buildRegionOnlyConclusions(comparison),
+  };
 }

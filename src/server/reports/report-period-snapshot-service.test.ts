@@ -57,6 +57,7 @@ function candidate(overrides: Partial<SnapshotCandidate> & { id: string }): Snap
     region: null,
     department: null,
     classificationId: null,
+    facility: null,
     statusHistory: [],
     ...overrides,
   };
@@ -525,19 +526,111 @@ describe("computeExecutiveReportSnapshot — functional scenarios (spec section 
     expect(snapshot.byClassification[keys[0]!]?.openAtEnd).toBe(1);
   });
 
-  it("16. complaint without region or department lands in the unspecified bucket and is not dropped from reconciliation", () => {
+  it("16. complaint without region, department, or facility lands in the unspecified bucket and is not dropped from reconciliation", () => {
     const c = candidate({
       id: "c16",
       status: ComplaintStatus.OPEN,
       complaintDate: new Date("2026-07-01T00:00:00.000Z"),
       region: null,
       department: null,
+      facility: null,
     });
     const snapshot = computeExecutiveReportSnapshot([c], { currentPeriod: CURRENT, previousPeriod: null });
     const regionSum = Object.values(snapshot.byRegion).reduce((s, g) => s + g.openAtEnd, 0);
     const deptSum = Object.values(snapshot.byDepartment).reduce((s, g) => s + g.openAtEnd, 0);
+    const facilitySum = Object.values(snapshot.byFacility).reduce((s, g) => s + g.openAtEnd, 0);
     expect(regionSum).toBe(snapshot.current.openAtEnd);
     expect(deptSum).toBe(snapshot.current.openAtEnd);
+    expect(facilitySum).toBe(snapshot.current.openAtEnd);
+    expect(Object.keys(snapshot.byFacility)).toEqual(["غير محدد"]);
+  });
+});
+
+describe("computeExecutiveReportSnapshot — byFacility grouping (spec section 17 items 1-5)", () => {
+  it("1. a complaint created before the period and still open at period end appears in its facility's openAtEnd and lateAtEnd (prior-period backlog carried forward)", () => {
+    const c = candidate({
+      id: "f1",
+      status: ComplaintStatus.OPEN,
+      complaintDate: new Date("2026-07-01T00:00:00.000Z"),
+      facility: "سجن الرياض",
+    });
+    const snapshot = computeExecutiveReportSnapshot([c], { currentPeriod: CURRENT, previousPeriod: null });
+    expect(snapshot.byFacility["سجن الرياض"]?.receivedDuringPeriod).toBe(0);
+    expect(snapshot.byFacility["سجن الرياض"]?.openAtEnd).toBe(1);
+    expect(snapshot.byFacility["سجن الرياض"]?.lateAtEnd).toBe(1);
+  });
+
+  it("2. facilities are computed with the same historical evidence order as regions/departments/classifications", () => {
+    const c = candidate({
+      id: "f2",
+      status: ComplaintStatus.CLOSED,
+      complaintDate: new Date("2026-07-01T00:00:00.000Z"),
+      closedAt: new Date("2026-07-28T00:00:00.000Z"),
+      facility: "سجن جدة",
+      statusHistory: history([
+        { fromStatus: ComplaintStatus.OPEN, toStatus: ComplaintStatus.CLOSED, changedAt: "2026-07-28T00:00:00.000Z" },
+      ]),
+    });
+    const snapshot = computeExecutiveReportSnapshot([c], { currentPeriod: CURRENT, previousPeriod: null });
+    expect(snapshot.byFacility["سجن جدة"]?.receivedDuringPeriod).toBe(0);
+    expect(snapshot.byFacility["سجن جدة"]?.closedDuringPeriod).toBe(1);
+    expect(snapshot.byFacility["سجن جدة"]?.openAtEnd).toBe(0);
+  });
+
+  it("3. receivedDuringPeriod/openAtEnd/lateAtEnd sum across facilities back to the overall snapshot (reconciliation)", () => {
+    const candidates = [
+      candidate({ id: "f3a", status: ComplaintStatus.OPEN, complaintDate: new Date("2026-01-01T00:00:00.000Z"), facility: "سجن الرياض" }),
+      candidate({ id: "f3b", status: ComplaintStatus.OPEN, complaintDate: new Date("2026-07-30T00:00:00.000Z"), facility: null }),
+      candidate({
+        id: "f3c",
+        status: ComplaintStatus.CLOSED,
+        complaintDate: new Date("2026-01-01T00:00:00.000Z"),
+        closedAt: new Date("2026-07-27T00:00:00.000Z"),
+        statusHistory: history([{ fromStatus: ComplaintStatus.OPEN, toStatus: ComplaintStatus.CLOSED, changedAt: "2026-07-27T00:00:00.000Z" }]),
+        facility: "سجن جدة",
+      }),
+    ];
+    const snapshot = computeExecutiveReportSnapshot(candidates, { currentPeriod: CURRENT, previousPeriod: null });
+    const sums = Object.values(snapshot.byFacility).reduce(
+      (acc, g) => ({
+        receivedDuringPeriod: acc.receivedDuringPeriod + g.receivedDuringPeriod,
+        openAtEnd: acc.openAtEnd + g.openAtEnd,
+        lateAtEnd: acc.lateAtEnd + g.lateAtEnd,
+      }),
+      { receivedDuringPeriod: 0, openAtEnd: 0, lateAtEnd: 0 }
+    );
+    expect(sums.receivedDuringPeriod).toBe(snapshot.current.receivedDuringPeriod);
+    expect(sums.openAtEnd).toBe(snapshot.current.openAtEnd);
+    expect(sums.lateAtEnd).toBe(snapshot.current.lateAtEnd);
+  });
+
+  it("4. a CANCELLED complaint under a facility never pushes the facility's openAtEnd above the overall total", () => {
+    const candidates = [
+      candidate({ id: "f4a", status: ComplaintStatus.OPEN, complaintDate: new Date("2026-07-01T00:00:00.000Z"), facility: "سجن الرياض" }),
+      candidate({
+        id: "f4b",
+        status: ComplaintStatus.CANCELLED,
+        complaintDate: new Date("2026-07-01T00:00:00.000Z"),
+        facility: "سجن الرياض",
+        statusHistory: history([
+          { fromStatus: ComplaintStatus.OPEN, toStatus: ComplaintStatus.CANCELLED, changedAt: "2026-07-10T00:00:00.000Z" },
+        ]),
+      }),
+    ];
+    const snapshot = computeExecutiveReportSnapshot(candidates, { currentPeriod: CURRENT, previousPeriod: null });
+    expect(snapshot.byFacility["سجن الرياض"]?.openAtEnd).toBe(1);
+    expect(snapshot.current.openAtEnd).toBe(1);
+  });
+
+  it("5. lateAtEnd never exceeds openAtEnd for any facility bucket", () => {
+    const candidates = [
+      candidate({ id: "f5a", status: ComplaintStatus.OPEN, complaintDate: new Date("2026-01-01T00:00:00.000Z"), facility: "سجن الرياض" }),
+      candidate({ id: "f5b", status: ComplaintStatus.OPEN, complaintDate: new Date("2026-07-30T00:00:00.000Z"), facility: "سجن الرياض" }),
+    ];
+    const snapshot = computeExecutiveReportSnapshot(candidates, { currentPeriod: CURRENT, previousPeriod: PREVIOUS });
+    for (const group of Object.values(snapshot.byFacility)) {
+      expect(group.lateAtEnd).toBeLessThanOrEqual(group.openAtEnd);
+    }
   });
 });
 
@@ -746,6 +839,7 @@ describe("loadReportPeriodSnapshotCandidates — query shape (spec section 7)", 
       region: true,
       department: true,
       classificationId: true,
+      facility: true,
       statusHistory: { select: { fromStatus: true, toStatus: true, changedAt: true } },
     });
     for (const forbidden of [
