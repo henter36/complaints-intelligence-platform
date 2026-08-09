@@ -191,9 +191,12 @@ describe("Facility Registry", () => {
       status: FacilitySyncStatus.COMPLETED,
       attempts: 2,
     });
+    const completed = await prisma.importBatch.findUniqueOrThrow({ where: { id: batch.id } });
     await expect(retryFacilitySyncForConfirmedBatch(batch.id, prisma)).resolves.toMatchObject({
       status: FacilitySyncStatus.COMPLETED,
-      attempts: 3,
+      attempts: 2,
+      syncedFacilities: 0,
+      syncedAt: completed.facilitySyncedAt!.toISOString(),
     });
     expect(await prisma.facility.count()).toBe(1);
     expect(await prisma.facility.findUniqueOrThrow({ where: { id: facility.id } })).toMatchObject({

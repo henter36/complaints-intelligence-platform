@@ -33,15 +33,47 @@ CREATE TEMP TABLE "__FacilityCanonicalBackfill" (
     "cleanRegion" TEXT
 );
 
-WITH RECURSIVE whitespace_normalized AS (
+WITH RECURSIVE unicode_whitespace_stage_one AS (
     SELECT
         "id" AS "complaintId",
-        trim(
-            replace(replace(replace(replace(replace("facility", char(9), ' '), char(10), ' '), char(11), ' '), char(12), ' '), char(13), ' ')
-        ) AS "displayName",
-        NULLIF(trim(replace(replace(replace(replace(replace("region", char(9), ' '), char(10), ' '), char(11), ' '), char(12), ' '), char(13), ' ')), '') AS "cleanRegion"
+        replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(
+            "facility",
+            char(160), ' '), char(5760), ' '), char(8192), ' '), char(8193), ' '),
+            char(8194), ' '), char(8195), ' '), char(8196), ' '), char(8197), ' '),
+            char(8198), ' '), char(8199), ' '
+        ) AS "facilityText",
+        replace(replace(replace(replace(replace(replace(replace(replace(replace(replace(
+            "region",
+            char(160), ' '), char(5760), ' '), char(8192), ' '), char(8193), ' '),
+            char(8194), ' '), char(8195), ' '), char(8196), ' '), char(8197), ' '),
+            char(8198), ' '), char(8199), ' '
+        ) AS "regionText"
     FROM "Complaint"
     WHERE "facility" IS NOT NULL
+), unicode_whitespace_normalized AS (
+    SELECT
+        "complaintId",
+        replace(replace(replace(replace(replace(replace(replace(replace(replace(
+            "facilityText",
+            char(8200), ' '), char(8201), ' '), char(8202), ' '), char(8232), ' '),
+            char(8233), ' '), char(8239), ' '), char(8287), ' '), char(12288), ' '),
+            char(65279), ' '
+        ) AS "facilityText",
+        replace(replace(replace(replace(replace(replace(replace(replace(replace(
+            "regionText",
+            char(8200), ' '), char(8201), ' '), char(8202), ' '), char(8232), ' '),
+            char(8233), ' '), char(8239), ' '), char(8287), ' '), char(12288), ' '),
+            char(65279), ' '
+        ) AS "regionText"
+    FROM unicode_whitespace_stage_one
+), whitespace_normalized AS (
+    SELECT
+        "complaintId",
+        trim(
+            replace(replace(replace(replace(replace("facilityText", char(9), ' '), char(10), ' '), char(11), ' '), char(12), ' '), char(13), ' ')
+        ) AS "displayName",
+        NULLIF(trim(replace(replace(replace(replace(replace("regionText", char(9), ' '), char(10), ' '), char(11), ' '), char(12), ' '), char(13), ' ')), '') AS "cleanRegion"
+    FROM unicode_whitespace_normalized
 
     UNION ALL
 

@@ -185,7 +185,13 @@ export async function retryFacilitySyncForConfirmedBatch(
 ): Promise<FacilitySyncResult> {
   const batch = await client.importBatch.findUnique({
     where: { id: batchId },
-    select: { id: true, status: true },
+    select: {
+      id: true,
+      status: true,
+      facilitySyncStatus: true,
+      facilitySyncAttempts: true,
+      facilitySyncedAt: true,
+    },
   });
   if (!batch) {
     throw new FacilityRegistrySyncError("IMPORT_BATCH_NOT_FOUND", "دفعة الاستيراد غير موجودة", 404);
@@ -196,6 +202,18 @@ export async function retryFacilitySyncForConfirmedBatch(
       "لا يمكن مزامنة السجون قبل تأكيد دفعة الاستيراد",
       409
     );
+  }
+  if (
+    batch.facilitySyncStatus === FacilitySyncStatus.COMPLETED
+    && batch.facilitySyncedAt !== null
+  ) {
+    return {
+      batchId,
+      status: FacilitySyncStatus.COMPLETED,
+      syncedFacilities: 0,
+      attempts: batch.facilitySyncAttempts,
+      syncedAt: batch.facilitySyncedAt.toISOString(),
+    };
   }
 
   const pending = await client.importBatch.update({
