@@ -24,6 +24,12 @@ import { UNCLASSIFIED_CLASSIFICATION_KEY } from "@/lib/reports/classification-ke
 import { MIN_CHART_HEIGHT } from "./report-chart-service";
 
 const DANGER = REPORT_DESIGN_TOKENS.colors.danger;
+const NO_CLASSIFICATION_COMPARISON_MESSAGE =
+  "لا تتوفر فترة سابقة صالحة لاستخراج تحولات التصنيفات.";
+const UNAVAILABLE_CLASSIFICATION_CHANGES_MESSAGE =
+  "تعذر احتساب تحولات التصنيفات لهذه الفترة.";
+const NO_CLASSIFICATION_CHANGES_MESSAGE =
+  "لم تسجل التصنيفات تغيرات مقارنة بالفترة السابقة.";
 
 function countPageObjects(buffer: Buffer): number {
   return (buffer.toString("binary").match(/\/Type\s*\/Page\s*\/Parent/g) ?? []).length;
@@ -78,6 +84,12 @@ function makeV2Brief(overrides: Partial<ExecutiveBriefV2Data> = {}): ExecutiveBr
     bottomFacilities: [
       { name: "سجن الدمام", total: 2, open: 0, closed: 2, currentlyLate: 0, shareOfTotal: 2 },
       { name: "سجن أبها", total: 3, open: 1, closed: 2, currentlyLate: 0, shareOfTotal: 3 },
+    ],
+    classificationChanges: [
+      { classificationId: "c1", classificationName: "نقل", classificationPath: "فئة اختبار / نقل", currentCount: 60, previousCount: 20, difference: 40, changeRate: 200, direction: "ارتفاع" },
+      { classificationId: "c3", classificationName: "استفسار", classificationPath: "فئة اختبار / استفسار", currentCount: 12, previousCount: 0, difference: 12, changeRate: null, direction: "جديد" },
+      { classificationId: "c4", classificationName: "صيانة", classificationPath: "فئة اختبار / صيانة", currentCount: 5, previousCount: 30, difference: -25, changeRate: -83.3, direction: "انخفاض" },
+      { classificationId: "c5", classificationName: "شكوى إدارية قديمة", classificationPath: "فئة اختبار / شكوى إدارية قديمة", currentCount: 0, previousCount: 18, difference: -18, changeRate: -100, direction: "انخفاض إلى صفر" },
     ],
     conclusions: ["استنتاج تجريبي."],
     notes: ["ملاحظة جودة بيانات تجريبية."],
@@ -369,13 +381,17 @@ describe("renderExecutiveBriefV2Pdf", () => {
         "الدمام",
         "الاستنتاجات",
         "استنتاج",
-        "المتابعة",
+        "تحولات",
         "نقل",
+        "صيانة",
       ]) {
         expect(joined).toContain(token);
       }
       expect(joined).not.toContain("[object Object]");
       expect(joined).not.toContain("الإدارة");
+      // "المتابعة" only ever appeared via the old department×classification
+      // rises box; it must never render on V2's page 4 anymore.
+      expect(joined).not.toContain("المتابعة");
       expect(joined).not.toContain(preparePdfText("ملاحظات جودة البيانات وتأثيرها على المؤشرات"));
       expect(joined).not.toContain("ملاحظات جودة البيانات وتأثيرها على المؤشرات");
     } finally {
@@ -461,6 +477,160 @@ describe("V2 page 4 — facilities replace departments (spec sections 5-9, 14-16
       for (const token of ["منطقة1", "منطقة2", "منطقة3", "منطقة4", "منطقة5"]) {
         expect(joined).toContain(token);
       }
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+});
+
+describe("V2 page 4 — classification shifts replace notable rises (spec sections 1-2, 9, 14-16)", () => {
+  it("renders 'أبرز تحولات التصنيفات' and every classification name/direction label, never the old rises heading or its department-based text", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(makeV2Report());
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      // "أبرز تحولات التصنيفات" reorders under RTL shaping; check the
+      // distinctive single word rather than the exact phrase.
+      expect(joined).toContain("تحولات");
+      for (const token of ["نقل", "استفسار", "صيانة"]) {
+        expect(joined).toContain(token);
+      }
+      expect(joined).not.toContain("الارتفاعات الملحوظة");
+      expect(joined).not.toContain("لا توجد ارتفاعات إدارية حادة في هذه الفترة");
+      // "المتابعة" is the department name in makeV2Report()'s deptClassRises
+      // fixture (still a valid ComparisonResult field — just unused by V2
+      // page 4 now). It must never leak into the rendered page text.
+      expect(joined).not.toContain("المتابعة");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("1/2/16. never reads comparisonData.deptClassRises for page 4, even when it has real department data and classificationChanges is empty", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(
+        makeV2Report({
+          briefData: makeV2Brief({ classificationChanges: [] }),
+          comparisonData: {
+            ...makeV2Report().comparisonData!,
+            deptClassRises: [
+              {
+                departmentId: "d-leak",
+                departmentName: "إدارة يجب ألا تظهر",
+                classificationId: "c-leak",
+                classificationName: "تصنيف تسريب",
+                classificationPath: "فئة / تصنيف تسريب",
+                currentCount: 99,
+                previousCount: 1,
+                difference: 98,
+                changeRate: 9800,
+                classificationContribution: 100,
+              },
+            ],
+          },
+        })
+      );
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(joined).not.toContain("إدارة يجب ألا تظهر");
+      expect(joined).not.toContain("تصنيف تسريب");
+      // classificationChanges is explicitly empty with a previous period
+      // present. "تغيرات" is the distinctive word from the message (RTL
+      // shaping reorders whole-phrase word order, so check a single word).
+      expect(joined).toContain("تغيرات");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("empty state A: no previous period reports that classification comparison is unavailable", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(
+        makeV2Report({
+          previousPeriod: null,
+          briefData: makeV2Brief({ classificationChanges: [] }),
+        })
+      );
+      const rendered = textSpy.mock.calls.map((call) => String(call[0]));
+      expect(rendered).toContain(preparePdfText(NO_CLASSIFICATION_COMPARISON_MESSAGE));
+      expect(rendered).not.toContain(preparePdfText(UNAVAILABLE_CLASSIFICATION_CHANGES_MESSAGE));
+      expect(rendered).not.toContain(preparePdfText(NO_CLASSIFICATION_CHANGES_MESSAGE));
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("empty state C: an explicitly computed empty result reports no classification changes", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(
+        makeV2Report({ briefData: makeV2Brief({ classificationChanges: [] }) })
+      );
+      const rendered = textSpy.mock.calls.map((call) => String(call[0]));
+      expect(rendered).toContain(preparePdfText(NO_CLASSIFICATION_CHANGES_MESSAGE));
+      expect(rendered).not.toContain(preparePdfText(NO_CLASSIFICATION_COMPARISON_MESSAGE));
+      expect(rendered).not.toContain(preparePdfText(UNAVAILABLE_CLASSIFICATION_CHANGES_MESSAGE));
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("renders all four direction labels from their unique page-4 classification rows", async () => {
+    const classificationChanges = [
+      { classificationId: "rise-v2", classificationName: "تصنيف-ارتفاع-V2", classificationPath: "فئة-V2 / تصنيف-ارتفاع-V2", currentCount: 60, previousCount: 20, difference: 40, changeRate: 200, direction: "ارتفاع" as const },
+      { classificationId: "decline-v2", classificationName: "تصنيف-انخفاض-V2", classificationPath: "فئة-V2 / تصنيف-انخفاض-V2", currentCount: 5, previousCount: 30, difference: -25, changeRate: -83.3, direction: "انخفاض" as const },
+      { classificationId: "new-v2", classificationName: "تصنيف-جديد-V2", classificationPath: "فئة-V2 / تصنيف-جديد-V2", currentCount: 12, previousCount: 0, difference: 12, changeRate: null, direction: "جديد" as const },
+      { classificationId: "zero-v2", classificationName: "تصنيف-صفر-V2", classificationPath: "فئة-V2 / تصنيف-صفر-V2", currentCount: 0, previousCount: 18, difference: -18, changeRate: -100, direction: "انخفاض إلى صفر" as const },
+    ];
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(
+        makeV2Report({ briefData: makeV2Brief({ classificationChanges }) })
+      );
+      const rendered = textSpy.mock.calls.map((call) => String(call[0]));
+
+      for (const row of classificationChanges) {
+        const pathCallIndex = rendered.indexOf(preparePdfText(row.classificationPath));
+        expect(pathCallIndex).toBeGreaterThanOrEqual(0);
+        expect(rendered[pathCallIndex + 4]).toBe(preparePdfText(row.direction));
+      }
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("20/21. stays exactly 4 pages with no warnings when classificationChanges has 5 rows", async () => {
+    const fiveChanges = [
+      { classificationId: "c1", classificationName: "أ", classificationPath: "فئة / أ", currentCount: 60, previousCount: 20, difference: 40, changeRate: 200, direction: "ارتفاع" as const },
+      { classificationId: "c2", classificationName: "ب", classificationPath: "فئة / ب", currentCount: 50, previousCount: 15, difference: 35, changeRate: 233.3, direction: "ارتفاع" as const },
+      { classificationId: "c3", classificationName: "ج", classificationPath: "فئة / ج", currentCount: 10, previousCount: 0, difference: 10, changeRate: null, direction: "جديد" as const },
+      { classificationId: "c4", classificationName: "د", classificationPath: "فئة / د", currentCount: 5, previousCount: 40, difference: -35, changeRate: -87.5, direction: "انخفاض" as const },
+      { classificationId: "c5", classificationName: "هـ", classificationPath: "فئة / هـ", currentCount: 0, previousCount: 22, difference: -22, changeRate: -100, direction: "انخفاض إلى صفر" as const },
+    ];
+    const result = await renderExecutiveBriefV2Pdf(
+      makeV2Report({ briefData: makeV2Brief({ classificationChanges: fiveChanges }) })
+    );
+    expect(countPageObjects(result.buffer)).toBe(4);
+    expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
+    expect(result.warnings.every((w) => !w.includes("بدلًا من"))).toBe(true);
+  });
+
+  it("empty state B: undefined classificationChanges reports unavailable data and keeps the PDF at 4 pages", async () => {
+    const brief = makeV2Brief();
+    const withoutChanges = { ...brief } as Partial<ExecutiveBriefV2Data>;
+    delete withoutChanges.classificationChanges;
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      const result = await renderExecutiveBriefV2Pdf(
+        makeV2Report({ briefData: withoutChanges as ExecutiveBriefV2Data })
+      );
+      const rendered = textSpy.mock.calls.map((call) => String(call[0]));
+      expect(rendered).toContain(preparePdfText(UNAVAILABLE_CLASSIFICATION_CHANGES_MESSAGE));
+      expect(rendered).not.toContain(preparePdfText(NO_CLASSIFICATION_COMPARISON_MESSAGE));
+      expect(rendered).not.toContain(preparePdfText(NO_CLASSIFICATION_CHANGES_MESSAGE));
+      expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
+      expect(countPageObjects(result.buffer)).toBe(4);
     } finally {
       textSpy.mockRestore();
     }

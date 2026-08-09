@@ -20,6 +20,7 @@ import {
   buildTopClassifications,
   buildTopAndBottomFacilities,
   buildRegionOnlyConclusions,
+  buildClassificationChanges,
   MONTHLY_WINDOW_SIZE,
   ARABIC_MONTH_NAMES,
 } from "./report-executive-brief-data-service";
@@ -2708,5 +2709,232 @@ describe("buildRegionOnlyConclusions — V2 only (spec sections 10-15, 17 items 
     for (const forbidden of ["سلبي", "مشكلة", "تحسن", "تراجع الأداء"]) {
       expect(conclusions).not.toContain(forbidden);
     }
+  });
+});
+
+describe("buildClassificationChanges — V2 only (spec sections 3-8, 17 items 4-15)", () => {
+  function classificationGroup(overrides: Partial<ComplaintGroupMetrics> & { id: string | null; name: string; total: number }): ComplaintGroupMetrics {
+    return {
+      count: overrides.total,
+      open: 0,
+      closed: 0,
+      currentlyLate: 0,
+      closedLate: 0,
+      withinDueDate: 0,
+      complianceRate: null,
+      averageResolutionDays: 0,
+      averageResolutionEligibleCount: 0,
+      slaEligibleCount: 0,
+      closedWithoutTrustedDateCount: 0,
+      highPriorityOpen: 0,
+      unclassified: 0,
+      categoryId: `cat-${overrides.id}`,
+      categoryName: "فئة اختبار",
+      classificationName: overrides.name,
+      ...overrides,
+    };
+  }
+
+  function balancedClassificationGroups(): {
+    current: ComplaintGroupMetrics[];
+    previous: ComplaintGroupMetrics[];
+  } {
+    return {
+      current: [
+        classificationGroup({ id: "r1", name: "ارتفاع 1", total: 110 }),
+        classificationGroup({ id: "r2", name: "ارتفاع 2", total: 100 }),
+        classificationGroup({ id: "r3", name: "ارتفاع 3", total: 70 }),
+        classificationGroup({ id: "d1", name: "انخفاض 1", total: 5 }),
+        classificationGroup({ id: "d2", name: "انخفاض 2", total: 10 }),
+        classificationGroup({ id: "d3", name: "انخفاض 3", total: 10 }),
+      ],
+      previous: [
+        classificationGroup({ id: "r1", name: "ارتفاع 1", total: 10 }),
+        classificationGroup({ id: "r2", name: "ارتفاع 2", total: 10 }),
+        classificationGroup({ id: "r3", name: "ارتفاع 3", total: 10 }),
+        classificationGroup({ id: "d1", name: "انخفاض 1", total: 100 }),
+        classificationGroup({ id: "d2", name: "انخفاض 2", total: 90 }),
+        classificationGroup({ id: "d3", name: "انخفاض 3", total: 80 }),
+      ],
+    };
+  }
+
+  it("4. current > previous (both > 0) → ارتفاع", () => {
+    const current = [classificationGroup({ id: "c1", name: "نقل", total: 30 })];
+    const previous = [classificationGroup({ id: "c1", name: "نقل", total: 10 })];
+    const [row] = buildClassificationChanges(current, previous, true);
+    expect(row?.direction).toBe("ارتفاع");
+    expect(row?.difference).toBe(20);
+  });
+
+  it("5/11. previous=0, current>0 → جديد, with no fabricated change rate", () => {
+    const current = [classificationGroup({ id: "c1", name: "استفسار", total: 12 })];
+    const [row] = buildClassificationChanges(current, [], true);
+    expect(row?.direction).toBe("جديد");
+    expect(row?.previousCount).toBe(0);
+    expect(row?.changeRate).toBeNull();
+  });
+
+  it("6. current < previous, current > 0 → انخفاض", () => {
+    const current = [classificationGroup({ id: "c1", name: "صيانة", total: 5 })];
+    const previous = [classificationGroup({ id: "c1", name: "صيانة", total: 30 })];
+    const [row] = buildClassificationChanges(current, previous, true);
+    expect(row?.direction).toBe("انخفاض");
+    expect(row?.difference).toBe(-25);
+  });
+
+  it("7/10. previous > 0, current = 0 → انخفاض إلى صفر, and a classification only present in the previous period is never lost", () => {
+    const previous = [classificationGroup({ id: "c1", name: "شكوى قديمة", total: 18 })];
+    const rows = buildClassificationChanges([], previous, true);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.direction).toBe("انخفاض إلى صفر");
+    expect(rows[0]?.currentCount).toBe(0);
+    expect(rows[0]?.previousCount).toBe(18);
+  });
+
+  it("8. current === previous → excluded entirely (not \"دون تغير\")", () => {
+    const current = [classificationGroup({ id: "c1", name: "نقل", total: 10 })];
+    const previous = [classificationGroup({ id: "c1", name: "نقل", total: 10 })];
+    const rows = buildClassificationChanges(current, previous, true);
+    expect(rows).toHaveLength(0);
+  });
+
+  it("9. never renders Infinity or NaN in changeRate for any generated row", () => {
+    const current = [
+      classificationGroup({ id: "c1", name: "جديد كليًا", total: 5 }),
+      classificationGroup({ id: "c2", name: "منخفض", total: 2 }),
+    ];
+    const previous = [classificationGroup({ id: "c2", name: "منخفض", total: 40 })];
+    const rows = buildClassificationChanges(current, previous, true);
+    for (const row of rows) {
+      expect(row.changeRate === null || Number.isFinite(row.changeRate)).toBe(true);
+    }
+  });
+
+  it("12. selects by |difference| descending, not by change-rate percentage", () => {
+    // A small-base classification with a huge percentage swing (+400%) must
+    // not outrank a much larger absolute swing from a bigger base.
+    const current = [
+      classificationGroup({ id: "big", name: "كبير", total: 120 }),
+      classificationGroup({ id: "small", name: "صغير", total: 5 }),
+    ];
+    const previous = [
+      classificationGroup({ id: "big", name: "كبير", total: 20 }),
+      classificationGroup({ id: "small", name: "صغير", total: 1 }),
+    ];
+    const rows = buildClassificationChanges(current, previous, true);
+    expect(rows[0]?.classificationId).toBe("big");
+  });
+
+  it("13. represents both rising and declining classifications when both exist", () => {
+    const current = [
+      classificationGroup({ id: "r1", name: "ارتفاع1", total: 100 }),
+      classificationGroup({ id: "r2", name: "ارتفاع2", total: 90 }),
+      classificationGroup({ id: "d1", name: "انخفاض1", total: 5 }),
+      classificationGroup({ id: "d2", name: "انخفاض2", total: 5 }),
+    ];
+    const previous = [
+      classificationGroup({ id: "r1", name: "ارتفاع1", total: 10 }),
+      classificationGroup({ id: "r2", name: "ارتفاع2", total: 10 }),
+      classificationGroup({ id: "d1", name: "انخفاض1", total: 95 }),
+      classificationGroup({ id: "d2", name: "انخفاض2", total: 85 }),
+    ];
+    const rows = buildClassificationChanges(current, previous, true);
+    expect(rows.some((r) => r.direction === "ارتفاع")).toBe(true);
+    expect(rows.some((r) => r.direction === "انخفاض")).toBe(true);
+  });
+
+  it("14. caps at 5 rows even when many classifications changed", () => {
+    const current = Array.from({ length: 10 }, (_, i) =>
+      classificationGroup({ id: `c${i}`, name: `تصنيف ${i}`, total: 100 - i * 5 })
+    );
+    const previous = Array.from({ length: 10 }, (_, i) =>
+      classificationGroup({ id: `c${i}`, name: `تصنيف ${i}`, total: 10 })
+    );
+    const rows = buildClassificationChanges(current, previous, true);
+    expect(rows).toHaveLength(5);
+  });
+
+  it("fills limit 5 with at least two rows per direction and gives the final seat to the strongest remaining change", () => {
+    const { current, previous } = balancedClassificationGroups();
+    const rows = buildClassificationChanges(current, previous, true, 5);
+
+    expect(rows).toHaveLength(5);
+    expect(rows.filter((row) => row.direction === "ارتفاع")).toHaveLength(2);
+    expect(rows.filter((row) => row.direction === "انخفاض")).toHaveLength(3);
+    expect(rows.map((row) => row.classificationId)).toContain("d3");
+    expect(rows.map((row) => row.classificationId)).not.toContain("r3");
+  });
+
+  it.each([
+    { limit: 0, expectedIds: [] },
+    { limit: 1, expectedIds: ["r1"] },
+    { limit: 2, expectedIds: ["r1", "d1"] },
+    { limit: 3, expectedIds: ["r1", "d1", "r2"] },
+    { limit: 4, expectedIds: ["r1", "d1", "r2", "d2"] },
+    { limit: 5, expectedIds: ["r1", "d1", "r2", "d2", "d3"] },
+  ])("honors and fills the requested balanced limit=$limit", ({ limit, expectedIds }) => {
+    const { current, previous } = balancedClassificationGroups();
+    const rows = buildClassificationChanges(current, previous, true, limit);
+
+    expect(rows.length).toBeLessThanOrEqual(limit);
+    expect(rows).toHaveLength(limit);
+    expect(rows.map((row) => row.classificationId)).toEqual(expectedIds);
+  });
+
+  it("15. tie-breaks (equal |difference|) are deterministic: |changeRate| desc, then volume desc, then Arabic name asc", () => {
+    const current = [
+      classificationGroup({ id: "b", name: "ب", total: 20 }),
+      classificationGroup({ id: "a", name: "أ", total: 20 }),
+    ];
+    const previous = [
+      classificationGroup({ id: "b", name: "ب", total: 10 }),
+      classificationGroup({ id: "a", name: "أ", total: 10 }),
+    ];
+    const first = buildClassificationChanges(current, previous, true);
+    const second = buildClassificationChanges(current, previous, true);
+    expect(first).toEqual(second);
+    expect(first[0]?.classificationId).toBe("a");
+  });
+
+  it("no previous period → returns an empty list rather than fabricating a comparison", () => {
+    const current = [classificationGroup({ id: "c1", name: "نقل", total: 10 })];
+    expect(buildClassificationChanges(current, [], false)).toEqual([]);
+  });
+
+  it("the unclassified sentinel bucket can appear when its own change is significant, keyed consistently with buildTopClassifications", () => {
+    const current = [classificationGroup({ id: null, name: UNCLASSIFIED_CLASSIFICATION_LABEL, total: 50 })];
+    const previous = [classificationGroup({ id: null, name: UNCLASSIFIED_CLASSIFICATION_LABEL, total: 10 })];
+    const [row] = buildClassificationChanges(current, previous, true);
+    expect(row?.classificationId).toBe(UNCLASSIFIED_CLASSIFICATION_KEY);
+    expect(row?.classificationPath).toBe(UNCLASSIFIED_CLASSIFICATION_LABEL);
+  });
+
+  it("17. buildTopClassifications output is unaffected by the classificationRowKey/resolveClassificationRowInfo refactor", () => {
+    const current = [classificationGroup({ id: "c1", name: "نقل", total: 30, categoryName: "فئة أ" })];
+    const previous = [classificationGroup({ id: "c1", name: "نقل", total: 20 })];
+    const rows = buildTopClassifications(current, previous, 30);
+    expect(rows).toEqual([
+      {
+        categoryId: "cat-c1",
+        categoryName: "فئة أ",
+        classificationId: "c1",
+        classificationName: "نقل",
+        classificationPath: "فئة أ / نقل",
+        currentCount: 30,
+        previousCount: 20,
+        difference: 10,
+        changeRate: 50,
+        shareOfTotal: 100,
+      },
+    ]);
+  });
+
+  it("generated rows never carry a department-shaped field", () => {
+    const current = [classificationGroup({ id: "c1", name: "نقل", total: 30 })];
+    const [row] = buildClassificationChanges(current, [], true);
+    expect(row).toBeDefined();
+    expect(row).not.toHaveProperty("departmentName");
+    expect(row).not.toHaveProperty("departmentId");
   });
 });

@@ -7,7 +7,7 @@
  *   1. Cover   — large title + 3 summary cards + all-time total
  *   2. Trend   — registered/closed totals + monthly combo chart + key notes
  *   3. Regions — comparison chart + volume cards + delta/topic table
- *   4. Dept/Class — notable rises + classification table + department table + conclusions + data notes
+ *   4. Classifications/Facilities — classification-shift table + classification table + facility tables + conclusions
  */
 
 import fs from "node:fs";
@@ -25,6 +25,7 @@ import type {
   ExecutiveEntityRow,
   ExecutiveBriefKpiCard,
   PeriodSnapshotMetrics,
+  ClassificationChangeRow,
 } from "@/lib/reports/report-contract";
 import type { ExecutiveBriefV2Data, ReportData } from "./report-data-service";
 import { isExecutiveBriefV2Data } from "./report-data-service";
@@ -1089,6 +1090,18 @@ function formatEntityTableCell(row: ExecutiveEntityRow, key: string): string {
   return formatTableValue((row as Record<string, unknown>)[key]);
 }
 
+/**
+ * Plain Arabic words only — no arrow glyphs. The Amiri font used by this PDF
+ * has no glyph for U+2191/U+2193, which rendered as a visible tofu box next
+ * to the direction word (confirmed via a real generated PDF); spec section 9
+ * made arrows conditional on RTL/font compatibility, and they are not.
+ */
+function formatClassificationChangeCell(row: ClassificationChangeRow, key: string): string {
+  if (key === "difference") return formatReportNumber(row.difference, { sign: true });
+  if (key === "classificationPath") return row.classificationPath;
+  return formatTableValue((row as Record<string, unknown>)[key]);
+}
+
 async function renderPage3(ctx: V2Context): Promise<void> {
   const { doc, data, brief, layout, warnings } = ctx;
   const { margin, contentWidth } = layout;
@@ -1238,30 +1251,43 @@ function renderPage4(ctx: V2Context): void {
   const topFacilityRows = brief.topFacilities ?? [];
   const bottomFacilityRows = brief.bottomFacilities ?? [];
   const conclusions = (brief.conclusions ?? []).slice(0, 5);
+  const classificationChangeRows = brief.classificationChanges;
   const hasClassComparison = classRows.some((r) => r.previousCount > 0);
 
   let y = drawPageHeader(ctx, "التصنيفات والسجون والاستنتاجات");
   const gap = 14;
   const rowH = 26;
 
-  // ── Notable rises (text box) ──────────────────────────────────────────────
-  y = drawSectionTitle(doc, "الارتفاعات الملحوظة", margin, y, contentWidth);
-  const rises = hasPrevPeriod ? (data.comparisonData?.deptClassRises ?? []).slice(0, 6) : [];
-  const riseTexts = rises.length > 0
-    ? rises.map((r) => `${r.departmentName} / ${r.classificationPath ?? r.classificationName}: ${formatReportNumber(r.difference, { sign: true })} شكوى`)
-    : ["لا توجد ارتفاعات إدارية حادة في هذه الفترة."];
-  const riseBoxH = Math.max(60, 18 + riseTexts.length * 22);
-  doc.roundedRect(margin, y, contentWidth, riseBoxH, REPORT_DESIGN_TOKENS.card.radius)
-    .fillAndStroke(COLORS.background, COLORS.border);
-  doc.font("Body").fontSize(REPORT_DESIGN_TOKENS.fontSize.body).fillColor(COLORS.text);
-  riseTexts.forEach((txt, idx) => {
-    doc.text(preparePdfText(`• ${txt}`), margin + 10, y + 9 + idx * 22, {
-      width: contentWidth - 20, height: 22, align: "right",
-      wordSpacing: WORD_SPACING, lineBreak: false, ellipsis: true,
+  // ── Classification shifts (V2-only; region page has its own region deltas, page 4 stays classification-only — never department-based) ──
+  y = drawSectionTitle(doc, "أبرز تحولات التصنيفات", margin, y, contentWidth);
+  if (classificationChangeRows && classificationChangeRows.length > 0) {
+    const changeCols: ColDef[] = [
+      { key: "classificationPath", label: "التصنيف", weight: 2.0 },
+      { key: "currentCount", label: "الحالية", weight: 0.8 },
+      { key: "previousCount", label: "السابقة", weight: 0.8 },
+      { key: "difference", label: "الفرق", weight: 0.8 },
+      { key: "direction", label: "الاتجاه", weight: 1.4 },
+    ];
+    y = drawTable({
+      doc,
+      rows: classificationChangeRows,
+      columns: changeCols,
+      x: margin,
+      y,
+      width: contentWidth,
+      rowHeight: 22,
+      formatCell: formatClassificationChangeCell,
     });
-  });
-  resetInk(doc);
-  y += riseBoxH + gap;
+    y += gap;
+  } else {
+    let message = "لا تتوفر فترة سابقة صالحة لاستخراج تحولات التصنيفات.";
+    if (hasPrevPeriod) {
+      message = classificationChangeRows === undefined
+        ? "تعذر احتساب تحولات التصنيفات لهذه الفترة."
+        : "لم تسجل التصنيفات تغيرات مقارنة بالفترة السابقة.";
+    }
+    y = drawInfoBox(doc, message, margin, y, contentWidth) + gap;
+  }
 
   // ── Classifications table ─────────────────────────────────────────────────
   y = drawSectionTitle(doc, "أعلى التصنيفات", margin, y, contentWidth);
@@ -1420,6 +1446,7 @@ const EMPTY_V2: ExecutiveBriefV2Data = {
   classificationOpenLate: {},
   topFacilities: [],
   bottomFacilities: [],
+  classificationChanges: [],
   periodMetrics: { current: EMPTY_PERIOD_SNAPSHOT_METRICS, previous: null },
   regionSnapshotAtEnd: [],
   departmentPeriodMetrics: [],

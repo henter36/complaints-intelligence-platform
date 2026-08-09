@@ -287,6 +287,35 @@ describe.skipIf(!DEV_DB_AVAILABLE)(
       }
     });
 
+    it("data contract: classificationChanges (V2 page 4 \"أبرز تحولات التصنيفات\") carries classification names, correct current/previous/difference, and never a department name (spec section 16)", () => {
+      const brief = requireV2Brief();
+      const rows = brief.classificationChanges ?? [];
+      const departmentNames = new Set((brief.departmentPeriodMetrics ?? []).map((d) => d.departmentName));
+
+      expect(rows.length).toBeLessThanOrEqual(5);
+      for (const row of rows) {
+        expect(row.classificationPath.length).toBeGreaterThan(0);
+        expect(row).not.toHaveProperty("departmentName");
+        expect(row).not.toHaveProperty("departmentId");
+        expect(departmentNames.has(row.classificationPath)).toBe(false);
+        expect(row.difference).toBe(row.currentCount - row.previousCount);
+        expect(row.difference).not.toBe(0);
+        if (row.previousCount === 0) {
+          expect(row.changeRate).toBeNull();
+          expect(row.direction).toBe("جديد");
+        } else {
+          expect(row.changeRate === null || Number.isFinite(row.changeRate)).toBe(true);
+        }
+        // Capability check: a classification that dropped to zero this
+        // period must be representable (not silently dropped for having no
+        // current-period row) — asserted whenever real data has such a case.
+        if (row.currentCount === 0) {
+          expect(row.previousCount).toBeGreaterThan(0);
+          expect(row.direction).toBe("انخفاض إلى صفر");
+        }
+      }
+    });
+
     it("PDF smoke test: renders exactly four pages without throwing", () => {
       expect(pdfBuffer.subarray(0, 5).toString("ascii")).toBe("%PDF-");
       const pageCount = (pdfBuffer.toString("binary").match(/\/Type\s*\/Page\s*\/Parent/g) ?? []).length;
