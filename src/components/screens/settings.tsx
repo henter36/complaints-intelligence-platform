@@ -221,11 +221,11 @@ export function Settings() {
           </div>
 
           {loading && (
-            <div role="status" aria-label="جارٍ تحميل السجون" className="space-y-3">
+            <output aria-label="جارٍ تحميل السجون" className="block space-y-3">
               <Skeleton className="h-10 w-full" />
               <Skeleton className="h-10 w-full" />
               <Skeleton className="h-10 w-full" />
-            </div>
+            </output>
           )}
 
           {!loading && loadError && (

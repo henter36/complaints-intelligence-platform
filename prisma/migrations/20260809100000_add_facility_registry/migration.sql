@@ -88,6 +88,11 @@ SET "facilityNormalizedName" = (
     SELECT "normalizedName"
     FROM "__FacilityCanonicalBackfill"
     WHERE "complaintId" = "Complaint"."id"
+)
+WHERE EXISTS (
+    SELECT 1
+    FROM "__FacilityCanonicalBackfill"
+    WHERE "complaintId" = "Complaint"."id"
 );
 
 INSERT INTO "Facility" (
