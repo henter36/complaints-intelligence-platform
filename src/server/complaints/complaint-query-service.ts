@@ -453,11 +453,12 @@ export async function listComplaints(
   const query = parseComplaintQuery(params);
   const now = options.now ?? new Date();
   const baseWhere = buildComplaintWhere(query, now);
-  const facilityWhere = query.operationalScope === "current"
-    ? await buildCurrentOperationalFacilityWhere()
-    : query.operationalScope === "historical"
-      ? await buildHistoricalOperationalFacilityWhere()
-      : {};
+  let facilityWhere: Prisma.ComplaintWhereInput = {};
+  if (query.operationalScope === "current") {
+    facilityWhere = await buildCurrentOperationalFacilityWhere();
+  } else if (query.operationalScope === "historical") {
+    facilityWhere = await buildHistoricalOperationalFacilityWhere();
+  }
   const where = combineComplaintWhere(baseWhere, facilityWhere);
   const pageSize = options.limit ? Math.min(options.limit, EXPORT_LIMIT) : query.pageSize;
   const skip = (query.page - 1) * query.pageSize;

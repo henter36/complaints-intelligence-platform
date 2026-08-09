@@ -1111,6 +1111,10 @@ export async function confirmReadyImportBatch(
         const errorCode = scanError instanceof Error
           ? scanError.message.slice(0, 200)
           : "UNKNOWN";
+        if (client !== db) {
+          console.error(`[TEXT_RISK] isolated scan start failed for batch ${batchId}: ${errorCode}`);
+          return;
+        }
         writeAuditLog(db, {
           action: "TEXT_RISK_SCAN_START_FAILED",
           entityType: "ImportBatch",

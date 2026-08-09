@@ -67,7 +67,7 @@ SELECT
     CURRENT_TIMESTAMP,
     CURRENT_TIMESTAMP
 FROM normalized_complaints
-WHERE "normalizedName" <> ''
+WHERE length("normalizedName") > 0
 GROUP BY "normalizedName";
 
 -- CreateIndex
