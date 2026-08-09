@@ -1,0 +1,144 @@
+import { FacilityStatus, type Prisma, type PrismaClient } from "@prisma/client";
+
+import { db } from "@/lib/db";
+import {
+  normalizeFacilityDisplayName,
+  normalizeFacilityName,
+  normalizeFacilityRegion,
+} from "@/server/facilities/facility-name";
+
+type FacilityRegistryClient = Pick<PrismaClient, "complaint" | "facility" | "importBatchRow">;
+
+export type FacilityRegistryWarning = {
+  code: "FACILITY_REGION_CONFLICT";
+  facilityName: string;
+  regions: string[];
+};
+
+export type FacilityBackfillResult = {
+  discovered: number;
+  createdOrMatched: number;
+  warnings: FacilityRegistryWarning[];
+};
+
+type FacilityCandidate = {
+  displayCounts: Map<string, number>;
+  regionCounts: Map<string, number>;
+};
+
+function increment(map: Map<string, number>, key: string): void {
+  map.set(key, (map.get(key) ?? 0) + 1);
+}
+
+function mostFrequentValue(counts: Map<string, number>): string {
+  return [...counts.entries()]
+    .sort(([leftValue, leftCount], [rightValue, rightCount]) =>
+      rightCount - leftCount || leftValue.localeCompare(rightValue, "ar")
+    )[0]![0];
+}
+
+function collectCandidates(
+  rows: ReadonlyArray<{ facility: unknown; region: unknown }>
+): Map<string, FacilityCandidate> {
+  const candidates = new Map<string, FacilityCandidate>();
+  for (const row of rows) {
+    const name = normalizeFacilityDisplayName(row.facility);
+    const normalizedName = normalizeFacilityName(row.facility);
+    if (!name || !normalizedName) continue;
+
+    const candidate = candidates.get(normalizedName) ?? {
+      displayCounts: new Map<string, number>(),
+      regionCounts: new Map<string, number>(),
+    };
+    increment(candidate.displayCounts, name);
+    const region = normalizeFacilityRegion(row.region);
+    if (region) increment(candidate.regionCounts, region);
+    candidates.set(normalizedName, candidate);
+  }
+  return candidates;
+}
+
+async function upsertCandidate(
+  client: FacilityRegistryClient,
+  normalizedName: string,
+  candidate: FacilityCandidate
+): Promise<void> {
+  const name = mostFrequentValue(candidate.displayCounts);
+  const region = candidate.regionCounts.size === 1
+    ? [...candidate.regionCounts.keys()][0]!
+    : null;
+
+  await client.facility.upsert({
+    where: { normalizedName },
+    create: {
+      name,
+      normalizedName,
+      region,
+      status: FacilityStatus.ACTIVE,
+    },
+    // Registry status is authoritative. Import/backfill never reopens a facility
+    // and never guesses a region after conflicting historical evidence.
+    update: {},
+  });
+}
+
+export async function backfillFacilityRegistry(
+  client: FacilityRegistryClient = db
+): Promise<FacilityBackfillResult> {
+  const rows = await client.complaint.findMany({
+    select: { facility: true, region: true },
+  });
+  const candidates = collectCandidates(rows);
+  const warnings: FacilityRegistryWarning[] = [];
+
+  for (const [normalizedName, candidate] of candidates) {
+    if (candidate.regionCounts.size > 1) {
+      warnings.push({
+        code: "FACILITY_REGION_CONFLICT",
+        facilityName: mostFrequentValue(candidate.displayCounts),
+        regions: [...candidate.regionCounts.keys()].sort((left, right) => left.localeCompare(right, "ar")),
+      });
+    }
+    await upsertCandidate(client, normalizedName, candidate);
+  }
+
+  return {
+    discovered: candidates.size,
+    createdOrMatched: candidates.size,
+    warnings,
+  };
+}
+
+function jsonObject(value: Prisma.JsonValue): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+/**
+ * Best-effort, retry-safe registry synchronization after a confirmed import.
+ * The caller deliberately catches failures so registry maintenance can never
+ * roll back or invalidate an otherwise successful complaint import.
+ */
+export async function syncFacilitiesFromImportBatch(
+  importBatchId: string,
+  client: FacilityRegistryClient = db
+): Promise<number> {
+  const rows = await client.importBatchRow.findMany({
+    where: { importBatchId },
+    select: { normalizedData: true },
+  });
+  const candidates = collectCandidates(
+    rows.flatMap((row) => {
+      const normalizedData = jsonObject(row.normalizedData);
+      return normalizedData
+        ? [{ facility: normalizedData.facility, region: normalizedData.region }]
+        : [];
+    })
+  );
+
+  for (const [normalizedName, candidate] of candidates) {
+    await upsertCandidate(client, normalizedName, candidate);
+  }
+  return candidates.size;
+}

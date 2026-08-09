@@ -11,6 +11,7 @@ export type ScreenId =
   | "reports"
   | "classifications"
   | "import-log"
+  | "settings"
   | "ai-analysis";
 
 export default async function Home() {

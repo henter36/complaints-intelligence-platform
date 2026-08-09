@@ -7,6 +7,11 @@ import {
   CLOSED_COMPLAINT_STATUSES,
   OPEN_COMPLAINT_STATUSES,
 } from "./status";
+import {
+  buildCurrentOperationalFacilityWhere,
+  buildHistoricalOperationalFacilityWhere,
+  combineComplaintWhere,
+} from "@/server/facilities/facility-operational-scope-service";
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_PAGE_SIZE = 25;
@@ -75,6 +80,7 @@ const querySchema = z.object({
   categoryId: optionalText,
   classificationId: optionalText,
   importBatchId: optionalText,
+  operationalScope: z.enum(["current", "historical"]).optional(),
   from: dateSchema,
   to: dateSchema,
   dueFrom: dateSchema,
@@ -446,7 +452,13 @@ export async function listComplaints(
 ): Promise<ComplaintListResult> {
   const query = parseComplaintQuery(params);
   const now = options.now ?? new Date();
-  const where = buildComplaintWhere(query, now);
+  const baseWhere = buildComplaintWhere(query, now);
+  const facilityWhere = query.operationalScope === "current"
+    ? await buildCurrentOperationalFacilityWhere()
+    : query.operationalScope === "historical"
+      ? await buildHistoricalOperationalFacilityWhere()
+      : {};
+  const where = combineComplaintWhere(baseWhere, facilityWhere);
   const pageSize = options.limit ? Math.min(options.limit, EXPORT_LIMIT) : query.pageSize;
   const skip = (query.page - 1) * query.pageSize;
 

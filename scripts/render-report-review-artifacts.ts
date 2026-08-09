@@ -212,6 +212,13 @@ function zeroTrendReport(): ReportData {
 const v2BriefData: ExecutiveBriefV2Data = {
   ...briefData,
   allTimeTotal: 18560,
+  topFacilities: [
+    { name: "سجن نشط ذو شكاوى", total: 22, open: 5, closed: 17, currentlyLate: 2, shareOfTotal: 7.3 },
+  ],
+  bottomFacilities: [
+    { name: "سجن نشط بلا شكاوى", total: 0, open: 0, closed: 0, currentlyLate: 0, shareOfTotal: 0 },
+    { name: "سجن نشط برصيد سابق", total: 0, open: 4, closed: 0, currentlyLate: 1, shareOfTotal: 0 },
+  ],
   classificationOpenLate: {
     c1: { openAtEnd: 41, lateAtEnd: 11 },
     c2: { openAtEnd: 26, lateAtEnd: 4 },

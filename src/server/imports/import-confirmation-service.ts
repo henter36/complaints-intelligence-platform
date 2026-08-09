@@ -22,6 +22,7 @@ import { calculateRowCounters } from "./import-batch-service";
 import { deriveSubject } from "./subject-derive";
 import { startTextRiskScan } from "@/server/analytics/text-risk/text-risk-analysis-service";
 import { normalizeComplainantIdentifier } from "@/server/complaints/repeated-complaint-identifier";
+import { syncFacilitiesFromImportBatch } from "@/server/facilities/facility-registry-service";
 
 /** Shared Prisma transaction wait/timeouts for large import confirmation/rollback. */
 export const IMPORT_TRANSACTION_MAX_WAIT_MS = 30_000;
@@ -141,7 +142,10 @@ export type ImportRollbackResult = {
   revertedUpdates: number;
 };
 
-type ImportConfirmationClient = Pick<typeof db, "$transaction">;
+type ImportConfirmationClient = Pick<
+  typeof db,
+  "$transaction" | "complaint" | "facility" | "importBatchRow"
+>;
 type ImportConfirmationTransaction = Prisma.TransactionClient;
 type RollbackSnapshot = Prisma.ImportChangeSnapshotGetPayload<{
   include: { importBatchRow: true };
@@ -1000,11 +1004,19 @@ async function recalculateIsRepeatedForIdentifiers(
 
 export async function confirmReadyImportBatch(
   batchId: string,
-  options: { actor?: string; client?: ImportConfirmationClient } = {}
+  options: {
+    actor?: string;
+    client?: ImportConfirmationClient;
+    triggerTextRiskScan?: boolean;
+  } = {}
 ): Promise<ImportConfirmationResult> {
   const actor = options.actor ?? AUDIT_ACTOR_SINGLE_ADMIN;
   const confirmedAt = new Date();
   const client = options.client ?? db;
+  // A caller-provided client may point at an isolated transaction/test DB.
+  // Never launch a scan through the process-global client for that database
+  // unless the caller explicitly opts in.
+  const triggerTextRiskScan = options.triggerTextRiskScan ?? options.client === undefined;
 
   return client.$transaction(async (tx) => {
     const transition = await tx.importBatch.updateMany({
@@ -1082,24 +1094,35 @@ export async function confirmReadyImportBatch(
       unchanged: counters.noChangeRows,
       duplicates: counters.duplicateRows,
     };
-  }, { maxWait: IMPORT_TRANSACTION_MAX_WAIT_MS, timeout: IMPORT_CONFIRMATION_TIMEOUT_MS }).then((result) => {
-    // Trigger text-risk scan after the transaction commits.
-    // Failure here must not propagate — the import is already confirmed.
-    startTextRiskScan({ importBatchId: batchId, actor }).catch((scanError: unknown) => {
-      const errorCode = scanError instanceof Error
-        ? scanError.message.slice(0, 200)
+  }, { maxWait: IMPORT_TRANSACTION_MAX_WAIT_MS, timeout: IMPORT_CONFIRMATION_TIMEOUT_MS }).then(async (result) => {
+    try {
+      await syncFacilitiesFromImportBatch(batchId, client);
+    } catch (syncError: unknown) {
+      const syncCode = syncError instanceof Error
+        ? syncError.message.slice(0, 100)
         : "UNKNOWN";
-      writeAuditLog(db, {
-        action: "TEXT_RISK_SCAN_START_FAILED",
-        entityType: "ImportBatch",
-        entityId: batchId,
-        actor,
-        metadata: { importBatchId: batchId, errorCode },
-      }).catch((logError: unknown) => {
-        const logCode = logError instanceof Error ? logError.message.slice(0, 100) : "UNKNOWN";
-        console.error(`[TEXT_RISK] scan start failed for batch ${batchId}: ${logCode}`);
+      console.error(`[FACILITY_REGISTRY] import sync failed for batch ${batchId}: ${syncCode}`);
+    }
+
+    if (triggerTextRiskScan) {
+      // Trigger text-risk scan after the transaction commits.
+      // Failure here must not propagate — the import is already confirmed.
+      startTextRiskScan({ importBatchId: batchId, actor }).catch((scanError: unknown) => {
+        const errorCode = scanError instanceof Error
+          ? scanError.message.slice(0, 200)
+          : "UNKNOWN";
+        writeAuditLog(db, {
+          action: "TEXT_RISK_SCAN_START_FAILED",
+          entityType: "ImportBatch",
+          entityId: batchId,
+          actor,
+          metadata: { importBatchId: batchId, errorCode },
+        }).catch((logError: unknown) => {
+          const logCode = logError instanceof Error ? logError.message.slice(0, 100) : "UNKNOWN";
+          console.error(`[TEXT_RISK] scan start failed for batch ${batchId}: ${logCode}`);
+        });
       });
-    });
+    }
     return result;
   });
 }

@@ -1,7 +1,7 @@
 // Core AI analysis orchestration. Handles governance, rate limiting,
 // data sanitization, provider calls, result validation, and audit logging.
 
-import type { AiAnalysisType } from "@prisma/client";
+import type { AiAnalysisType, Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { env } from "@/lib/env";
 import { logger } from "@/server/logger";
@@ -15,6 +15,10 @@ import * as recurringTopicsPrompt from "./prompts/recurring-topics";
 import * as possibleRootCausesPrompt from "./prompts/possible-root-causes";
 import * as anomalyAnalysisPrompt from "./prompts/anomaly-analysis";
 import * as improvementOpportunitiesPrompt from "./prompts/improvement-opportunities";
+import {
+  buildCurrentOperationalFacilityWhere,
+  combineComplaintWhere,
+} from "@/server/facilities/facility-operational-scope-service";
 
 // Stale run window: runs older than this are excluded from the active-run check.
 // A run stuck in PENDING/RUNNING past this window is considered dead.
@@ -219,7 +223,7 @@ async function checkRateLimits(type: AiAnalysisType, filtersSnapshot: Record<str
 
 // ─── Data loading ────────────────────────────────────────────────────────────
 
-async function loadAnalysisPopulation(where: Record<string, unknown>) {
+async function loadAnalysisPopulation(where: Prisma.ComplaintWhereInput) {
   // Get the true total count without any cap
   const totalMatching = await db.complaint.count({ where });
 
@@ -350,7 +354,10 @@ export async function runAiAnalysis(
 
   await checkRateLimits(type, filtersSnapshot);
 
-  const where = buildComplaintWhere(filters);
+  const where = combineComplaintWhere(
+    buildComplaintWhere(filters) as Prisma.ComplaintWhereInput,
+    await buildCurrentOperationalFacilityWhere()
+  );
   const { complaints, totalMatching } = await loadAnalysisPopulation(where);
 
   const mapped = complaints.map(c => ({

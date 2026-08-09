@@ -33,6 +33,7 @@ const dbMocks = vi.hoisted(() => ({
   groupBy: vi.fn(),
   count: vi.fn(),
   classificationFindMany: vi.fn(),
+  facilityFindMany: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -45,6 +46,9 @@ vi.mock("@/lib/db", () => ({
     classification: {
       findMany: dbMocks.classificationFindMany,
     },
+    facility: {
+      findMany: dbMocks.facilityFindMany,
+    },
   },
 }));
 
@@ -54,6 +58,11 @@ function q(query: string) {
 
 const FRESHNESS_NOW = new Date("2026-08-05T12:00:00.000Z");
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+beforeEach(() => {
+  dbMocks.facilityFindMany.mockReset();
+  dbMocks.facilityFindMany.mockResolvedValue([]);
+});
 
 function ago(ms: number): Date {
   return new Date(FRESHNESS_NOW.getTime() - ms);

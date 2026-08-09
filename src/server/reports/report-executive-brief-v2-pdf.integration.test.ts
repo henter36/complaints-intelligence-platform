@@ -255,13 +255,13 @@ describe.skipIf(!DEV_DB_AVAILABLE)(
       expect(totals).toEqual(recomputed);
     });
 
-    it("data contract: topFacilities/bottomFacilities never share a facility name, and bottom only contains facilities with receivedDuringPeriod > 0", () => {
+    it("data contract: topFacilities/bottomFacilities never overlap, and zero-volume facilities remain valid bottom rows", () => {
       const brief = requireV2Brief();
       const topNames = new Set((brief.topFacilities ?? []).map((r) => r.name));
       const bottomNames = (brief.bottomFacilities ?? []).map((r) => r.name);
       expect(bottomNames.every((name) => !topNames.has(name))).toBe(true);
       for (const row of brief.bottomFacilities ?? []) {
-        expect(row.total).toBeGreaterThan(0);
+        expect(row.total).toBeGreaterThanOrEqual(0);
       }
       for (const row of [...(brief.topFacilities ?? []), ...(brief.bottomFacilities ?? [])]) {
         expect(row.name).not.toBe("غير محدد");

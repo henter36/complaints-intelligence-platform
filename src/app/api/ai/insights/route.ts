@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
+import {
+  buildCurrentOperationalFacilityWhere,
+  combineComplaintWhere,
+} from "@/server/facilities/facility-operational-scope-service";
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 200;
@@ -42,8 +46,9 @@ export async function GET(req: NextRequest) {
     const url = new URL(req.url);
     const limit = parseLimit(url.searchParams.get("limit"));
 
+    const facilityWhere = await buildCurrentOperationalFacilityWhere();
     const analyzed = await db.complaint.findMany({
-      where: { aiAnalyzedAt: { not: null } },
+      where: combineComplaintWhere({ aiAnalyzedAt: { not: null } }, facilityWhere),
       select: {
         id: true,
         externalId: true,

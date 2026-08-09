@@ -20,6 +20,10 @@ vi.mock("@/lib/db", () => ({
       if (!dbHolder.client) throw new Error("test prisma not ready");
       return dbHolder.client.classification;
     },
+    get facility() {
+      if (!dbHolder.client) throw new Error("test prisma not ready");
+      return dbHolder.client.facility;
+    },
   },
 }));
 

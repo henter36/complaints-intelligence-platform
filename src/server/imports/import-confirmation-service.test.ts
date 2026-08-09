@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   ComplaintPriority,
   ComplaintStatus,
+  FacilityStatus,
   ImportBatchStatus,
   ImportChangeType,
   ImportRowAction,
@@ -225,6 +226,56 @@ describe("transactional import confirmation", () => {
     await expect(prisma.importChangeSnapshot.count({ where: { importBatchId: batch.id } })).resolves.toBe(2);
     await expect(prisma.complaintStatusHistory.count({ where: { importBatchId: batch.id } })).resolves.toBe(2);
     await expect(prisma.auditLog.count({ where: { entityId: batch.id, action: "IMPORT_CONFIRMATION_COMPLETED" } })).resolves.toBe(1);
+  });
+
+  it("synchronizes new facilities after confirmation without reopening CLOSED registry rows", async () => {
+    const suffix = crypto.randomUUID();
+    const closedName = `سجن مقفل ${suffix}`;
+    const closedFacility = await prisma.facility.create({
+      data: {
+        name: closedName,
+        normalizedName: closedName,
+        status: FacilityStatus.CLOSED,
+        closedAt: new Date("2026-06-01T00:00:00.000Z"),
+      },
+    });
+    const batch = await createReadyBatch();
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 1,
+      action: ImportRowAction.NEW,
+      normalizedData: {
+        externalId: `FAC-NEW-${suffix}`,
+        complaintDate: "2026-07-02T00:00:00.000Z",
+        subject: "سجن جديد",
+        facility: `  سجن جديد ${suffix}  `,
+        region: "الرياض",
+      },
+    });
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 2,
+      action: ImportRowAction.NEW,
+      normalizedData: {
+        externalId: `FAC-CLOSED-${suffix}`,
+        complaintDate: "2026-07-03T00:00:00.000Z",
+        subject: "شكوى تاريخية",
+        facility: closedName,
+        region: "الرياض",
+      },
+    });
+
+    await confirmReadyImportBatch(batch.id, { client: prisma });
+    expect(await prisma.facility.findFirstOrThrow({
+      where: { name: `سجن جديد ${suffix}` },
+    })).toMatchObject({
+      status: FacilityStatus.ACTIVE,
+      region: "منطقة الرياض",
+    });
+    expect(await prisma.facility.findUniqueOrThrow({ where: { id: closedFacility.id } })).toMatchObject({
+      status: FacilityStatus.CLOSED,
+      closedAt: new Date("2026-06-01T00:00:00.000Z"),
+    });
   });
 
   it("rolls back created and updated complaints and prevents a second rollback", async () => {
@@ -788,7 +839,10 @@ describe("scan trigger on import confirmation", () => {
       data: { totalRows: 1, newRows: 1 },
     });
 
-    const result = await confirmReadyImportBatch(batch.id, { client: prisma });
+    const result = await confirmReadyImportBatch(batch.id, {
+      client: prisma,
+      triggerTextRiskScan: true,
+    });
     expect(result).toMatchObject({ status: "CONFIRMED", created: 1 });
 
     // Flush the micro-task queue so the .catch chain runs; any unhandled rejection
@@ -816,7 +870,10 @@ describe("scan trigger on import confirmation", () => {
       data: { totalRows: 1, newRows: 1 },
     });
 
-    await confirmReadyImportBatch(batch.id, { client: prisma });
+    await confirmReadyImportBatch(batch.id, {
+      client: prisma,
+      triggerTextRiskScan: true,
+    });
     await Promise.resolve();
 
     expect(startTextRiskScanMock).toHaveBeenCalledWith(

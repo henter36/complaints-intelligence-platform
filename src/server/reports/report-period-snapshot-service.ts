@@ -27,6 +27,15 @@ import { buildComplaintQueryParams, type ReportFilters } from "./report-definiti
 import type { PeriodRange } from "./report-comparison";
 import { classificationKey } from "@/lib/reports/classification-keys";
 import { normalizeRegionName } from "@/lib/reports/region-normalization";
+import {
+  canonicalFacilityName,
+  eligibleRegistryFacilitiesForPeriod,
+  isFacilityEligibleAt,
+  isFacilityEventEligible,
+  loadFacilityOperationalRegistry,
+  type FacilityOperationalRegistry,
+} from "@/server/facilities/facility-operational-scope-service";
+import { normalizeFacilityName } from "@/server/facilities/facility-name";
 
 /** Shared "missing value" bucket label reused across every dimension grouping (department, facility, ...). */
 export const UNSPECIFIED_GROUP_LABEL = "غير محدد";
@@ -251,10 +260,14 @@ export function wasComplaintClosedInWindow(
   complaint: ClosureResolutionInput,
   window: PeriodRange
 ): boolean {
+  return resolveComplaintClosureInstants(complaint).some((instant) => isWithinPeriod(instant, window));
+}
+
+export function resolveComplaintClosureInstants(complaint: ClosureResolutionInput): Date[] {
   if (hasGenuineClosureTransition(complaint)) {
-    return complaint.statusHistory.some(
-      (entry) => isGenuineClosureTransition(entry) && isWithinPeriod(entry.changedAt, window)
-    );
+    return complaint.statusHistory
+      .filter(isGenuineClosureTransition)
+      .map((entry) => entry.changedAt);
   }
   const effectiveClosedAt = resolveComplaintEffectiveClosedAt({
     status: complaint.status,
@@ -263,7 +276,7 @@ export function wasComplaintClosedInWindow(
     closedAt: complaint.closedAt,
     lastUpdatedAt: complaint.sourceUpdatedAt,
   });
-  return effectiveClosedAt !== null && isWithinPeriod(effectiveClosedAt, window);
+  return effectiveClosedAt ? [effectiveClosedAt] : [];
 }
 
 type OpenLateState = { isOpen: boolean; isLate: boolean; certain: boolean };
@@ -319,6 +332,7 @@ function matchesStatusFilterAtEnd(
  */
 type SnapshotAggregationContext = {
   statusFilter?: ComplaintStatus;
+  facilityRegistry?: FacilityOperationalRegistry;
   warnings: string[];
   uncertainComplaintIds: Set<string>;
 };
@@ -346,8 +360,22 @@ function buildPeriodGroupSnapshot(
   let lateAtEnd = 0;
   for (const complaint of scoped) {
     const createdAt = resolveComplaintCreatedAt(complaint);
-    if (createdAt && isWithinPeriod(createdAt, period)) {
+    if (
+      createdAt
+      && isWithinPeriod(createdAt, period)
+      && (!context.facilityRegistry || isFacilityEventEligible(
+        context.facilityRegistry,
+        complaint.facility,
+        createdAt
+      ))
+    ) {
       receivedDuringPeriod += 1;
+    }
+    if (
+      context.facilityRegistry
+      && !isFacilityEligibleAt(context.facilityRegistry, complaint.facility, period.toExclusive)
+    ) {
+      continue;
     }
     const state = resolveOpenAndLateAtEnd(complaint, period);
     if (!state.certain) {
@@ -360,10 +388,17 @@ function buildPeriodGroupSnapshot(
     }
   }
 
-  const closedDuringPeriod = scoped.reduce(
-    (count, complaint) => (wasComplaintClosedInWindow(complaint, period) ? count + 1 : count),
-    0
-  );
+  const closedDuringPeriod = scoped.reduce((count, complaint) => {
+    const eligibleClosure = resolveComplaintClosureInstants(complaint).some((instant) =>
+      isWithinPeriod(instant, period)
+      && (!context.facilityRegistry || isFacilityEventEligible(
+        context.facilityRegistry,
+        complaint.facility,
+        instant
+      ))
+    );
+    return eligibleClosure ? count + 1 : count;
+  }, 0);
 
   return {
     receivedDuringPeriod,
@@ -393,8 +428,12 @@ function classificationGroupKey(complaint: SnapshotCandidate): string {
   return classificationKey(complaint.classificationId);
 }
 
-function facilityGroupKey(complaint: SnapshotCandidate): string {
-  return complaint.facility ?? UNSPECIFIED_GROUP_LABEL;
+function facilityGroupKey(
+  complaint: SnapshotCandidate,
+  registry?: FacilityOperationalRegistry
+): string {
+  return (registry ? canonicalFacilityName(registry, complaint.facility) : complaint.facility?.trim())
+    ?? UNSPECIFIED_GROUP_LABEL;
 }
 
 function groupComplaints(
@@ -436,8 +475,7 @@ export class SnapshotReconciliationError extends Error {}
 
 /**
  * Verifies that summing a dimension's grouped snapshots reproduces the
- * overall snapshot for receivedDuringPeriod, openAtEnd, and lateAtEnd (the
- * three indicators section 20 requires to reconcile exactly). Throws rather
+ * overall snapshot for every flow and stock indicator. Throws rather
  * than silently rounding away drift.
  */
 export function assertPeriodGroupReconciliation(input: {
@@ -448,16 +486,22 @@ export function assertPeriodGroupReconciliation(input: {
   const sums = Object.values(input.groups).reduce(
     (acc, group) => ({
       receivedDuringPeriod: acc.receivedDuringPeriod + group.receivedDuringPeriod,
+      closedDuringPeriod: acc.closedDuringPeriod + group.closedDuringPeriod,
       openAtEnd: acc.openAtEnd + group.openAtEnd,
       lateAtEnd: acc.lateAtEnd + group.lateAtEnd,
     }),
-    { receivedDuringPeriod: 0, openAtEnd: 0, lateAtEnd: 0 }
+    { receivedDuringPeriod: 0, closedDuringPeriod: 0, openAtEnd: 0, lateAtEnd: 0 }
   );
 
   const mismatches: string[] = [];
   if (sums.receivedDuringPeriod !== input.overall.receivedDuringPeriod) {
     mismatches.push(
       `receivedDuringPeriod ${sums.receivedDuringPeriod} != ${input.overall.receivedDuringPeriod}`
+    );
+  }
+  if (sums.closedDuringPeriod !== input.overall.closedDuringPeriod) {
+    mismatches.push(
+      `closedDuringPeriod ${sums.closedDuringPeriod} != ${input.overall.closedDuringPeriod}`
     );
   }
   if (sums.openAtEnd !== input.overall.openAtEnd) {
@@ -573,12 +617,17 @@ export type SnapshotPeriods = { currentPeriod: PeriodRange; previousPeriod: Peri
 export function computeExecutiveReportSnapshot(
   candidates: readonly SnapshotCandidate[],
   periods: SnapshotPeriods,
-  options: { statusFilter?: ComplaintStatus; strict?: boolean } = {}
+  options: {
+    statusFilter?: ComplaintStatus;
+    strict?: boolean;
+    facilityRegistry?: FacilityOperationalRegistry;
+  } = {}
 ): ExecutiveReportSnapshotData {
   const warnings: string[] = [];
   const strict = options.strict ?? process.env.NODE_ENV === "test";
   const snapshotOptions: SnapshotAggregationContext = {
     statusFilter: options.statusFilter,
+    facilityRegistry: options.facilityRegistry,
     warnings,
     uncertainComplaintIds: new Set(),
   };
@@ -601,7 +650,33 @@ export function computeExecutiveReportSnapshot(
     classificationGroupKey,
     snapshotOptions
   );
-  const byFacility = buildGroupedSnapshot(candidates, periods.currentPeriod, facilityGroupKey, snapshotOptions);
+  const byFacility = buildGroupedSnapshot(
+    candidates,
+    periods.currentPeriod,
+    (complaint) => facilityGroupKey(complaint, options.facilityRegistry),
+    snapshotOptions
+  );
+  if (options.facilityRegistry) {
+    const eligibleNames = new Set(
+      eligibleRegistryFacilitiesForPeriod(options.facilityRegistry, periods.currentPeriod)
+        .map((facility) => facility.name)
+    );
+    for (const key of Object.keys(byFacility)) {
+      const normalizedName = normalizeFacilityName(key);
+      const facility = normalizedName
+        ? options.facilityRegistry.byNormalizedName.get(normalizedName)
+        : undefined;
+      if (facility && !eligibleNames.has(facility.name)) delete byFacility[key];
+    }
+    for (const name of eligibleNames) {
+      byFacility[name] ??= {
+        receivedDuringPeriod: 0,
+        closedDuringPeriod: 0,
+        openAtEnd: 0,
+        lateAtEnd: 0,
+      };
+    }
+  }
 
   const overallGroup: ReportPeriodGroupSnapshot = {
     receivedDuringPeriod: current.receivedDuringPeriod,
@@ -626,10 +701,12 @@ export async function buildExecutiveReportSnapshotData(
   periods: SnapshotPeriods,
   now: Date = new Date()
 ): Promise<ExecutiveReportSnapshotData> {
-  const candidates = await loadReportPeriodSnapshotCandidates(
-    filters,
-    now,
-    periods.currentPeriod.toExclusive
-  );
-  return computeExecutiveReportSnapshot(candidates, periods, { statusFilter: filters.status });
+  const [candidates, facilityRegistry] = await Promise.all([
+    loadReportPeriodSnapshotCandidates(filters, now, periods.currentPeriod.toExclusive),
+    loadFacilityOperationalRegistry(),
+  ]);
+  return computeExecutiveReportSnapshot(candidates, periods, {
+    statusFilter: filters.status,
+    facilityRegistry,
+  });
 }
