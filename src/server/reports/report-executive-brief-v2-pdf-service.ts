@@ -1251,7 +1251,7 @@ function renderPage4(ctx: V2Context): void {
   const topFacilityRows = brief.topFacilities ?? [];
   const bottomFacilityRows = brief.bottomFacilities ?? [];
   const conclusions = (brief.conclusions ?? []).slice(0, 5);
-  const classificationChangeRows = brief.classificationChanges ?? [];
+  const classificationChangeRows = brief.classificationChanges;
   const hasClassComparison = classRows.some((r) => r.previousCount > 0);
 
   let y = drawPageHeader(ctx, "التصنيفات والسجون والاستنتاجات");
@@ -1260,13 +1260,13 @@ function renderPage4(ctx: V2Context): void {
 
   // ── Classification shifts (V2-only; region page has its own region deltas, page 4 stays classification-only — never department-based) ──
   y = drawSectionTitle(doc, "أبرز تحولات التصنيفات", margin, y, contentWidth);
-  if (classificationChangeRows.length > 0) {
+  if (classificationChangeRows && classificationChangeRows.length > 0) {
     const changeCols: ColDef[] = [
-      { key: "classificationPath", label: "التصنيف", weight: 2.4 },
+      { key: "classificationPath", label: "التصنيف", weight: 2.0 },
       { key: "currentCount", label: "الحالية", weight: 0.8 },
       { key: "previousCount", label: "السابقة", weight: 0.8 },
       { key: "difference", label: "الفرق", weight: 0.8 },
-      { key: "direction", label: "الاتجاه", weight: 1 },
+      { key: "direction", label: "الاتجاه", weight: 1.4 },
     ];
     y = drawTable({
       doc,
@@ -1280,9 +1280,12 @@ function renderPage4(ctx: V2Context): void {
     });
     y += gap;
   } else {
-    const message = hasPrevPeriod
-      ? "لم تسجل التصنيفات تغيرات مقارنة بالفترة السابقة."
-      : "لا تتوفر فترة سابقة صالحة لاستخراج تحولات التصنيفات.";
+    let message = "لا تتوفر فترة سابقة صالحة لاستخراج تحولات التصنيفات.";
+    if (hasPrevPeriod) {
+      message = classificationChangeRows === undefined
+        ? "تعذر احتساب تحولات التصنيفات لهذه الفترة."
+        : "لم تسجل التصنيفات تغيرات مقارنة بالفترة السابقة.";
+    }
     y = drawInfoBox(doc, message, margin, y, contentWidth) + gap;
   }
 

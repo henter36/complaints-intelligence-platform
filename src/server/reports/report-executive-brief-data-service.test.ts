@@ -2735,6 +2735,30 @@ describe("buildClassificationChanges — V2 only (spec sections 3-8, 17 items 4-
     };
   }
 
+  function balancedClassificationGroups(): {
+    current: ComplaintGroupMetrics[];
+    previous: ComplaintGroupMetrics[];
+  } {
+    return {
+      current: [
+        classificationGroup({ id: "r1", name: "ارتفاع 1", total: 110 }),
+        classificationGroup({ id: "r2", name: "ارتفاع 2", total: 100 }),
+        classificationGroup({ id: "r3", name: "ارتفاع 3", total: 70 }),
+        classificationGroup({ id: "d1", name: "انخفاض 1", total: 5 }),
+        classificationGroup({ id: "d2", name: "انخفاض 2", total: 10 }),
+        classificationGroup({ id: "d3", name: "انخفاض 3", total: 10 }),
+      ],
+      previous: [
+        classificationGroup({ id: "r1", name: "ارتفاع 1", total: 10 }),
+        classificationGroup({ id: "r2", name: "ارتفاع 2", total: 10 }),
+        classificationGroup({ id: "r3", name: "ارتفاع 3", total: 10 }),
+        classificationGroup({ id: "d1", name: "انخفاض 1", total: 100 }),
+        classificationGroup({ id: "d2", name: "انخفاض 2", total: 90 }),
+        classificationGroup({ id: "d3", name: "انخفاض 3", total: 80 }),
+      ],
+    };
+  }
+
   it("4. current > previous (both > 0) → ارتفاع", () => {
     const current = [classificationGroup({ id: "c1", name: "نقل", total: 30 })];
     const previous = [classificationGroup({ id: "c1", name: "نقل", total: 10 })];
@@ -2828,7 +2852,34 @@ describe("buildClassificationChanges — V2 only (spec sections 3-8, 17 items 4-
       classificationGroup({ id: `c${i}`, name: `تصنيف ${i}`, total: 10 })
     );
     const rows = buildClassificationChanges(current, previous, true);
-    expect(rows.length).toBeLessThanOrEqual(5);
+    expect(rows).toHaveLength(5);
+  });
+
+  it("fills limit 5 with at least two rows per direction and gives the final seat to the strongest remaining change", () => {
+    const { current, previous } = balancedClassificationGroups();
+    const rows = buildClassificationChanges(current, previous, true, 5);
+
+    expect(rows).toHaveLength(5);
+    expect(rows.filter((row) => row.direction === "ارتفاع")).toHaveLength(2);
+    expect(rows.filter((row) => row.direction === "انخفاض")).toHaveLength(3);
+    expect(rows.map((row) => row.classificationId)).toContain("d3");
+    expect(rows.map((row) => row.classificationId)).not.toContain("r3");
+  });
+
+  it.each([
+    { limit: 0, expectedIds: [] },
+    { limit: 1, expectedIds: ["r1"] },
+    { limit: 2, expectedIds: ["r1", "d1"] },
+    { limit: 3, expectedIds: ["r1", "d1", "r2"] },
+    { limit: 4, expectedIds: ["r1", "d1", "r2", "d2"] },
+    { limit: 5, expectedIds: ["r1", "d1", "r2", "d2", "d3"] },
+  ])("honors and fills the requested balanced limit=$limit", ({ limit, expectedIds }) => {
+    const { current, previous } = balancedClassificationGroups();
+    const rows = buildClassificationChanges(current, previous, true, limit);
+
+    expect(rows.length).toBeLessThanOrEqual(limit);
+    expect(rows).toHaveLength(limit);
+    expect(rows.map((row) => row.classificationId)).toEqual(expectedIds);
   });
 
   it("15. tie-breaks (equal |difference|) are deterministic: |changeRate| desc, then volume desc, then Arabic name asc", () => {

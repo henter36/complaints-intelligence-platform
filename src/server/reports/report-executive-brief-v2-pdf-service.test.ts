@@ -24,6 +24,12 @@ import { UNCLASSIFIED_CLASSIFICATION_KEY } from "@/lib/reports/classification-ke
 import { MIN_CHART_HEIGHT } from "./report-chart-service";
 
 const DANGER = REPORT_DESIGN_TOKENS.colors.danger;
+const NO_CLASSIFICATION_COMPARISON_MESSAGE =
+  "لا تتوفر فترة سابقة صالحة لاستخراج تحولات التصنيفات.";
+const UNAVAILABLE_CLASSIFICATION_CHANGES_MESSAGE =
+  "تعذر احتساب تحولات التصنيفات لهذه الفترة.";
+const NO_CLASSIFICATION_CHANGES_MESSAGE =
+  "لم تسجل التصنيفات تغيرات مقارنة بالفترة السابقة.";
 
 function countPageObjects(buffer: Buffer): number {
   return (buffer.toString("binary").match(/\/Type\s*\/Page\s*\/Parent/g) ?? []).length;
@@ -537,7 +543,7 @@ describe("V2 page 4 — classification shifts replace notable rises (spec sectio
     }
   });
 
-  it("shows the no-previous-period empty state when previousPeriod is absent", async () => {
+  it("empty state A: no previous period reports that classification comparison is unavailable", async () => {
     const textSpy = vi.spyOn(PDFDocument.prototype, "text");
     try {
       await renderExecutiveBriefV2Pdf(
@@ -546,24 +552,49 @@ describe("V2 page 4 — classification shifts replace notable rises (spec sectio
           briefData: makeV2Brief({ classificationChanges: [] }),
         })
       );
-      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
-      // "لاستخراج" is the distinctive word from the no-previous-period
-      // message (RTL shaping reorders whole-phrase word order).
-      expect(joined).toContain("لاستخراج");
+      const rendered = textSpy.mock.calls.map((call) => String(call[0]));
+      expect(rendered).toContain(preparePdfText(NO_CLASSIFICATION_COMPARISON_MESSAGE));
+      expect(rendered).not.toContain(preparePdfText(UNAVAILABLE_CLASSIFICATION_CHANGES_MESSAGE));
+      expect(rendered).not.toContain(preparePdfText(NO_CLASSIFICATION_CHANGES_MESSAGE));
     } finally {
       textSpy.mockRestore();
     }
   });
 
-  it("renders direction labels for rise/decline/new/drop-to-zero rows", async () => {
+  it("empty state C: an explicitly computed empty result reports no classification changes", async () => {
     const textSpy = vi.spyOn(PDFDocument.prototype, "text");
     try {
-      await renderExecutiveBriefV2Pdf(makeV2Report());
-      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
-      // makeV2Brief()'s classificationChanges fixture covers all 4 directions.
-      expect(joined).toContain("ارتفاع");
-      expect(joined).toContain("انخفاض");
-      expect(joined).toContain("جديد");
+      await renderExecutiveBriefV2Pdf(
+        makeV2Report({ briefData: makeV2Brief({ classificationChanges: [] }) })
+      );
+      const rendered = textSpy.mock.calls.map((call) => String(call[0]));
+      expect(rendered).toContain(preparePdfText(NO_CLASSIFICATION_CHANGES_MESSAGE));
+      expect(rendered).not.toContain(preparePdfText(NO_CLASSIFICATION_COMPARISON_MESSAGE));
+      expect(rendered).not.toContain(preparePdfText(UNAVAILABLE_CLASSIFICATION_CHANGES_MESSAGE));
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("renders all four direction labels from their unique page-4 classification rows", async () => {
+    const classificationChanges = [
+      { classificationId: "rise-v2", classificationName: "تصنيف-ارتفاع-V2", classificationPath: "فئة-V2 / تصنيف-ارتفاع-V2", currentCount: 60, previousCount: 20, difference: 40, changeRate: 200, direction: "ارتفاع" as const },
+      { classificationId: "decline-v2", classificationName: "تصنيف-انخفاض-V2", classificationPath: "فئة-V2 / تصنيف-انخفاض-V2", currentCount: 5, previousCount: 30, difference: -25, changeRate: -83.3, direction: "انخفاض" as const },
+      { classificationId: "new-v2", classificationName: "تصنيف-جديد-V2", classificationPath: "فئة-V2 / تصنيف-جديد-V2", currentCount: 12, previousCount: 0, difference: 12, changeRate: null, direction: "جديد" as const },
+      { classificationId: "zero-v2", classificationName: "تصنيف-صفر-V2", classificationPath: "فئة-V2 / تصنيف-صفر-V2", currentCount: 0, previousCount: 18, difference: -18, changeRate: -100, direction: "انخفاض إلى صفر" as const },
+    ];
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(
+        makeV2Report({ briefData: makeV2Brief({ classificationChanges }) })
+      );
+      const rendered = textSpy.mock.calls.map((call) => String(call[0]));
+
+      for (const row of classificationChanges) {
+        const pathCallIndex = rendered.indexOf(preparePdfText(row.classificationPath));
+        expect(pathCallIndex).toBeGreaterThanOrEqual(0);
+        expect(rendered[pathCallIndex + 4]).toBe(preparePdfText(row.direction));
+      }
     } finally {
       textSpy.mockRestore();
     }
@@ -585,15 +616,24 @@ describe("V2 page 4 — classification shifts replace notable rises (spec sectio
     expect(result.warnings.every((w) => !w.includes("بدلًا من"))).toBe(true);
   });
 
-  it("still renders a valid 4-page PDF when classificationChanges is undefined (older/fallback brief shape)", async () => {
+  it("empty state B: undefined classificationChanges reports unavailable data and keeps the PDF at 4 pages", async () => {
     const brief = makeV2Brief();
     const withoutChanges = { ...brief } as Partial<ExecutiveBriefV2Data>;
     delete withoutChanges.classificationChanges;
-    const result = await renderExecutiveBriefV2Pdf(
-      makeV2Report({ briefData: withoutChanges as ExecutiveBriefV2Data })
-    );
-    expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
-    expect(countPageObjects(result.buffer)).toBe(4);
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      const result = await renderExecutiveBriefV2Pdf(
+        makeV2Report({ briefData: withoutChanges as ExecutiveBriefV2Data })
+      );
+      const rendered = textSpy.mock.calls.map((call) => String(call[0]));
+      expect(rendered).toContain(preparePdfText(UNAVAILABLE_CLASSIFICATION_CHANGES_MESSAGE));
+      expect(rendered).not.toContain(preparePdfText(NO_CLASSIFICATION_COMPARISON_MESSAGE));
+      expect(rendered).not.toContain(preparePdfText(NO_CLASSIFICATION_CHANGES_MESSAGE));
+      expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
+      expect(countPageObjects(result.buffer)).toBe(4);
+    } finally {
+      textSpy.mockRestore();
+    }
   });
 });
 

@@ -217,6 +217,12 @@ const v2BriefData: ExecutiveBriefV2Data = {
     c2: { openAtEnd: 26, lateAtEnd: 4 },
     c3: { openAtEnd: 18, lateAtEnd: 5 },
   },
+  classificationChanges: [
+    { classificationId: "change-rise", classificationName: "طلب نقل", classificationPath: "الخدمات / طلب نقل", currentCount: 60, previousCount: 20, difference: 40, changeRate: 200, direction: "ارتفاع" },
+    { classificationId: "change-decline", classificationName: "طلب علاج", classificationPath: "الخدمات / طلب علاج", currentCount: 5, previousCount: 30, difference: -25, changeRate: -83.3, direction: "انخفاض" },
+    { classificationId: "change-new", classificationName: "استفسار جديد", classificationPath: "الاستفسارات / استفسار جديد", currentCount: 12, previousCount: 0, difference: 12, changeRate: null, direction: "جديد" },
+    { classificationId: "change-zero", classificationName: "معاملة قديمة", classificationPath: "المعاملات / معاملة قديمة", currentCount: 0, previousCount: 18, difference: -18, changeRate: -100, direction: "انخفاض إلى صفر" },
+  ],
   monthlyStockFlow: [
     { monthKey: "2025-08", monthLabel: "أغسطس 2025", receivedCount: 1552, closedDuringMonthCount: 1412, openAtMonthEndCount: 158, lateAtMonthEndCount: 34 },
     { monthKey: "2025-09", monthLabel: "سبتمبر 2025", receivedCount: 1468, closedDuringMonthCount: 1300, openAtMonthEndCount: 150, lateAtMonthEndCount: 32 },
@@ -279,6 +285,7 @@ function v2NoReferenceReport(): ReportData {
   base.comparisonData = undefined;
   base.briefData = {
     ...v2BriefData,
+    classificationChanges: [],
     allRegions: v2BriefData.allRegions.map((row) => ({
       ...row,
       previousCount: 0,

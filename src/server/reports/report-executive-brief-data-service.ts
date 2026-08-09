@@ -718,6 +718,7 @@ type ClassificationRowInfo = {
   categoryName: string;
 };
 
+/** Resolves the stable identity and Arabic display path shared by classification tables. */
 function resolveClassificationRowInfo(group: ComplaintGroupMetrics): ClassificationRowInfo {
   const id = classificationRowKey(group);
   const isUnclassified = id === UNCLASSIFIED_CLASSIFICATION_KEY;
@@ -810,19 +811,25 @@ function compareClassificationChangeMagnitude(
 
 /**
  * Guarantees both directions are represented (when both exist), mirroring
- * {@link selectBalancedRegionConclusions}'s shape: 2 guaranteed per side,
- * then remaining slots go to whichever side's next-strongest unselected row
- * has the larger |difference| — never letting one direction consume every slot.
+ * {@link selectBalancedRegionConclusions}'s shape: up to 2 guaranteed per side
+ * within the requested capacity, then remaining slots go to whichever side's
+ * next-strongest unselected row ranks first by the shared magnitude comparator.
  */
 function selectBalancedClassificationChanges(
   rising: readonly ClassificationChangeRow[],
   declining: readonly ClassificationChangeRow[],
   maxTotal: number
 ): ClassificationChangeRow[] {
+  if (maxTotal <= 0) return [];
   if (declining.length === 0) return rising.slice(0, maxTotal);
   if (rising.length === 0) return declining.slice(0, maxTotal);
 
-  const guaranteedEach = Math.min(2, rising.length, declining.length);
+  const guaranteedEach = Math.min(
+    2,
+    rising.length,
+    declining.length,
+    Math.floor(maxTotal / 2)
+  );
   const selected: ClassificationChangeRow[] = [
     ...rising.slice(0, guaranteedEach),
     ...declining.slice(0, guaranteedEach),
@@ -836,7 +843,10 @@ function selectBalancedClassificationChanges(
   ) {
     const nextRising = rising[nextRisingIndex];
     const nextDeclining = declining[nextDecliningIndex];
-    if (nextRising && (!nextDeclining || Math.abs(nextRising.difference) >= Math.abs(nextDeclining.difference))) {
+    if (
+      nextRising
+      && (!nextDeclining || compareClassificationChangeMagnitude(nextRising, nextDeclining) <= 0)
+    ) {
       selected.push(nextRising);
       nextRisingIndex++;
     } else if (nextDeclining) {
@@ -844,7 +854,7 @@ function selectBalancedClassificationChanges(
       nextDecliningIndex++;
     }
   }
-  return selected;
+  return selected.slice(0, maxTotal);
 }
 
 /**
