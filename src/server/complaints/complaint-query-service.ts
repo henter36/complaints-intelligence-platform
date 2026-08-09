@@ -12,6 +12,7 @@ import {
   buildHistoricalOperationalFacilityWhere,
   combineComplaintWhere,
 } from "@/server/facilities/facility-operational-scope-service";
+import { normalizeFacilityName } from "@/server/facilities/facility-name";
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_PAGE_SIZE = 25;
@@ -320,7 +321,11 @@ function applyScalarFilters(where: Prisma.ComplaintWhereInput, query: ComplaintQ
   if (query.severity) where.severity = query.severity;
   if (query.channel) where.channel = query.channel;
   if (query.region ?? query.regionId) where.region = query.region ?? query.regionId;
-  if (query.facility ?? query.facilityId) where.facility = query.facility ?? query.facilityId;
+  const selectedFacility = query.facility ?? query.facilityId;
+  if (selectedFacility) {
+    const canonicalKey = normalizeFacilityName(selectedFacility);
+    where.facilityNormalizedName = canonicalKey ?? "__INVALID_FACILITY_KEY__";
+  }
   if (query.department ?? query.departmentId) where.department = query.department ?? query.departmentId;
   if (query.categoryId) where.categoryId = query.categoryId;
   if (query.classificationId) where.classificationId = query.classificationId;

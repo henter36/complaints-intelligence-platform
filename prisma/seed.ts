@@ -1,6 +1,7 @@
 import {
   ComplaintPriority,
   ComplaintStatus,
+  FacilitySyncStatus,
   ImportBatchStatus,
   ImportRowAction,
   ImportRowValidationStatus,
@@ -11,6 +12,7 @@ import { pathToFileURL } from "node:url";
 import { db as appDb } from "../src/lib/db";
 import { createComplaint, updateComplaintStatus } from "../src/server/complaints/complaint-service";
 import { writeAuditLog, AUDIT_ACTOR_SINGLE_ADMIN } from "../src/server/audit/audit-log-service";
+import { backfillFacilityRegistry } from "../src/server/facilities/facility-registry-service";
 
 const actor = AUDIT_ACTOR_SINGLE_ADMIN;
 const baseDate = new Date("2026-07-15T09:00:00.000Z");
@@ -24,6 +26,7 @@ export async function seed(database: PrismaClient = appDb) {
   await db.importBatchRow.deleteMany();
   await db.complaintStatusHistory.deleteMany();
   await db.complaint.deleteMany();
+  await db.facility.deleteMany();
   await db.importBatch.deleteMany();
   await db.reportTemplate.deleteMany();
   await db.classification.deleteMany();
@@ -312,6 +315,17 @@ export async function seed(database: PrismaClient = appDb) {
     actor,
   });
 
+  await backfillFacilityRegistry(db);
+  await db.importBatch.update({
+    where: { id: confirmedBatch.id },
+    data: {
+      facilitySyncStatus: FacilitySyncStatus.COMPLETED,
+      facilitySyncAttempts: 1,
+      facilitySyncError: null,
+      facilitySyncedAt: new Date(),
+    },
+  });
+
   await db.reportTemplate.create({
     data: {
       name: "ملخص الشكاوى الشهري التجريبي",
@@ -337,6 +351,7 @@ export async function seed(database: PrismaClient = appDb) {
   console.log("- 2 import batches");
   console.log("- 6 import rows");
   console.log("- 1 report template");
+  console.log("- 4 active facilities");
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

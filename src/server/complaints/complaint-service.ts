@@ -1,5 +1,6 @@
 import { ComplaintStatus, type Complaint, type Prisma, type PrismaClient } from "@prisma/client";
 import { writeAuditLog, AUDIT_ACTOR_SYSTEM } from "@/server/audit/audit-log-service";
+import { normalizeFacilityName } from "@/server/facilities/facility-name";
 import {
   assertClosedAtMatchesStatus,
   assertComplaintStatusTransition,
@@ -74,6 +75,7 @@ export async function createComplaint(
   const complaint = await db.complaint.create({
     data: {
       ...input,
+      facilityNormalizedName: normalizeFacilityName(input.facility),
       importBatchId: input.importBatchId ?? options.importBatchId ?? null,
     },
   });

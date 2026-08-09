@@ -74,6 +74,12 @@ describe("central complaint query service", () => {
     expect(where.AND).toEqual([{ classificationId: { not: null } }]);
   });
 
+  it("turns the visible facility filter into its canonical indexed key", () => {
+    const where = buildComplaintWhere(parseComplaintQuery(query("facility=سجن%20%20الرياض")));
+    expect(where.facility).toBeUndefined();
+    expect(where.facilityNormalizedName).toBe("سجن الرياض");
+  });
+
   it("removes only default page and pageSize from applied filters", async () => {
     const result = await listComplaints(query());
 

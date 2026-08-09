@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   ComplaintStatus,
   FacilityStatus,
+  FacilitySyncStatus,
   ImportBatchStatus,
   ImportRowAction,
   ImportRowValidationStatus,
@@ -15,6 +16,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import {
   backfillFacilityRegistry,
+  retryFacilitySyncForConfirmedBatch,
   syncFacilitiesFromImportBatch,
 } from "./facility-registry-service";
 import { updateFacilityOperationalStatus } from "./facility-management-service";
@@ -55,6 +57,7 @@ async function complaint(facility: string | null, region: string | null) {
       receivedAt: new Date("2026-07-01T00:00:00.000Z"),
       complaintDate: new Date("2026-07-01T00:00:00.000Z"),
       facility,
+      facilityNormalizedName: normalizeFacilityName(facility),
       region,
     },
   });
@@ -155,6 +158,58 @@ describe("Facility Registry", () => {
       status: FacilityStatus.CLOSED,
       closedAt: new Date("2026-08-01T00:00:00Z"),
     });
+  });
+
+  it("persists a failed sync and retries the confirmed batch idempotently", async () => {
+    const name = `سجن retry ${crypto.randomUUID()}`;
+    const batch = await importBatchRow(name, "الرياض");
+    const facility = await prisma.facility.create({
+      data: {
+        name,
+        normalizedName: `مفتاح متعارض ${crypto.randomUUID()}`,
+        status: FacilityStatus.CLOSED,
+        closedAt: new Date("2026-08-01T00:00:00.000Z"),
+      },
+    });
+
+    await expect(retryFacilitySyncForConfirmedBatch(batch.id, prisma)).rejects.toMatchObject({
+      code: "FACILITY_SYNC_FAILED",
+    });
+    expect(await prisma.importBatch.findUniqueOrThrow({ where: { id: batch.id } })).toMatchObject({
+      status: ImportBatchStatus.CONFIRMED,
+      facilitySyncStatus: FacilitySyncStatus.FAILED,
+      facilitySyncAttempts: 1,
+      facilitySyncError: expect.any(String),
+      facilitySyncedAt: null,
+    });
+
+    await prisma.facility.update({
+      where: { id: facility.id },
+      data: { normalizedName: normalizeFacilityName(name)! },
+    });
+    await expect(retryFacilitySyncForConfirmedBatch(batch.id, prisma)).resolves.toMatchObject({
+      status: FacilitySyncStatus.COMPLETED,
+      attempts: 2,
+    });
+    await expect(retryFacilitySyncForConfirmedBatch(batch.id, prisma)).resolves.toMatchObject({
+      status: FacilitySyncStatus.COMPLETED,
+      attempts: 3,
+    });
+    expect(await prisma.facility.count()).toBe(1);
+    expect(await prisma.facility.findUniqueOrThrow({ where: { id: facility.id } })).toMatchObject({
+      status: FacilityStatus.CLOSED,
+      closedAt: new Date("2026-08-01T00:00:00.000Z"),
+    });
+  });
+
+  it("matches spelling variants through one canonical Complaint key", async () => {
+    for (const value of ["سجن الرياض", "سجن  الرياض", "سجن\nالرياض"]) {
+      await complaint(value, "الرياض");
+    }
+    const canonicalKey = normalizeFacilityName("سجن الرياض");
+    expect(await prisma.complaint.count({
+      where: { facilityNormalizedName: canonicalKey },
+    })).toBe(3);
   });
 
   it("changes status without deleting or rewriting complaint history", async () => {

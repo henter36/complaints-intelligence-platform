@@ -3,7 +3,7 @@ import { FacilityStatus, type Prisma, type PrismaClient } from "@prisma/client";
 import { db } from "@/lib/db";
 import { normalizeFacilityName } from "@/server/facilities/facility-name";
 
-type FacilityScopeClient = Pick<PrismaClient, "complaint" | "facility">;
+type FacilityScopeClient = Pick<PrismaClient, "facility">;
 
 export type OperationalFacility = {
   id: string;
@@ -77,7 +77,9 @@ export function isFacilityEligibleAt(
 ): boolean {
   const facility = findOperationalFacility(registry, facilityName);
   if (!facility || facility.status === FacilityStatus.ACTIVE) return true;
-  return facility.closedAt !== null && measuredAt < facility.closedAt;
+  // A legacy CLOSED row with no cutoff is excluded from current analytics by
+  // isFacilityCurrentlyEligible(), but must not erase history at every instant.
+  return facility.closedAt === null || measuredAt < facility.closedAt;
 }
 
 export function isFacilityEligibleForPeriod(
@@ -114,9 +116,8 @@ export function eligibleRegistryFacilitiesForPeriod(
 }
 
 /**
- * Produces the central current-operational Prisma scope. It resolves historical
- * spelling/whitespace variants in one set-based read and never performs a
- * facility lookup per complaint.
+ * Produces the central current-operational Prisma scope over the indexed
+ * canonical key. Unknown/null keys remain eligible for migration parity.
  */
 export async function buildCurrentOperationalFacilityWhere(
   client: FacilityScopeClient = db
@@ -127,23 +128,12 @@ export async function buildCurrentOperationalFacilityWhere(
     select: { normalizedName: true },
   });
   if (closedFacilities.length === 0) return {};
-  const complaintNames = await client.complaint.findMany({
-    where: { facility: { not: null } },
-    select: { facility: true },
-    distinct: ["facility"],
-  });
-
-  const closedKeys = new Set(closedFacilities.map((facility) => facility.normalizedName));
-  const blockedNames = complaintNames.flatMap(({ facility }) => {
-    const key = normalizeFacilityName(facility);
-    return facility && key && closedKeys.has(key) ? [facility] : [];
-  });
-  if (blockedNames.length === 0) return {};
+  const closedKeys = closedFacilities.map((facility) => facility.normalizedName);
 
   return {
     OR: [
-      { facility: null },
-      { facility: { notIn: blockedNames } },
+      { facilityNormalizedName: null },
+      { facilityNormalizedName: { notIn: closedKeys } },
     ],
   };
 }
@@ -153,38 +143,28 @@ export async function buildHistoricalOperationalFacilityWhere(
 ): Promise<Prisma.ComplaintWhereInput> {
   if (!client.facility) return {};
   const closedFacilities = await client.facility.findMany({
-    where: { status: FacilityStatus.CLOSED },
+    where: { status: FacilityStatus.CLOSED, closedAt: { not: null } },
     select: { normalizedName: true, closedAt: true },
   });
   if (closedFacilities.length === 0) return {};
-  const complaintNames = await client.complaint.findMany({
-    where: { facility: { not: null } },
-    select: { facility: true },
-    distinct: ["facility"],
-  });
-  const closedByKey = new Map(
-    closedFacilities.map((facility) => [facility.normalizedName, facility.closedAt])
-  );
-  const rawNamesByCutoff = new Map<number, string[]>();
-  const allClosedRawNames: string[] = [];
-  for (const { facility } of complaintNames) {
-    const key = normalizeFacilityName(facility);
-    if (!facility || !key || !closedByKey.has(key)) continue;
-    allClosedRawNames.push(facility);
-    const closedAt = closedByKey.get(key);
-    if (!closedAt) continue;
-    const cutoff = closedAt.getTime();
-    rawNamesByCutoff.set(cutoff, [...(rawNamesByCutoff.get(cutoff) ?? []), facility]);
+  const keysByCutoff = new Map<number, string[]>();
+  for (const facility of closedFacilities) {
+    if (!facility.closedAt) continue;
+    const cutoff = facility.closedAt.getTime();
+    keysByCutoff.set(cutoff, [
+      ...(keysByCutoff.get(cutoff) ?? []),
+      facility.normalizedName,
+    ]);
   }
-  if (allClosedRawNames.length === 0) return {};
+  const closedKeys = closedFacilities.map((facility) => facility.normalizedName);
 
   return {
     OR: [
-      { facility: null },
-      { facility: { notIn: allClosedRawNames } },
-      ...[...rawNamesByCutoff.entries()].map(([cutoff, names]) => ({
+      { facilityNormalizedName: null },
+      { facilityNormalizedName: { notIn: closedKeys } },
+      ...[...keysByCutoff.entries()].map(([cutoff, keys]) => ({
         AND: [
-          { facility: { in: names } },
+          { facilityNormalizedName: { in: keys } },
           {
             OR: [
               { complaintDate: { lt: new Date(cutoff) } },
@@ -202,39 +182,29 @@ export async function buildHistoricalFacilityClosureEventWhere(
 ): Promise<Prisma.ComplaintStatusHistoryWhereInput> {
   if (!client.facility) return {};
   const closedFacilities = await client.facility.findMany({
-    where: { status: FacilityStatus.CLOSED },
+    where: { status: FacilityStatus.CLOSED, closedAt: { not: null } },
     select: { normalizedName: true, closedAt: true },
   });
   if (closedFacilities.length === 0) return {};
-  const complaintNames = await client.complaint.findMany({
-    where: { facility: { not: null } },
-    select: { facility: true },
-    distinct: ["facility"],
-  });
-  const closedByKey = new Map(
-    closedFacilities.map((facility) => [facility.normalizedName, facility.closedAt])
-  );
-  const allClosedRawNames: string[] = [];
-  const rawNamesByCutoff = new Map<number, string[]>();
-  for (const { facility } of complaintNames) {
-    const key = normalizeFacilityName(facility);
-    if (!facility || !key || !closedByKey.has(key)) continue;
-    allClosedRawNames.push(facility);
-    const closedAt = closedByKey.get(key);
-    if (!closedAt) continue;
-    const cutoff = closedAt.getTime();
-    rawNamesByCutoff.set(cutoff, [...(rawNamesByCutoff.get(cutoff) ?? []), facility]);
+  const keysByCutoff = new Map<number, string[]>();
+  for (const facility of closedFacilities) {
+    if (!facility.closedAt) continue;
+    const cutoff = facility.closedAt.getTime();
+    keysByCutoff.set(cutoff, [
+      ...(keysByCutoff.get(cutoff) ?? []),
+      facility.normalizedName,
+    ]);
   }
-  if (allClosedRawNames.length === 0) return {};
+  const closedKeys = closedFacilities.map((facility) => facility.normalizedName);
 
   return {
     OR: [
-      { complaint: { is: { facility: null } } },
-      { complaint: { is: { facility: { notIn: allClosedRawNames } } } },
-      ...[...rawNamesByCutoff.entries()].map(([cutoff, names]) => ({
+      { complaint: { is: { facilityNormalizedName: null } } },
+      { complaint: { is: { facilityNormalizedName: { notIn: closedKeys } } } },
+      ...[...keysByCutoff.entries()].map(([cutoff, keys]) => ({
         AND: [
           { changedAt: { lt: new Date(cutoff) } },
-          { complaint: { is: { facility: { in: names } } } },
+          { complaint: { is: { facilityNormalizedName: { in: keys } } } },
         ],
       })),
     ],

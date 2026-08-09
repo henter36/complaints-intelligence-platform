@@ -10,6 +10,7 @@ import {
 } from "@/server/classifications/classification-assignment";
 import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 import { buildComplaintTiming } from "@/server/complaints/complaint-timing";
+import { normalizeFacilityName } from "@/server/facilities/facility-name";
 
 type RouteContext = {
   params: Promise<{ id: string }>;
@@ -227,6 +228,9 @@ function buildComplaintUpdateData(
     description: payload.description,
     region: payload.region,
     facility: payload.facility,
+    facilityNormalizedName: payload.facility === undefined
+      ? undefined
+      : normalizeFacilityName(payload.facility),
     department: payload.department,
     categoryId: payload.categoryId,
     classificationId: payload.classificationId,

@@ -6,8 +6,10 @@
 
 - `ACTIVE`: included in current operational analytics. `closedAt` is always `null`.
 - `CLOSED`: excluded from current operational analytics and requires a valid `closedAt`.
+- A legacy `CLOSED` row with `closedAt = null` is still excluded currently, but is retained in historical scopes because an unknown cutoff must not erase history.
 - Reopening changes the row to `ACTIVE` and clears `closedAt`.
 - Import synchronization creates previously unseen names as `ACTIVE`, is idempotent through the normalized-name unique key, and never changes an existing facility status.
+- Every confirmed import persists a separate facility-sync state (`PENDING`, `COMPLETED`, or `FAILED`). A failed sync leaves the import `CONFIRMED` and can be retried idempotently through the admin retry endpoint.
 
 ## Current and historical analytics
 
@@ -29,5 +31,7 @@ The eligible Facility Registry is left-joined with the report period snapshot. A
 ## Name and region backfill
 
 Backfill trims/collapses whitespace and reuses the shared Arabic normalizer. Blank, `null`, and `غير محدد` names are ignored. A region is stored only when all canonical nonblank historical region values agree; conflicts leave `region = null` and produce a warning without blocking the registry.
+
+`Complaint.facility` remains the raw historical display value. The indexed `Complaint.facilityNormalizedName` is derived exclusively with `normalizeFacilityName()` and is used for operational scopes and facility filters, so whitespace/newline/Arabic spelling variants resolve to the same registry identity without scanning historical complaint names.
 
 Historical facility selection in the generic report filter UI is currently limited to the active-registry list. General historical reports remain temporally correct; raw complaints remain searchable by their historical facility name.

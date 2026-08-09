@@ -1,4 +1,10 @@
-import { FacilityStatus, type Prisma, type PrismaClient } from "@prisma/client";
+import {
+  FacilityStatus,
+  FacilitySyncStatus,
+  ImportBatchStatus,
+  type Prisma,
+  type PrismaClient,
+} from "@prisma/client";
 
 import { db } from "@/lib/db";
 import {
@@ -8,6 +14,26 @@ import {
 } from "@/server/facilities/facility-name";
 
 type FacilityRegistryClient = Pick<PrismaClient, "complaint" | "facility" | "importBatchRow">;
+type FacilitySyncClient = FacilityRegistryClient & Pick<PrismaClient, "importBatch">;
+
+export class FacilityRegistrySyncError extends Error {
+  constructor(
+    readonly code: "IMPORT_BATCH_NOT_FOUND" | "IMPORT_BATCH_NOT_CONFIRMED" | "FACILITY_SYNC_FAILED",
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = "FacilityRegistrySyncError";
+  }
+}
+
+export type FacilitySyncResult = {
+  batchId: string;
+  status: typeof FacilitySyncStatus.COMPLETED;
+  syncedFacilities: number;
+  attempts: number;
+  syncedAt: string;
+};
 
 export type FacilityRegistryWarning = {
   code: "FACILITY_REGION_CONFLICT";
@@ -116,9 +142,9 @@ function jsonObject(value: Prisma.JsonValue): Record<string, unknown> | null {
 }
 
 /**
- * Best-effort, retry-safe registry synchronization after a confirmed import.
- * The caller deliberately catches failures so registry maintenance can never
- * roll back or invalidate an otherwise successful complaint import.
+ * Idempotent registry upsert used by the durable post-confirmation retry flow.
+ * This function mutates only Facility rows; its caller owns persisted attempt
+ * state and deliberately keeps the complaint import transaction independent.
  */
 export async function syncFacilitiesFromImportBatch(
   importBatchId: string,
@@ -141,4 +167,79 @@ export async function syncFacilitiesFromImportBatch(
     await upsertCandidate(client, normalizedName, candidate);
   }
   return candidates.size;
+}
+
+function boundedSyncError(error: unknown): string {
+  const message = error instanceof Error ? error.message : "UNKNOWN";
+  return message.replaceAll(/\s+/g, " ").trim().slice(0, 500) || "UNKNOWN";
+}
+
+/**
+ * Runs (or reruns) registry synchronization for an already-confirmed import.
+ * The persisted PENDING/FAILED/COMPLETED state is independent of ImportBatch.status,
+ * and the underlying canonical upserts make repeated calls safe.
+ */
+export async function retryFacilitySyncForConfirmedBatch(
+  batchId: string,
+  client: FacilitySyncClient = db
+): Promise<FacilitySyncResult> {
+  const batch = await client.importBatch.findUnique({
+    where: { id: batchId },
+    select: { id: true, status: true },
+  });
+  if (!batch) {
+    throw new FacilityRegistrySyncError("IMPORT_BATCH_NOT_FOUND", "دفعة الاستيراد غير موجودة", 404);
+  }
+  if (batch.status !== ImportBatchStatus.CONFIRMED) {
+    throw new FacilityRegistrySyncError(
+      "IMPORT_BATCH_NOT_CONFIRMED",
+      "لا يمكن مزامنة السجون قبل تأكيد دفعة الاستيراد",
+      409
+    );
+  }
+
+  const pending = await client.importBatch.update({
+    where: { id: batchId },
+    data: {
+      facilitySyncStatus: FacilitySyncStatus.PENDING,
+      facilitySyncAttempts: { increment: 1 },
+      facilitySyncError: null,
+      facilitySyncedAt: null,
+    },
+    select: { facilitySyncAttempts: true },
+  });
+
+  try {
+    const syncedFacilities = await syncFacilitiesFromImportBatch(batchId, client);
+    const syncedAt = new Date();
+    await client.importBatch.update({
+      where: { id: batchId },
+      data: {
+        facilitySyncStatus: FacilitySyncStatus.COMPLETED,
+        facilitySyncError: null,
+        facilitySyncedAt: syncedAt,
+      },
+    });
+    return {
+      batchId,
+      status: FacilitySyncStatus.COMPLETED,
+      syncedFacilities,
+      attempts: pending.facilitySyncAttempts,
+      syncedAt: syncedAt.toISOString(),
+    };
+  } catch (error) {
+    await client.importBatch.update({
+      where: { id: batchId },
+      data: {
+        facilitySyncStatus: FacilitySyncStatus.FAILED,
+        facilitySyncError: boundedSyncError(error),
+        facilitySyncedAt: null,
+      },
+    });
+    throw new FacilityRegistrySyncError(
+      "FACILITY_SYNC_FAILED",
+      "تعذرت مزامنة السجون ويمكن إعادة المحاولة",
+      500
+    );
+  }
 }

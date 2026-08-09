@@ -9,6 +9,7 @@ import {
 } from "@prisma/client";
 import { db } from "@/lib/db";
 import { writeAuditLog, AUDIT_ACTOR_SYSTEM } from "@/server/audit/audit-log-service";
+import { normalizeFacilityName } from "@/server/facilities/facility-name";
 import { RULE_CATALOG_VERSION } from "./text-risk-rule-catalog";
 import { matchTextRisks, computeSourceTextHash } from "./text-risk-matcher";
 
@@ -454,7 +455,11 @@ function buildSignalWhere(options: ListSignalsOptions): Prisma.TextRiskSignalWhe
   if (options.reviewStatus) where.reviewStatus = options.reviewStatus;
   if (options.certainty) where.certainty = options.certainty;
   if (options.region) where.region = options.region;
-  if (options.facility) where.facility = options.facility;
+  if (options.facility) {
+    where.complaint = {
+      facilityNormalizedName: normalizeFacilityName(options.facility) ?? "__INVALID_FACILITY_KEY__",
+    };
+  }
   if (options.department) where.department = options.department;
 
   if (options.from || options.to) {

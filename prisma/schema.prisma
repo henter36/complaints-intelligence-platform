@@ -97,6 +97,12 @@ enum FacilityStatus {
   CLOSED
 }
 
+enum FacilitySyncStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
 model Facility {
   id             String         @id @default(cuid())
   name           String         @unique
@@ -168,6 +174,7 @@ model Complaint {
   complainantPhone      String?
   region                String?
   facility              String?
+  facilityNormalizedName String?
   department            String?
   categoryId            String?
   category              Category?                @relation(fields: [categoryId], references: [id])
@@ -226,6 +233,7 @@ model Complaint {
   @@index([createdAt])
   @@index([isDeleted])
   @@index([region])
+  @@index([facilityNormalizedName])
   @@index([department])
   @@index([classificationId])
   @@index([classificationAssignmentSource])
@@ -345,6 +353,10 @@ model ImportBatch {
   selectedSheet   String?
   columnMapping   Json?
   confirmationFailureCode String?
+  facilitySyncStatus FacilitySyncStatus?
+  facilitySyncAttempts Int                  @default(0)
+  facilitySyncError String?
+  facilitySyncedAt DateTime?
   rollbackFailureCode String?
   rollbackReason  String?
   appliedCreatedRows Int                 @default(0)

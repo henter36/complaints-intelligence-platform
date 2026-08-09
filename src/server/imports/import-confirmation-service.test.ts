@@ -6,6 +6,7 @@ import {
   ComplaintPriority,
   ComplaintStatus,
   FacilityStatus,
+  FacilitySyncStatus,
   ImportBatchStatus,
   ImportChangeType,
   ImportRowAction,
@@ -25,6 +26,8 @@ import {
   toImportConfirmationErrorResponse,
 } from "./import-confirmation-service";
 import { deriveSubject } from "./subject-derive";
+import { retryFacilitySyncForConfirmedBatch } from "@/server/facilities/facility-registry-service";
+import { normalizeFacilityName } from "@/server/facilities/facility-name";
 
 // Mock startTextRiskScan to keep integration tests isolated from the analysis service.
 // The scan is fire-and-forget, so mocking it has no effect on confirmation assertions.
@@ -266,6 +269,27 @@ describe("transactional import confirmation", () => {
     });
 
     await confirmReadyImportBatch(batch.id, { client: prisma });
+    const importedComplaints = await prisma.complaint.findMany({
+      where: { importBatchId: batch.id },
+      select: { facility: true, facilityNormalizedName: true },
+    });
+    expect(importedComplaints).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        facility: `  سجن جديد ${suffix}  `,
+        facilityNormalizedName: `سجن جديد ${suffix}`,
+      }),
+      expect.objectContaining({
+        facility: closedName,
+        facilityNormalizedName: closedName,
+      }),
+    ]));
+    expect(await prisma.importBatch.findUniqueOrThrow({ where: { id: batch.id } })).toMatchObject({
+      status: ImportBatchStatus.CONFIRMED,
+      facilitySyncStatus: FacilitySyncStatus.COMPLETED,
+      facilitySyncAttempts: 1,
+      facilitySyncError: null,
+      facilitySyncedAt: expect.any(Date),
+    });
     expect(await prisma.facility.findFirstOrThrow({
       where: { name: `سجن جديد ${suffix}` },
     })).toMatchObject({
@@ -273,6 +297,91 @@ describe("transactional import confirmation", () => {
       region: "منطقة الرياض",
     });
     expect(await prisma.facility.findUniqueOrThrow({ where: { id: closedFacility.id } })).toMatchObject({
+      status: FacilityStatus.CLOSED,
+      closedAt: new Date("2026-06-01T00:00:00.000Z"),
+    });
+  });
+
+  it("updates and clears the canonical facility key with import changes", async () => {
+    const existing = await createComplaint(`FAC-UPDATE-${crypto.randomUUID()}`);
+    const batch = await createReadyBatch();
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 1,
+      action: ImportRowAction.UPDATE,
+      matchedComplaintId: existing.id,
+      matchedComplaintVersion: existing.version,
+      normalizedData: {
+        externalId: existing.externalId,
+        facility: "سِجْن\nالرياض",
+      },
+    });
+    await confirmReadyImportBatch(batch.id, { client: prisma });
+    expect(await prisma.complaint.findUniqueOrThrow({ where: { id: existing.id } })).toMatchObject({
+      facility: "سِجْن\nالرياض",
+      facilityNormalizedName: "سجن الرياض",
+    });
+
+    const updated = await prisma.complaint.findUniqueOrThrow({ where: { id: existing.id } });
+    const clearingBatch = await createReadyBatch();
+    await addRow({
+      batchId: clearingBatch.id,
+      rowNumber: 1,
+      action: ImportRowAction.UPDATE,
+      matchedComplaintId: updated.id,
+      matchedComplaintVersion: updated.version,
+      normalizedData: { externalId: updated.externalId, facility: null },
+    });
+    await confirmReadyImportBatch(clearingBatch.id, { client: prisma });
+    expect(await prisma.complaint.findUniqueOrThrow({ where: { id: existing.id } })).toMatchObject({
+      facility: null,
+      facilityNormalizedName: null,
+    });
+  });
+
+  it("keeps a confirmed import and persists a retryable facility-sync failure", async () => {
+    const name = `سجن تعارض ${crypto.randomUUID()}`;
+    const conflicting = await prisma.facility.create({
+      data: {
+        name,
+        normalizedName: `مفتاح مختلف ${crypto.randomUUID()}`,
+        status: FacilityStatus.CLOSED,
+        closedAt: new Date("2026-06-01T00:00:00.000Z"),
+      },
+    });
+    const batch = await createReadyBatch();
+    await addRow({
+      batchId: batch.id,
+      rowNumber: 1,
+      action: ImportRowAction.NEW,
+      normalizedData: {
+        externalId: `FAC-SYNC-FAIL-${crypto.randomUUID()}`,
+        complaintDate: "2026-07-01T00:00:00.000Z",
+        subject: "شكوى مؤكدة",
+        facility: name,
+      },
+    });
+
+    await expect(confirmReadyImportBatch(batch.id, { client: prisma })).resolves.toMatchObject({
+      status: ImportBatchStatus.CONFIRMED,
+    });
+    expect(await prisma.importBatch.findUniqueOrThrow({ where: { id: batch.id } })).toMatchObject({
+      status: ImportBatchStatus.CONFIRMED,
+      facilitySyncStatus: FacilitySyncStatus.FAILED,
+      facilitySyncAttempts: 1,
+      facilitySyncError: expect.any(String),
+    });
+    expect(await prisma.complaint.count({ where: { importBatchId: batch.id } })).toBe(1);
+
+    await prisma.facility.update({
+      where: { id: conflicting.id },
+      data: { normalizedName: normalizeFacilityName(name)! },
+    });
+    await expect(retryFacilitySyncForConfirmedBatch(batch.id, prisma)).resolves.toMatchObject({
+      status: FacilitySyncStatus.COMPLETED,
+      attempts: 2,
+    });
+    expect(await prisma.facility.findUniqueOrThrow({ where: { id: conflicting.id } })).toMatchObject({
       status: FacilityStatus.CLOSED,
       closedAt: new Date("2026-06-01T00:00:00.000Z"),
     });

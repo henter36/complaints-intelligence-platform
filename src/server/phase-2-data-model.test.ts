@@ -102,6 +102,7 @@ describe("Complaint domain model", () => {
 
     const history = await prisma.complaintStatusHistory.findMany({ where: { complaintId: complaint.id } });
     const audit = await prisma.auditLog.findMany({ where: { entityId: complaint.id } });
+    expect(complaint.facilityNormalizedName).toBe("منشاه اختباريه");
     expect(history).toHaveLength(1);
     expect(history[0].toStatus).toBe(ComplaintStatus.OPEN);
     expect(audit.some(entry => entry.action === "COMPLAINT_CREATED")).toBe(true);
@@ -474,6 +475,15 @@ describe("Seed data", () => {
       name: "ملخص الشكاوى الشهري التجريبي",
       reportType: "EXECUTIVE_SUMMARY",
       createdBy: "single-admin",
+    });
+    await expect(prisma.facility.count({ where: { status: "ACTIVE" } })).resolves.toBe(4);
+    await expect(prisma.importBatch.findFirstOrThrow({
+      where: { status: ImportBatchStatus.CONFIRMED },
+    })).resolves.toMatchObject({
+      facilitySyncStatus: "COMPLETED",
+      facilitySyncAttempts: 1,
+      facilitySyncError: null,
+      facilitySyncedAt: expect.any(Date),
     });
   });
 });

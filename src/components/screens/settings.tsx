@@ -75,9 +75,12 @@ function apiErrorMessage(payload: unknown, fallback: string): string {
   return typeof message === "string" && message.trim() ? message : fallback;
 }
 
-function displayDate(value: string | null): string {
+export function displayDate(value: string | null): string {
   if (!value) return "—";
-  return new Intl.DateTimeFormat("ar-SA", { dateStyle: "medium" }).format(new Date(value));
+  return new Intl.DateTimeFormat("ar-SA-u-ca-gregory", {
+    dateStyle: "medium",
+    timeZone: "UTC",
+  }).format(new Date(value));
 }
 
 export function Settings() {
@@ -218,7 +221,7 @@ export function Settings() {
           </div>
 
           {loading && (
-            <div aria-label="جارٍ تحميل السجون" className="space-y-3">
+            <div role="status" aria-label="جارٍ تحميل السجون" className="space-y-3">
               <Skeleton className="h-10 w-full" />
               <Skeleton className="h-10 w-full" />
               <Skeleton className="h-10 w-full" />

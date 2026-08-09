@@ -4,7 +4,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { filterManagedFacilities, Settings, type ManagedFacility } from "./settings";
+import { displayDate, filterManagedFacilities, Settings, type ManagedFacility } from "./settings";
 
 const toastSpy = vi.hoisted(() => vi.fn());
 vi.mock("@/hooks/use-toast", () => ({ useToast: () => ({ toast: toastSpy }) }));
@@ -37,7 +37,26 @@ function response(body: unknown, ok = true): Response {
 describe("Settings facility management", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     toastSpy.mockReset();
+  });
+
+  it("renders closure dates in the Gregorian calendar at the stored UTC day", () => {
+    const originalTimezone = process.env.TZ;
+    try {
+      process.env.TZ = "Pacific/Honolulu";
+      const behindUtc = displayDate("2026-07-01T00:00:00.000Z");
+      process.env.TZ = "Pacific/Kiritimati";
+      const aheadOfUtc = displayDate("2026-07-01T00:00:00.000Z");
+
+      expect(behindUtc).toBe(aheadOfUtc);
+      expect(behindUtc).toMatch(/2026|٢٠٢٦/);
+      expect(behindUtc).toMatch(/01|١|٠١/);
+      expect(behindUtc).not.toMatch(/1447|1448|١٤٤٧|١٤٤٨/);
+      expect(displayDate(null)).toBe("—");
+    } finally {
+      process.env.TZ = originalTimezone;
+    }
   });
 
   it("filters by search, status, and region without mixing facilities", () => {
@@ -115,7 +134,7 @@ describe("Settings facility management", () => {
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
     render(<Settings />);
-    expect(screen.getByLabelText("جارٍ تحميل السجون")).toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "جارٍ تحميل السجون" })).toBeInTheDocument();
     resolveFirst(response({ error: { message: "تعذر الاتصال" } }, false));
     expect(await screen.findByText("تعذر الاتصال")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /إعادة المحاولة/ }));
