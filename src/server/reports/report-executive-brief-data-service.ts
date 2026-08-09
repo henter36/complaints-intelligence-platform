@@ -44,6 +44,7 @@ import type {
   RegionSnapshotAtEndRow,
   DepartmentPeriodMetricsRow,
   ClassificationSnapshotAtEndRow,
+  ClassificationChangeRow,
 } from "@/lib/reports/report-contract";
 import {
   buildClassificationPath,
@@ -696,52 +697,204 @@ function buildNotes(result: ComplaintKpiResult, comparison: ComparisonResult): s
 // Top classifications
 // ---------------------------------------------------------------------------
 
+/** Same key resolution `buildTopClassifications` and `buildClassificationChanges` both need, so the "same" classification always resolves to the same id in either. */
+function classificationRowKey(group: ComplaintGroupMetrics): string {
+  if (group.id) return group.id;
+  // Null id + unclassified display name → shared sentinel for open/late join.
+  if (
+    group.name === UNCLASSIFIED_CLASSIFICATION_LABEL ||
+    group.classificationName === UNCLASSIFIED_CLASSIFICATION_LABEL
+  ) {
+    return UNCLASSIFIED_CLASSIFICATION_KEY;
+  }
+  return group.name;
+}
+
+type ClassificationRowInfo = {
+  classificationId: string;
+  classificationName: string;
+  classificationPath: string;
+  categoryId: string | null;
+  categoryName: string;
+};
+
+function resolveClassificationRowInfo(group: ComplaintGroupMetrics): ClassificationRowInfo {
+  const id = classificationRowKey(group);
+  const isUnclassified = id === UNCLASSIFIED_CLASSIFICATION_KEY;
+  const classificationName = isUnclassified
+    ? UNCLASSIFIED_CLASSIFICATION_LABEL
+    : (group.classificationName ?? group.name);
+  const categoryName = isUnclassified ? "" : (group.categoryName ?? "");
+  const classificationPath = isUnclassified
+    ? UNCLASSIFIED_CLASSIFICATION_LABEL
+    : buildClassificationPath(categoryName || null, classificationName);
+  return {
+    classificationId: id,
+    classificationName,
+    classificationPath,
+    categoryId: isUnclassified ? null : (group.categoryId ?? null),
+    categoryName: categoryName || (isUnclassified ? UNCLASSIFIED_CLASSIFICATION_LABEL : ""),
+  };
+}
+
 export function buildTopClassifications(
   currentDistributions: ComplaintGroupMetrics[],
   previousDistributions: ComplaintGroupMetrics[],
   currentTotal: number,
   limit: number = TOP_CLASSIFICATIONS_LIMIT
 ): ClassificationBriefRow[] {
-  const toRowKey = (group: ComplaintGroupMetrics): string => {
-    if (group.id) return group.id;
-    // Null id + unclassified display name → shared sentinel for open/late join.
-    if (
-      group.name === UNCLASSIFIED_CLASSIFICATION_LABEL ||
-      group.classificationName === UNCLASSIFIED_CLASSIFICATION_LABEL
-    ) {
-      return UNCLASSIFIED_CLASSIFICATION_KEY;
-    }
-    return group.name;
-  };
-
-  const prevMap = new Map(previousDistributions.map((g) => [toRowKey(g), g.total]));
+  const prevMap = new Map(previousDistributions.map((g) => [classificationRowKey(g), g.total]));
 
   return currentDistributions.slice(0, limit).map((group) => {
     const currentCount = group.total;
-    const id = toRowKey(group);
-    const previousCount = prevMap.get(id) ?? 0;
-    const difference = currentCount - previousCount;
-    const isUnclassified = id === UNCLASSIFIED_CLASSIFICATION_KEY;
-    const classificationName = isUnclassified
-      ? UNCLASSIFIED_CLASSIFICATION_LABEL
-      : (group.classificationName ?? group.name);
-    const categoryName = isUnclassified ? "" : (group.categoryName ?? "");
-    const classificationPath = isUnclassified
-      ? UNCLASSIFIED_CLASSIFICATION_LABEL
-      : buildClassificationPath(categoryName || null, classificationName);
+    const info = resolveClassificationRowInfo(group);
+    const previousCount = prevMap.get(info.classificationId) ?? 0;
     return {
-      categoryId: isUnclassified ? null : (group.categoryId ?? null),
-      categoryName: categoryName || (isUnclassified ? UNCLASSIFIED_CLASSIFICATION_LABEL : ""),
-      classificationId: id,
-      classificationName,
-      classificationPath,
+      categoryId: info.categoryId,
+      categoryName: info.categoryName,
+      classificationId: info.classificationId,
+      classificationName: info.classificationName,
+      classificationPath: info.classificationPath,
       currentCount,
       previousCount,
-      difference,
+      difference: currentCount - previousCount,
       changeRate: computeChangeRate(currentCount, previousCount),
       shareOfTotal: currentTotal > 0 ? roundRate((currentCount / currentTotal) * 100) : 0,
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// V2: classification changes (page 4 "أبرز تحولات التصنيفات")
+// ---------------------------------------------------------------------------
+
+const CLASSIFICATION_CHANGES_LIMIT = 5;
+
+/**
+ * previousCount===0 handling matches the region-conclusions rule: never
+ * fabricate a rate. currentCount===previousCount returns null — the caller
+ * excludes that classification entirely ("دون تغير" is not a "change").
+ */
+function resolveClassificationChangeDirection(
+  currentCount: number,
+  previousCount: number
+): ClassificationChangeRow["direction"] | null {
+  if (currentCount === previousCount) return null;
+  if (previousCount === 0 && currentCount > 0) return "جديد";
+  if (previousCount > 0 && currentCount === 0) return "انخفاض إلى صفر";
+  return currentCount > previousCount ? "ارتفاع" : "انخفاض";
+}
+
+/**
+ * Ranks by the raw complaint-count swing first (a large numeric jump matters
+ * more operationally than a large percentage of a tiny base), then by
+ * |changeRate| when at least one side has one, then by total volume, then by
+ * name — fully deterministic.
+ */
+function compareClassificationChangeMagnitude(
+  a: ClassificationChangeRow,
+  b: ClassificationChangeRow
+): number {
+  const byAbsDifference = Math.abs(b.difference) - Math.abs(a.difference);
+  if (byAbsDifference !== 0) return byAbsDifference;
+
+  if (a.changeRate !== null || b.changeRate !== null) {
+    const byRate = Math.abs(b.changeRate ?? 0) - Math.abs(a.changeRate ?? 0);
+    if (byRate !== 0) return byRate;
+  }
+
+  const bySum = (b.currentCount + b.previousCount) - (a.currentCount + a.previousCount);
+  if (bySum !== 0) return bySum;
+  return a.classificationPath.localeCompare(b.classificationPath, "ar");
+}
+
+/**
+ * Guarantees both directions are represented (when both exist), mirroring
+ * {@link selectBalancedRegionConclusions}'s shape: 2 guaranteed per side,
+ * then remaining slots go to whichever side's next-strongest unselected row
+ * has the larger |difference| — never letting one direction consume every slot.
+ */
+function selectBalancedClassificationChanges(
+  rising: readonly ClassificationChangeRow[],
+  declining: readonly ClassificationChangeRow[],
+  maxTotal: number
+): ClassificationChangeRow[] {
+  if (declining.length === 0) return rising.slice(0, maxTotal);
+  if (rising.length === 0) return declining.slice(0, maxTotal);
+
+  const guaranteedEach = Math.min(2, rising.length, declining.length);
+  const selected: ClassificationChangeRow[] = [
+    ...rising.slice(0, guaranteedEach),
+    ...declining.slice(0, guaranteedEach),
+  ];
+
+  let nextRisingIndex = guaranteedEach;
+  let nextDecliningIndex = guaranteedEach;
+  while (
+    selected.length < maxTotal
+    && (nextRisingIndex < rising.length || nextDecliningIndex < declining.length)
+  ) {
+    const nextRising = rising[nextRisingIndex];
+    const nextDeclining = declining[nextDecliningIndex];
+    if (nextRising && (!nextDeclining || Math.abs(nextRising.difference) >= Math.abs(nextDeclining.difference))) {
+      selected.push(nextRising);
+      nextRisingIndex++;
+    } else if (nextDeclining) {
+      selected.push(nextDeclining);
+      nextDecliningIndex++;
+    }
+  }
+  return selected;
+}
+
+/**
+ * V2-only. Built from the UNION of current- and previous-period
+ * classification distributions (not just `buildTopClassifications`'s
+ * current-period top N) so a classification that dropped to zero this
+ * period — "انخفاض إلى صفر" — is never silently dropped for having no
+ * current-period row. No department involvement anywhere in this path.
+ */
+export function buildClassificationChanges(
+  currentDistributions: ComplaintGroupMetrics[],
+  previousDistributions: ComplaintGroupMetrics[],
+  hasPreviousPeriod: boolean,
+  limit: number = CLASSIFICATION_CHANGES_LIMIT
+): ClassificationChangeRow[] {
+  if (!hasPreviousPeriod) return [];
+
+  const currentMap = new Map(currentDistributions.map((g) => [classificationRowKey(g), g] as const));
+  const previousMap = new Map(previousDistributions.map((g) => [classificationRowKey(g), g] as const));
+  const allKeys = new Set<string>([...currentMap.keys(), ...previousMap.keys()]);
+
+  const rows: ClassificationChangeRow[] = [];
+  for (const key of allKeys) {
+    const currentGroup = currentMap.get(key);
+    const previousGroup = previousMap.get(key);
+    const currentCount = currentGroup?.total ?? 0;
+    const previousCount = previousGroup?.total ?? 0;
+    const direction = resolveClassificationChangeDirection(currentCount, previousCount);
+    if (direction === null) continue;
+    const info = resolveClassificationRowInfo(currentGroup ?? previousGroup!);
+    rows.push({
+      classificationId: info.classificationId,
+      classificationName: info.classificationName,
+      classificationPath: info.classificationPath,
+      currentCount,
+      previousCount,
+      difference: currentCount - previousCount,
+      changeRate: computeChangeRate(currentCount, previousCount),
+      direction,
+    });
+  }
+
+  const rising = rows
+    .filter((r) => r.direction === "ارتفاع" || r.direction === "جديد")
+    .sort(compareClassificationChangeMagnitude);
+  const declining = rows
+    .filter((r) => r.direction === "انخفاض" || r.direction === "انخفاض إلى صفر")
+    .sort(compareClassificationChangeMagnitude);
+
+  return selectBalancedClassificationChanges(rising, declining, limit).sort(compareClassificationChangeMagnitude);
 }
 
 // ---------------------------------------------------------------------------
@@ -1753,6 +1906,12 @@ export async function buildExecutiveBriefV2Data(
     snapshotData.byFacility
   );
 
+  const classificationChanges = buildClassificationChanges(
+    result.distributions.byClassification,
+    previousResult?.distributions.byClassification ?? [],
+    comparison.previousPeriod !== null
+  );
+
   return {
     ...briefData,
     allTimeTotal,
@@ -1760,6 +1919,7 @@ export async function buildExecutiveBriefV2Data(
     classificationOpenLate,
     topFacilities,
     bottomFacilities,
+    classificationChanges,
     // V2-only: region-only conclusions replace the department/classification-based base conclusions.
     conclusions: buildRegionOnlyConclusions(comparison),
   };
