@@ -18,13 +18,16 @@ import {
   dedupeTrendComplaintsById,
   buildMonthlyTrendPrimaryWhere,
   buildTopClassifications,
+  buildTopAndBottomFacilities,
+  buildRegionOnlyConclusions,
   MONTHLY_WINDOW_SIZE,
   ARABIC_MONTH_NAMES,
 } from "./report-executive-brief-data-service";
 import { ComplaintStatus } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
 import type { ReportFilters } from "./report-definition-service";
-import type { ComparisonResult, DeptClassPeriodCount, PeriodRange } from "./report-comparison";
+import type { ComparisonResult, DeptClassPeriodCount, PeriodRange, RegionChangeRow } from "./report-comparison";
+import type { ReportPeriodGroupSnapshot } from "./report-period-snapshot-service";
 import type { ComplaintGroupMetrics, ComplaintKpiResult } from "@/server/complaints/complaint-kpi-service";
 import {
   UNCLASSIFIED_CLASSIFICATION_KEY,
@@ -2507,5 +2510,203 @@ describe("classification + region reconciliation", () => {
     expect(totals.lateAtEnd).toBe(166);
     expect(enriched.find((r) => r.classificationId === UNCLASSIFIED_CLASSIFICATION_KEY)?.openAtEnd).not.toBe(0);
     expect(enriched.find((r) => r.classificationId === UNCLASSIFIED_CLASSIFICATION_KEY)?.openAtEnd).not.toBe(68);
+  });
+});
+
+describe("buildTopAndBottomFacilities — V2 only (spec sections 5-6, 17 items 6-11)", () => {
+  function snapshot(overrides: Partial<ReportPeriodGroupSnapshot> = {}): ReportPeriodGroupSnapshot {
+    return { receivedDuringPeriod: 0, closedDuringPeriod: 0, openAtEnd: 0, lateAtEnd: 0, ...overrides };
+  }
+
+  it("6. sorts top facilities by receivedDuringPeriod desc, then openAtEnd desc, lateAtEnd desc, closedDuringPeriod desc, name asc", () => {
+    const byFacility: Record<string, ReportPeriodGroupSnapshot> = {
+      "سجن أ": snapshot({ receivedDuringPeriod: 10, openAtEnd: 2, lateAtEnd: 1, closedDuringPeriod: 8 }),
+      "سجن ب": snapshot({ receivedDuringPeriod: 10, openAtEnd: 5, lateAtEnd: 1, closedDuringPeriod: 5 }),
+      "سجن ج": snapshot({ receivedDuringPeriod: 20, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 19 }),
+    };
+    const { topFacilities } = buildTopAndBottomFacilities(40, byFacility);
+    expect(topFacilities.map((r) => r.name)).toEqual(["سجن ج", "سجن ب", "سجن أ"]);
+  });
+
+  it("7. sorts bottom facilities by receivedDuringPeriod asc, then openAtEnd asc, lateAtEnd asc, closedDuringPeriod asc, name asc", () => {
+    const byFacility: Record<string, ReportPeriodGroupSnapshot> = {
+      // High-volume facilities fill the top-5 list so the low-volume trio
+      // below is never touched by the top/bottom anti-overlap rule (item 10),
+      // keeping this test focused purely on bottom's own sort order.
+      "سجن مرتفع 1": snapshot({ receivedDuringPeriod: 50, openAtEnd: 5, lateAtEnd: 2, closedDuringPeriod: 45 }),
+      "سجن مرتفع 2": snapshot({ receivedDuringPeriod: 40, openAtEnd: 4, lateAtEnd: 1, closedDuringPeriod: 36 }),
+      "سجن مرتفع 3": snapshot({ receivedDuringPeriod: 30, openAtEnd: 3, lateAtEnd: 1, closedDuringPeriod: 27 }),
+      "سجن مرتفع 4": snapshot({ receivedDuringPeriod: 20, openAtEnd: 2, lateAtEnd: 0, closedDuringPeriod: 18 }),
+      "سجن مرتفع 5": snapshot({ receivedDuringPeriod: 15, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 14 }),
+      "سجن أ": snapshot({ receivedDuringPeriod: 3, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 2 }),
+      "سجن ب": snapshot({ receivedDuringPeriod: 1, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 0 }),
+      "سجن ج": snapshot({ receivedDuringPeriod: 1, openAtEnd: 0, lateAtEnd: 0, closedDuringPeriod: 1 }),
+    };
+    const { bottomFacilities } = buildTopAndBottomFacilities(160, byFacility);
+    expect(bottomFacilities.slice(0, 3).map((r) => r.name)).toEqual(["سجن ج", "سجن ب", "سجن أ"]);
+  });
+
+  it("8. excludes the unspecified (غير محدد) and empty-name buckets from both lists", () => {
+    const byFacility: Record<string, ReportPeriodGroupSnapshot> = {
+      "غير محدد": snapshot({ receivedDuringPeriod: 50, openAtEnd: 10, lateAtEnd: 5, closedDuringPeriod: 40 }),
+      "": snapshot({ receivedDuringPeriod: 20, openAtEnd: 3, lateAtEnd: 1, closedDuringPeriod: 17 }),
+      "سجن أ": snapshot({ receivedDuringPeriod: 5, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 4 }),
+    };
+    const { topFacilities, bottomFacilities } = buildTopAndBottomFacilities(75, byFacility);
+    expect(topFacilities.map((r) => r.name)).toEqual(["سجن أ"]);
+    // The single remaining eligible facility is consumed by the top list, so
+    // it correctly never repeats in bottom (spec item 10's anti-overlap rule).
+    expect(bottomFacilities).toEqual([]);
+  });
+
+  it("9. a backlog-only facility (receivedDuringPeriod=0 but open>0) is eligible for top but never for bottom", () => {
+    const byFacility: Record<string, ReportPeriodGroupSnapshot> = {
+      "سجن الرصيد": snapshot({ receivedDuringPeriod: 0, openAtEnd: 4, lateAtEnd: 2, closedDuringPeriod: 0 }),
+      "سجن نشط": snapshot({ receivedDuringPeriod: 3, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 2 }),
+    };
+    const { topFacilities, bottomFacilities } = buildTopAndBottomFacilities(3, byFacility);
+    expect(topFacilities.some((r) => r.name === "سجن الرصيد")).toBe(true);
+    expect(bottomFacilities.some((r) => r.name === "سجن الرصيد")).toBe(false);
+  });
+
+  it("10. never lets the same facility appear in both lists — shrinks bottom instead when the facility pool is small", () => {
+    const byFacility: Record<string, ReportPeriodGroupSnapshot> = {
+      "سجن أ": snapshot({ receivedDuringPeriod: 10, openAtEnd: 2, lateAtEnd: 1, closedDuringPeriod: 8 }),
+      "سجن ب": snapshot({ receivedDuringPeriod: 5, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 4 }),
+    };
+    const { topFacilities, bottomFacilities } = buildTopAndBottomFacilities(15, byFacility);
+    // Only 2 facilities exist; both are consumed by the top-5 list, so bottom shrinks to empty.
+    expect(topFacilities.map((r) => r.name)).toEqual(["سجن أ", "سجن ب"]);
+    expect(bottomFacilities).toEqual([]);
+    const topNames = new Set(topFacilities.map((r) => r.name));
+    expect(bottomFacilities.every((r) => !topNames.has(r.name))).toBe(true);
+  });
+
+  it("11. tie-breaks by Arabic name ascending are stable for both lists", () => {
+    const byFacility: Record<string, ReportPeriodGroupSnapshot> = {
+      "سجن ياء": snapshot({ receivedDuringPeriod: 5, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 4 }),
+      "سجن ألف": snapshot({ receivedDuringPeriod: 5, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 4 }),
+      "سجن باء": snapshot({ receivedDuringPeriod: 5, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 4 }),
+    };
+    const { topFacilities } = buildTopAndBottomFacilities(15, byFacility);
+    const names = topFacilities.map((r) => r.name);
+    expect(names).toEqual([...names].sort((a, b) => a.localeCompare(b, "ar")));
+  });
+
+  it("caps each list at 5 rows and computes shareOfTotal from the overall receivedDuringPeriod", () => {
+    const byFacility: Record<string, ReportPeriodGroupSnapshot> = {};
+    for (let i = 0; i < 8; i++) {
+      byFacility[`سجن ${i}`] = snapshot({ receivedDuringPeriod: 10 - i, openAtEnd: 1, closedDuringPeriod: 9 - i });
+    }
+    const { topFacilities } = buildTopAndBottomFacilities(100, byFacility);
+    expect(topFacilities).toHaveLength(5);
+    expect(topFacilities[0]!.shareOfTotal).toBe(10);
+  });
+});
+
+describe("buildRegionOnlyConclusions — V2 only (spec sections 10-15, 17 items 17-21)", () => {
+  function regionChange(overrides: Partial<RegionChangeRow> & { regionName: string }): RegionChangeRow {
+    return {
+      currentCount: 0,
+      previousCount: 0,
+      difference: 0,
+      changeRate: null,
+      direction: "دون تغير",
+      ...overrides,
+    };
+  }
+
+  function comparisonWithRegionChanges(
+    regionChanges: RegionChangeRow[],
+    hasPrevious = true
+  ): ComparisonResult {
+    return { ...makeComparison(hasPrevious), regionChanges };
+  }
+
+  it("17. conclusions never mention departments, facilities, or classifications — only region names and counts", () => {
+    const comparison = comparisonWithRegionChanges([
+      regionChange({ regionName: "الرياض", currentCount: 140, previousCount: 20, difference: 120, changeRate: 600, direction: "ارتفاع" }),
+    ]);
+    const conclusions = buildRegionOnlyConclusions(comparison);
+    expect(conclusions).toHaveLength(1);
+    expect(conclusions[0]).toContain("الرياض");
+    expect(conclusions[0]).not.toContain("إدارة");
+    expect(conclusions[0]).not.toContain("سجن");
+    expect(conclusions[0]).not.toContain("تصنيف");
+  });
+
+  it("18-19. builds rise/decline text only from comparison.regionChanges, matching the spec's example phrasing", () => {
+    const comparison = comparisonWithRegionChanges([
+      regionChange({ regionName: "الرياض", currentCount: 620, previousCount: 500, difference: 120, changeRate: 18, direction: "ارتفاع" }),
+      regionChange({ regionName: "تبوك", currentCount: 250, previousCount: 285, difference: -35, changeRate: -12, direction: "انخفاض" }),
+    ]);
+    const conclusions = buildRegionOnlyConclusions(comparison);
+    expect(conclusions).toContain("سجلت الرياض ارتفاعًا قدره 120 شكوى مقارنة بالفترة السابقة، بنسبة تغير 18%.");
+    expect(conclusions).toContain("سجلت تبوك انخفاضًا قدره 35 شكوى مقارنة بالفترة السابقة، بنسبة تغير 12%.");
+  });
+
+  it("20. previousCount === 0 with currentCount > 0 never fabricates a change rate (no Infinity/NaN/percent)", () => {
+    const comparison = comparisonWithRegionChanges([
+      regionChange({ regionName: "المنطقة الشرقية", currentCount: 18, previousCount: 0, difference: 18, changeRate: null, direction: "جديد" }),
+    ]);
+    const conclusions = buildRegionOnlyConclusions(comparison);
+    expect(conclusions[0]).toBe("سجلت المنطقة الشرقية 18 شكوى خلال الفترة الحالية بعد عدم تسجيل شكاوى في الفترة السابقة.");
+    expect(conclusions[0]).not.toContain("Infinity");
+    expect(conclusions[0]).not.toContain("NaN");
+    expect(conclusions[0]).not.toContain("%");
+  });
+
+  it("21. no valid comparison period returns the dedicated fallback sentence, never a fabricated comparison", () => {
+    const comparison = comparisonWithRegionChanges([], false);
+    const conclusions = buildRegionOnlyConclusions(comparison);
+    expect(conclusions).toEqual(["لا تتوفر فترة سابقة صالحة لاستخراج استنتاجات مقارنة للمناطق."]);
+  });
+
+  it("no rises or declines (all regions unchanged) returns the dedicated no-changes sentence", () => {
+    const comparison = comparisonWithRegionChanges([
+      regionChange({ regionName: "الرياض", currentCount: 40, previousCount: 40, difference: 0, changeRate: 0, direction: "دون تغير" }),
+    ]);
+    const conclusions = buildRegionOnlyConclusions(comparison);
+    expect(conclusions).toEqual(["لم تسجل المناطق تغيرات في أعداد الشكاوى مقارنة بالفترة السابقة."]);
+  });
+
+  it("caps at 5 conclusions and represents both directions when both exist (not consumed entirely by one side)", () => {
+    const comparison = comparisonWithRegionChanges([
+      regionChange({ regionName: "منطقة1", currentCount: 100, previousCount: 10, difference: 90, changeRate: 900, direction: "ارتفاع" }),
+      regionChange({ regionName: "منطقة2", currentCount: 90, previousCount: 10, difference: 80, changeRate: 800, direction: "ارتفاع" }),
+      regionChange({ regionName: "منطقة3", currentCount: 80, previousCount: 10, difference: 70, changeRate: 700, direction: "ارتفاع" }),
+      regionChange({ regionName: "منطقة4", currentCount: 70, previousCount: 10, difference: 60, changeRate: 600, direction: "ارتفاع" }),
+      regionChange({ regionName: "منطقة5", currentCount: 10, previousCount: 100, difference: -90, changeRate: -90, direction: "انخفاض" }),
+      regionChange({ regionName: "منطقة6", currentCount: 10, previousCount: 90, difference: -80, changeRate: -89, direction: "انخفاض" }),
+    ]);
+    const conclusions = buildRegionOnlyConclusions(comparison);
+    expect(conclusions.length).toBeLessThanOrEqual(5);
+    const mentionsRise = conclusions.some((c) => c.includes("ارتفاعًا"));
+    const mentionsDecline = conclusions.some((c) => c.includes("انخفاضًا"));
+    expect(mentionsRise).toBe(true);
+    expect(mentionsDecline).toBe(true);
+  });
+
+  it("sorts rising regions by difference desc, then changeRate desc, then Arabic name asc", () => {
+    const comparison = comparisonWithRegionChanges([
+      regionChange({ regionName: "ب", currentCount: 20, previousCount: 10, difference: 10, changeRate: 100, direction: "ارتفاع" }),
+      regionChange({ regionName: "أ", currentCount: 20, previousCount: 10, difference: 10, changeRate: 100, direction: "ارتفاع" }),
+      regionChange({ regionName: "ج", currentCount: 30, previousCount: 10, difference: 20, changeRate: 200, direction: "ارتفاع" }),
+    ]);
+    const conclusions = buildRegionOnlyConclusions(comparison);
+    expect(conclusions[0]).toContain("ج");
+    expect(conclusions[1]).toContain("أ");
+    expect(conclusions[2]).toContain("ب");
+  });
+
+  it("never says 'negative performance', 'decline', or 'problem' for a rise, and doesn't editorialize a decline as improvement", () => {
+    const comparison = comparisonWithRegionChanges([
+      regionChange({ regionName: "الرياض", currentCount: 120, previousCount: 100, difference: 20, changeRate: 20, direction: "ارتفاع" }),
+      regionChange({ regionName: "جدة", currentCount: 80, previousCount: 100, difference: -20, changeRate: -20, direction: "انخفاض" }),
+    ]);
+    const conclusions = buildRegionOnlyConclusions(comparison).join(" ");
+    for (const forbidden of ["سلبي", "مشكلة", "تحسن", "تراجع الأداء"]) {
+      expect(conclusions).not.toContain(forbidden);
+    }
   });
 });

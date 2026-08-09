@@ -15,6 +15,7 @@ import {
   resolveV2MonthlyChartHeight,
   resolveV2MonthlyChartRenderPlan,
   resolveV2ConclusionsAvailableHeight,
+  resolveV2FacilityRowCounts,
 } from "./report-executive-brief-v2-pdf-service";
 import { preparePdfText } from "./arabic-pdf-text";
 import { REPORT_DESIGN_TOKENS } from "@/lib/reports/design-tokens";
@@ -68,6 +69,14 @@ function makeV2Brief(overrides: Partial<ExecutiveBriefV2Data> = {}): ExecutiveBr
     concentrationBands: [],
     topDepartments: [
       { name: "المتابعة", total: 40, open: 10, closed: 30, currentlyLate: 3, shareOfTotal: 40 },
+    ],
+    topFacilities: [
+      { name: "سجن الملز", total: 25, open: 8, closed: 17, currentlyLate: 2, shareOfTotal: 25 },
+      { name: "سجن الشميسي", total: 15, open: 4, closed: 11, currentlyLate: 1, shareOfTotal: 15 },
+    ],
+    bottomFacilities: [
+      { name: "سجن الدمام", total: 2, open: 0, closed: 2, currentlyLate: 0, shareOfTotal: 2 },
+      { name: "سجن أبها", total: 3, open: 1, closed: 2, currentlyLate: 0, shareOfTotal: 3 },
     ],
     conclusions: ["استنتاج تجريبي."],
     notes: ["ملاحظة جودة بيانات تجريبية."],
@@ -354,7 +363,9 @@ describe("renderExecutiveBriefV2Pdf", () => {
         "تغير",
         "موضوع",
         "التصنيف",
-        "الإدارة",
+        "السجون",
+        "الملز",
+        "الدمام",
         "الاستنتاجات",
         "استنتاج",
         "المتابعة",
@@ -363,6 +374,7 @@ describe("renderExecutiveBriefV2Pdf", () => {
         expect(joined).toContain(token);
       }
       expect(joined).not.toContain("[object Object]");
+      expect(joined).not.toContain("الإدارة");
       expect(joined).not.toContain(preparePdfText("ملاحظات جودة البيانات وتأثيرها على المؤشرات"));
       expect(joined).not.toContain("ملاحظات جودة البيانات وتأثيرها على المؤشرات");
     } finally {
@@ -383,6 +395,71 @@ describe("renderExecutiveBriefV2Pdf", () => {
       const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
       expect(joined).not.toContain(preparePdfText(policyNote));
       expect(joined).not.toContain(policyNote);
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+});
+
+describe("V2 page 4 — facilities replace departments (spec sections 5-9, 14-16)", () => {
+  it("renders both facility section titles and every provided facility name, and never renders the department section title/name", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      const result = await renderExecutiveBriefV2Pdf(makeV2Report());
+      expect(countPageObjects(result.buffer)).toBe(4);
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      for (const token of ["السجون", "السجن", "الملز", "الشميسي", "الدمام", "أبها"]) {
+        expect(joined).toContain(token);
+      }
+      // "الإدارة"/"أعلى الإدارات" (the old department section) must never appear on V2's page 4.
+      expect(joined).not.toContain("الإدارة");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("still renders a valid 4-page PDF when topFacilities/bottomFacilities are both empty", async () => {
+    const result = await renderExecutiveBriefV2Pdf(
+      makeV2Report({
+        briefData: makeV2Brief({ topFacilities: [], bottomFacilities: [] }),
+      })
+    );
+    expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
+    expect(countPageObjects(result.buffer)).toBe(4);
+  });
+
+  it("still renders a valid 4-page PDF when topFacilities/bottomFacilities are undefined (older/fallback brief shape)", async () => {
+    const brief = makeV2Brief();
+    const withoutFacilities = { ...brief } as Partial<ExecutiveBriefV2Data>;
+    delete withoutFacilities.topFacilities;
+    delete withoutFacilities.bottomFacilities;
+    const result = await renderExecutiveBriefV2Pdf(
+      makeV2Report({ briefData: withoutFacilities as ExecutiveBriefV2Data })
+    );
+    expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
+    expect(countPageObjects(result.buffer)).toBe(4);
+  });
+
+  it("renders all 5 conclusions, not just the first 4 (regression: conclusions box off-by-one truncated the last line)", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(
+        makeV2Report({
+          briefData: makeV2Brief({
+            conclusions: [
+              "سجلت منطقة1 ارتفاعًا قدره 10 شكوى مقارنة بالفترة السابقة، بنسبة تغير 10%.",
+              "سجلت منطقة2 ارتفاعًا قدره 20 شكوى مقارنة بالفترة السابقة، بنسبة تغير 20%.",
+              "سجلت منطقة3 ارتفاعًا قدره 30 شكوى مقارنة بالفترة السابقة، بنسبة تغير 30%.",
+              "سجلت منطقة4 ارتفاعًا قدره 40 شكوى مقارنة بالفترة السابقة، بنسبة تغير 40%.",
+              "سجلت منطقة5 ارتفاعًا قدره 50 شكوى مقارنة بالفترة السابقة، بنسبة تغير 50%.",
+            ],
+          }),
+        })
+      );
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      for (const token of ["منطقة1", "منطقة2", "منطقة3", "منطقة4", "منطقة5"]) {
+        expect(joined).toContain(token);
+      }
     } finally {
       textSpy.mockRestore();
     }
@@ -705,10 +782,66 @@ describe("V2 monthly chart contract + KPI packing", () => {
     const boxHdrH = 30;
     const conclusionsCount = 3;
     const conclusionsBoxH = Math.max(
-      boxHdrH + lineH + 12,
-      Math.min(boxHdrH + 12 + Math.max(conclusionsCount, 1) * lineH, availableH)
+      boxHdrH + lineH + 16,
+      Math.min(boxHdrH + 16 + Math.max(conclusionsCount, 1) * lineH, availableH)
     );
     expect(y + conclusionsBoxH).toBeLessThanOrEqual(pageHeight - margin - 26);
+  });
+
+  it("sizes the conclusions box so drawBulletBox's own maxLines formula fits every conclusion (regression: off-by-one truncated the last line)", () => {
+    const lineH = 22;
+    const boxHdrH = 30;
+    for (const conclusionsCount of [1, 2, 3, 4, 5]) {
+      const availableH = resolveV2ConclusionsAvailableHeight(1200, 42, 300);
+      const conclusionsBoxH = Math.max(
+        boxHdrH + lineH + 16,
+        Math.min(boxHdrH + 16 + conclusionsCount * lineH, availableH)
+      );
+      // Mirrors drawBulletBox's own maxLines computation exactly.
+      const maxLines = Math.max(1, Math.floor((conclusionsBoxH - boxHdrH - 16) / lineH));
+      expect(maxLines).toBeGreaterThanOrEqual(conclusionsCount);
+    }
+  });
+
+  it("resolveV2FacilityRowCounts keeps 5 rows when there is ample room", () => {
+    const { topRows, bottomRows } = resolveV2FacilityRowCounts({
+      pageHeight: 1200,
+      margin: 42,
+      y: 300,
+      gap: 14,
+      topAvailableRows: 5,
+      bottomAvailableRows: 5,
+    });
+    expect(topRows).toBe(5);
+    expect(bottomRows).toBe(5);
+  });
+
+  it("resolveV2FacilityRowCounts shrinks rows (never below 3) instead of starving the conclusions box under a tight budget", () => {
+    const { topRows, bottomRows } = resolveV2FacilityRowCounts({
+      pageHeight: 1200,
+      margin: 42,
+      y: 1000, // little vertical room left before the footer reserve
+      gap: 14,
+      topAvailableRows: 5,
+      bottomAvailableRows: 5,
+    });
+    expect(topRows).toBeGreaterThanOrEqual(3);
+    expect(topRows).toBeLessThanOrEqual(5);
+    expect(bottomRows).toBeGreaterThanOrEqual(3);
+    expect(bottomRows).toBeLessThanOrEqual(5);
+  });
+
+  it("resolveV2FacilityRowCounts never asks for more rows than are actually available", () => {
+    const { topRows, bottomRows } = resolveV2FacilityRowCounts({
+      pageHeight: 1200,
+      margin: 42,
+      y: 300,
+      gap: 14,
+      topAvailableRows: 2,
+      bottomAvailableRows: 0,
+    });
+    expect(topRows).toBe(2);
+    expect(bottomRows).toBe(0);
   });
 
   it("fits stress KPI values without throwing (0%, unavailable, large numbers)", async () => {

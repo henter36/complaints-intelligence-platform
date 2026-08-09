@@ -145,6 +145,47 @@ export function resolveV2ConclusionsAvailableHeight(
   return Math.max(0, pageHeight - margin - 26 - y);
 }
 
+const FACILITY_ROW_HEIGHT = 26;
+const FACILITY_TABLE_HEADER_H = FACILITY_ROW_HEIGHT + 2;
+const FACILITY_SECTION_TITLE_H = 13 + 8; // matches drawSectionTitle's y advance
+const FACILITY_MAX_ROWS = 5;
+const FACILITY_MIN_ROWS = 3;
+/** boxHdrH + one visible line + padding — the smallest a non-empty conclusions box can be. */
+const CONCLUSIONS_MIN_HEIGHT = 30 + 22 + 12;
+
+/**
+ * Picks how many rows the top/bottom facility tables get (5 down to 3) so
+ * the conclusions box below always keeps room for at least one line —
+ * facility rows are reduced before conclusions are ever shrunk or hidden.
+ */
+export function resolveV2FacilityRowCounts(input: {
+  pageHeight: number;
+  margin: number;
+  /** y position right after the classifications table (before the facility section titles). */
+  y: number;
+  gap: number;
+  topAvailableRows: number;
+  bottomAvailableRows: number;
+}): { topRows: number; bottomRows: number } {
+  const fixedChrome = FACILITY_SECTION_TITLE_H * 2 + input.gap * 2;
+  const budget = input.pageHeight - input.margin - 26 - input.y - fixedChrome;
+
+  for (let rows = FACILITY_MAX_ROWS; rows >= FACILITY_MIN_ROWS; rows--) {
+    const topRows = Math.min(rows, input.topAvailableRows);
+    const bottomRows = Math.min(rows, input.bottomAvailableRows);
+    const facilitiesHeight =
+      FACILITY_TABLE_HEADER_H + topRows * FACILITY_ROW_HEIGHT
+      + FACILITY_TABLE_HEADER_H + bottomRows * FACILITY_ROW_HEIGHT;
+    if (facilitiesHeight + CONCLUSIONS_MIN_HEIGHT <= budget) {
+      return { topRows, bottomRows };
+    }
+  }
+  return {
+    topRows: Math.min(FACILITY_MIN_ROWS, input.topAvailableRows),
+    bottomRows: Math.min(FACILITY_MIN_ROWS, input.bottomAvailableRows),
+  };
+}
+
 type V2Context = {
   doc: PDFKit.PDFDocument;
   data: ReportData;
@@ -1020,7 +1061,8 @@ function formatClassificationTableCell(
   return formatTableValue((row as Record<string, unknown>)[key]);
 }
 
-function formatDepartmentTableCell(row: ExecutiveEntityRow, key: string): string {
+/** Shared cell formatter for any {@link ExecutiveEntityRow} table (facilities, and — outside V2 — departments). */
+function formatEntityTableCell(row: ExecutiveEntityRow, key: string): string {
   return formatTableValue((row as Record<string, unknown>)[key]);
 }
 
@@ -1163,18 +1205,18 @@ async function renderPage3(ctx: V2Context): Promise<void> {
   );
 }
 
-// ── Page 4: Classifications + Departments + Conclusions ───────────────────────
+// ── Page 4: Classifications + Facilities + Conclusions ─────────────────────────
 
 function renderPage4(ctx: V2Context): void {
   const { doc, data, brief, layout } = ctx;
   const { margin, contentWidth } = layout;
   const hasPrevPeriod = Boolean(data.previousPeriod);
   const classRows = brief.topClassifications.slice(0, 8);
-  const deptRows = (brief.topDepartments ?? []).slice(0, 8);
+  const topFacilityRows = brief.topFacilities ?? [];
+  const bottomFacilityRows = brief.bottomFacilities ?? [];
   const hasClassComparison = classRows.some((r) => r.previousCount > 0);
-  // Departments table has no previous columns today; keep rise list gated on real previous period.
 
-  let y = drawPageHeader(ctx, "التصنيفات والإدارات والاستنتاجات");
+  let y = drawPageHeader(ctx, "التصنيفات والسجون والاستنتاجات");
   const gap = 14;
   const rowH = 26;
 
@@ -1233,24 +1275,48 @@ function renderPage4(ctx: V2Context): void {
   });
   y += gap;
 
-  // ── Departments table ──────────────────────────────────────────────────────
-  y = drawSectionTitle(doc, "أعلى الإدارات", margin, y, contentWidth);
-  const deptCols: ColDef[] = [
-    { key: "name", label: "الإدارة", weight: 2.2 },
+  // ── Facilities: top + bottom ────────────────────────────────────────────────
+  // Row counts flex (5 down to 3) so the conclusions box below never gets
+  // shrunk or hidden to make room for these tables.
+  const facilityRowCounts = resolveV2FacilityRowCounts({
+    pageHeight: layout.pageSize[1],
+    margin,
+    y,
+    gap,
+    topAvailableRows: topFacilityRows.length,
+    bottomAvailableRows: bottomFacilityRows.length,
+  });
+  const facilityCols: ColDef[] = [
+    { key: "name", label: "السجن", weight: 2.2 },
     { key: "total", label: "شكاوى الفترة", weight: 0.9 },
     { key: "closed", label: "مغلقة خلال الفترة", weight: 0.9 },
     { key: "open", label: "مفتوحة نهاية الفترة", weight: 0.95 },
     { key: "currentlyLate", label: "متأخرة نهاية الفترة", weight: 0.95 },
   ];
+
+  y = drawSectionTitle(doc, "أعلى السجون", margin, y, contentWidth);
   y = drawTable({
     doc,
-    rows: deptRows,
-    columns: deptCols,
+    rows: topFacilityRows.slice(0, facilityRowCounts.topRows),
+    columns: facilityCols,
     x: margin,
     y,
     width: contentWidth,
     rowHeight: rowH,
-    formatCell: formatDepartmentTableCell,
+    formatCell: formatEntityTableCell,
+  });
+  y += gap;
+
+  y = drawSectionTitle(doc, "أقل السجون", margin, y, contentWidth);
+  y = drawTable({
+    doc,
+    rows: bottomFacilityRows.slice(0, facilityRowCounts.bottomRows),
+    columns: facilityCols,
+    x: margin,
+    y,
+    width: contentWidth,
+    rowHeight: rowH,
+    formatCell: formatEntityTableCell,
   });
   y += gap;
 
@@ -1266,10 +1332,14 @@ function renderPage4(ctx: V2Context): void {
   if (availableH <= 0) {
     return;
   }
+  // Padding must match drawBulletBox's own reserved header space (16, not
+  // 12) — otherwise the box sizes itself for N lines but drawBulletBox's
+  // maxLines computation silently renders only N-1, truncating the last
+  // conclusion (see resolveMonthlyTrendNotesHeight for the same, correct pattern).
   const conclusionsBoxH = Math.max(
-    boxHdrH + lineH + 12,
+    boxHdrH + lineH + 16,
     Math.min(
-      boxHdrH + 12 + Math.max(conclusions.length, 1) * lineH,
+      boxHdrH + 16 + Math.max(conclusions.length, 1) * lineH,
       availableH
     )
   );
@@ -1332,6 +1402,8 @@ const EMPTY_V2: ExecutiveBriefV2Data = {
   allTimeTotal: 0,
   monthlyStockFlow: [],
   classificationOpenLate: {},
+  topFacilities: [],
+  bottomFacilities: [],
   periodMetrics: { current: EMPTY_PERIOD_SNAPSHOT_METRICS, previous: null },
   regionSnapshotAtEnd: [],
   departmentPeriodMetrics: [],

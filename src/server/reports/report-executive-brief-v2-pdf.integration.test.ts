@@ -255,6 +255,32 @@ describe.skipIf(!DEV_DB_AVAILABLE)(
       expect(totals).toEqual(recomputed);
     });
 
+    it("data contract: topFacilities/bottomFacilities never share a facility name, and bottom only contains facilities with receivedDuringPeriod > 0", () => {
+      const brief = requireV2Brief();
+      const topNames = new Set((brief.topFacilities ?? []).map((r) => r.name));
+      const bottomNames = (brief.bottomFacilities ?? []).map((r) => r.name);
+      expect(bottomNames.every((name) => !topNames.has(name))).toBe(true);
+      for (const row of brief.bottomFacilities ?? []) {
+        expect(row.total).toBeGreaterThan(0);
+      }
+      for (const row of [...(brief.topFacilities ?? []), ...(brief.bottomFacilities ?? [])]) {
+        expect(row.name).not.toBe("غير محدد");
+        expect(row.name.trim().length).toBeGreaterThan(0);
+      }
+    });
+
+    it("data contract: V2 conclusions never mention departments, facilities, or classifications — only regions", () => {
+      const brief = requireV2Brief();
+      const departmentNames = (brief.departmentPeriodMetrics ?? []).map((d) => d.departmentName);
+      const facilityNames = [...(brief.topFacilities ?? []), ...(brief.bottomFacilities ?? [])].map((f) => f.name);
+      const conclusionsText = (brief.conclusions ?? []).join(" ");
+      for (const name of [...departmentNames, ...facilityNames]) {
+        if (name && name !== "غير محدد") {
+          expect(conclusionsText).not.toContain(name);
+        }
+      }
+    });
+
     it("PDF smoke test: renders exactly four pages without throwing", () => {
       expect(pdfBuffer.subarray(0, 5).toString("ascii")).toBe("%PDF-");
       const pageCount = (pdfBuffer.toString("binary").match(/\/Type\s*\/Page\s*\/Parent/g) ?? []).length;
