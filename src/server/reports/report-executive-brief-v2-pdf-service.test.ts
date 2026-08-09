@@ -16,6 +16,7 @@ import {
   resolveV2MonthlyChartRenderPlan,
   resolveV2ConclusionsAvailableHeight,
   resolveV2FacilityRowCounts,
+  computeV2ConclusionsBoxHeight,
 } from "./report-executive-brief-v2-pdf-service";
 import { preparePdfText } from "./arabic-pdf-text";
 import { REPORT_DESIGN_TOKENS } from "@/lib/reports/design-tokens";
@@ -778,25 +779,15 @@ describe("V2 monthly chart contract + KPI packing", () => {
     expect(availableH).toBe(pageHeight - margin - 26 - y);
     expect(availableH).not.toBe(pageHeight - margin * 2 - 26 - y);
 
-    const lineH = 22;
-    const boxHdrH = 30;
-    const conclusionsCount = 3;
-    const conclusionsBoxH = Math.max(
-      boxHdrH + lineH + 16,
-      Math.min(boxHdrH + 16 + Math.max(conclusionsCount, 1) * lineH, availableH)
-    );
+    const conclusionsBoxH = Math.min(computeV2ConclusionsBoxHeight(3), availableH);
     expect(y + conclusionsBoxH).toBeLessThanOrEqual(pageHeight - margin - 26);
   });
 
-  it("sizes the conclusions box so drawBulletBox's own maxLines formula fits every conclusion (regression: off-by-one truncated the last line)", () => {
+  it("computeV2ConclusionsBoxHeight sizes the box so drawBulletBox's own maxLines formula fits every conclusion (regression: off-by-one truncated the last line)", () => {
     const lineH = 22;
     const boxHdrH = 30;
     for (const conclusionsCount of [1, 2, 3, 4, 5]) {
-      const availableH = resolveV2ConclusionsAvailableHeight(1200, 42, 300);
-      const conclusionsBoxH = Math.max(
-        boxHdrH + lineH + 16,
-        Math.min(boxHdrH + 16 + conclusionsCount * lineH, availableH)
-      );
+      const conclusionsBoxH = computeV2ConclusionsBoxHeight(conclusionsCount);
       // Mirrors drawBulletBox's own maxLines computation exactly.
       const maxLines = Math.max(1, Math.floor((conclusionsBoxH - boxHdrH - 16) / lineH));
       expect(maxLines).toBeGreaterThanOrEqual(conclusionsCount);
@@ -811,24 +802,84 @@ describe("V2 monthly chart contract + KPI packing", () => {
       gap: 14,
       topAvailableRows: 5,
       bottomAvailableRows: 5,
+      requiredConclusionsHeight: computeV2ConclusionsBoxHeight(3),
     });
     expect(topRows).toBe(5);
     expect(bottomRows).toBe(5);
   });
 
-  it("resolveV2FacilityRowCounts shrinks rows (never below 3) instead of starving the conclusions box under a tight budget", () => {
+  // These mirror the resolver's own internal layout constants (row height 26,
+  // table header 28, two section titles + two gaps of chrome) so each case
+  // can independently predict which row count the budget forces, instead of
+  // just asserting a floor of 3 the resolver itself no longer enforces.
+  const FACILITY_ROW_H = 26;
+  const FACILITY_HEADER_H = FACILITY_ROW_H + 2;
+  const FACILITY_CHROME = (13 + 8) * 2 + 14 * 2; // two section titles + two gaps (gap=14 below)
+
+  function facilityBudget(pageHeight: number, margin: number, y: number): number {
+    return pageHeight - margin - 26 - y - FACILITY_CHROME;
+  }
+
+  it("resolveV2FacilityRowCounts picks the largest feasible row count (down to 0) so facility rows + conclusions never exceed the page budget", () => {
+    const pageHeight = 1200;
+    const margin = 42;
+    const gap = 14;
+    const requiredConclusionsHeight = computeV2ConclusionsBoxHeight(3);
+
+    // y chosen so the budget only fits 2 rows per side (3 rows would overflow).
+    const y = 762;
+    const budget = facilityBudget(pageHeight, margin, y);
     const { topRows, bottomRows } = resolveV2FacilityRowCounts({
-      pageHeight: 1200,
-      margin: 42,
-      y: 1000, // little vertical room left before the footer reserve
-      gap: 14,
+      pageHeight, margin, y, gap,
       topAvailableRows: 5,
       bottomAvailableRows: 5,
+      requiredConclusionsHeight,
     });
-    expect(topRows).toBeGreaterThanOrEqual(3);
-    expect(topRows).toBeLessThanOrEqual(5);
-    expect(bottomRows).toBeGreaterThanOrEqual(3);
-    expect(bottomRows).toBeLessThanOrEqual(5);
+    expect(topRows).toBe(2);
+    expect(bottomRows).toBe(2);
+    const facilitiesHeight = 2 * (FACILITY_HEADER_H + topRows * FACILITY_ROW_H);
+    // The chosen rows plus the full conclusions requirement must fit inside
+    // the budget computed from the exact same y/chrome the resolver used.
+    expect(facilitiesHeight + requiredConclusionsHeight).toBeLessThanOrEqual(budget);
+  });
+
+  it("resolveV2FacilityRowCounts reduces to exactly 1 row per side when only that much room remains", () => {
+    const pageHeight = 1200;
+    const margin = 42;
+    const gap = 14;
+    const requiredConclusionsHeight = computeV2ConclusionsBoxHeight(3);
+    const y = 812;
+    const { topRows, bottomRows } = resolveV2FacilityRowCounts({
+      pageHeight, margin, y, gap,
+      topAvailableRows: 5,
+      bottomAvailableRows: 5,
+      requiredConclusionsHeight,
+    });
+    expect(topRows).toBe(1);
+    expect(bottomRows).toBe(1);
+  });
+
+  it("resolveV2FacilityRowCounts reduces facility rows all the way to 0 (not floored at 3) while conclusions keep their full required height", () => {
+    const pageHeight = 1200;
+    const margin = 42;
+    const gap = 14;
+    const requiredConclusionsHeight = computeV2ConclusionsBoxHeight(3);
+    const y = 872; // only room for headers-only facility tables (0 rows each)
+    const { topRows, bottomRows } = resolveV2FacilityRowCounts({
+      pageHeight, margin, y, gap,
+      topAvailableRows: 5,
+      bottomAvailableRows: 5,
+      requiredConclusionsHeight,
+    });
+    expect(topRows).toBe(0);
+    expect(bottomRows).toBe(0);
+
+    // After drawing zero-row (headers-only) tables, conclusions must still
+    // get their full required height — never sacrificed for facility rows.
+    const facilitiesHeight = 2 * FACILITY_HEADER_H;
+    const yAfterFacilities = y + FACILITY_CHROME + facilitiesHeight;
+    const availableH = resolveV2ConclusionsAvailableHeight(pageHeight, margin, yAfterFacilities);
+    expect(availableH).toBeGreaterThanOrEqual(requiredConclusionsHeight);
   });
 
   it("resolveV2FacilityRowCounts never asks for more rows than are actually available", () => {
@@ -839,6 +890,7 @@ describe("V2 monthly chart contract + KPI packing", () => {
       gap: 14,
       topAvailableRows: 2,
       bottomAvailableRows: 0,
+      requiredConclusionsHeight: computeV2ConclusionsBoxHeight(3),
     });
     expect(topRows).toBe(2);
     expect(bottomRows).toBe(0);

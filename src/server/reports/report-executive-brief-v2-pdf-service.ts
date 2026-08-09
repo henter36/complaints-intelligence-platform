@@ -149,14 +149,34 @@ const FACILITY_ROW_HEIGHT = 26;
 const FACILITY_TABLE_HEADER_H = FACILITY_ROW_HEIGHT + 2;
 const FACILITY_SECTION_TITLE_H = 13 + 8; // matches drawSectionTitle's y advance
 const FACILITY_MAX_ROWS = 5;
-const FACILITY_MIN_ROWS = 3;
-/** boxHdrH + one visible line + padding — the smallest a non-empty conclusions box can be. */
-const CONCLUSIONS_MIN_HEIGHT = 30 + 22 + 12;
+
+// These three mirror drawBulletBox's own internal layout constants exactly
+// (hdrH, lineH, and the "height - hdrH - 16" reserved-padding term in its
+// maxLines formula). Keeping a single source of truth here is what prevents
+// the box-sizing math and drawBulletBox's own rendering math from drifting
+// apart again (previously 12 vs. 16, which silently truncated a line).
+const CONCLUSIONS_BOX_HEADER_H = 30;
+const CONCLUSIONS_BOX_LINE_H = 22;
+const CONCLUSIONS_BOX_BODY_PADDING = 16;
 
 /**
- * Picks how many rows the top/bottom facility tables get (5 down to 3) so
- * the conclusions box below always keeps room for at least one line —
- * facility rows are reduced before conclusions are ever shrunk or hidden.
+ * Exact box height drawBulletBox needs to display `lineCount` conclusion
+ * lines without truncating the last one — the inverse of drawBulletBox's own
+ * `maxLines = floor((height - hdrH - 16) / lineH)` formula. Used both to size
+ * the conclusions box itself and to budget room for it before facility rows
+ * are picked, so the two can never disagree.
+ */
+export function computeV2ConclusionsBoxHeight(lineCount: number): number {
+  const lines = Math.max(lineCount, 1);
+  return CONCLUSIONS_BOX_HEADER_H + CONCLUSIONS_BOX_BODY_PADDING + lines * CONCLUSIONS_BOX_LINE_H;
+}
+
+/**
+ * Picks how many rows the top/bottom facility tables get (5 down to 0) so
+ * the conclusions box below always keeps room for every actual conclusion —
+ * facility rows are reduced, down to zero if truly necessary, before a
+ * single conclusion line is ever dropped. Never requests more rows than are
+ * actually available on either side.
  */
 export function resolveV2FacilityRowCounts(input: {
   pageHeight: number;
@@ -166,24 +186,27 @@ export function resolveV2FacilityRowCounts(input: {
   gap: number;
   topAvailableRows: number;
   bottomAvailableRows: number;
+  /** Height drawBulletBox needs to show every actual conclusion — see {@link computeV2ConclusionsBoxHeight}. */
+  requiredConclusionsHeight: number;
 }): { topRows: number; bottomRows: number } {
   const fixedChrome = FACILITY_SECTION_TITLE_H * 2 + input.gap * 2;
   const budget = input.pageHeight - input.margin - 26 - input.y - fixedChrome;
 
-  for (let rows = FACILITY_MAX_ROWS; rows >= FACILITY_MIN_ROWS; rows--) {
+  for (let rows = FACILITY_MAX_ROWS; rows >= 0; rows--) {
     const topRows = Math.min(rows, input.topAvailableRows);
     const bottomRows = Math.min(rows, input.bottomAvailableRows);
     const facilitiesHeight =
       FACILITY_TABLE_HEADER_H + topRows * FACILITY_ROW_HEIGHT
       + FACILITY_TABLE_HEADER_H + bottomRows * FACILITY_ROW_HEIGHT;
-    if (facilitiesHeight + CONCLUSIONS_MIN_HEIGHT <= budget) {
+    if (facilitiesHeight + input.requiredConclusionsHeight <= budget) {
       return { topRows, bottomRows };
     }
   }
-  return {
-    topRows: Math.min(FACILITY_MIN_ROWS, input.topAvailableRows),
-    bottomRows: Math.min(FACILITY_MIN_ROWS, input.bottomAvailableRows),
-  };
+  // Even zero facility rows (headers only) doesn't leave room for every
+  // conclusion — an extreme page-budget shortage facility rows cannot fix by
+  // shrinking further. Zero rows still maximizes whatever room conclusions
+  // get; it is never the cause of a conclusion being dropped.
+  return { topRows: 0, bottomRows: 0 };
 }
 
 type V2Context = {
@@ -1214,6 +1237,7 @@ function renderPage4(ctx: V2Context): void {
   const classRows = brief.topClassifications.slice(0, 8);
   const topFacilityRows = brief.topFacilities ?? [];
   const bottomFacilityRows = brief.bottomFacilities ?? [];
+  const conclusions = (brief.conclusions ?? []).slice(0, 5);
   const hasClassComparison = classRows.some((r) => r.previousCount > 0);
 
   let y = drawPageHeader(ctx, "التصنيفات والسجون والاستنتاجات");
@@ -1276,8 +1300,8 @@ function renderPage4(ctx: V2Context): void {
   y += gap;
 
   // ── Facilities: top + bottom ────────────────────────────────────────────────
-  // Row counts flex (5 down to 3) so the conclusions box below never gets
-  // shrunk or hidden to make room for these tables.
+  // Row counts flex (5 down to 0) so the conclusions box below always keeps
+  // room for every actual conclusion — facility rows never cause truncation.
   const facilityRowCounts = resolveV2FacilityRowCounts({
     pageHeight: layout.pageSize[1],
     margin,
@@ -1285,6 +1309,7 @@ function renderPage4(ctx: V2Context): void {
     gap,
     topAvailableRows: topFacilityRows.length,
     bottomAvailableRows: bottomFacilityRows.length,
+    requiredConclusionsHeight: computeV2ConclusionsBoxHeight(conclusions.length),
   });
   const facilityCols: ColDef[] = [
     { key: "name", label: "السجن", weight: 2.2 },
@@ -1321,9 +1346,6 @@ function renderPage4(ctx: V2Context): void {
   y += gap;
 
   // ── Conclusions (full-width) — data-quality notes are intentionally not rendered in V2 ──
-  const lineH = 22;
-  const boxHdrH = 30;
-  const conclusions = (brief.conclusions ?? []).slice(0, 5);
   const availableH = resolveV2ConclusionsAvailableHeight(
     layout.pageSize[1],
     layout.margin,
@@ -1332,17 +1354,11 @@ function renderPage4(ctx: V2Context): void {
   if (availableH <= 0) {
     return;
   }
-  // Padding must match drawBulletBox's own reserved header space (16, not
-  // 12) — otherwise the box sizes itself for N lines but drawBulletBox's
-  // maxLines computation silently renders only N-1, truncating the last
-  // conclusion (see resolveMonthlyTrendNotesHeight for the same, correct pattern).
-  const conclusionsBoxH = Math.max(
-    boxHdrH + lineH + 16,
-    Math.min(
-      boxHdrH + 16 + Math.max(conclusions.length, 1) * lineH,
-      availableH
-    )
-  );
+  // Uses the exact same formula the facility row-count budget above already
+  // reserved room for (computeV2ConclusionsBoxHeight), so this box is never
+  // sized differently than what was actually planned for it — clamped only
+  // by availableH itself, never inflated past the footer reserve.
+  const conclusionsBoxH = Math.min(computeV2ConclusionsBoxHeight(conclusions.length), availableH);
 
   drawBulletBox({
     doc,

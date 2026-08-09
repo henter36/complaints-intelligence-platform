@@ -273,8 +273,14 @@ describe.skipIf(!DEV_DB_AVAILABLE)(
       const brief = requireV2Brief();
       const departmentNames = (brief.departmentPeriodMetrics ?? []).map((d) => d.departmentName);
       const facilityNames = [...(brief.topFacilities ?? []), ...(brief.bottomFacilities ?? [])].map((f) => f.name);
+      // classificationPath is the name most likely to actually appear in report
+      // text; classificationName is checked too since either could leak in.
+      const classificationNames = (brief.topClassifications ?? []).flatMap((c) => [
+        c.classificationPath,
+        c.classificationName,
+      ]);
       const conclusionsText = (brief.conclusions ?? []).join(" ");
-      for (const name of [...departmentNames, ...facilityNames]) {
+      for (const name of [...departmentNames, ...facilityNames, ...classificationNames]) {
         if (name && name !== "غير محدد") {
           expect(conclusionsText).not.toContain(name);
         }
