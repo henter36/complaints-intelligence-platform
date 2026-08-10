@@ -21,62 +21,52 @@ import {
   STATUS_LABELS, STATUS_COLORS, PRIORITY_LABELS,
 } from "@/lib/ar-utils";
 import { isAbortError } from "@/lib/abort";
+import {
+  apiErrorMessage,
+  isDashboardData,
+  readJsonResponse,
+  type DashboardData,
+} from "@/lib/analytics/analytics-api-contract";
 import type { ScreenId } from "@/app/page";
 
-interface DashboardData {
-  volume: {
-    total: number; open: number; inProgress: number; closed: number;
-    reopened: number; rejected: number; late: number; repeated: number;
-    validated: number; notValidated: number; potentialDuplicates: number;
-  };
-  performance: {
-    closureRate: number; onTimeRate: number | null; lateRate: number;
-    avgFirstResponseHours: number; avgProcessingHours: number; avgOpenAgeHours: number;
-    overdueNoAction: number; overdueNoActionRate: number; reopenRate: number;
-    validityRate: number; avgSatisfaction: number; satisfactionRate: number;
-  };
-  trend: {
-    previousTotal: number | null; growthRate: number | null;
-    trendData: { date: string; total: number; closed: number }[];
-  };
-  distributions: {
-    byRegion: { name: string; count: number }[];
-    byDepartment: { name: string; count: number }[];
-    byClassification: { name: string; count: number }[];
-    byChannel: { name: string; count: number }[];
-    byStatus: { name: string; count: number }[];
-    byPriority: { name: string; count: number }[];
-    bySeverity: { name: string; count: number }[];
-  };
-  alerts: {
-    criticalComplaints: number; lateCritical: number;
-    missingFields: number; dataQualityRate: number;
-  };
-}
-
 const CHART_COLORS = ["#0d9488", "#f59e0b", "#3b82f6", "#ef4444", "#a855f7", "#14b8a6", "#f97316", "#ec4899"];
+const DASHBOARD_LOAD_ERROR = "تعذر تحميل مؤشرات لوحة التحكم";
 
 export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void }) {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const loadRequestRef = useRef(0);
 
   const loadData = useCallback(async (signal?: AbortSignal) => {
     const requestId = loadRequestRef.current + 1;
     loadRequestRef.current = requestId;
     const canUpdate = () => !signal?.aborted && loadRequestRef.current === requestId;
-    setLoading(true);
+    if (canUpdate()) {
+      setLoading(true);
+      setData(null);
+      setError(null);
+    }
     let aborted = false;
     try {
       const res = await fetch("/api/dashboard", { signal });
-      const json = await res.json();
+      const payload = await readJsonResponse(res);
+      if (!res.ok) {
+        throw new Error(apiErrorMessage(payload, DASHBOARD_LOAD_ERROR));
+      }
+      if (!isDashboardData(payload)) {
+        throw new Error("استجابة لوحة التحكم غير مكتملة");
+      }
       if (canUpdate()) {
-        setData(json);
+        setData(payload);
+        setError(null);
       }
     } catch (e) {
       aborted = isAbortError(e);
-      if (!aborted) {
-        console.error(e);
+      if (!aborted && canUpdate()) {
+        setData(null);
+        setError(DASHBOARD_LOAD_ERROR);
+        console.error("Dashboard data load failed:", e);
       }
     } finally {
       if (!aborted && canUpdate()) {
@@ -97,33 +87,72 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
     };
   }, [loadData]);
 
-  const v = data?.volume;
-  const p = data?.performance;
-  const t = data?.trend;
-  const a = data?.alerts;
+  const pageHeader = (
+    <PageHeader
+      title="الشاشة الرئيسية"
+      description="نظرة شاملة على مؤشرات الشكاوى والأداء"
+      icon={<LayoutDashboard className="h-6 w-6" />}
+      actions={
+        <>
+          <Button variant="outline" size="sm" onClick={() => void loadData()} disabled={loading}>
+            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+            تحديث
+          </Button>
+          <Button size="sm" onClick={() => onNavigate("import")}>
+            <Sparkles className="h-4 w-4" />
+            رفع ملف جديد
+          </Button>
+        </>
+      }
+    />
+  );
+
+  if (loading) {
+    return (
+      <div className="space-y-6">
+        {pageHeader}
+        <div
+          role="status"
+          className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3"
+          aria-label="جارٍ تحميل مؤشرات لوحة التحكم"
+        >
+          {Array.from({ length: 6 }).map((_, index) => (
+            <Skeleton key={index} className="h-28 rounded-xl" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (error || !data) {
+    return (
+      <div className="space-y-6">
+        {pageHeader}
+        <Card role="alert" className="border-destructive/40">
+          <CardContent className="flex flex-col items-center gap-4 py-10 text-center">
+            <AlertTriangle className="h-8 w-8 text-destructive" aria-hidden="true" />
+            <div className="space-y-1">
+              <p className="font-semibold">{error ?? DASHBOARD_LOAD_ERROR}</p>
+              <p className="text-sm text-muted-foreground">يمكنك المحاولة مرة أخرى.</p>
+            </div>
+            <Button type="button" variant="outline" onClick={() => void loadData()}>
+              <RefreshCw className="h-4 w-4" aria-hidden="true" />
+              إعادة المحاولة
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  const { volume: v, performance: p, trend: t, alerts: a } = data;
 
   return (
     <div className="space-y-6">
-      <PageHeader
-        title="الشاشة الرئيسية"
-        description="نظرة شاملة على مؤشرات الشكاوى والأداء"
-        icon={<LayoutDashboard className="h-6 w-6" />}
-        actions={
-          <>
-            <Button variant="outline" size="sm" onClick={() => void loadData()} disabled={loading}>
-              <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
-              تحديث
-            </Button>
-            <Button size="sm" onClick={() => onNavigate("import")}>
-              <Sparkles className="h-4 w-4" />
-              رفع ملف جديد
-            </Button>
-          </>
-        }
-      />
+      {pageHeader}
 
       {/* Critical Alerts Banner */}
-      {data && (a!.criticalComplaints > 0 || a!.lateCritical > 0) && (
+      {(a.criticalComplaints > 0 || a.lateCritical > 0) && (
         <Card className="border-red-200 bg-red-50/50 dark:bg-red-950/20">
           <CardContent className="flex items-center gap-4 py-4">
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-red-100 dark:bg-red-900/40">
@@ -132,9 +161,9 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
             <div className="flex-1">
               <p className="font-semibold text-red-900 dark:text-red-200">تنبيهات حرجة تتطلب attention فوري</p>
               <p className="text-sm text-red-700 dark:text-red-300">
-                {a!.criticalComplaints > 0 && `${formatNumber(a!.criticalComplaints)} شكوى حرجة`}
-                {a!.criticalComplaints > 0 && a!.lateCritical > 0 && " • "}
-                {a!.lateCritical > 0 && `${formatNumber(a!.lateCritical)} شكوى حرجة متأخرة`}
+                {a.criticalComplaints > 0 && `${formatNumber(a.criticalComplaints)} شكوى حرجة`}
+                {a.criticalComplaints > 0 && a.lateCritical > 0 && " • "}
+                {a.lateCritical > 0 && `${formatNumber(a.lateCritical)} شكوى حرجة متأخرة`}
               </p>
             </div>
             <Button variant="destructive" size="sm" onClick={() => onNavigate("explorer")}>
@@ -158,12 +187,12 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
             ))
           ) : (
             <>
-              <KpiCard label="إجمالي الشكاوى" value={v!.total} icon={<Database className="h-5 w-5" />} color="primary" />
-              <KpiCard label="المفتوحة" value={v!.open} icon={<Clock className="h-5 w-5" />} color="blue" />
-              <KpiCard label="قيد المعالجة" value={v!.inProgress} icon={<Activity className="h-5 w-5" />} color="amber" />
-              <KpiCard label="المغلقة" value={v!.closed} icon={<CheckCircle2 className="h-5 w-5" />} color="emerald" />
-              <KpiCard label="المتأخرة" value={v!.late} icon={<FileWarning className="h-5 w-5" />} color="red" highlight={v!.late > 0} />
-              <KpiCard label="معاد فتحها" value={v!.reopened} icon={<RefreshCw className="h-5 w-5" />} color="purple" />
+              <KpiCard label="إجمالي الشكاوى" value={v.total} icon={<Database className="h-5 w-5" />} color="primary" />
+              <KpiCard label="المفتوحة" value={v.open} icon={<Clock className="h-5 w-5" />} color="blue" />
+              <KpiCard label="قيد المعالجة" value={v.inProgress} icon={<Activity className="h-5 w-5" />} color="amber" />
+              <KpiCard label="المغلقة" value={v.closed} icon={<CheckCircle2 className="h-5 w-5" />} color="emerald" />
+              <KpiCard label="المتأخرة" value={v.late} icon={<FileWarning className="h-5 w-5" />} color="red" highlight={v.late > 0} />
+              <KpiCard label="معاد فتحها" value={v.reopened} icon={<RefreshCw className="h-5 w-5" />} color="purple" />
             </>
           )}
         </div>
@@ -175,10 +204,10 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
           Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-20 rounded-xl" />)
         ) : (
           <>
-            <MiniStat label="الشكاوى المكررة" value={v!.repeated} icon={<RefreshCw className="h-4 w-4" />} />
-            <MiniStat label="ثبتت صحتها" value={v!.validated} icon={<CheckCircle2 className="h-4 w-4" />} />
-            <MiniStat label="لم تثبت صحتها" value={v!.notValidated} icon={<FileWarning className="h-4 w-4" />} />
-            <MiniStat label="تشابه محتمل" value={v!.potentialDuplicates} icon={<AlertTriangle className="h-4 w-4" />} />
+            <MiniStat label="الشكاوى المكررة" value={v.repeated} icon={<RefreshCw className="h-4 w-4" />} />
+            <MiniStat label="ثبتت صحتها" value={v.validated} icon={<CheckCircle2 className="h-4 w-4" />} />
+            <MiniStat label="لم تثبت صحتها" value={v.notValidated} icon={<FileWarning className="h-4 w-4" />} />
+            <MiniStat label="تشابه محتمل" value={v.potentialDuplicates} icon={<AlertTriangle className="h-4 w-4" />} />
           </>
         )}
       </div>
@@ -205,7 +234,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
               <Skeleton className="h-64 w-full" />
             ) : (
               <ResponsiveContainer width="100%" height={260}>
-                <AreaChart data={t!.trendData}>
+                <AreaChart data={t.trendData}>
                   <defs>
                     <linearGradient id="totalGrad" x1="0" y1="0" x2="0" y2="1">
                       <stop offset="5%" stopColor="#0d9488" stopOpacity={0.3} />
@@ -243,7 +272,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
               <ResponsiveContainer width="100%" height={260}>
                 <PieChart>
                   <Pie
-                    data={data!.distributions.byStatus.map(s => ({ name: STATUS_LABELS[s.name] || s.name, value: s.count }))}
+                    data={data.distributions.byStatus.map(s => ({ name: STATUS_LABELS[s.name] || s.name, value: s.count }))}
                     dataKey="value"
                     nameKey="name"
                     cx="50%"
@@ -252,7 +281,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
                     innerRadius={40}
                     paddingAngle={2}
                   >
-                    {data!.distributions.byStatus.map((_, i) => (
+                    {data.distributions.byStatus.map((_, i) => (
                       <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
                     ))}
                   </Pie>
@@ -278,7 +307,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
             <>
               <PerfCard
                 title="نسبة الإغلاق"
-                value={p!.closureRate}
+                value={p.closureRate}
                 suffix="%"
                 icon={<CheckCircle2 className="h-5 w-5" />}
                 color="emerald"
@@ -286,7 +315,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
               />
               <PerfCard
                 title="الإغلاق ضمن المهلة"
-                value={p!.onTimeRate}
+                value={p.onTimeRate}
                 suffix="%"
                 icon={<Clock className="h-5 w-5" />}
                 color="blue"
@@ -294,7 +323,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
               />
               <PerfCard
                 title="نسبة التأخر"
-                value={p!.lateRate}
+                value={p.lateRate}
                 suffix="%"
                 icon={<FileWarning className="h-5 w-5" />}
                 color="red"
@@ -303,7 +332,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
               />
               <PerfCard
                 title="رضا المستفيدين"
-                value={p!.satisfactionRate}
+                value={p.satisfactionRate}
                 suffix="%"
                 icon={<Users className="h-5 w-5" />}
                 color="purple"
@@ -324,7 +353,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
               <CardContent className="p-4 flex items-center justify-between">
                 <div>
                   <p className="text-xs text-muted-foreground">متوسط زمن أول استجابة</p>
-                  <p className="text-2xl font-bold mt-1">{formatDuration(p!.avgFirstResponseHours)}</p>
+                  <p className="text-2xl font-bold mt-1">{formatDuration(p.avgFirstResponseHours)}</p>
                 </div>
                 <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-blue-100 dark:bg-blue-900/30">
                   <Clock className="h-6 w-6 text-blue-600" />
@@ -335,7 +364,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
               <CardContent className="p-4 flex items-center justify-between">
                 <div>
                   <p className="text-xs text-muted-foreground">متوسط زمن المعالجة</p>
-                  <p className="text-2xl font-bold mt-1">{formatDuration(p!.avgProcessingHours)}</p>
+                  <p className="text-2xl font-bold mt-1">{formatDuration(p.avgProcessingHours)}</p>
                 </div>
                 <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-emerald-100 dark:bg-emerald-900/30">
                   <Activity className="h-6 w-6 text-emerald-600" />
@@ -346,7 +375,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
               <CardContent className="p-4 flex items-center justify-between">
                 <div>
                   <p className="text-xs text-muted-foreground">متوسط عمر الشكاوى المفتوحة</p>
-                  <p className="text-2xl font-bold mt-1">{formatDuration(p!.avgOpenAgeHours)}</p>
+                  <p className="text-2xl font-bold mt-1">{formatDuration(p.avgOpenAgeHours)}</p>
                 </div>
                 <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-amber-100 dark:bg-amber-900/30">
                   <Calendar className="h-6 w-6 text-amber-600" />
@@ -372,7 +401,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
               <Skeleton className="h-64 w-full" />
             ) : (
               <ResponsiveContainer width="100%" height={260}>
-                <BarChart data={data!.distributions.byRegion.slice(0, 8)} layout="vertical">
+                <BarChart data={data.distributions.byRegion.slice(0, 8)} layout="vertical">
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" horizontal={false} />
                   <XAxis type="number" tick={{ fontSize: 11 }} />
                   <YAxis dataKey="name" type="category" tick={{ fontSize: 11 }} width={100} />
@@ -397,13 +426,13 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
               <Skeleton className="h-64 w-full" />
             ) : (
               <ResponsiveContainer width="100%" height={260}>
-                <BarChart data={data!.distributions.byClassification.slice(0, 8)}>
+                <BarChart data={data.distributions.byClassification.slice(0, 8)}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
                   <XAxis dataKey="name" tick={{ fontSize: 10 }} angle={-20} textAnchor="end" height={60} />
                   <YAxis tick={{ fontSize: 11 }} />
                   <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} />
                   <Bar dataKey="count" name="الشكاوى" radius={[6, 6, 0, 0]}>
-                    {data!.distributions.byClassification.slice(0, 8).map((_, i) => (
+                    {data.distributions.byClassification.slice(0, 8).map((_, i) => (
                       <Cell key={i} fill={CHART_COLORS[i % CHART_COLORS.length]} />
                     ))}
                   </Bar>
@@ -429,8 +458,8 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
               <Skeleton className="h-64 w-full" />
             ) : (
               <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-                {data!.distributions.byDepartment.slice(0, 10).map((dept, i) => {
-                  const max = data!.distributions.byDepartment[0]?.count || 1;
+                {data.distributions.byDepartment.slice(0, 10).map((dept, i) => {
+                  const max = data.distributions.byDepartment[0]?.count || 1;
                   const pct = (dept.count / max) * 100;
                   return (
                     <div key={dept.name} className="flex items-center gap-3">
@@ -469,7 +498,7 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
                   <RadialBarChart
                     innerRadius="70%"
                     outerRadius="100%"
-                    data={[{ name: "الجودة", value: a!.dataQualityRate, fill: a!.dataQualityRate >= 90 ? "#22c55e" : "#f59e0b" }]}
+                    data={[{ name: "الجودة", value: a.dataQualityRate, fill: a.dataQualityRate >= 90 ? "#22c55e" : "#f59e0b" }]}
                     startAngle={90}
                     endAngle={-270}
                   >
@@ -477,17 +506,17 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
                   </RadialBarChart>
                 </ResponsiveContainer>
                 <div className="text-center -mt-24">
-                  <p className="text-3xl font-bold">{a!.dataQualityRate}%</p>
+                  <p className="text-3xl font-bold">{a.dataQualityRate}%</p>
                   <p className="text-xs text-muted-foreground">جودة البيانات</p>
                 </div>
                 <div className="mt-20 w-full space-y-2">
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-muted-foreground">سجلات ناقصة</span>
-                    <span className="font-medium text-amber-600">{formatNumber(a!.missingFields)}</span>
+                    <span className="font-medium text-amber-600">{formatNumber(a.missingFields)}</span>
                   </div>
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-muted-foreground">شكاوى حرجة</span>
-                    <span className="font-medium text-red-600">{formatNumber(a!.criticalComplaints)}</span>
+                    <span className="font-medium text-red-600">{formatNumber(a.criticalComplaints)}</span>
                   </div>
                 </div>
               </div>
