@@ -111,15 +111,14 @@ export function Dashboard({ onNavigate }: { onNavigate: (s: ScreenId) => void })
     return (
       <div className="space-y-6">
         {pageHeader}
-        <div
-          role="status"
+        <output
           className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3"
           aria-label="جارٍ تحميل مؤشرات لوحة التحكم"
         >
           {Array.from({ length: 6 }).map((_, index) => (
             <Skeleton key={index} className="h-28 rounded-xl" />
           ))}
-        </div>
+        </output>
       </div>
     );
   }

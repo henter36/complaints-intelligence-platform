@@ -93,6 +93,12 @@ describe("Dashboard smoke", () => {
 
     const { container } = render(<Dashboard onNavigate={vi.fn()} />);
 
+    const loadingOutput = container.querySelector(
+      'output[aria-label="جارٍ تحميل مؤشرات لوحة التحكم"]'
+    );
+    expect(loadingOutput).toBeInTheDocument();
+    expect(loadingOutput).not.toHaveAttribute("role");
+    expect(container.querySelector('[role="status"]')).not.toBeInTheDocument();
     expect(container.querySelector(".animate-pulse")).toBeInTheDocument();
   });
 
