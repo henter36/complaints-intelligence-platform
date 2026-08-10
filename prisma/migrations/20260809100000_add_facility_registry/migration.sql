@@ -121,10 +121,9 @@ SET "facilityNormalizedName" = (
     FROM "__FacilityCanonicalBackfill"
     WHERE "complaintId" = "Complaint"."id"
 )
-WHERE EXISTS (
-    SELECT 1
+WHERE "id" IN (
+    SELECT "complaintId"
     FROM "__FacilityCanonicalBackfill"
-    WHERE "complaintId" = "Complaint"."id"
 );
 
 INSERT INTO "Facility" (

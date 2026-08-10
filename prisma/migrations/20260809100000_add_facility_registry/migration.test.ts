@@ -50,17 +50,29 @@ describe("migration: add_facility_registry", () => {
       `INSERT INTO "Complaint" ("id", "facility", "region") VALUES (?, ?, 'منطقة الرياض')`
     );
     values.forEach((value, index) => insert.run(`complaint-${index}`, value));
+    insert.run("complaint-null", null);
     database.exec(`INSERT INTO "ImportBatch" ("id", "status") VALUES ('confirmed', 'CONFIRMED')`);
+    const complaintCountBefore = database.prepare(
+      `SELECT count(*) AS "count" FROM "Complaint"`
+    ).get() as { count: number };
 
     database.exec(MIGRATION_SQL);
 
     const rows = database.prepare(
       `SELECT "id", "facility", "facilityNormalizedName" FROM "Complaint" ORDER BY "id"`
-    ).all() as Array<{ id: string; facility: string; facilityNormalizedName: string | null }>;
-    expect(rows).toHaveLength(values.length);
-    for (const row of rows) {
+    ).all() as Array<{ id: string; facility: string | null; facilityNormalizedName: string | null }>;
+    expect(rows).toHaveLength(values.length + 1);
+    expect(rows).toHaveLength(complaintCountBefore.count);
+    for (const row of rows.filter(
+      (candidate): candidate is typeof candidate & { facility: string } => candidate.facility !== null
+    )) {
       expect(row.facilityNormalizedName).toBe(normalizeFacilityName(row.facility));
     }
+    expect(rows.find((row) => row.id === "complaint-0")?.facilityNormalizedName).toBe(
+      normalizeFacilityName(values[0])
+    );
+    expect(rows.find((row) => row.facility === "غير محدد")?.facilityNormalizedName).toBeNull();
+    expect(rows.find((row) => row.id === "complaint-null")?.facilityNormalizedName).toBeNull();
 
     const facilities = database.prepare(
       `SELECT "name", "normalizedName" FROM "Facility" ORDER BY "normalizedName"`
@@ -73,10 +85,14 @@ describe("migration: add_facility_registry", () => {
       expect(facility.name).toBe(normalizeFacilityDisplayName(facility.name));
       expect(facility.normalizedName).toBe(normalizeFacilityName(facility.name));
     }
+    expect(database.prepare(
+      `SELECT "normalizedName" FROM "Facility" GROUP BY "normalizedName" HAVING count(*) > 1`
+    ).all()).toEqual([]);
 
     expect(database.prepare(
       `SELECT "facilitySyncStatus" AS "status" FROM "ImportBatch" WHERE "id" = 'confirmed'`
     ).get()).toEqual({ status: "COMPLETED" });
     expect(database.prepare("PRAGMA quick_check").get()).toEqual({ quick_check: "ok" });
+    expect(MIGRATION_SQL).not.toMatch(/WHERE\s+EXISTS\s*\(/i);
   });
 });
