@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Dashboard } from "./dashboard";
 
@@ -71,6 +71,17 @@ function dashboardData(total: number) {
   };
 }
 
+function jsonResponse(
+  body: unknown,
+  { ok = true, status = ok ? 200 : 500 }: { ok?: boolean; status?: number } = {}
+): Response {
+  return {
+    ok,
+    status,
+    json: vi.fn().mockResolvedValue(body),
+  } as unknown as Response;
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -82,6 +93,12 @@ describe("Dashboard smoke", () => {
 
     const { container } = render(<Dashboard onNavigate={vi.fn()} />);
 
+    const loadingOutput = container.querySelector(
+      'output[aria-label="جارٍ تحميل مؤشرات لوحة التحكم"]'
+    );
+    expect(loadingOutput).toBeInTheDocument();
+    expect(loadingOutput).not.toHaveAttribute("role");
+    expect(container.querySelector('[role="status"]')).not.toBeInTheDocument();
     expect(container.querySelector(".animate-pulse")).toBeInTheDocument();
   });
 
@@ -113,6 +130,64 @@ describe("Dashboard smoke", () => {
     expect(consoleError).not.toHaveBeenCalled();
   });
 
+  it("shows a retryable error instead of rendering KPI cards for an HTTP 500", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(
+      {
+        error: {
+          code: "DASHBOARD_QUERY_FAILED",
+          message: "تعذر جلب مؤشرات لوحة التحكم",
+        },
+      },
+      { ok: false, status: 500 }
+    )));
+
+    render(<Dashboard onNavigate={vi.fn()} />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("تعذر تحميل مؤشرات لوحة التحكم");
+    expect(screen.getByRole("button", { name: "إعادة المحاولة" })).toBeInTheDocument();
+    expect(screen.queryByText("إجمالي الشكاوى")).not.toBeInTheDocument();
+  });
+
+  it("rejects a malformed successful payload instead of committing it to state", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ error: "unexpected" })));
+
+    render(<Dashboard onNavigate={vi.fn()} />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("تعذر تحميل مؤشرات لوحة التحكم");
+    expect(screen.queryByText("إجمالي الشكاوى")).not.toBeInTheDocument();
+  });
+
+  it("renders the existing dashboard normally for a valid HTTP 200 payload", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse(dashboardData(98_765))));
+
+    render(<Dashboard onNavigate={vi.fn()} />);
+
+    expect(await screen.findAllByText("٩٨٬٧٦٥")).not.toHaveLength(0);
+    expect(screen.getByText("إجمالي الشكاوى")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("clears the error and renders valid data when retry succeeds", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(
+        { error: { code: "DASHBOARD_QUERY_FAILED", message: "تعذر جلب مؤشرات لوحة التحكم" } },
+        { ok: false, status: 500 }
+      ))
+      .mockResolvedValueOnce(jsonResponse(dashboardData(12_345)));
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<Dashboard onNavigate={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: "إعادة المحاولة" }));
+
+    expect(await screen.findAllByText("١٢٬٣٤٥")).not.toHaveLength(0);
+    expect(screen.queryByText("تعذر تحميل مؤشرات لوحة التحكم")).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("does not let an old unmounted response replace the latest dashboard state", async () => {
     const first = deferred<Response>();
     const second = deferred<Response>();
@@ -133,14 +208,14 @@ describe("Dashboard smoke", () => {
     });
 
     await act(async () => {
-      second.resolve({ json: () => Promise.resolve(dashboardData(98_765)) } as Response);
+      second.resolve(jsonResponse(dashboardData(98_765)));
       await second.promise;
     });
 
     expect(await screen.findAllByText("٩٨٬٧٦٥")).not.toHaveLength(0);
 
     await act(async () => {
-      first.resolve({ json: () => Promise.resolve(dashboardData(12_345)) } as Response);
+      first.resolve(jsonResponse(dashboardData(12_345)));
       await first.promise;
     });
 
