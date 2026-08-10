@@ -55,6 +55,9 @@ describe("migration: add_facility_registry", () => {
     const complaintCountBefore = database.prepare(
       `SELECT count(*) AS "count" FROM "Complaint"`
     ).get() as { count: number };
+    const complaintsBefore = database.prepare(
+      `SELECT "id", "facility" FROM "Complaint" ORDER BY "id"`
+    ).all() as Array<{ id: string; facility: string | null }>;
 
     database.exec(MIGRATION_SQL);
 
@@ -63,6 +66,7 @@ describe("migration: add_facility_registry", () => {
     ).all() as Array<{ id: string; facility: string | null; facilityNormalizedName: string | null }>;
     expect(rows).toHaveLength(values.length + 1);
     expect(rows).toHaveLength(complaintCountBefore.count);
+    expect(rows.map(({ id, facility }) => ({ id, facility }))).toEqual(complaintsBefore);
     for (const row of rows.filter(
       (candidate): candidate is typeof candidate & { facility: string } => candidate.facility !== null
     )) {
