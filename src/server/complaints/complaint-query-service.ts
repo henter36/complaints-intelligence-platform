@@ -7,6 +7,12 @@ import {
   CLOSED_COMPLAINT_STATUSES,
   OPEN_COMPLAINT_STATUSES,
 } from "./status";
+import {
+  buildCurrentOperationalFacilityWhere,
+  buildHistoricalOperationalFacilityWhere,
+  combineComplaintWhere,
+} from "@/server/facilities/facility-operational-scope-service";
+import { normalizeFacilityName } from "@/server/facilities/facility-name";
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_PAGE_SIZE = 25;
@@ -75,6 +81,7 @@ const querySchema = z.object({
   categoryId: optionalText,
   classificationId: optionalText,
   importBatchId: optionalText,
+  operationalScope: z.enum(["current", "historical"]).optional(),
   from: dateSchema,
   to: dateSchema,
   dueFrom: dateSchema,
@@ -314,7 +321,11 @@ function applyScalarFilters(where: Prisma.ComplaintWhereInput, query: ComplaintQ
   if (query.severity) where.severity = query.severity;
   if (query.channel) where.channel = query.channel;
   if (query.region ?? query.regionId) where.region = query.region ?? query.regionId;
-  if (query.facility ?? query.facilityId) where.facility = query.facility ?? query.facilityId;
+  const selectedFacility = query.facility ?? query.facilityId;
+  if (selectedFacility) {
+    const canonicalKey = normalizeFacilityName(selectedFacility);
+    where.facilityNormalizedName = canonicalKey ?? "__INVALID_FACILITY_KEY__";
+  }
   if (query.department ?? query.departmentId) where.department = query.department ?? query.departmentId;
   if (query.categoryId) where.categoryId = query.categoryId;
   if (query.classificationId) where.classificationId = query.classificationId;
@@ -446,7 +457,14 @@ export async function listComplaints(
 ): Promise<ComplaintListResult> {
   const query = parseComplaintQuery(params);
   const now = options.now ?? new Date();
-  const where = buildComplaintWhere(query, now);
+  const baseWhere = buildComplaintWhere(query, now);
+  let facilityWhere: Prisma.ComplaintWhereInput = {};
+  if (query.operationalScope === "current") {
+    facilityWhere = await buildCurrentOperationalFacilityWhere();
+  } else if (query.operationalScope === "historical") {
+    facilityWhere = await buildHistoricalOperationalFacilityWhere();
+  }
+  const where = combineComplaintWhere(baseWhere, facilityWhere);
   const pageSize = options.limit ? Math.min(options.limit, EXPORT_LIMIT) : query.pageSize;
   const skip = (query.page - 1) * query.pageSize;
 

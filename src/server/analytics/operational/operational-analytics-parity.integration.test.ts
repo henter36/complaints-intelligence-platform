@@ -20,10 +20,15 @@ vi.mock("@/lib/db", () => ({
       if (!dbHolder.client) throw new Error("test prisma not ready");
       return dbHolder.client.classification;
     },
+    get facility() {
+      if (!dbHolder.client) throw new Error("test prisma not ready");
+      return dbHolder.client.facility;
+    },
   },
 }));
 
 import { getOperationalAnalytics } from "./operational-analytics-service";
+import { normalizeFacilityName } from "@/server/facilities/facility-name";
 import { listComplaints } from "@/server/complaints/complaint-query-service";
 
 const NOW = new Date("2026-08-05T12:00:00.000Z");
@@ -342,6 +347,12 @@ async function seedParityDataset(prisma: PrismaClient) {
       },
     ],
   });
+  for (const facility of ["مستشفى أ", "مستشفى ب"]) {
+    await prisma.complaint.updateMany({
+      where: { facility },
+      data: { facilityNormalizedName: normalizeFacilityName(facility) },
+    });
+  }
 }
 
 describe("operational analytics DB aggregate integration", () => {

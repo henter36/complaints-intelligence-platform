@@ -50,6 +50,7 @@ const dbMocks = vi.hoisted(() => ({
   complaintFindMany: vi.fn(),
   complaintFindFirst: vi.fn(),
   complaintCount: vi.fn(),
+  facilityFindMany: vi.fn(),
   statusHistoryGroupBy: vi.fn(),
   statusHistoryCount: vi.fn(),
   queryRaw: vi.fn(),
@@ -67,6 +68,9 @@ vi.mock("@/lib/db", () => ({
       groupBy: dbMocks.statusHistoryGroupBy,
       count: dbMocks.statusHistoryCount,
     },
+    facility: {
+      findMany: dbMocks.facilityFindMany,
+    },
     $queryRaw: dbMocks.queryRaw,
   },
 }));
@@ -78,6 +82,7 @@ beforeEach(() => {
   dbMocks.complaintFindMany.mockResolvedValue([]);
   dbMocks.complaintFindFirst.mockResolvedValue(null);
   dbMocks.complaintCount.mockResolvedValue(0);
+  dbMocks.facilityFindMany.mockResolvedValue([]);
   dbMocks.statusHistoryGroupBy.mockResolvedValue([]);
   dbMocks.statusHistoryCount.mockResolvedValue(0);
   dbMocks.queryRaw.mockResolvedValue([]);
@@ -2545,6 +2550,26 @@ describe("buildTopAndBottomFacilities — V2 only (spec sections 5-6, 17 items 6
     };
     const { bottomFacilities } = buildTopAndBottomFacilities(160, byFacility);
     expect(bottomFacilities.slice(0, 3).map((r) => r.name)).toEqual(["سجن ج", "سجن ب", "سجن أ"]);
+  });
+
+  it("includes an authoritative ACTIVE zero-volume facility in the bottom list", () => {
+    const byFacility: Record<string, ReportPeriodGroupSnapshot> = {
+      "سجن مرتفع 1": snapshot({ receivedDuringPeriod: 50 }),
+      "سجن مرتفع 2": snapshot({ receivedDuringPeriod: 40 }),
+      "سجن مرتفع 3": snapshot({ receivedDuringPeriod: 30 }),
+      "سجن مرتفع 4": snapshot({ receivedDuringPeriod: 20 }),
+      "سجن مرتفع 5": snapshot({ receivedDuringPeriod: 10 }),
+      "سجن نشط بلا شكاوى": snapshot(),
+      "سجن نشط برصيد": snapshot({ openAtEnd: 3, lateAtEnd: 1 }),
+      "سجن منخفض": snapshot({ receivedDuringPeriod: 1 }),
+    };
+    const { bottomFacilities } = buildTopAndBottomFacilities(151, byFacility);
+    expect(bottomFacilities.map((row) => row.name)).toEqual([
+      "سجن نشط بلا شكاوى",
+      "سجن نشط برصيد",
+      "سجن منخفض",
+    ]);
+    expect(bottomFacilities[0]).toMatchObject({ total: 0, open: 0, currentlyLate: 0, closed: 0 });
   });
 
   it("8. excludes the unspecified (غير محدد) and empty-name buckets from both lists", () => {

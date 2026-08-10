@@ -1,6 +1,7 @@
 import {
   ComplaintPriority,
   ComplaintStatus,
+  FacilitySyncStatus,
   ImportBatchStatus,
   ImportChangeType,
   ImportRowAction,
@@ -22,6 +23,8 @@ import { calculateRowCounters } from "./import-batch-service";
 import { deriveSubject } from "./subject-derive";
 import { startTextRiskScan } from "@/server/analytics/text-risk/text-risk-analysis-service";
 import { normalizeComplainantIdentifier } from "@/server/complaints/repeated-complaint-identifier";
+import { retryFacilitySyncForConfirmedBatch } from "@/server/facilities/facility-registry-service";
+import { normalizeFacilityName } from "@/server/facilities/facility-name";
 
 /** Shared Prisma transaction wait/timeouts for large import confirmation/rollback. */
 export const IMPORT_TRANSACTION_MAX_WAIT_MS = 30_000;
@@ -58,6 +61,7 @@ const SNAPSHOT_FIELDS = [
   "complainantPhone",
   "region",
   "facility",
+  "facilityNormalizedName",
   "department",
   "categoryId",
   "classificationId",
@@ -141,7 +145,10 @@ export type ImportRollbackResult = {
   revertedUpdates: number;
 };
 
-type ImportConfirmationClient = Pick<typeof db, "$transaction">;
+type ImportConfirmationClient = Pick<
+  typeof db,
+  "$transaction" | "complaint" | "facility" | "importBatch" | "importBatchRow"
+>;
 type ImportConfirmationTransaction = Prisma.TransactionClient;
 type RollbackSnapshot = Prisma.ImportChangeSnapshotGetPayload<{
   include: { importBatchRow: true };
@@ -713,6 +720,7 @@ async function applyNewRow(
         complainantPhone: normalized.complainantPhone ?? null,
         region: normalized.region ?? null,
         facility: normalized.facility ?? null,
+        facilityNormalizedName: normalizeFacilityName(normalized.facility),
         department: normalized.department ?? null,
         categoryId: taxonomy.categoryId ?? null,
         classificationId: taxonomy.classificationId ?? null,
@@ -849,7 +857,10 @@ function assignImportUpdateFields(
   );
   assignIfDefined(data, "complainantPhone", normalized.complainantPhone);
   assignIfDefined(data, "region", normalized.region);
-  assignIfDefined(data, "facility", normalized.facility);
+  if (normalized.facility !== undefined) {
+    data.facility = normalized.facility;
+    data.facilityNormalizedName = normalizeFacilityName(normalized.facility);
+  }
   assignIfDefined(data, "department", normalized.department);
 
   assignImportClassificationFields(data, current, taxonomy, assignmentFields);
@@ -1000,11 +1011,19 @@ async function recalculateIsRepeatedForIdentifiers(
 
 export async function confirmReadyImportBatch(
   batchId: string,
-  options: { actor?: string; client?: ImportConfirmationClient } = {}
+  options: {
+    actor?: string;
+    client?: ImportConfirmationClient;
+    triggerTextRiskScan?: boolean;
+  } = {}
 ): Promise<ImportConfirmationResult> {
   const actor = options.actor ?? AUDIT_ACTOR_SINGLE_ADMIN;
   const confirmedAt = new Date();
   const client = options.client ?? db;
+  // A caller-provided client may point at an isolated transaction/test DB.
+  // Never launch a scan through the process-global client for that database
+  // unless the caller explicitly opts in.
+  const triggerTextRiskScan = options.triggerTextRiskScan ?? options.client === undefined;
 
   return client.$transaction(async (tx) => {
     const transition = await tx.importBatch.updateMany({
@@ -1063,6 +1082,9 @@ export async function confirmReadyImportBatch(
         confirmedAt,
         appliedCreatedRows: counters.newRows,
         appliedUpdatedRows: counters.updatedRows,
+        facilitySyncStatus: FacilitySyncStatus.PENDING,
+        facilitySyncError: null,
+        facilitySyncedAt: null,
       },
     });
     await writeAuditLog(tx, {
@@ -1082,24 +1104,39 @@ export async function confirmReadyImportBatch(
       unchanged: counters.noChangeRows,
       duplicates: counters.duplicateRows,
     };
-  }, { maxWait: IMPORT_TRANSACTION_MAX_WAIT_MS, timeout: IMPORT_CONFIRMATION_TIMEOUT_MS }).then((result) => {
-    // Trigger text-risk scan after the transaction commits.
-    // Failure here must not propagate — the import is already confirmed.
-    startTextRiskScan({ importBatchId: batchId, actor }).catch((scanError: unknown) => {
-      const errorCode = scanError instanceof Error
-        ? scanError.message.slice(0, 200)
+  }, { maxWait: IMPORT_TRANSACTION_MAX_WAIT_MS, timeout: IMPORT_CONFIRMATION_TIMEOUT_MS }).then(async (result) => {
+    try {
+      await retryFacilitySyncForConfirmedBatch(batchId, client);
+    } catch (syncError: unknown) {
+      const syncCode = syncError instanceof Error
+        ? syncError.message.slice(0, 100)
         : "UNKNOWN";
-      writeAuditLog(db, {
-        action: "TEXT_RISK_SCAN_START_FAILED",
-        entityType: "ImportBatch",
-        entityId: batchId,
-        actor,
-        metadata: { importBatchId: batchId, errorCode },
-      }).catch((logError: unknown) => {
-        const logCode = logError instanceof Error ? logError.message.slice(0, 100) : "UNKNOWN";
-        console.error(`[TEXT_RISK] scan start failed for batch ${batchId}: ${logCode}`);
+      console.error(`[FACILITY_REGISTRY] import sync failed for batch ${batchId}: ${syncCode}`);
+    }
+
+    if (triggerTextRiskScan) {
+      // Trigger text-risk scan after the transaction commits.
+      // Failure here must not propagate — the import is already confirmed.
+      startTextRiskScan({ importBatchId: batchId, actor }).catch((scanError: unknown) => {
+        const errorCode = scanError instanceof Error
+          ? scanError.message.slice(0, 200)
+          : "UNKNOWN";
+        if (client !== db) {
+          console.error(`[TEXT_RISK] isolated scan start failed for batch ${batchId}: ${errorCode}`);
+          return;
+        }
+        writeAuditLog(db, {
+          action: "TEXT_RISK_SCAN_START_FAILED",
+          entityType: "ImportBatch",
+          entityId: batchId,
+          actor,
+          metadata: { importBatchId: batchId, errorCode },
+        }).catch((logError: unknown) => {
+          const logCode = logError instanceof Error ? logError.message.slice(0, 100) : "UNKNOWN";
+          console.error(`[TEXT_RISK] scan start failed for batch ${batchId}: ${logCode}`);
+        });
       });
-    });
+    }
     return result;
   });
 }
@@ -1160,6 +1197,7 @@ function restoreSnapshotData(beforeData: Prisma.JsonValue | null): Prisma.Compla
   }
 
   const data = beforeData as Record<string, unknown>;
+  const facility = restoreOptionalTextField(data, "facility");
   return {
     sourceReference: restoreOptionalTextField(data, "sourceReference"),
     complaintDate: restoreOptionalDateField(data, "complaintDate"),
@@ -1173,7 +1211,8 @@ function restoreSnapshotData(beforeData: Prisma.JsonValue | null): Prisma.Compla
     complainantIdentifier: restoreOptionalTextField(data, "complainantIdentifier"),
     complainantPhone: restoreOptionalTextField(data, "complainantPhone"),
     region: restoreOptionalTextField(data, "region"),
-    facility: restoreOptionalTextField(data, "facility"),
+    facility,
+    facilityNormalizedName: normalizeFacilityName(facility),
     department: restoreOptionalTextField(data, "department"),
     categoryId: restoreOptionalTextField(data, "categoryId"),
     classificationId: restoreOptionalTextField(data, "classificationId"),

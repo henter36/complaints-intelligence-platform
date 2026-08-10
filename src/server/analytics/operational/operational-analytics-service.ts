@@ -32,6 +32,10 @@ import {
   type ActionStatusDistribution,
   type StaffActorMetrics,
 } from "./operational-analytics-types";
+import {
+  buildCurrentOperationalFacilityWhere,
+  combineComplaintWhere,
+} from "@/server/facilities/facility-operational-scope-service";
 
 const LONG_ACTION_TAKEN_CHARS = 80;
 const RARE_SHARE_THRESHOLD = 0.01;
@@ -572,10 +576,14 @@ export async function getOperationalAnalytics(
   const includeStaffActors = options.includeStaffActors === true;
 
   const query = parseComplaintQuery(params);
-  const where = buildComplaintWhere(query, now);
+  const facilityWhere = await buildCurrentOperationalFacilityWhere();
+  const where = combineComplaintWhere(buildComplaintWhere(query, now), facilityWhere);
   const prevParams = previousPeriodParams(params);
   const previousWhere = prevParams
-    ? buildComplaintWhere(parseComplaintQuery(prevParams), now)
+    ? combineComplaintWhere(
+        buildComplaintWhere(parseComplaintQuery(prevParams), now),
+        facilityWhere
+      )
     : null;
 
   const aggregatedPromise = loadAggregatedOperationalDimensions({ where, previousWhere, now });

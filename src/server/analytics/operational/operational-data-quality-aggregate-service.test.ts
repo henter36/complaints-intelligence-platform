@@ -437,6 +437,10 @@ describe("getOperationalAnalytics — data quality query count (actual SQL event
       datasources: { db: { url: `file:${join(tempDir!, "test.db")}` } },
       log: [{ emit: "event", level: "query" }],
     });
+    // Establish the engine connection before subscribing. Otherwise the first
+    // measured client in a fresh process may emit one initialization query
+    // that later clients do not, which makes the count depend on test order.
+    await measuredClient.$connect();
     let queryCount = 0;
     (measuredClient as unknown as { $on: (event: "query", cb: () => void) => void }).$on("query", () => {
       queryCount += 1;

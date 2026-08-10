@@ -410,4 +410,11 @@ describe("listTextRiskSignals", () => {
     const call = mockDb.textRiskSignal.findMany.mock.calls[0][0];
     expect(call.where.region).toBe("منطقة الرياض");
   });
+
+  it("applies facility filters through the complaint canonical key", async () => {
+    await listTextRiskSignals({ facility: "سجن  الرياض" });
+    const call = mockDb.textRiskSignal.findMany.mock.calls[0][0];
+    expect(call.where.facility).toBeUndefined();
+    expect(call.where.complaint).toEqual({ facilityNormalizedName: "سجن الرياض" });
+  });
 });

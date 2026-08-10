@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { ComplaintPriority, ComplaintStatus } from "@prisma/client";
+import { ComplaintPriority, ComplaintStatus, FacilityStatus } from "@prisma/client";
 import { db } from "@/lib/db";
 import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 
@@ -23,11 +23,11 @@ export async function GET(req: NextRequest) {
         select: { department: true },
         distinct: ["department"],
       }),
-      db.complaint.findMany({
-        where: { isDeleted: false, facility: { not: null } },
-        select: { facility: true, region: true },
-        distinct: ["facility"],
-      }),
+      db.facility?.findMany({
+        where: { status: FacilityStatus.ACTIVE },
+        select: { name: true, region: true },
+        orderBy: { name: "asc" },
+      }) ?? Promise.resolve([]),
       db.category.findMany({
         where: { isDeleted: false, isActive: true },
         include: {
@@ -72,8 +72,8 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       regions: regionRows.flatMap(r => r.region ? [optionFromName(r.region)] : []).sort((a, b) => compareArabicLabels(a.name, b.name)),
       departments: departmentRows.flatMap(d => d.department ? [optionFromName(d.department)] : []).sort((a, b) => compareArabicLabels(a.name, b.name)),
-      facilities: facilityRows.flatMap(f => f.facility ? [{ id: f.facility, name: f.facility, regionId: f.region }] : []).sort((a, b) => compareArabicLabels(a.name, b.name)),
-      locations: facilityRows.flatMap(f => f.facility ? [{ id: f.facility, name: f.facility, regionId: f.region }] : []).sort((a, b) => compareArabicLabels(a.name, b.name)),
+      facilities: facilityRows.map(f => ({ id: f.name, name: f.name, regionId: f.region })),
+      locations: facilityRows.map(f => ({ id: f.name, name: f.name, regionId: f.region })),
       categories: categories.map(category => ({ id: category.id, name: category.nameAr })),
       classifications: categories.map(category => ({
         id: category.id,

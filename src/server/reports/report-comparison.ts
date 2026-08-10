@@ -11,6 +11,10 @@ import {
 import { buildClassificationPath } from "@/lib/reports/classification-keys";
 import { comparisonHalfOpenPeriod } from "@/lib/reports/period-range";
 import type { ComparisonMode } from "@/lib/reports/report-contract";
+import {
+  isFacilityEventEligible,
+  loadFacilityOperationalRegistry,
+} from "@/server/facilities/facility-operational-scope-service";
 
 // ---------------------------------------------------------------------------
 // Centralized period-comparison module.
@@ -143,6 +147,7 @@ export type ComparisonResult = {
 const comparisonSelect = {
   complaintDate: true,
   receivedAt: true,
+  facility: true,
   region: true,
   subject: true,
   department: true,
@@ -721,7 +726,7 @@ export async function buildComparisonResult(
   const warnings: ComparisonWarning[] = [];
 
   const currentWhere = buildPeriodWhere(filters, currentPeriod, now);
-  const [current, previous] = await Promise.all([
+  const [loadedCurrent, loadedPrevious, facilityRegistry] = await Promise.all([
     db.complaint.findMany({ where: currentWhere, select: comparisonSelect }),
     previousPeriod
       ? db.complaint.findMany({
@@ -729,7 +734,18 @@ export async function buildComparisonResult(
           select: comparisonSelect,
         })
       : Promise.resolve<ComparisonComplaint[]>([]),
+    loadFacilityOperationalRegistry(),
   ]);
+  const current = loadedCurrent.filter((complaint) => isFacilityEventEligible(
+    facilityRegistry,
+    complaint.facility,
+    complaint.complaintDate ?? complaint.receivedAt
+  ));
+  const previous = loadedPrevious.filter((complaint) => isFacilityEventEligible(
+    facilityRegistry,
+    complaint.facility,
+    complaint.complaintDate ?? complaint.receivedAt
+  ));
 
   if (!previousPeriod) {
     warnings.push({

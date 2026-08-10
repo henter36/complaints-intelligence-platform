@@ -51,6 +51,7 @@ function drillDownHref(base: URLSearchParams, extra: Record<string, string>): st
     if (value) params.set(key, value);
   }
   params.set("screen", "explorer");
+  params.set("operationalScope", "current");
   return `/?${params.toString()}`;
 }
 

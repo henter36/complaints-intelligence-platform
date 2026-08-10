@@ -26,6 +26,11 @@ import {
   isOpenComplaintStatus,
   isReopenTransition,
 } from "./status";
+import {
+  isFacilityCurrentlyEligible,
+  isFacilityEventEligible,
+  loadFacilityOperationalRegistry,
+} from "@/server/facilities/facility-operational-scope-service";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const UNSPECIFIED_LABEL = "غير محدد";
@@ -275,6 +280,7 @@ const KPI_METRIC_KEYS = [
 type ComplaintKpiOptions = {
   comparisonMode?: ComparisonMode;
   includeComparison?: boolean;
+  facilityScope?: "CURRENT" | "HISTORICAL";
 };
 
 export async function getComplaintKpis(
@@ -283,14 +289,27 @@ export async function getComplaintKpis(
   options: ComplaintKpiOptions = {}
 ): Promise<ComplaintKpiResult> {
   const query = parseComplaintQuery(params);
-  const currentWhere = buildComplaintWhere(query, now);
-  const previousWhere = options.includeComparison === false
+  const baseCurrentWhere = buildComplaintWhere(query, now);
+  const basePreviousWhere = options.includeComparison === false
     ? null
     : buildPreviousWhere(query, now, options.comparisonMode);
-  const [current, previous] = await Promise.all([
+  const facilityScope = options.facilityScope ?? "CURRENT";
+  const currentWhere = baseCurrentWhere;
+  const previousWhere = basePreviousWhere;
+  const [loadedCurrent, loadedPrevious, registry] = await Promise.all([
     db.complaint.findMany({ where: currentWhere, select: kpiSelect }),
     previousWhere ? db.complaint.findMany({ where: previousWhere, select: kpiSelect }) : Promise.resolve(null),
+    loadFacilityOperationalRegistry(),
   ]);
+  const eligible = (complaint: KpiComplaint) => facilityScope === "CURRENT"
+    ? isFacilityCurrentlyEligible(registry, complaint.facility)
+    : isFacilityEventEligible(
+        registry,
+        complaint.facility,
+        complaint.complaintDate ?? complaint.receivedAt
+      );
+  const current = loadedCurrent.filter(eligible);
+  const previous = loadedPrevious?.filter(eligible) ?? null;
   return buildKpiResult(current, previous, now, query);
 }
 

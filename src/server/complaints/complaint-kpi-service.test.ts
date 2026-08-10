@@ -1,15 +1,19 @@
-import { ComplaintPriority, ComplaintStatus } from "@prisma/client";
+import { ComplaintPriority, ComplaintStatus, FacilityStatus } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { getComplaintKpis, getPreviousPeriodRange } from "./complaint-kpi-service";
 
 const dbMocks = vi.hoisted(() => ({
   findMany: vi.fn(),
+  facilityFindMany: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({
   db: {
     complaint: {
       findMany: dbMocks.findMany,
+    },
+    facility: {
+      findMany: dbMocks.facilityFindMany,
     },
   },
 }));
@@ -51,6 +55,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 describe("complaint KPI service", () => {
   beforeEach(() => {
     dbMocks.findMany.mockReset();
+    dbMocks.facilityFindMany.mockReset();
+    dbMocks.facilityFindMany.mockResolvedValue([]);
   });
 
   it("marks reopenCount increases as negative", async () => {
@@ -73,6 +79,47 @@ describe("complaint KPI service", () => {
     expect(result.kpis.reopenCount.previousValue).toBe(0);
     expect(result.kpis.reopenCount.trend).toBe("up");
     expect(result.kpis.reopenCount.direction).toBe("negative");
+  });
+
+  it("excludes CLOSED facilities before every current KPI distribution", async () => {
+    dbMocks.facilityFindMany.mockResolvedValue([
+      {
+        id: "active",
+        name: "Active Prison A",
+        normalizedName: "active prison a",
+        region: "منطقة الرياض",
+        status: FacilityStatus.ACTIVE,
+        closedAt: null,
+      },
+      {
+        id: "closed",
+        name: "Closed Prison B",
+        normalizedName: "closed prison b",
+        region: "منطقة الرياض",
+        status: FacilityStatus.CLOSED,
+        closedAt: new Date("2026-07-01T00:00:00Z"),
+      },
+    ]);
+    dbMocks.findMany.mockResolvedValueOnce([
+      ...Array.from({ length: 10 }, (_, index) => complaint({
+        id: `active-${index}`,
+        facility: "Active Prison A",
+        region: "منطقة الرياض",
+      })),
+      ...Array.from({ length: 7 }, (_, index) => complaint({
+        id: `closed-${index}`,
+        facility: "Closed Prison B",
+        region: "منطقة الرياض",
+      })),
+    ]);
+
+    const result = await getComplaintKpis(new URLSearchParams(), new Date("2026-08-01T00:00:00Z"));
+    expect(result.volume.total).toBe(10);
+    expect(result.distributions.byFacility.map((row) => row.name)).toEqual(["Active Prison A"]);
+    expect(result.distributions.byRegion).toEqual([
+      expect.objectContaining({ name: "منطقة الرياض", total: 10 }),
+    ]);
+    expect(result.distributions.byClassification.reduce((sum, row) => sum + row.total, 0)).toBe(10);
   });
 
   it("does not merge classification groups with the same name and different ids", async () => {

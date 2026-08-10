@@ -432,6 +432,7 @@ async function fetchOverdueTable(
   mode: "preview" | "run"
 ): Promise<ReportTable> {
   const params = buildComplaintQueryParams(filters);
+  params.set("operationalScope", "historical");
   params.set("isLate", "true");
   params.set("sortBy", "dueDate");
   params.set("sortOrder", "asc");
@@ -454,6 +455,7 @@ async function fetchDetailTable(
   hardLimit: number
 ): Promise<ReportTable> {
   const params = buildComplaintQueryParams(filters);
+  params.set("operationalScope", "historical");
   const cap = mode === "preview" ? Math.min(limit, PREVIEW_TABLE_ROW_CAP) : limit;
   const result = await listComplaints(params, { limit: cap });
 
@@ -512,6 +514,7 @@ async function buildExecutiveSummaryCore(
   const result = await getComplaintKpis(params, now, {
     comparisonMode: options.comparisonMode ?? "PREVIOUS_EQUIVALENT_PERIOD",
     includeComparison: options.includeComparison,
+    facilityScope: "HISTORICAL",
   });
   const comparison = await buildComparisonResult(filters, now, {
     comparisonMode: options.comparisonMode ?? "PREVIOUS_EQUIVALENT_PERIOD",
@@ -661,7 +664,10 @@ async function buildExecutiveSummaryWithMode(
       "to",
       new Date(comparison.previousPeriod.toExclusive.getTime() - DAY_MS).toISOString().slice(0, 10)
     );
-    previousResult = await getComplaintKpis(prevParams, now, { includeComparison: false });
+    previousResult = await getComplaintKpis(prevParams, now, {
+      includeComparison: false,
+      facilityScope: "HISTORICAL",
+    });
   }
 
   if (reportMode === "FULL_ANALYTICAL") {
@@ -742,7 +748,7 @@ async function buildGroupPerformanceReport(
 async function buildClassificationAnalysis(request: ReportRequest, now: Date): Promise<ReportData> {
   const { filters } = request;
   const params = buildComplaintQueryParams(filters);
-  const result = await getComplaintKpis(params, now);
+  const result = await getComplaintKpis(params, now, { facilityScope: "HISTORICAL" });
 
   const from = new Date(filters.from);
   const to = new Date(filters.to);
@@ -760,7 +766,9 @@ async function buildClassificationAnalysis(request: ReportRequest, now: Date): P
     const previousParams = buildComplaintQueryParams(filters);
     previousParams.set("from", previousRange.from.toISOString().slice(0, 10));
     previousParams.set("to", previousRange.to.toISOString().slice(0, 10));
-    const previousResult = await getComplaintKpis(previousParams, now);
+    const previousResult = await getComplaintKpis(previousParams, now, {
+      facilityScope: "HISTORICAL",
+    });
     const previousByName = new Map(previousResult.distributions.byClassification.map((g) => [g.name, g.total]));
     trendRows = result.distributions.byClassification.map((group) => {
       const previousTotal = previousByName.get(group.name) ?? 0;
@@ -834,7 +842,7 @@ async function buildComplaintDetailReport(
   const { filters, options } = request;
   const definition = getReportDefinition(ReportType.COMPLAINT_DETAIL);
   const params = buildComplaintQueryParams(filters);
-  const kpisResult = await getComplaintKpis(params, now);
+  const kpisResult = await getComplaintKpis(params, now, { facilityScope: "HISTORICAL" });
   const warnings: string[] = [];
 
   const limit = options.maxRows ?? definition.maxRows;
@@ -881,7 +889,7 @@ async function buildOverdueComplaintsReport(
   const { filters, options } = request;
   const definition = getReportDefinition(ReportType.OVERDUE_COMPLAINTS);
   const params = buildComplaintQueryParams(filters);
-  const kpisResult = await getComplaintKpis(params, now);
+  const kpisResult = await getComplaintKpis(params, now, { facilityScope: "HISTORICAL" });
   const warnings: string[] = [];
 
   const limit = options.maxRows ?? definition.maxRows;
@@ -938,14 +946,14 @@ export async function buildReportData(
     }
     case ReportType.DEPARTMENT_PERFORMANCE: {
       const params = buildComplaintQueryParams(request.filters);
-      const result = await getComplaintKpis(params, now);
+      const result = await getComplaintKpis(params, now, { facilityScope: "HISTORICAL" });
       return buildGroupPerformanceReport(request, now, result, [
         { id: "group_breakdown", title: "أداء الإدارات", groups: result.distributions.byDepartment },
       ]);
     }
     case ReportType.REGION_FACILITY_PERFORMANCE: {
       const params = buildComplaintQueryParams(request.filters);
-      const result = await getComplaintKpis(params, now);
+      const result = await getComplaintKpis(params, now, { facilityScope: "HISTORICAL" });
       return buildGroupPerformanceReport(request, now, result, [
         { id: "group_breakdown_region", title: "أداء المناطق", groups: result.distributions.byRegion },
         { id: "group_breakdown_facility", title: "أداء المواقع", groups: result.distributions.byFacility },

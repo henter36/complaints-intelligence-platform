@@ -10,6 +10,7 @@ import { ClassificationsManager } from "@/components/screens/classifications-man
 import { ImportLog } from "@/components/screens/import-log";
 import { AiAnalysis } from "@/components/screens/ai-analysis";
 import { TextRisks } from "@/components/screens/text-risks";
+import { Settings } from "@/components/screens/settings";
 import { AppSidebar } from "@/components/layout/app-sidebar";
 import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import type { ScreenId } from "@/app/page";
@@ -56,6 +57,7 @@ export function HomeShell({ username }: Readonly<{ username: string }>) {
             {activeScreen === "reports" && <ReportsCenter />}
             {activeScreen === "classifications" && <ClassificationsManager />}
             {activeScreen === "import-log" && <ImportLog onResume={(batchId) => navigate("import", batchId)} />}
+            {activeScreen === "settings" && <Settings />}
             {activeScreen === "ai-analysis" && <AiAnalysis />}
           </main>
           <footer className="border-t bg-card py-4 px-6 mt-auto">

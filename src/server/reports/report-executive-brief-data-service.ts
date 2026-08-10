@@ -58,12 +58,21 @@ import {
 } from "@/lib/reports/region-normalization";
 import {
   buildExecutiveReportSnapshotData,
-  wasComplaintClosedInWindow,
+  resolveComplaintClosureInstants,
   UNSPECIFIED_GROUP_LABEL,
   type ComplaintStatusHistoryEntry,
   type ExecutiveReportSnapshotData,
   type ReportPeriodGroupSnapshot,
 } from "./report-period-snapshot-service";
+import {
+  buildHistoricalFacilityClosureEventWhere,
+  buildHistoricalOperationalFacilityWhere,
+  combineComplaintWhere,
+  isFacilityEligibleAt,
+  isFacilityEventEligible,
+  loadFacilityOperationalRegistry,
+  type FacilityOperationalRegistry,
+} from "@/server/facilities/facility-operational-scope-service";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TOP_CLASSIFICATIONS_LIMIT = 8;
@@ -437,17 +446,16 @@ function buildTopFacilityCandidates(
 }
 
 /**
- * Eligible for "lowest volume": only facilities that actually received
- * complaints this period (receivedDuringPeriod > 0) — a facility's mere
- * absence from this period's activity is never proof of zero complaints, so
- * it must not appear here just because it has no other group presence.
+ * Eligible for "lowest volume": every period-eligible registry facility,
+ * including a facility with zero inflow and zero stock. The snapshot service
+ * left-joins the registry before this point, so absence is now authoritative.
  */
 function buildBottomFacilityCandidates(
   totalReceivedDuringPeriod: number,
   byFacility: Record<string, ReportPeriodGroupSnapshot>
 ): ExecutiveEntityRow[] {
   return Object.entries(byFacility)
-    .filter(([name, snapshot]) => !isUnspecifiedOrEmptyFacilityName(name) && snapshot.receivedDuringPeriod > 0)
+    .filter(([name]) => !isUnspecifiedOrEmptyFacilityName(name))
     .map(([name, snapshot]) => toFacilityEntityRow(totalReceivedDuringPeriod, name, snapshot))
     .sort(compareExecutiveEntityRowsAscending);
 }
@@ -1037,11 +1045,15 @@ async function fetchComplaintsForTimeline(
   params.delete("to");
   const query = parseComplaintQuery(params);
   const baseWhere = buildComplaintWhere(query, now);
-  const where: Prisma.ComplaintWhereInput = {
+  const periodWhere: Prisma.ComplaintWhereInput = {
     ...baseWhere,
     isDeleted: false,
     ...buildEffectiveDateWhere(period),
   };
+  const where = combineComplaintWhere(
+    periodWhere,
+    await buildHistoricalOperationalFacilityWhere()
+  );
   return db.complaint.findMany({ where, select: { complaintDate: true, receivedAt: true } });
 }
 
@@ -1144,45 +1156,37 @@ async function buildNetBacklogFlow(
   const periodDays = Math.round(
     (currentPeriod.toExclusive.getTime() - currentPeriod.from.getTime()) / DAY_MS
   );
-
-  // Build non-date complaint filters.
   const params = buildComplaintQueryParams(filters);
   params.delete("from");
   params.delete("to");
   const query = parseComplaintQuery(params);
   const baseWhere = buildComplaintWhere(query, now);
-
-  // Inflow: apply effective-date OR policy to current period.
-  const inflowWhere: Prisma.ComplaintWhereInput = {
+  const [receivedFacilityScope, closureFacilityScope] = await Promise.all([
+    buildHistoricalOperationalFacilityWhere(),
+    buildHistoricalFacilityClosureEventWhere(),
+  ]);
+  const inflowWhere = combineComplaintWhere({
     ...baseWhere,
     isDeleted: false,
     ...buildEffectiveDateWhere(currentPeriod),
-  };
-  const inflow = await db.complaint.count({ where: inflowWhere });
-
-  // Non-date filters for outflow complaint scope (no date on complaint itself;
-  // the date axis here is changedAt on the status transition).
+  }, receivedFacilityScope);
   const nonDateComplaintFilters: Prisma.ComplaintWhereInput = {
     ...baseWhere,
     isDeleted: false,
   };
-
-  // Outflow: deduplicated by complaint via groupBy.
-  const outflowGroups = await db.complaintStatusHistory.groupBy({
-    by: ["complaintId"],
-    where: {
-      toStatus: { in: ["CLOSED", "RESOLVED"] },
-      changedAt: {
-        gte: currentPeriod.from,
-        lt: currentPeriod.toExclusive,
+  const [inflow, outflowGroups] = await Promise.all([
+    db.complaint.count({ where: inflowWhere }),
+    db.complaintStatusHistory.groupBy({
+      by: ["complaintId"],
+      where: {
+        toStatus: { in: ["CLOSED", "RESOLVED"] },
+        changedAt: { gte: currentPeriod.from, lt: currentPeriod.toExclusive },
+        complaint: { is: nonDateComplaintFilters },
+        ...closureFacilityScope,
       },
-      complaint: {
-        is: nonDateComplaintFilters,
-      },
-    },
-  });
+    }),
+  ]);
   const outflow = outflowGroups.length;
-
   return { inflow, outflow, net: inflow - outflow, periodDays };
 }
 
@@ -1428,6 +1432,7 @@ type TrendComplaint = {
   closedAt: Date | null;
   /** Mapped from Complaint.sourceUpdatedAt — last-update closure fallback. */
   lastUpdatedAt: Date | null;
+  facility?: string | null;
   statusHistory: readonly ComplaintStatusHistoryEntry[];
 };
 
@@ -1438,6 +1443,7 @@ const TREND_COMPLAINT_SELECT = {
   receivedAt: true,
   closedAt: true,
   sourceUpdatedAt: true,
+  facility: true,
   statusHistory: {
     select: { fromStatus: true, toStatus: true, changedAt: true },
   },
@@ -1450,6 +1456,7 @@ function toTrendComplaint(row: {
   receivedAt: Date;
   closedAt: Date | null;
   sourceUpdatedAt: Date | null;
+  facility: string | null;
   statusHistory: readonly ComplaintStatusHistoryEntry[];
 }): TrendComplaint & { id: string } {
   return {
@@ -1459,6 +1466,7 @@ function toTrendComplaint(row: {
     receivedAt: row.receivedAt,
     closedAt: row.closedAt,
     lastUpdatedAt: row.sourceUpdatedAt,
+    facility: row.facility,
     statusHistory: row.statusHistory,
   };
 }
@@ -1604,31 +1612,6 @@ function wasReceivedDuringMonth(
   return createdMs >= monthStartMs && createdMs < monthEndExclusiveMs;
 }
 
-/**
- * StatusHistory first (a genuine fromStatus-carrying transition to CLOSED/
- * RESOLVED), effective-closed-date as fallback only when the complaint has
- * no such transition anywhere — shared with the period-snapshot service so
- * "closed during the period" and "closed during the month" can never drift
- * on the same underlying data (spec section 15).
- */
-function wasClosedDuringMonth(
-  complaint: TrendComplaint,
-  monthStartMs: number,
-  monthEndExclusiveMs: number
-): boolean {
-  return wasComplaintClosedInWindow(
-    {
-      status: complaint.status,
-      complaintDate: complaint.complaintDate,
-      receivedAt: complaint.receivedAt,
-      closedAt: complaint.closedAt,
-      sourceUpdatedAt: complaint.lastUpdatedAt,
-      statusHistory: complaint.statusHistory,
-    },
-    { from: new Date(monthStartMs), toExclusive: new Date(monthEndExclusiveMs) }
-  );
-}
-
 function wasOpenAtMonthEnd(
   createdMs: number,
   trustedClosedAt: Date | null,
@@ -1651,18 +1634,48 @@ function accumulateComplaintForMonth(
   accumulator: MonthlyTrendAccumulator,
   complaint: TrendComplaint,
   monthStartMs: number,
-  monthEndExclusiveMs: number
+  monthEndExclusiveMs: number,
+  facilityRegistry?: FacilityOperationalRegistry
 ): void {
   const createdAt = resolveTrendCreatedAt(complaint);
   if (!createdAt) return;
   const createdMs = createdAt.getTime();
   const trustedClosedAt = resolveTrustedClosedAt(complaint);
 
-  if (wasReceivedDuringMonth(createdMs, monthStartMs, monthEndExclusiveMs)) {
+  if (
+    wasReceivedDuringMonth(createdMs, monthStartMs, monthEndExclusiveMs)
+    && (!facilityRegistry || isFacilityEventEligible(
+      facilityRegistry,
+      complaint.facility,
+      createdAt
+    ))
+  ) {
     accumulator.receivedCount += 1;
   }
-  if (wasClosedDuringMonth(complaint, monthStartMs, monthEndExclusiveMs)) {
+  const eligibleClosure = resolveComplaintClosureInstants({
+    status: complaint.status,
+    complaintDate: complaint.complaintDate,
+    receivedAt: complaint.receivedAt,
+    closedAt: complaint.closedAt,
+    sourceUpdatedAt: complaint.lastUpdatedAt,
+    statusHistory: complaint.statusHistory,
+  }).some((instant) =>
+    instant.getTime() >= monthStartMs
+    && instant.getTime() < monthEndExclusiveMs
+    && (!facilityRegistry || isFacilityEventEligible(
+      facilityRegistry,
+      complaint.facility,
+      instant
+    ))
+  );
+  if (eligibleClosure) {
     accumulator.closedDuringMonthCount += 1;
+  }
+  if (
+    facilityRegistry
+    && !isFacilityEligibleAt(facilityRegistry, complaint.facility, new Date(monthEndExclusiveMs))
+  ) {
+    return;
   }
   if (!wasOpenAtMonthEnd(createdMs, trustedClosedAt, monthEndExclusiveMs)) {
     return;
@@ -1684,7 +1697,10 @@ function accumulateComplaintForMonth(
 export function aggregateMonthlyComplaintTrend(
   complaints: readonly TrendComplaint[],
   buckets: readonly MonthBucket[],
-  options: { reportEndExclusive?: Date } = {}
+  options: {
+    reportEndExclusive?: Date;
+    facilityRegistry?: FacilityOperationalRegistry;
+  } = {}
 ): MonthlyComplaintTrendPoint[] {
   const lastIndex = buckets.length - 1;
   return buckets.map((bucket, index) => {
@@ -1696,7 +1712,13 @@ export function aggregateMonthlyComplaintTrend(
         : naturalEndMs;
     const accumulator = createMonthlyTrendAccumulator();
     for (const complaint of complaints) {
-      accumulateComplaintForMonth(accumulator, complaint, monthStartMs, monthEndExclusiveMs);
+      accumulateComplaintForMonth(
+        accumulator,
+        complaint,
+        monthStartMs,
+        monthEndExclusiveMs,
+        options.facilityRegistry
+      );
     }
     return {
       monthKey: bucket.key,
@@ -1851,13 +1873,15 @@ async function buildMonthlyStockFlow(
 
   // Trend is not limited by filters.from: history window drives the candidate set.
   // Only complaints that can affect chart series are loaded (not all-time history).
-  const complaints = await fetchMonthlyTrendComplaints(
-    baseWhere,
-    windowFrom,
-    windowToExclusive
-  );
+  const [complaints, facilityRegistry] = await Promise.all([
+    fetchMonthlyTrendComplaints(baseWhere, windowFrom, windowToExclusive),
+    loadFacilityOperationalRegistry(),
+  ]);
 
-  return aggregateMonthlyComplaintTrend(complaints, buckets, { reportEndExclusive: reportToExclusive });
+  return aggregateMonthlyComplaintTrend(complaints, buckets, {
+    reportEndExclusive: reportToExclusive,
+    facilityRegistry,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1873,7 +1897,10 @@ async function fetchAllTimeTotal(
   params.delete("to");
   const query = parseComplaintQuery(params);
   const baseWhere = buildComplaintWhere(query, now);
-  return db.complaint.count({ where: { ...baseWhere, isDeleted: false } });
+  const facilityWhere = await buildHistoricalOperationalFacilityWhere();
+  return db.complaint.count({
+    where: combineComplaintWhere({ ...baseWhere, isDeleted: false }, facilityWhere),
+  });
 }
 
 // ---------------------------------------------------------------------------

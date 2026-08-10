@@ -14,6 +14,7 @@ import {
   ShieldCheck,
   LogOut,
   KeyRound,
+  Settings,
 } from "lucide-react";
 import {
   Sidebar,
@@ -58,6 +59,7 @@ const menuItems: {
   { id: "reports", label: "مركز التقارير", icon: FileText, description: "إنشاء وتصدير التقارير", group: "التقارير" },
   { id: "classifications", label: "إدارة التصنيفات", icon: Tags, description: "التصنيفات والكلمات الدالة", group: "الإدارة" },
   { id: "import-log", label: "سجل الاستيراد", icon: History, description: "تاريخ دفعات الاستيراد", group: "الإدارة" },
+  { id: "settings", label: "الإعدادات", icon: Settings, description: "إدارة السجون والحالة التشغيلية", group: "الإدارة" },
 ];
 
 interface AppSidebarProps {
