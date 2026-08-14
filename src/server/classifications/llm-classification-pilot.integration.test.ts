@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { PrismaClient } from "@prisma/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -153,5 +153,87 @@ describe("read-only LLM classification pilot", () => {
       ...paths(),
     })).rejects.toThrow("PILOT_NOT_APPROVED");
     expect(db.complaint.findMany).not.toHaveBeenCalled();
+  });
+
+  it("keeps private-review opaque IDs consistent with provider requests after resume", async () => {
+    const rows = Array.from({ length: 3 }, (_, index) => ({
+      id: `resume-${index}`,
+      sourceDetail: "زيارة",
+      subject: `موضوع فريد ${index}`,
+      description: "وصف للمراجعة",
+      classificationId: "visit",
+      categoryId: "rights",
+      version: index + 1,
+      classification: { nameAr: "الزيارة" },
+      category: { nameAr: "الحقوق" },
+    }));
+    const db = {
+      complaint: { findMany: vi.fn().mockResolvedValue(rows) },
+      classification: { findMany: vi.fn().mockResolvedValue(taxonomyRows) },
+    } as unknown as PrismaClient;
+    const provider = vi.fn<LlmStructuredProvider>().mockResolvedValue({
+      output: {
+        decision: "REVIEW",
+        targetClassificationId: null,
+        targetCategoryId: null,
+        evidenceLevel: "WEAK",
+        reasonCodes: ["AMBIGUOUS"],
+        shortReason: "تحتاج مراجعة.",
+      },
+      inputTokens: 10,
+      outputTokens: 3,
+      model: "test-model",
+    });
+    const artifactPaths = paths();
+
+    await runLlmClassificationPilot({
+      db,
+      catalog,
+      provider,
+      model: "test-model",
+      timeoutMs: 1_000,
+      limit: 3,
+      smoke: true,
+      ...artifactPaths,
+    });
+
+    const state = JSON.parse(readFileSync(artifactPaths.statePath, "utf8")) as {
+      items: Array<{ status: string; result: unknown }>;
+    };
+    state.items.reverse();
+    state.items[0].status = "PENDING";
+    state.items[0].result = null;
+    writeFileSync(artifactPaths.statePath, JSON.stringify(state));
+    writeFileSync(artifactPaths.cachePath, "{}");
+
+    await runLlmClassificationPilot({
+      db,
+      catalog,
+      provider,
+      model: "test-model",
+      timeoutMs: 1_000,
+      limit: 3,
+      smoke: true,
+      ...artifactPaths,
+    });
+
+    const opaqueIdBySubject = new Map<string, string>();
+    for (const [request] of provider.mock.calls) {
+      const firstSection = request.input.split("\n", 1)[0];
+      const parsed = JSON.parse(firstSection) as {
+        complaint: { opaqueId: string; subject: string };
+      };
+      const previous = opaqueIdBySubject.get(parsed.complaint.subject);
+      if (previous) expect(parsed.complaint.opaqueId).toBe(previous);
+      opaqueIdBySubject.set(parsed.complaint.subject, parsed.complaint.opaqueId);
+    }
+
+    const privateReview = JSON.parse(readFileSync(artifactPaths.privateReviewPath, "utf8")) as {
+      items: Array<{ opaqueId: string; sanitizedSubject: string }>;
+    };
+    expect(privateReview.items).toHaveLength(3);
+    for (const item of privateReview.items) {
+      expect(item.opaqueId).toBe(opaqueIdBySubject.get(item.sanitizedSubject));
+    }
   });
 });

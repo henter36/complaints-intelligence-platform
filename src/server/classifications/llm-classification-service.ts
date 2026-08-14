@@ -54,11 +54,13 @@ function validateClassifierAssignment(input: {
 }): boolean {
   const { output, request } = input;
   if (output.decision === "KEEP") {
+    if (output.targetClassificationId !== null || output.targetCategoryId !== null) return false;
+    if (request.currentClassificationId === null && request.currentCategoryId === null) return true;
+    if (request.currentClassificationId === null || request.currentCategoryId === null) return false;
     const current = input.catalog.entries.find(
       (entry) => entry.classificationId === request.currentClassificationId
     );
-    return output.targetClassificationId === null && output.targetCategoryId === null &&
-      current?.categoryId === request.currentCategoryId;
+    return current?.categoryId === request.currentCategoryId;
   }
   if (output.decision === "REVIEW") {
     return output.targetClassificationId === null && output.targetCategoryId === null;
@@ -245,6 +247,8 @@ export function sanitizeComplaintForClassification(
 
 export function computeLlmClassificationCacheKey(input: {
   complaint: SanitizedClassificationComplaint;
+  currentClassificationId: string | null;
+  currentCategoryId: string | null;
   candidateClassificationIds: readonly string[];
   model: string;
   taxonomyFingerprint: string;
@@ -256,6 +260,8 @@ export function computeLlmClassificationCacheKey(input: {
       subject: input.complaint.subject,
       description: input.complaint.description,
     },
+    currentClassificationId: input.currentClassificationId,
+    currentCategoryId: input.currentCategoryId,
     candidates: [...input.candidateClassificationIds].sort(
       (left, right) => left.localeCompare(right, "en")
     ),

@@ -2,23 +2,15 @@ import { db } from "@/lib/db";
 import { env } from "@/lib/env";
 import { artifactTimestamp, readLlmClassificationJson } from "@/server/classifications/llm-classification-artifacts";
 import { runLlmClassificationPilot } from "@/server/classifications/llm-classification-pilot";
-import type { LlmClassificationEvaluation } from "@/server/classifications/llm-classification-evaluation";
+import { parseLlmClassificationEvaluationArtifact } from "@/server/classifications/llm-classification-evaluation";
 import {
   loadSemanticCatalog,
   localArtifactPath,
   parseCliArguments,
   positiveIntegerArgument,
   requiredClassificationProvider,
-  safeCliError,
+  runLlmClassificationCli,
 } from "./lib/llm-classification-cli";
-
-type EvaluationArtifact = {
-  model: string;
-  promptVersion: string;
-  taxonomyFingerprint: string;
-  semanticCatalogFingerprint: string;
-  metrics: LlmClassificationEvaluation;
-};
 
 async function run(): Promise<void> {
   const args = parseCliArguments(process.argv.slice(2));
@@ -28,7 +20,7 @@ async function run(): Promise<void> {
   const catalog = loadSemanticCatalog(args.get("catalog"));
   const evaluationPath = args.get("evaluation");
   const evaluation = evaluationPath
-    ? readLlmClassificationJson<EvaluationArtifact>(evaluationPath)
+    ? parseLlmClassificationEvaluationArtifact(readLlmClassificationJson<unknown>(evaluationPath))
     : null;
   const timestamp = artifactTimestamp();
   const artifact = await runLlmClassificationPilot({
@@ -61,9 +53,7 @@ async function run(): Promise<void> {
   }));
 }
 
-run()
-  .catch((error: unknown) => {
-    console.error(safeCliError(error));
-    process.exitCode = 1;
-  })
-  .finally(() => db.$disconnect());
+void runLlmClassificationCli({
+  run,
+  disconnect: () => db.$disconnect(),
+});

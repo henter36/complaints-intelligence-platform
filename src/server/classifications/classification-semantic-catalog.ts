@@ -23,24 +23,24 @@ const CATALOG_DEFINITION_SCHEMA: Record<string, unknown> = {
   additionalProperties: false,
   required: ["semanticDefinition", "includedConcepts", "excludedConcepts", "confusableWith"],
   properties: {
-    semanticDefinition: { type: "string", minLength: 1, maxLength: 800 },
+    semanticDefinition: { type: "string" },
     includedConcepts: {
       type: "array",
-      maxItems: 20,
-      items: { type: "string", minLength: 1, maxLength: 120 },
+      items: { type: "string" },
     },
     excludedConcepts: {
       type: "array",
-      maxItems: 20,
-      items: { type: "string", minLength: 1, maxLength: 120 },
+      items: { type: "string" },
     },
     confusableWith: {
       type: "array",
-      maxItems: 12,
-      items: { type: "string", minLength: 1 },
+      items: { type: "string" },
     },
   },
 };
+
+const CATALOG_EXAMPLE_SAMPLE_WINDOW = 50;
+const CATALOG_EXAMPLES_PER_CLASSIFICATION = 3;
 
 type DefinitionOutput = {
   semanticDefinition: string;
@@ -123,39 +123,39 @@ async function loadSanitizedExamples(
   db: PrismaClient,
   classificationIds: readonly string[]
 ): Promise<Map<string, Array<{ sourceDetail: string; subject: string; description: string }>>> {
-  const rows = await db.complaint.findMany({
-    where: { isDeleted: false, classificationId: { in: [...classificationIds] } },
-    select: { id: true, classificationId: true, sourceDetail: true, subject: true, description: true },
-    orderBy: { id: "asc" },
-  });
-  const ranked = new Map<string, Array<{
-    rank: string;
-    value: { sourceDetail: string; subject: string; description: string };
-  }>>();
+  const examples = await mapWithConcurrency(classificationIds, 4, async (classificationId) => {
+    const rows = await db.complaint.findMany({
+      where: { isDeleted: false, classificationId },
+      select: { id: true, sourceDetail: true, subject: true, description: true },
+      orderBy: { id: "asc" },
+      take: CATALOG_EXAMPLE_SAMPLE_WINDOW,
+    });
+    const ranked: Array<{
+      rank: string;
+      value: { sourceDetail: string; subject: string; description: string };
+    }> = [];
 
-  for (const row of rows) {
-    if (!row.classificationId) continue;
-    const current = ranked.get(row.classificationId) ?? [];
-    const sanitized = sanitizeClassificationComplaint(row, "EXAMPLE");
-    const value = {
-      sourceDetail: sanitized.sourceDetail,
-      subject: sanitized.subject,
-      description: sanitized.description,
-    };
-    if (!current.some((entry) => stableStringify(entry.value) === stableStringify(value))) {
-      current.push({
+    for (const row of rows) {
+      const sanitized = sanitizeClassificationComplaint(row, "EXAMPLE");
+      const value = {
+        sourceDetail: sanitized.sourceDetail,
+        subject: sanitized.subject,
+        description: sanitized.description,
+      };
+      if (ranked.some((entry) => stableStringify(entry.value) === stableStringify(value))) {
+        continue;
+      }
+      ranked.push({
         rank: createHash("sha256").update(`catalog-example-v1:${row.id}`).digest("hex"),
         value,
       });
-      current.sort((left, right) => left.rank.localeCompare(right.rank, "en"));
-      if (current.length > 3) current.pop();
-      ranked.set(row.classificationId, current);
+      ranked.sort((left, right) => left.rank.localeCompare(right.rank, "en"));
+      if (ranked.length > CATALOG_EXAMPLES_PER_CLASSIFICATION) ranked.pop();
     }
-  }
-  return new Map([...ranked.entries()].map(([classificationId, values]) => [
-    classificationId,
-    values.map((entry) => entry.value),
-  ]));
+    return [classificationId, ranked.map((entry) => entry.value)] as const;
+  });
+
+  return new Map(examples);
 }
 
 function catalogDefinitionInstructions(): string {

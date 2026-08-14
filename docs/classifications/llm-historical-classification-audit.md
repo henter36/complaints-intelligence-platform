@@ -25,6 +25,8 @@ Only `sourceDetail`, `subject`, and `description` enter the classification bound
 
 Each request receives an opaque local identifier such as `C000001`. The private mapping to a database ID never appears in prompts. Normal logs contain only aggregate counts or safe error codes; raw prompts, complaint text, API responses, reasons, credentials, and token values are not logged.
 
+Classification fields are sanitized over a bounded lookahead window before their final field limits are applied. This lets the sanitizer redact an email, phone, identifier, or card number that starts before a truncation boundary and ends after it without increasing the final prompt size.
+
 ## Semantic catalog
 
 Run:
@@ -49,6 +51,8 @@ The selector covers classifications, categories, source-detail presence, descrip
 
 The real-ID mapping is stored separately in `.local/llm-classification/private-gold-map.json` with restrictive local permissions. A stable 70/30 `DEVELOPMENT`/`HOLDOUT` split is assigned before labeling. Holdout labels must not be used for prompt or catalog calibration.
 
+`DEVELOPMENT` is reserved for calibration and error analysis in a separate workflow. The approval evaluation sends only reviewed `HOLDOUT` rows to the provider and computes its metrics and gate only from those rows, avoiding model calls that cannot affect the approval decision.
+
 ## Classifier, verifier, and candidate retrieval
 
 The model is the semantic classifier. Keywords, normalized terms, names, current assignment, and confusable classifications help retrieve candidates and provide evidence, but no keyword forces a decision. Weak retrieval widens to the full active catalog to protect candidate recall.
@@ -70,6 +74,8 @@ With no reviewed labels, the command stops with `GOLD_SET_NOT_YET_LABELED` and r
 
 `PILOT_APPROVED` requires all of the following on the untouched holdout: at least 90 reviewed items, at least 20 genuinely changed assignments, `CHANGE_CONFIRMED` precision of at least 98%, and no target classification with a repeated severe precision failure. Model-to-model agreement is reported only as agreement, never as accuracy.
 
+The evaluation artifact is operator-controlled local evidence, not a cryptographic signature or a tamper-proof approval source. The pilot validates its schema and checks its model, prompt, taxonomy, and catalog fingerprints before use; that level of governance is acceptable only because Phase 1 is read-only. A future Apply phase must use stronger provenance and must not treat this local status field alone as authorization.
+
 ## Pilot, reliability, resume, and cost controls
 
 The full pilot is blocked unless an evaluation artifact says `PILOT_APPROVED`:
@@ -88,7 +94,7 @@ npm run classifications:llm-pilot -- --smoke --limit=10
 
 Selection is deterministic and stratified rather than the first rows. Concurrency and retries are bounded; only rate limits, 5xx errors, network failures, and timeouts are retried with exponential backoff. Authentication, request, and schema failures are not retried.
 
-State is saved with `PENDING`, `COMPLETED`, and `FAILED` after every concurrency-sized batch. The cache key hashes sanitized content, candidate IDs, model, prompt version, taxonomy fingerprint, and semantic catalog fingerprint. It is never keyed by complaint ID alone. A changed prompt, model, catalog, taxonomy, candidate set, or sanitized text invalidates the cache.
+State is saved with `PENDING`, `COMPLETED`, and `FAILED` after every concurrency-sized batch. The cache key hashes sanitized content, current classification/category assignment, candidate IDs, model, prompt version, taxonomy fingerprint, and semantic catalog fingerprint. It is never keyed by complaint ID alone. A changed prompt, model, catalog, taxonomy, current assignment, candidate set, or sanitized text invalidates the cache.
 
 Before calls, the artifact estimates complaint count, input characters/tokens, request upper bound, and candidate size. Results aggregate classifier/verifier token usage and request counts. Public pilot output contains only run metadata, outcome counts, and transition counts. Sanitized review text and short reasons are confined to the ignored private review artifact.
 

@@ -227,6 +227,18 @@ const CLASSIFICATION_TEXT_LIMITS = {
   description: 5_000,
 } as const;
 
+// Covers the longest bounded PII token used by classification sanitization,
+// including a standards-sized email address, when it crosses a field boundary.
+const CLASSIFICATION_PII_BOUNDARY_LOOKAHEAD = 320;
+
+function sanitizeClassificationField(value: string, limit: number): string {
+  const sanitizationLimit = Math.min(
+    MAX_SANITIZATION_INPUT_LENGTH,
+    limit + CLASSIFICATION_PII_BOUNDARY_LOOKAHEAD
+  );
+  return sanitizeText(value.slice(0, sanitizationLimit)).slice(0, limit);
+}
+
 /**
  * Minimal complaint projection allowed in the LLM classification boundary.
  * The caller supplies an opaque request-local ID; database and external IDs are
@@ -238,12 +250,14 @@ export function sanitizeClassificationComplaint(
 ): SanitizedClassificationComplaint {
   return {
     opaqueId,
-    sourceDetail: sanitizeText(
-      (input.sourceDetail ?? "").slice(0, CLASSIFICATION_TEXT_LIMITS.sourceDetail)
+    sourceDetail: sanitizeClassificationField(
+      input.sourceDetail ?? "",
+      CLASSIFICATION_TEXT_LIMITS.sourceDetail
     ),
-    subject: sanitizeText(input.subject.slice(0, CLASSIFICATION_TEXT_LIMITS.subject)),
-    description: sanitizeText(
-      (input.description ?? "").slice(0, CLASSIFICATION_TEXT_LIMITS.description)
+    subject: sanitizeClassificationField(input.subject, CLASSIFICATION_TEXT_LIMITS.subject),
+    description: sanitizeClassificationField(
+      input.description ?? "",
+      CLASSIFICATION_TEXT_LIMITS.description
     ),
   };
 }

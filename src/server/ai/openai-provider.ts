@@ -1,6 +1,7 @@
 // OpenAI provider adapter. Decoupled from analysis logic.
 
 import OpenAI from "openai";
+import type { Response } from "openai/resources/responses/responses";
 import { env } from "@/lib/env";
 import { logger } from "@/server/logger";
 
@@ -60,6 +61,30 @@ export interface StructuredProviderCallResult {
 }
 
 type StructuredResponsesClient = Pick<OpenAI, "responses">;
+
+function responseContainsRefusal(response: Response): boolean {
+  return response.output.some(
+    (item) => item.type === "message" && item.content.some((part) => part.type === "refusal")
+  );
+}
+
+function assertStructuredResponseUsable(response: Response): void {
+  if (response.status === "incomplete") {
+    const truncated = response.incomplete_details?.reason === "max_output_tokens";
+    const code = truncated ? "AI_RESPONSE_TRUNCATED" : "AI_RESPONSE_INCOMPLETE";
+    logProviderFailure(code, undefined);
+    throw new AiProviderError(
+      code,
+      truncated
+        ? "AI response exceeded its output token budget."
+        : "AI response was incomplete."
+    );
+  }
+  if (responseContainsRefusal(response)) {
+    logProviderFailure("AI_RESPONSE_REFUSED", undefined);
+    throw new AiProviderError("AI_RESPONSE_REFUSED", "AI provider refused the request.");
+  }
+}
 
 function logProviderFailure(code: string, status: number | undefined): void {
   // Log the failure category but never the API key or raw prompt
@@ -188,6 +213,8 @@ export async function callOpenAIStructuredWithClient(
         timeout: options.timeoutMs,
       }
     );
+
+    assertStructuredResponseUsable(response);
 
     return {
       output: JSON.parse(response.output_text),

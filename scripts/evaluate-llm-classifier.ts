@@ -12,7 +12,7 @@ import {
   localArtifactPath,
   parseCliArguments,
   requiredClassificationProvider,
-  safeCliError,
+  runLlmClassificationCli,
 } from "./lib/llm-classification-cli";
 
 async function run(): Promise<void> {
@@ -20,7 +20,9 @@ async function run(): Promise<void> {
   const goldSetPath = args.get("gold-set") ?? localArtifactPath("gold-set-reviewed.json");
   const goldSet = readLlmClassificationJson<GoldSetReviewArtifact>(goldSetPath);
   const labeledCount = goldSet.items.filter(
-    (item) => item.humanReviewStatus === "REVIEWED" && item.humanExpectedClassificationId
+    (item) => item.split === "HOLDOUT" &&
+      item.humanReviewStatus === "REVIEWED" &&
+      item.humanExpectedClassificationId
   ).length;
   if (labeledCount === 0) throw new Error("GOLD_SET_NOT_YET_LABELED");
   const catalog = loadSemanticCatalog(args.get("catalog"));
@@ -50,9 +52,7 @@ async function run(): Promise<void> {
   console.log(JSON.stringify({ status: result.metrics.status, sampleSize: result.metrics.sampleSize }));
 }
 
-run()
-  .catch((error: unknown) => {
-    console.error(safeCliError(error));
-    process.exitCode = 1;
-  })
-  .finally(() => db.$disconnect());
+void runLlmClassificationCli({
+  run,
+  disconnect: () => db.$disconnect(),
+});

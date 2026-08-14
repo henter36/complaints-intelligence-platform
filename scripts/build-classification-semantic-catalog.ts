@@ -3,10 +3,11 @@ import { env } from "@/lib/env";
 import { buildClassificationSemanticCatalog } from "@/server/classifications/classification-semantic-catalog";
 import { writeLlmClassificationJson } from "@/server/classifications/llm-classification-artifacts";
 import {
+  artifactBasename,
   enabledClassificationProvider,
   localArtifactPath,
   parseCliArguments,
-  safeCliError,
+  runLlmClassificationCli,
 } from "./lib/llm-classification-cli";
 
 async function run(): Promise<void> {
@@ -25,13 +26,11 @@ async function run(): Promise<void> {
     generationStatus: provider ? "GENERATED_BY_LLM" : "PENDING_LLM_ENRICHMENT",
     categoryCount: catalog.categoryCount,
     classificationCount: catalog.classificationCount,
-    output: "semantic-catalog-draft.json",
+    output: artifactBasename(outputPath),
   }));
 }
 
-run()
-  .catch((error: unknown) => {
-    console.error(safeCliError(error));
-    process.exitCode = 1;
-  })
-  .finally(() => db.$disconnect());
+void runLlmClassificationCli({
+  run,
+  disconnect: () => db.$disconnect(),
+});

@@ -7,7 +7,7 @@ import {
   localArtifactPath,
   parseCliArguments,
   positiveIntegerArgument,
-  safeCliError,
+  runLlmClassificationCli,
 } from "./lib/llm-classification-cli";
 
 async function run(): Promise<void> {
@@ -35,9 +35,7 @@ async function run(): Promise<void> {
   }));
 }
 
-run()
-  .catch((error: unknown) => {
-    console.error(safeCliError(error));
-    process.exitCode = 1;
-  })
-  .finally(() => db.$disconnect());
+void runLlmClassificationCli({
+  run,
+  disconnect: () => db.$disconnect(),
+});

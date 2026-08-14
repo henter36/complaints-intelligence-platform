@@ -127,6 +127,22 @@ describe("governed LLM classification", () => {
     expect(provider).toHaveBeenCalledTimes(1);
   });
 
+  it("accepts a structurally valid KEEP for a fully unassigned complaint", async () => {
+    const provider = vi.fn<LlmStructuredProvider>().mockResolvedValue(output(keepOutput()));
+    const result = await runGovernedLlmClassification({
+      complaint: requestComplaint(),
+      currentClassificationId: null,
+      currentCategoryId: null,
+      catalog: catalog(),
+      provider,
+      model: "test-model",
+      timeoutMs: 1_000,
+    });
+
+    expect(result.outcome).toBe("KEEP");
+    expect(result.failureCode).toBeNull();
+  });
+
   it("confirms CHANGE only after an independent verifier approval", async () => {
     const provider = vi.fn<LlmStructuredProvider>()
       .mockResolvedValueOnce(output(changeOutput()))
@@ -307,6 +323,8 @@ describe("candidate retrieval, anchoring, and cache", () => {
   it("invalidates cache for content, candidate, model, prompt taxonomy, or catalog changes", () => {
     const base = {
       complaint: requestComplaint(),
+      currentClassificationId: "visit",
+      currentCategoryId: "rights",
       candidateClassificationIds: ["visit", "religious-supplies"],
       model: "model-a",
       taxonomyFingerprint: "taxonomy-a",
@@ -320,6 +338,14 @@ describe("candidate retrieval, anchoring, and cache", () => {
     expect(computeLlmClassificationCacheKey({ ...base, candidateClassificationIds: ["visit"] })).not.toBe(key);
     expect(computeLlmClassificationCacheKey({
       ...base,
+      currentClassificationId: "religious-supplies",
+    })).not.toBe(key);
+    expect(computeLlmClassificationCacheKey({
+      ...base,
+      currentCategoryId: "guidance",
+    })).not.toBe(key);
+    expect(computeLlmClassificationCacheKey({
+      ...base,
       complaint: { ...base.complaint, description: "نص آخر" },
     })).not.toBe(key);
   });
@@ -327,6 +353,8 @@ describe("candidate retrieval, anchoring, and cache", () => {
   it("produces the same cache key for the same candidates in different orders", () => {
     const base = {
       complaint: requestComplaint(),
+      currentClassificationId: "visit",
+      currentCategoryId: "rights",
       model: "model-a",
       taxonomyFingerprint: "taxonomy-a",
       semanticCatalogFingerprint: "catalog-a",

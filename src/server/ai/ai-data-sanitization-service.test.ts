@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { sanitizeText, sanitizeComplaint, buildAggregateStats, detectPII } from "./ai-data-sanitization-service";
+import {
+  buildAggregateStats,
+  detectPII,
+  sanitizeClassificationComplaint,
+  sanitizeComplaint,
+  sanitizeText,
+} from "./ai-data-sanitization-service";
 
 describe("sanitizeText - PII redaction", () => {
   it("redacts Saudi national ID", () => {
@@ -69,6 +75,40 @@ describe("sanitizeComplaint", () => {
     const future = new Date(Date.now() + 86400000 * 2).toISOString();
     expect(sanitizeComplaint({ id: "1", subject: "s", dueDate: past }).isOverdue).toBe(true);
     expect(sanitizeComplaint({ id: "2", subject: "s", dueDate: future }).isOverdue).toBe(false);
+  });
+});
+
+describe("classification sanitization — PII at truncation boundaries", () => {
+  const descriptionLimit = 5_000;
+
+  it.each([
+    ["email", "boundary.user@example.com", "boundary.user"],
+    ["phone", "+966501234567", "+96650"],
+    ["national ID", "1234567890", "12345"],
+    ["card", "4111 1111 1111 1111", "4111 1111"],
+    ["long identifier", "987654321098765432109876543210", "9876543210"],
+  ])("redacts a %s that crosses the description limit", (_label, pii, sensitiveFragment) => {
+    const prefix = "ن".repeat(descriptionLimit - 5);
+    const result = sanitizeClassificationComplaint({
+      subject: "موضوع",
+      description: `${prefix}${pii} نص لاحق`,
+    }, "C000001");
+
+    expect(result.description).toHaveLength(descriptionLimit);
+    expect(result.description).not.toContain(sensitiveFragment);
+    expect(result.description).not.toContain(pii);
+  });
+
+  it("preserves all classification field output limits", () => {
+    const result = sanitizeClassificationComplaint({
+      sourceDetail: "س".repeat(1_000),
+      subject: "م".repeat(2_000),
+      description: "و".repeat(6_000),
+    }, "C000001");
+
+    expect(result.sourceDetail).toHaveLength(500);
+    expect(result.subject).toHaveLength(1_000);
+    expect(result.description).toHaveLength(5_000);
   });
 });
 

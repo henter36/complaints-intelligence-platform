@@ -1,11 +1,14 @@
+import { z } from "zod";
 import {
   CHANGE_CONFIRMED_PRECISION_GATE,
+  FINAL_LLM_OUTCOMES,
   type ClassificationSemanticCatalog,
   type FinalLlmOutcome,
   type LlmStructuredProvider,
   type LlmTokenUsage,
 } from "./llm-classification-contract";
 import type {
+  GoldSetReviewItem,
   GoldSetReviewArtifact,
   GoldSetSplit,
 } from "./llm-classification-gold-set";
@@ -56,6 +59,89 @@ export type LlmClassificationEvaluation = {
     passed: boolean;
   };
 };
+
+const ratioSchema = z.number().min(0).max(1);
+const metricPairSchema = z.strictObject({
+  precision: ratioSchema,
+  recall: ratioSchema,
+  f1: ratioSchema,
+});
+const groupedAccuracySchema = z.strictObject({
+  correct: z.number().int().nonnegative(),
+  total: z.number().int().nonnegative(),
+  accuracy: ratioSchema,
+});
+const evaluationSchema = z.strictObject({
+  status: z.enum(["PILOT_APPROVED", "PILOT_NOT_APPROVED"]),
+  sampleSize: z.number().int().nonnegative(),
+  overallAccuracy: ratioSchema,
+  keep: metricPairSchema,
+  change: metricPairSchema,
+  macroF1: ratioSchema,
+  abstentionRate: ratioSchema,
+  reviewRate: ratioSchema,
+  candidateRetrievalRecall: ratioSchema,
+  classifierVerifierDisagreementRate: ratioSchema,
+  currentAssignmentAgreementRate: ratioSchema,
+  anchoringErrorRate: ratioSchema,
+  perCategoryAccuracy: z.record(z.string(), groupedAccuracySchema),
+  perClassificationAccuracy: z.record(z.string(), groupedAccuracySchema),
+  confusionMatrix: z.record(z.string(), z.record(z.string(), z.number().int().nonnegative())),
+  systematicFailures: z.array(z.string()),
+  gate: z.strictObject({
+    requiredChangePrecision: ratioSchema,
+    minimumHoldoutSize: z.number().int().nonnegative(),
+    minimumExpectedChanges: z.number().int().nonnegative(),
+    observedExpectedChanges: z.number().int().nonnegative(),
+    passed: z.boolean(),
+  }),
+});
+const evaluationPredictionSchema = z.strictObject({
+  reviewId: z.string().min(1),
+  split: z.enum(["DEVELOPMENT", "HOLDOUT"]),
+  currentClassificationId: z.string().nullable(),
+  expectedClassificationId: z.string().min(1),
+  expectedCategoryId: z.string().min(1),
+  outcome: z.enum(FINAL_LLM_OUTCOMES),
+  predictedClassificationId: z.string().nullable(),
+  predictedCategoryId: z.string().nullable(),
+  candidateClassificationIds: z.array(z.string()),
+  classifierDecision: z.enum(["KEEP", "CHANGE", "REVIEW"]).nullable(),
+  classifierVerifierAgreement: z.boolean().nullable(),
+});
+const tokenUsageSchema = z.strictObject({
+  classifierInputTokens: z.number().int().nonnegative(),
+  classifierOutputTokens: z.number().int().nonnegative(),
+  verifierInputTokens: z.number().int().nonnegative(),
+  verifierOutputTokens: z.number().int().nonnegative(),
+  totalRequests: z.number().int().nonnegative(),
+});
+
+export const llmClassificationEvaluationArtifactSchema = z.strictObject({
+  schemaVersion: z.literal(1),
+  generatedAt: z.string().datetime(),
+  model: z.string().min(1),
+  promptVersion: z.string().min(1),
+  taxonomyFingerprint: z.string().min(1),
+  semanticCatalogFingerprint: z.string().min(1),
+  metrics: evaluationSchema,
+  tokenUsage: tokenUsageSchema,
+  predictions: z.array(evaluationPredictionSchema),
+});
+
+export type LlmClassificationEvaluationArtifact = z.infer<
+  typeof llmClassificationEvaluationArtifactSchema
+>;
+
+export function parseLlmClassificationEvaluationArtifact(
+  value: unknown
+): LlmClassificationEvaluationArtifact {
+  const parsed = llmClassificationEvaluationArtifactSchema.safeParse(value);
+  if (!parsed.success) {
+    throw new Error("LLM_CLASSIFICATION_EVALUATION_ARTIFACT_INVALID");
+  }
+  return parsed.data;
+}
 
 function ratio(numerator: number, denominator: number): number {
   return denominator === 0 ? 0 : numerator / denominator;
@@ -216,19 +302,27 @@ export async function runLlmClassificationEvaluation(input: {
   predictions: EvaluationPrediction[];
   tokenUsage: LlmTokenUsage;
 }> {
-  const reviewed = input.goldSet.items.filter(
-    (item) => item.humanReviewStatus === "REVIEWED" && item.humanExpectedClassificationId
+  const reviewedHoldout = input.goldSet.items.filter(
+    (item): item is GoldSetReviewItem & { humanExpectedClassificationId: string } =>
+      item.split === "HOLDOUT" &&
+      item.humanReviewStatus === "REVIEWED" &&
+      item.humanExpectedClassificationId !== null
   );
-  if (reviewed.length === 0) throw new Error("GOLD_SET_NOT_YET_LABELED");
+  if (reviewedHoldout.length === 0) throw new Error("GOLD_SET_NOT_YET_LABELED");
+
+  const classificationById = new Map(
+    input.catalog.entries.map((entry) => [entry.classificationId, entry])
+  );
+  const validatedItems = reviewedHoldout.map((item) => {
+    const expected = classificationById.get(item.humanExpectedClassificationId);
+    if (!expected) throw new Error("GOLD_SET_EXPECTED_CLASSIFICATION_INVALID");
+    return { item, expected };
+  });
 
   const evaluated = await mapWithConcurrency(
-    reviewed,
+    validatedItems,
     input.concurrency ?? 3,
-    async (item) => {
-      const expected = input.catalog.entries.find(
-        (entry) => entry.classificationId === item.humanExpectedClassificationId
-      );
-      if (!expected) throw new Error("GOLD_SET_EXPECTED_CLASSIFICATION_INVALID");
+    async ({ item, expected }) => {
       const result = await runGovernedLlmClassification({
         complaint: {
           opaqueId: item.reviewId,

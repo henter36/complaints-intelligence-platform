@@ -159,6 +159,7 @@ export async function prepareClassificationGoldSet(input: {
   generatedAt?: Date;
 }): Promise<{ review: GoldSetReviewArtifact; privateMap: PrivateGoldMap }> {
   const pool = await loadGoldComplaintPool(input.db);
+  if (pool.length === 0) throw new Error("GOLD_SET_COMPLAINT_POOL_EMPTY");
   const selected = selectStratifiedComplaints(pool, Math.min(input.size, pool.length));
   const items: GoldSetReviewItem[] = [];
   const mappings: PrivateGoldMap["mappings"] = [];

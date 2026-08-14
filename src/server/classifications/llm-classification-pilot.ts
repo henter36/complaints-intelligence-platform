@@ -257,6 +257,8 @@ function cacheKeyFor(input: {
     sanitized,
     key: computeLlmClassificationCacheKey({
       complaint: sanitized,
+      currentClassificationId: input.complaint.classificationId,
+      currentCategoryId: input.complaint.categoryId,
       candidateClassificationIds: candidates.map((entry) => entry.classificationId),
       model: input.model,
       taxonomyFingerprint: input.catalog.taxonomyFingerprint,
@@ -363,12 +365,11 @@ async function processPendingPilotBatches(input: {
   pilot: RunPilotInput;
   state: PilotState;
   cache: PilotCache;
-  selected: readonly PilotComplaint[];
   selectedById: ReadonlyMap<string, PilotComplaint>;
+  sequenceById: ReadonlyMap<string, number>;
 }): Promise<void> {
   const pending = input.state.items.filter((item) => item.status === "PENDING");
   const concurrency = input.pilot.concurrency ?? 3;
-  const sequenceById = new Map(input.selected.map((entry, index) => [entry.id, index + 1]));
   writeLlmClassificationJson(input.pilot.statePath, input.state, { private: true });
 
   for (let offset = 0; offset < pending.length; offset += concurrency) {
@@ -377,7 +378,7 @@ async function processPendingPilotBatches(input: {
       processPilotStateItem({
         stateItem,
         selectedById: input.selectedById,
-        sequenceById,
+        sequenceById: input.sequenceById,
         pilot: input.pilot,
         cache: input.cache,
       })
@@ -422,16 +423,19 @@ function summarizePilotState(state: PilotState): {
 
 function buildPrivatePilotReview(
   state: PilotState,
-  selectedById: ReadonlyMap<string, PilotComplaint>
+  selectedById: ReadonlyMap<string, PilotComplaint>,
+  sequenceById: ReadonlyMap<string, number>
 ): PrivatePilotReview {
   return {
     schemaVersion: 1,
     runId: state.runId,
-    items: state.items.flatMap((item, index) => {
+    items: state.items.flatMap((item) => {
       if (!item.result || !["CHANGE_CONFIRMED", "REVIEW"].includes(item.result.outcome)) return [];
       const complaint = selectedById.get(item.complaintId);
       if (!complaint) return [];
-      const sanitized = sanitizeComplaintForClassification(complaint, index + 1);
+      const sequence = sequenceById.get(complaint.id);
+      if (!sequence) throw new Error("PILOT_SEQUENCE_MISSING");
+      const sanitized = sanitizeComplaintForClassification(complaint, sequence);
       return [{
         opaqueId: sanitized.opaqueId,
         sanitizedSubject: sanitized.subject,
@@ -453,10 +457,11 @@ export async function runLlmClassificationPilot(input: RunPilotInput): Promise<P
   const pool = await loadPilotComplaints(input.db);
   const selected = selectStratifiedComplaints(pool, Math.min(limit, pool.length));
   const selectedById = new Map(selected.map((complaint) => [complaint.id, complaint]));
+  const sequenceById = new Map(selected.map((complaint, index) => [complaint.id, index + 1]));
   const previousState = loadOptionalJson<PilotState>(input.statePath);
   const state = initializeState({ previous: previousState, selected, model: input.model, catalog: input.catalog });
   const cache = loadOptionalJson<PilotCache>(input.cachePath) ?? {};
-  await processPendingPilotBatches({ pilot: input, state, cache, selected, selectedById });
+  await processPendingPilotBatches({ pilot: input, state, cache, selectedById, sequenceById });
   const summary = summarizePilotState(state);
   const artifact: PilotArtifact = {
     schemaVersion: 1,
@@ -475,7 +480,7 @@ export async function runLlmClassificationPilot(input: RunPilotInput): Promise<P
     estimate: estimatePilot(selected, input.catalog),
     tokenUsage: summary.tokenUsage,
   };
-  const privateReview = buildPrivatePilotReview(state, selectedById);
+  const privateReview = buildPrivatePilotReview(state, selectedById, sequenceById);
   writeLlmClassificationJson(input.artifactPath, artifact);
   writeLlmClassificationJson(input.privateReviewPath, privateReview, { private: true });
   return artifact;

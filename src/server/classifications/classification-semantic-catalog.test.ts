@@ -72,6 +72,99 @@ describe("classification semantic catalog", () => {
       confusableWith: [],
       generationStatus: "GENERATED_BY_LLM",
     });
+    expect(provider.mock.calls[0][0].schema).toEqual({
+      type: "object",
+      additionalProperties: false,
+      required: ["semanticDefinition", "includedConcepts", "excludedConcepts", "confusableWith"],
+      properties: {
+        semanticDefinition: { type: "string" },
+        includedConcepts: { type: "array", items: { type: "string" } },
+        excludedConcepts: { type: "array", items: { type: "string" } },
+        confusableWith: { type: "array", items: { type: "string" } },
+      },
+    });
+    const providerSchema = JSON.stringify(provider.mock.calls[0][0].schema);
+    expect(providerSchema).not.toContain("minLength");
+    expect(providerSchema).not.toContain("maxLength");
+    expect(providerSchema).not.toContain("maxItems");
+  });
+
+  it.each([
+    ["overly long definition", { semanticDefinition: "س".repeat(801) }],
+    ["too many included concepts", { includedConcepts: Array(21).fill("مفهوم") }],
+    ["too many excluded concepts", { excludedConcepts: Array(21).fill("استثناء") }],
+    ["too many confusable IDs", { confusableWith: Array(13).fill("other") }],
+  ])("keeps Zod output limits for %s", async (_label, override) => {
+    const db = {
+      classification: { findMany: vi.fn().mockResolvedValue([classification]) },
+      complaint: { findMany: vi.fn().mockResolvedValue([]) },
+    } as unknown as PrismaClient;
+    const provider = vi.fn().mockResolvedValue({
+      output: {
+        semanticDefinition: "تعريف",
+        includedConcepts: ["مفهوم"],
+        excludedConcepts: ["استثناء"],
+        confusableWith: [],
+        ...override,
+      },
+      inputTokens: 1,
+      outputTokens: 1,
+      model: "test-model",
+    });
+
+    await expect(buildClassificationSemanticCatalog({
+      db,
+      model: "test-model",
+      provider,
+      generatedAt: new Date("2026-08-14T00:00:00.000Z"),
+    })).rejects.toThrow("SEMANTIC_CATALOG_MODEL_OUTPUT_INVALID");
+  });
+
+  it("bounds deterministic complaint examples per active classification", async () => {
+    const secondClassification = {
+      ...classification,
+      id: "books",
+      nameAr: "المكتبة",
+    };
+    const findMany = vi.fn().mockImplementation(({
+      where,
+      take,
+    }: { where: { classificationId: string }; take: number }) =>
+      Promise.resolve(Array.from({ length: Math.min(60, take) }, (_, index) => ({
+        id: `${where.classificationId}-${index}`,
+        sourceDetail: null,
+        subject: `موضوع ${index}`,
+        description: `وصف ${index}`,
+      })))
+    );
+    const db = {
+      classification: { findMany: vi.fn().mockResolvedValue([classification, secondClassification]) },
+      complaint: { findMany },
+    } as unknown as PrismaClient;
+    const provider = vi.fn().mockResolvedValue({
+      output: {
+        semanticDefinition: "تعريف",
+        includedConcepts: ["مفهوم"],
+        excludedConcepts: [],
+        confusableWith: [],
+      },
+      inputTokens: 1,
+      outputTokens: 1,
+      model: "test-model",
+    });
+
+    await buildClassificationSemanticCatalog({ db, model: "test-model", provider });
+
+    expect(findMany).toHaveBeenCalledTimes(2);
+    for (const [query] of findMany.mock.calls) {
+      expect(query).toMatchObject({ orderBy: { id: "asc" }, take: 50 });
+      expect(typeof query.where.classificationId).toBe("string");
+    }
+    expect(provider).toHaveBeenCalledTimes(2);
+    for (const [request] of provider.mock.calls) {
+      const providerInput = JSON.parse(request.input) as { sanitizedExamples: unknown[] };
+      expect(providerInput.sanitizedExamples.length).toBeLessThanOrEqual(3);
+    }
   });
 
   it("widens weak retrieval to preserve candidate recall", () => {

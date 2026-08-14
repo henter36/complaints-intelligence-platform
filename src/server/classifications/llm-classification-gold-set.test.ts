@@ -94,4 +94,13 @@ describe("human Gold Set workflow", () => {
     expect(result.privateMap.mappings[0].complaintId).toContain("real-");
     expect(result.review.developmentCount + result.review.holdoutCount).toBe(10);
   });
+
+  it("reports an empty complaint pool before stratified selection", async () => {
+    const db = {
+      complaint: { findMany: vi.fn().mockResolvedValue([]) },
+    } as unknown as PrismaClient;
+
+    await expect(prepareClassificationGoldSet({ db, catalog, size: 400 }))
+      .rejects.toThrow("GOLD_SET_COMPLAINT_POOL_EMPTY");
+  });
 });

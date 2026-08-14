@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import { env } from "@/lib/env";
 import type {
   ClassificationSemanticCatalog,
@@ -37,6 +37,10 @@ export function localArtifactPath(name: string): string {
   return resolve(LLM_CLASSIFICATION_LOCAL_ROOT, name);
 }
 
+export function artifactBasename(path: string): string {
+  return basename(path);
+}
+
 export function loadSemanticCatalog(path?: string): ClassificationSemanticCatalog {
   return readLlmClassificationJson<ClassificationSemanticCatalog>(
     path ?? localArtifactPath("semantic-catalog-draft.json")
@@ -58,4 +62,30 @@ export function safeCliError(error: unknown): string {
   if (!(error instanceof Error)) return "LLM_CLASSIFICATION_OPERATION_FAILED";
   const allowed = /^[A-Z0-9_:-]+$/;
   return allowed.test(error.message) ? error.message : "LLM_CLASSIFICATION_OPERATION_FAILED";
+}
+
+export async function runLlmClassificationCli(input: {
+  run: () => Promise<void>;
+  disconnect: () => Promise<void>;
+  reportError?: (message: string) => void;
+  setExitCode?: (code: number) => void;
+}): Promise<void> {
+  const reportError = input.reportError ?? ((message: string) => console.error(message));
+  const setExitCode = input.setExitCode ?? ((code: number) => {
+    process.exitCode = code;
+  });
+
+  try {
+    await input.run();
+  } catch (error: unknown) {
+    reportError(safeCliError(error));
+    setExitCode(1);
+  }
+
+  try {
+    await input.disconnect();
+  } catch {
+    reportError("LLM_CLASSIFICATION_DISCONNECT_FAILED");
+    setExitCode(1);
+  }
 }
