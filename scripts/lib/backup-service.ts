@@ -16,7 +16,7 @@ const MAX_MANIFEST_SIZE = 10 * 1024 * 1024;
 const SQLITE_EXECUTABLES: Partial<Record<NodeJS.Platform, string>> = {
   darwin: "/usr/bin/sqlite3",
   linux: "/usr/bin/sqlite3",
-  win32: "C:\\Windows\\System32\\sqlite3.exe",
+  win32: String.raw`C:\Windows\System32\sqlite3.exe`,
 };
 
 export type BackupLogger = Pick<Console, "log" | "warn" | "error">;
