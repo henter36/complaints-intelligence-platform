@@ -8,6 +8,7 @@ export const CLASSIFICATION_ASSIGNMENT_SOURCES = {
   IMPORT_EXPLICIT: "IMPORT_EXPLICIT",
   SOURCE_DETAIL_RULE: "SOURCE_DETAIL_RULE",
   HISTORICAL_BACKFILL: "HISTORICAL_BACKFILL",
+  HISTORICAL_CORRECTION: "HISTORICAL_CORRECTION",
   LEGACY_UNKNOWN: "LEGACY_UNKNOWN",
 } as const;
 
@@ -32,6 +33,7 @@ export const AUTOMATION_PROTECTED_ASSIGNMENT_SOURCES: ReadonlySet<Classification
   new Set([
     CLASSIFICATION_ASSIGNMENT_SOURCES.MANUAL,
     CLASSIFICATION_ASSIGNMENT_SOURCES.IMPORT_EXPLICIT,
+    CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_CORRECTION,
     CLASSIFICATION_ASSIGNMENT_SOURCES.LEGACY_UNKNOWN,
   ]);
 
@@ -76,7 +78,7 @@ export type BuildClassificationAssignmentInput = {
 
 /**
  * Build assignment metadata for a classification write.
- * Automated sources (SOURCE_DETAIL_RULE, HISTORICAL_BACKFILL) should pass taxonomyFingerprint.
+ * Automated sources (SOURCE_DETAIL_RULE, HISTORICAL_BACKFILL, HISTORICAL_CORRECTION) should pass taxonomyFingerprint.
  * HISTORICAL_BACKFILL should pass assignmentRunId.
  */
 export function buildClassificationAssignmentMetadata(
@@ -85,7 +87,8 @@ export function buildClassificationAssignmentMetadata(
   const assignedAt = input.assignedAt ?? new Date();
   const needsFingerprint =
     input.source === CLASSIFICATION_ASSIGNMENT_SOURCES.SOURCE_DETAIL_RULE ||
-    input.source === CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL;
+    input.source === CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_BACKFILL ||
+    input.source === CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_CORRECTION;
 
   return {
     classificationAssignmentSource: input.source,

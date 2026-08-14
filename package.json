@@ -33,6 +33,7 @@
     "integrity:check": "tsx scripts/integrity-check.ts",
     "classifications:restructure": "tsx scripts/restructure-classification-taxonomy.ts",
     "classifications:backfill": "tsx scripts/backfill-historical-classifications.ts",
+    "classifications:audit": "tsx scripts/audit-historical-classifications.ts",
     "db:repair-taxonomy-migration": "tsx scripts/repair-classification-taxonomy-migration.ts",
     "release:manifest": "tsx scripts/release-manifest.ts",
     "release:check": "tsx scripts/release-check.ts"
@@ -136,6 +137,7 @@
     "postcss": "^8.5.18",
     "sharp": "^0.35.3",
     "brace-expansion@5": "5.0.9",
+    "nanoid@3": "3.3.18",
     "exceljs": {
       "archiver": "^8.0.0",
       "uuid": "^11.1.0",

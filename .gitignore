@@ -36,6 +36,7 @@ output/pdf/
 output/playwright/
 output/classification-backfill-*.json
 output/backups/
+.local/
 .DS_Store
 
 .idea/
