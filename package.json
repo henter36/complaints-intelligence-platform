@@ -34,6 +34,10 @@
     "classifications:restructure": "tsx scripts/restructure-classification-taxonomy.ts",
     "classifications:backfill": "tsx scripts/backfill-historical-classifications.ts",
     "classifications:audit": "tsx scripts/audit-historical-classifications.ts",
+    "classifications:semantic-catalog": "tsx scripts/build-classification-semantic-catalog.ts",
+    "classifications:gold-set": "tsx scripts/prepare-classification-gold-set.ts",
+    "classifications:llm-eval": "tsx scripts/evaluate-llm-classifier.ts",
+    "classifications:llm-pilot": "tsx scripts/run-llm-classification-pilot.ts",
     "db:repair-taxonomy-migration": "tsx scripts/repair-classification-taxonomy-migration.ts",
     "release:manifest": "tsx scripts/release-manifest.ts",
     "release:check": "tsx scripts/release-check.ts"

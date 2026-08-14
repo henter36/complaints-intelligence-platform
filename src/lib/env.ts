@@ -49,6 +49,7 @@ const envSchema = z.object({
   AI_ENABLED: z.string().optional(),
   AI_PROVIDER: z.string().optional(),
   AI_MODEL: z.string().optional(),
+  AI_CLASSIFICATION_MODEL: z.string().optional(),
   AI_MAX_INPUT_COMPLAINTS: z.coerce.number().int().positive().optional(),
   AI_MAX_INPUT_CHARS: z.coerce.number().int().positive().optional(),
   AI_REQUEST_TIMEOUT_SECONDS: z.coerce.number().int().positive().optional(),
@@ -121,6 +122,8 @@ const envBase = {
   aiEnabled,
   aiProvider: parsed.data.AI_PROVIDER || "openai",
   aiModel: parsed.data.AI_MODEL || "gpt-4o-mini",
+  aiClassificationModel:
+    parsed.data.AI_CLASSIFICATION_MODEL || parsed.data.AI_MODEL || "gpt-4o-mini",
   aiMaxInputComplaints: parsed.data.AI_MAX_INPUT_COMPLAINTS ?? 500,
   aiMaxInputChars: parsed.data.AI_MAX_INPUT_CHARS ?? 120_000,
   aiRequestTimeoutSeconds: parsed.data.AI_REQUEST_TIMEOUT_SECONDS ?? 60,

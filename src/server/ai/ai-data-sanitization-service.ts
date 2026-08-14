@@ -208,6 +208,60 @@ export interface SanitizedComplaintRecord {
   isOverdue?: boolean;
 }
 
+export interface ClassificationComplaintInput {
+  sourceDetail?: string | null;
+  subject: string;
+  description?: string | null;
+}
+
+export interface SanitizedClassificationComplaint {
+  opaqueId: string;
+  sourceDetail: string;
+  subject: string;
+  description: string;
+}
+
+const CLASSIFICATION_TEXT_LIMITS = {
+  sourceDetail: 500,
+  subject: 1_000,
+  description: 5_000,
+} as const;
+
+// Covers the longest bounded PII token used by classification sanitization,
+// including a standards-sized email address, when it crosses a field boundary.
+const CLASSIFICATION_PII_BOUNDARY_LOOKAHEAD = 320;
+
+function sanitizeClassificationField(value: string, limit: number): string {
+  const sanitizationLimit = Math.min(
+    MAX_SANITIZATION_INPUT_LENGTH,
+    limit + CLASSIFICATION_PII_BOUNDARY_LOOKAHEAD
+  );
+  return sanitizeText(value.slice(0, sanitizationLimit)).slice(0, limit);
+}
+
+/**
+ * Minimal complaint projection allowed in the LLM classification boundary.
+ * The caller supplies an opaque request-local ID; database and external IDs are
+ * intentionally not accepted by this contract.
+ */
+export function sanitizeClassificationComplaint(
+  input: ClassificationComplaintInput,
+  opaqueId: string
+): SanitizedClassificationComplaint {
+  return {
+    opaqueId,
+    sourceDetail: sanitizeClassificationField(
+      input.sourceDetail ?? "",
+      CLASSIFICATION_TEXT_LIMITS.sourceDetail
+    ),
+    subject: sanitizeClassificationField(input.subject, CLASSIFICATION_TEXT_LIMITS.subject),
+    description: sanitizeClassificationField(
+      input.description ?? "",
+      CLASSIFICATION_TEXT_LIMITS.description
+    ),
+  };
+}
+
 export function sanitizeComplaint(c: ComplaintInputRecord): SanitizedComplaintRecord {
   const overdue = c.dueDate ? new Date(c.dueDate) < new Date() : false;
   const month = c.complaintDate

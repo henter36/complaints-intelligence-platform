@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "status": "DRAFT_REQUIRES_REVIEW",
+  "generatedAt": "YYYY-MM-DDTHH:mm:ss.sssZ",
+  "model": null,
+  "taxonomyFingerprint": "REPLACE_AFTER_REVIEW",
+  "semanticCatalogFingerprint": "REPLACE_AFTER_REVIEW",
+  "categoryCount": 0,
+  "classificationCount": 0,
+  "entries": [
+    {
+      "classificationId": "REPLACE_WITH_ACTIVE_ID",
+      "classificationName": "اسم التصنيف",
+      "categoryId": "REPLACE_WITH_ACTIVE_CATEGORY_ID",
+      "categoryName": "اسم التصنيف الرئيسي",
+      "keywords": [],
+      "semanticDefinition": null,
+      "includedConcepts": [],
+      "excludedConcepts": [],
+      "confusableWith": [],
+      "status": "DRAFT_REQUIRES_REVIEW",
+      "generationStatus": "PENDING_LLM_ENRICHMENT"
+    }
+  ]
+}
