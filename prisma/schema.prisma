@@ -159,73 +159,73 @@ model Classification {
 }
 
 model Complaint {
-  id                    String                   @id @default(cuid())
-  externalId            String?                  @unique
-  sourceReference       String?
-  complaintDate         DateTime?
-  receivedAt            DateTime                 @default(now())
-  dueDate               DateTime?
-  closedAt              DateTime?
-  status                ComplaintStatus          @default(NEW)
-  subject               String
-  description           String?
-  complainantName       String?
-  complainantIdentifier String?
-  complainantPhone      String?
-  region                String?
-  facility              String?
-  facilityNormalizedName String?
-  department            String?
-  categoryId            String?
-  category              Category?                @relation(fields: [categoryId], references: [id])
-  classificationId      String?
-  classification        Classification?          @relation(fields: [classificationId], references: [id])
-  classificationAssignmentSource     String?
-  classificationAssignedAt           DateTime?
-  classificationAssignedBy           String?
-  classificationTaxonomyFingerprint  String?
-  classificationAssignmentRunId      String?
-  priority              ComplaintPriority        @default(MEDIUM)
-  severity              ComplaintPriority        @default(MEDIUM)
-  channel               String?
-  resolution            String?
-  actionTaken           String?
-  actionDescription     String?
-  sourceClosedBy        String?
-  wingCode              String?
-  sourceUpdatedAt       DateTime?
-  sourceModifiedAt      DateTime?
-  sourceUpdatedBy       String?
-  sourceOrigin          String?
-  sourceStatus          String?
-  sourceDetail          String?
-  sourceActionStatus    String?
-  firstActionAt         DateTime?
-  processingStartedAt   DateTime?
-  delayReason           String?
-  isRepeated            Boolean                  @default(false)
-  isValidated           Boolean                  @default(false)
-  beneficiarySatisfaction Int?
-  aiClassification      String?
-  aiConfidence          Float?
-  aiReasoning           String?
-  aiSentiment           String?
-  aiSeverityScore       Float?
-  aiSummary             String?
-  aiAnalyzedAt          DateTime?
-  isPotentialDuplicate  Boolean                  @default(false)
-  duplicateOfId         String?
-  createdAt             DateTime                 @default(now())
-  updatedAt             DateTime                 @updatedAt
-  version               Int                      @default(1)
-  isDeleted             Boolean                  @default(false)
-  deletedAt             DateTime?
-  importBatchId         String?
-  importBatch           ImportBatch?             @relation(fields: [importBatchId], references: [id])
-  statusHistory         ComplaintStatusHistory[]
-  matchedImportRows     ImportBatchRow[]         @relation("MatchedComplaintRows")
-  createdImportRows     ImportBatchRow[]         @relation("CreatedComplaintRows")
-  textRiskSignals       TextRiskSignal[]
+  id                                String                   @id @default(cuid())
+  externalId                        String?                  @unique
+  sourceReference                   String?
+  complaintDate                     DateTime?
+  receivedAt                        DateTime                 @default(now())
+  dueDate                           DateTime?
+  closedAt                          DateTime?
+  status                            ComplaintStatus          @default(NEW)
+  subject                           String
+  description                       String?
+  complainantName                   String?
+  complainantIdentifier             String?
+  complainantPhone                  String?
+  region                            String?
+  facility                          String?
+  facilityNormalizedName            String?
+  department                        String?
+  categoryId                        String?
+  category                          Category?                @relation(fields: [categoryId], references: [id])
+  classificationId                  String?
+  classification                    Classification?          @relation(fields: [classificationId], references: [id])
+  classificationAssignmentSource    String?
+  classificationAssignedAt          DateTime?
+  classificationAssignedBy          String?
+  classificationTaxonomyFingerprint String?
+  classificationAssignmentRunId     String?
+  priority                          ComplaintPriority        @default(MEDIUM)
+  severity                          ComplaintPriority        @default(MEDIUM)
+  channel                           String?
+  resolution                        String?
+  actionTaken                       String?
+  actionDescription                 String?
+  sourceClosedBy                    String?
+  wingCode                          String?
+  sourceUpdatedAt                   DateTime?
+  sourceModifiedAt                  DateTime?
+  sourceUpdatedBy                   String?
+  sourceOrigin                      String?
+  sourceStatus                      String?
+  sourceDetail                      String?
+  sourceActionStatus                String?
+  firstActionAt                     DateTime?
+  processingStartedAt               DateTime?
+  delayReason                       String?
+  isRepeated                        Boolean                  @default(false)
+  isValidated                       Boolean                  @default(false)
+  beneficiarySatisfaction           Int?
+  aiClassification                  String?
+  aiConfidence                      Float?
+  aiReasoning                       String?
+  aiSentiment                       String?
+  aiSeverityScore                   Float?
+  aiSummary                         String?
+  aiAnalyzedAt                      DateTime?
+  isPotentialDuplicate              Boolean                  @default(false)
+  duplicateOfId                     String?
+  createdAt                         DateTime                 @default(now())
+  updatedAt                         DateTime                 @updatedAt
+  version                           Int                      @default(1)
+  isDeleted                         Boolean                  @default(false)
+  deletedAt                         DateTime?
+  importBatchId                     String?
+  importBatch                       ImportBatch?             @relation(fields: [importBatchId], references: [id])
+  statusHistory                     ComplaintStatusHistory[]
+  matchedImportRows                 ImportBatchRow[]         @relation("MatchedComplaintRows")
+  createdImportRows                 ImportBatchRow[]         @relation("CreatedComplaintRows")
+  textRiskSignals                   TextRiskSignal[]
 
   @@index([sourceReference])
   @@index([status])
@@ -242,28 +242,28 @@ model Complaint {
 }
 
 model ClassificationBackfillRun {
-  id                   String   @id @default(cuid())
-  operation            String
-  status               String
-  periodFrom           DateTime
-  periodToExclusive    DateTime
-  taxonomyFingerprint  String
-  manifestHash         String
-  eligibleCount        Int      @default(0)
-  plannedCount         Int      @default(0)
-  appliedCount         Int      @default(0)
-  skippedCount         Int      @default(0)
-  failedCount          Int      @default(0)
-  batchSize            Int      @default(500)
-  actor                String
-  startedAt            DateTime @default(now())
-  completedAt          DateTime?
-  rollbackOfRunId      String?
-  failureCode          String?
-  failureMessage       String?
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
-  items                ClassificationBackfillItem[]
+  id                  String                       @id @default(cuid())
+  operation           String
+  status              String
+  periodFrom          DateTime
+  periodToExclusive   DateTime
+  taxonomyFingerprint String
+  manifestHash        String
+  eligibleCount       Int                          @default(0)
+  plannedCount        Int                          @default(0)
+  appliedCount        Int                          @default(0)
+  skippedCount        Int                          @default(0)
+  failedCount         Int                          @default(0)
+  batchSize           Int                          @default(500)
+  actor               String
+  startedAt           DateTime                     @default(now())
+  completedAt         DateTime?
+  rollbackOfRunId     String?
+  failureCode         String?
+  failureMessage      String?
+  createdAt           DateTime                     @default(now())
+  updatedAt           DateTime                     @updatedAt
+  items               ClassificationBackfillItem[]
 
   @@index([status])
   @@index([manifestHash])
@@ -272,30 +272,100 @@ model ClassificationBackfillRun {
 }
 
 model ClassificationBackfillItem {
-  id                              String    @id @default(cuid())
-  runId                           String
-  run                             ClassificationBackfillRun @relation(fields: [runId], references: [id], onDelete: Cascade)
-  complaintId                     String
-  expectedVersion                 Int
-  appliedVersion                  Int?
-  previousClassificationId        String?
-  previousCategoryId              String?
-  targetClassificationId          String
-  targetCategoryId                String?
+  id                               String                    @id @default(cuid())
+  runId                            String
+  run                              ClassificationBackfillRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  complaintId                      String
+  expectedVersion                  Int
+  appliedVersion                   Int?
+  previousClassificationId         String?
+  previousCategoryId               String?
+  targetClassificationId           String
+  targetCategoryId                 String?
   targetClassificationNameSnapshot String
-  previousAssignmentSource        String?
-  targetAssignmentSource          String
-  previousAssignedAt              DateTime?
-  previousAssignedBy              String?
-  previousTaxonomyFingerprint     String?
-  previousAssignmentRunId         String?
-  sourceDetailHash                String
-  result                          String
-  skipReason                      String?
-  appliedAt                       DateTime?
-  rolledBackAt                    DateTime?
-  createdAt                       DateTime  @default(now())
-  updatedAt                       DateTime  @updatedAt
+  previousAssignmentSource         String?
+  targetAssignmentSource           String
+  previousAssignedAt               DateTime?
+  previousAssignedBy               String?
+  previousTaxonomyFingerprint      String?
+  previousAssignmentRunId          String?
+  sourceDetailHash                 String
+  result                           String
+  skipReason                       String?
+  appliedAt                        DateTime?
+  rolledBackAt                     DateTime?
+  createdAt                        DateTime                  @default(now())
+  updatedAt                        DateTime                  @updatedAt
+
+  @@unique([runId, complaintId])
+  @@index([runId])
+  @@index([complaintId])
+  @@index([result])
+  @@index([targetClassificationId])
+}
+
+model ClassificationAuditRun {
+  id                         String                    @id @default(cuid())
+  operation                  String
+  status                     String
+  taxonomyFingerprint        String
+  databaseFingerprint        String
+  manifestHash               String
+  totalComplaintCountBefore  Int
+  totalComplaintCountAfter   Int?
+  activeComplaintCountBefore Int
+  activeComplaintCountAfter  Int?
+  plannedCount               Int                       @default(0)
+  appliedCount               Int                       @default(0)
+  skippedCount               Int                       @default(0)
+  failedCount                Int                       @default(0)
+  reviewCount                Int                       @default(0)
+  ambiguousCount             Int                       @default(0)
+  insufficientEvidenceCount  Int                       @default(0)
+  invalidReferenceCount      Int                       @default(0)
+  batchSize                  Int                       @default(200)
+  actor                      String
+  backupName                 String?
+  startedAt                  DateTime                  @default(now())
+  completedAt                DateTime?
+  rollbackOfRunId            String?
+  failureCode                String?
+  failureMessage             String?
+  createdAt                  DateTime                  @default(now())
+  updatedAt                  DateTime                  @updatedAt
+  items                      ClassificationAuditItem[]
+
+  @@index([status])
+  @@index([manifestHash])
+  @@index([rollbackOfRunId])
+  @@index([startedAt])
+}
+
+model ClassificationAuditItem {
+  id                          String                 @id @default(cuid())
+  runId                       String
+  run                         ClassificationAuditRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  complaintId                 String
+  expectedVersion             Int
+  appliedVersion              Int?
+  previousClassificationId    String?
+  previousCategoryId          String?
+  targetClassificationId      String
+  targetCategoryId            String
+  previousAssignmentSource    String?
+  previousAssignedAt          DateTime?
+  previousAssignedBy          String?
+  previousTaxonomyFingerprint String?
+  previousAssignmentRunId     String?
+  complaintStateHash          String
+  reasonCode                  String
+  confidence                  Float
+  result                      String
+  skipReason                  String?
+  appliedAt                   DateTime?
+  rolledBackAt                DateTime?
+  createdAt                   DateTime               @default(now())
+  updatedAt                   DateTime               @updatedAt
 
   @@unique([runId, complaintId])
   @@index([runId])
@@ -321,52 +391,52 @@ model ComplaintStatusHistory {
 }
 
 model ImportBatch {
-  id              String              @id @default(cuid())
-  fileName        String
-  originalFileName String
-  fileHash        String
-  fileSize        Int
-  mimeType        String?
-  periodType      PeriodType
-  periodStart     DateTime
-  periodEnd       DateTime
-  status          ImportBatchStatus   @default(UPLOADED)
-  totalRows       Int                 @default(0)
-  validRows       Int                 @default(0)
-  invalidRows     Int                 @default(0)
-  newRows         Int                 @default(0)
-  updatedRows     Int                 @default(0)
-  duplicateRows   Int                 @default(0)
-  rejectedRows    Int                 @default(0)
-  warningRows      Int                 @default(0)
-  noChangeRows     Int                 @default(0)
-  uploadedAt      DateTime            @default(now())
-  validatedAt     DateTime?
-  confirmedAt     DateTime?
-  rolledBackAt    DateTime?
-  processingStartedAt DateTime?
-  processingCompletedAt DateTime?
-  createdBy       String              @default("single-admin")
-  notes           String?
-  failureCode     String?
-  storageKey      String?
-  selectedSheet   String?
-  columnMapping   Json?
+  id                      String                   @id @default(cuid())
+  fileName                String
+  originalFileName        String
+  fileHash                String
+  fileSize                Int
+  mimeType                String?
+  periodType              PeriodType
+  periodStart             DateTime
+  periodEnd               DateTime
+  status                  ImportBatchStatus        @default(UPLOADED)
+  totalRows               Int                      @default(0)
+  validRows               Int                      @default(0)
+  invalidRows             Int                      @default(0)
+  newRows                 Int                      @default(0)
+  updatedRows             Int                      @default(0)
+  duplicateRows           Int                      @default(0)
+  rejectedRows            Int                      @default(0)
+  warningRows             Int                      @default(0)
+  noChangeRows            Int                      @default(0)
+  uploadedAt              DateTime                 @default(now())
+  validatedAt             DateTime?
+  confirmedAt             DateTime?
+  rolledBackAt            DateTime?
+  processingStartedAt     DateTime?
+  processingCompletedAt   DateTime?
+  createdBy               String                   @default("single-admin")
+  notes                   String?
+  failureCode             String?
+  storageKey              String?
+  selectedSheet           String?
+  columnMapping           Json?
   confirmationFailureCode String?
-  facilitySyncStatus FacilitySyncStatus?
-  facilitySyncAttempts Int                  @default(0)
-  facilitySyncError String?
-  facilitySyncedAt DateTime?
-  rollbackFailureCode String?
-  rollbackReason  String?
-  appliedCreatedRows Int                 @default(0)
-  appliedUpdatedRows Int                 @default(0)
-  createdAt       DateTime            @default(now())
-  updatedAt       DateTime            @updatedAt
-  complaints      Complaint[]
-  rows            ImportBatchRow[]
-  statusHistory   ComplaintStatusHistory[]
-  changeSnapshots ImportChangeSnapshot[]
+  facilitySyncStatus      FacilitySyncStatus?
+  facilitySyncAttempts    Int                      @default(0)
+  facilitySyncError       String?
+  facilitySyncedAt        DateTime?
+  rollbackFailureCode     String?
+  rollbackReason          String?
+  appliedCreatedRows      Int                      @default(0)
+  appliedUpdatedRows      Int                      @default(0)
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+  complaints              Complaint[]
+  rows                    ImportBatchRow[]
+  statusHistory           ComplaintStatusHistory[]
+  changeSnapshots         ImportChangeSnapshot[]
 
   @@index([fileHash])
   @@index([status])
@@ -375,27 +445,27 @@ model ImportBatch {
 }
 
 model ImportBatchRow {
-  id                String                    @id @default(cuid())
-  importBatchId     String
-  importBatch       ImportBatch               @relation(fields: [importBatchId], references: [id], onDelete: Cascade)
-  rowNumber         Int
-  rawData           Json
-  normalizedData    Json?
-  externalId        String?
-  action            ImportRowAction           @default(NEW)
-  validationStatus  ImportRowValidationStatus @default(PENDING)
-  validationErrors  Json?
-  validationWarnings Json?
-  matchedComplaintId String?
-  matchedComplaint  Complaint?                @relation("MatchedComplaintRows", fields: [matchedComplaintId], references: [id])
+  id                      String                    @id @default(cuid())
+  importBatchId           String
+  importBatch             ImportBatch               @relation(fields: [importBatchId], references: [id], onDelete: Cascade)
+  rowNumber               Int
+  rawData                 Json
+  normalizedData          Json?
+  externalId              String?
+  action                  ImportRowAction           @default(NEW)
+  validationStatus        ImportRowValidationStatus @default(PENDING)
+  validationErrors        Json?
+  validationWarnings      Json?
+  matchedComplaintId      String?
+  matchedComplaint        Complaint?                @relation("MatchedComplaintRows", fields: [matchedComplaintId], references: [id])
   matchedComplaintVersion Int?
-  createdComplaintId String?
-  createdComplaint  Complaint?                @relation("CreatedComplaintRows", fields: [createdComplaintId], references: [id])
-  appliedAt         DateTime?
-  rolledBackAt      DateTime?
-  createdAt         DateTime                  @default(now())
-  updatedAt         DateTime                  @updatedAt
-  changeSnapshots   ImportChangeSnapshot[]
+  createdComplaintId      String?
+  createdComplaint        Complaint?                @relation("CreatedComplaintRows", fields: [createdComplaintId], references: [id])
+  appliedAt               DateTime?
+  rolledBackAt            DateTime?
+  createdAt               DateTime                  @default(now())
+  updatedAt               DateTime                  @updatedAt
+  changeSnapshots         ImportChangeSnapshot[]
 
   @@unique([importBatchId, rowNumber])
   @@index([importBatchId])
@@ -443,7 +513,7 @@ model AuditLog {
 
 model AdminCredential {
   id                String   @id @default(cuid())
-  singletonKey      String   @default("single-admin") @unique
+  singletonKey      String   @unique @default("single-admin")
   username          String   @unique
   passwordHash      String
   passwordChangedAt DateTime @default(now())
@@ -542,18 +612,18 @@ model ReportRun {
 }
 
 model ReportArtifact {
-  id           String       @id @default(cuid())
-  reportRunId  String
-  reportRun    ReportRun    @relation(fields: [reportRunId], references: [id], onDelete: Cascade)
-  format       ReportFormat
-  storageKey   String
-  fileName     String
-  mimeType     String
-  fileSize     Int
-  sha256       String
-  createdAt    DateTime     @default(now())
-  expiresAt    DateTime
-  deletedAt    DateTime?
+  id          String       @id @default(cuid())
+  reportRunId String
+  reportRun   ReportRun    @relation(fields: [reportRunId], references: [id], onDelete: Cascade)
+  format      ReportFormat
+  storageKey  String
+  fileName    String
+  mimeType    String
+  fileSize    Int
+  sha256      String
+  createdAt   DateTime     @default(now())
+  expiresAt   DateTime
+  deletedAt   DateTime?
 
   @@index([reportRunId])
   @@index([expiresAt])
@@ -685,24 +755,24 @@ enum AiRunStatus {
 }
 
 model AiAnalysisRun {
-  id                  String         @id @default(cuid())
-  analysisType        AiAnalysisType
-  status              AiRunStatus    @default(PENDING)
-  requestedBy         String         @default("single-admin")
-  filtersSnapshot     Json
-  inputSummary        Json
-  model               String?
-  provider            String?
-  promptVersion       String?
-  startedAt           DateTime?
-  completedAt         DateTime?
-  failedAt            DateTime?
-  errorCode           String?
-  errorMessage        String?
-  createdAt           DateTime       @default(now())
-  expiresAt           DateTime?
-  result              AiAnalysisResult?
-  feedbacks           AiFeedback[]
+  id              String            @id @default(cuid())
+  analysisType    AiAnalysisType
+  status          AiRunStatus       @default(PENDING)
+  requestedBy     String            @default("single-admin")
+  filtersSnapshot Json
+  inputSummary    Json
+  model           String?
+  provider        String?
+  promptVersion   String?
+  startedAt       DateTime?
+  completedAt     DateTime?
+  failedAt        DateTime?
+  errorCode       String?
+  errorMessage    String?
+  createdAt       DateTime          @default(now())
+  expiresAt       DateTime?
+  result          AiAnalysisResult?
+  feedbacks       AiFeedback[]
 
   @@index([status])
   @@index([analysisType])
@@ -711,54 +781,54 @@ model AiAnalysisRun {
 }
 
 model AiAnalysisResult {
-  id            String         @id @default(cuid())
-  analysisRunId String         @unique
-  analysisRun   AiAnalysisRun  @relation(fields: [analysisRunId], references: [id], onDelete: Cascade)
+  id            String        @id @default(cuid())
+  analysisRunId String        @unique
+  analysisRun   AiAnalysisRun @relation(fields: [analysisRunId], references: [id], onDelete: Cascade)
   resultJson    Json
   resultText    String?
-  createdAt     DateTime       @default(now())
+  createdAt     DateTime      @default(now())
   deletedAt     DateTime?
 
   @@index([deletedAt])
 }
 
 model AiFeedback {
-  id            String         @id @default(cuid())
+  id            String        @id @default(cuid())
   analysisRunId String
-  analysisRun   AiAnalysisRun  @relation(fields: [analysisRunId], references: [id], onDelete: Cascade)
+  analysisRun   AiAnalysisRun @relation(fields: [analysisRunId], references: [id], onDelete: Cascade)
   rating        String
   comment       String?
-  createdAt     DateTime       @default(now())
+  createdAt     DateTime      @default(now())
 
   @@index([analysisRunId])
 }
 
 model ClassificationTaxonomyRestructureRun {
-  id                              String   @id @default(cuid())
-  operation                       String
-  status                          String
-  proposalHash                    String
-  mappingHash                     String
-  currentTaxonomyFingerprint      String
-  targetTaxonomyFingerprint       String
-  manifestHash                    String
-  actor                           String
-  startedAt                       DateTime @default(now())
-  completedAt                     DateTime?
-  createdCount                    Int      @default(0)
-  renamedCount                    Int      @default(0)
-  movedCount                      Int      @default(0)
-  deactivatedCount                Int      @default(0)
-  keywordChangeCount              Int      @default(0)
-  legacyComplaintConsistencyUpdateCount Int @default(0)
-  rolledBackCount                 Int      @default(0)
-  skippedCount                    Int      @default(0)
-  failureCode                     String?
-  failureMessage                  String?
-  rollbackOfRunId                 String?
-  createdAt                       DateTime @default(now())
-  updatedAt                       DateTime @updatedAt
-  items                           ClassificationTaxonomyRestructureItem[]
+  id                                    String                                  @id @default(cuid())
+  operation                             String
+  status                                String
+  proposalHash                          String
+  mappingHash                           String
+  currentTaxonomyFingerprint            String
+  targetTaxonomyFingerprint             String
+  manifestHash                          String
+  actor                                 String
+  startedAt                             DateTime                                @default(now())
+  completedAt                           DateTime?
+  createdCount                          Int                                     @default(0)
+  renamedCount                          Int                                     @default(0)
+  movedCount                            Int                                     @default(0)
+  deactivatedCount                      Int                                     @default(0)
+  keywordChangeCount                    Int                                     @default(0)
+  legacyComplaintConsistencyUpdateCount Int                                     @default(0)
+  rolledBackCount                       Int                                     @default(0)
+  skippedCount                          Int                                     @default(0)
+  failureCode                           String?
+  failureMessage                        String?
+  rollbackOfRunId                       String?
+  createdAt                             DateTime                                @default(now())
+  updatedAt                             DateTime                                @updatedAt
+  items                                 ClassificationTaxonomyRestructureItem[]
 
   @@index([status])
   @@index([manifestHash])
@@ -767,7 +837,7 @@ model ClassificationTaxonomyRestructureRun {
 }
 
 model ClassificationTaxonomyRestructureItem {
-  id                String   @id @default(cuid())
+  id                String                               @id @default(cuid())
   runId             String
   run               ClassificationTaxonomyRestructureRun @relation(fields: [runId], references: [id], onDelete: Cascade)
   sequence          Int
@@ -778,8 +848,8 @@ model ClassificationTaxonomyRestructureItem {
   nextStateJson     Json?
   result            String
   skipReason        String?
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
+  createdAt         DateTime                             @default(now())
+  updatedAt         DateTime                             @updatedAt
 
   @@unique([runId, sequence])
   @@index([runId])

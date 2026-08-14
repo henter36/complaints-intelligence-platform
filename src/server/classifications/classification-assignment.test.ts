@@ -14,12 +14,13 @@ import {
 import { computeTaxonomyFingerprint } from "./taxonomy-fingerprint";
 
 describe("classification assignment sources", () => {
-  it("exposes the five governed assignment sources", () => {
+  it("exposes the six governed assignment sources", () => {
     expect(CLASSIFICATION_ASSIGNMENT_SOURCE_VALUES).toEqual([
       "MANUAL",
       "IMPORT_EXPLICIT",
       "SOURCE_DETAIL_RULE",
       "HISTORICAL_BACKFILL",
+      "HISTORICAL_CORRECTION",
       "LEGACY_UNKNOWN",
     ]);
     expect(isClassificationAssignmentSource("MANUAL")).toBe(true);
@@ -81,10 +82,11 @@ describe("classification assignment sources", () => {
     ).toBeNull();
   });
 
-  it("protects MANUAL, IMPORT_EXPLICIT, and LEGACY_UNKNOWN from automation", () => {
+  it("protects manual, explicit, legacy, and historical corrections from automation", () => {
     expect(AUTOMATION_PROTECTED_ASSIGNMENT_SOURCES.has("MANUAL")).toBe(true);
     expect(isAutomationProtectedAssignmentSource("IMPORT_EXPLICIT")).toBe(true);
     expect(isAutomationProtectedAssignmentSource("LEGACY_UNKNOWN")).toBe(true);
+    expect(isAutomationProtectedAssignmentSource("HISTORICAL_CORRECTION")).toBe(true);
     expect(isAutomationProtectedAssignmentSource("SOURCE_DETAIL_RULE")).toBe(false);
     expect(isAutomationProtectedAssignmentSource(null)).toBe(false);
   });
@@ -98,6 +100,18 @@ describe("classification assignment sources", () => {
     });
     expect(meta.classificationTaxonomyFingerprint).toBe("abc");
     expect(meta.classificationAssignmentRunId).toBe("run-1");
+  });
+
+  it("stores a fingerprint but no backfill run id for historical correction", () => {
+    const meta = buildClassificationAssignmentMetadata({
+      source: CLASSIFICATION_ASSIGNMENT_SOURCES.HISTORICAL_CORRECTION,
+      assignedBy: "historical-classification-cleanup",
+      taxonomyFingerprint: "taxonomy-fingerprint",
+      assignmentRunId: "must-not-be-used",
+    });
+    expect(meta.classificationTaxonomyFingerprint).toBe("taxonomy-fingerprint");
+    expect(meta.classificationAssignmentRunId).toBeNull();
+    expect(isAutomationProtectedAssignmentSource(meta.classificationAssignmentSource)).toBe(true);
   });
 });
 
