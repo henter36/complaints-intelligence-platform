@@ -321,7 +321,7 @@ function scoreCatalogEntry(input: {
     score += 1;
     reasons.push("CONFUSABLE");
   }
-  if (input.current && input.entry.categoryId === input.current.categoryId) {
+  if (input.entry.categoryId === input.current?.categoryId) {
     score += 0.5;
     reasons.push("CURRENT_CATEGORY");
   }

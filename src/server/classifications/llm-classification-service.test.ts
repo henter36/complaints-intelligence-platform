@@ -323,4 +323,22 @@ describe("candidate retrieval, anchoring, and cache", () => {
       complaint: { ...base.complaint, description: "نص آخر" },
     })).not.toBe(key);
   });
+
+  it("produces the same cache key for the same candidates in different orders", () => {
+    const base = {
+      complaint: requestComplaint(),
+      model: "model-a",
+      taxonomyFingerprint: "taxonomy-a",
+      semanticCatalogFingerprint: "catalog-a",
+    };
+    const first = computeLlmClassificationCacheKey({
+      ...base,
+      candidateClassificationIds: ["c", "a", "b"],
+    });
+    const second = computeLlmClassificationCacheKey({
+      ...base,
+      candidateClassificationIds: ["b", "c", "a"],
+    });
+    expect(second).toBe(first);
+  });
 });

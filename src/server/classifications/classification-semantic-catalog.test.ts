@@ -105,4 +105,62 @@ describe("classification semantic catalog", () => {
     });
     expect(candidates).toHaveLength(35);
   });
+
+  it("preserves the CURRENT_CATEGORY score and reason with optional current assignment", () => {
+    const entries = [
+      {
+        classificationId: "current",
+        classificationName: "الحالي",
+        categoryId: "shared-category",
+        categoryName: "رئيسي",
+        keywords: [],
+        semanticDefinition: null,
+        includedConcepts: [],
+        excludedConcepts: [],
+        confusableWith: [],
+        status: "DRAFT_REQUIRES_REVIEW" as const,
+        generationStatus: "PENDING_LLM_ENRICHMENT" as const,
+      },
+      {
+        classificationId: "peer",
+        classificationName: "نظير",
+        categoryId: "shared-category",
+        categoryName: "رئيسي",
+        keywords: [],
+        semanticDefinition: null,
+        includedConcepts: [],
+        excludedConcepts: [],
+        confusableWith: [],
+        status: "DRAFT_REQUIRES_REVIEW" as const,
+        generationStatus: "PENDING_LLM_ENRICHMENT" as const,
+      },
+    ];
+    const baseCatalog = {
+      schemaVersion: 1,
+      status: "DRAFT_REQUIRES_REVIEW" as const,
+      generatedAt: "2026-08-14T00:00:00.000Z",
+      model: null,
+      taxonomyFingerprint: "t",
+      semanticCatalogFingerprint: "c",
+      categoryCount: 1,
+      classificationCount: entries.length,
+      entries,
+    };
+    const withCurrent = retrieveClassificationCandidates({
+      catalog: baseCatalog,
+      complaint: { sourceDetail: "", subject: "عام", description: "" },
+      currentClassificationId: "current",
+    });
+    const peer = withCurrent.find((entry) => entry.classificationId === "peer");
+    expect(peer?.retrievalScore).toBe(0.5);
+    expect(peer?.retrievalReasons).toContain("CURRENT_CATEGORY");
+
+    const withoutCurrent = retrieveClassificationCandidates({
+      catalog: baseCatalog,
+      complaint: { sourceDetail: "", subject: "عام", description: "" },
+      currentClassificationId: null,
+    });
+    expect(withoutCurrent.find((entry) => entry.classificationId === "peer")?.retrievalReasons)
+      .not.toContain("CURRENT_CATEGORY");
+  });
 });

@@ -1,14 +1,14 @@
 import {
   CHANGE_CONFIRMED_PRECISION_GATE,
+  type ClassificationSemanticCatalog,
   type FinalLlmOutcome,
+  type LlmStructuredProvider,
+  type LlmTokenUsage,
 } from "./llm-classification-contract";
-import type { GoldSetSplit } from "./llm-classification-gold-set";
-import type { GoldSetReviewArtifact } from "./llm-classification-gold-set";
 import type {
-  ClassificationSemanticCatalog,
-  LlmStructuredProvider,
-  LlmTokenUsage,
-} from "./llm-classification-contract";
+  GoldSetReviewArtifact,
+  GoldSetSplit,
+} from "./llm-classification-gold-set";
 import { runGovernedLlmClassification } from "./llm-classification-service";
 import { mapWithConcurrency } from "./llm-classification-reliability";
 
@@ -134,7 +134,7 @@ function findSystematicFailures(rows: readonly EvaluationPrediction[]): string[]
     const correct = group.filter((row) => row.expectedClassificationId === target).length;
     if (ratio(correct, group.length) < 0.9) failures.push(target);
   }
-  return failures.sort();
+  return failures.sort((left, right) => left.localeCompare(right, "en"));
 }
 
 export function evaluateLlmClassificationPredictions(

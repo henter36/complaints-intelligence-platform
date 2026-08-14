@@ -68,6 +68,22 @@ describe("LLM classification evaluation", () => {
     expect(evaluateLlmClassificationPredictions(rows).status).toBe("PILOT_NOT_APPROVED");
   });
 
+  it("orders multiple systematic failure IDs deterministically", () => {
+    const targets = ["zeta", "alpha", "middle"];
+    const rows = targets.flatMap((target, targetIndex) =>
+      Array.from({ length: 5 }, (_, itemIndex) => prediction(targetIndex * 5 + itemIndex, {
+        expectedClassificationId: `expected-${target}`,
+        predictedClassificationId: target,
+        candidateClassificationIds: [target, `expected-${target}`],
+      }))
+    );
+    expect(evaluateLlmClassificationPredictions(rows).systematicFailures).toEqual([
+      "alpha",
+      "middle",
+      "zeta",
+    ]);
+  });
+
   it("stops before provider calls when human labels do not exist", async () => {
     const provider = vi.fn();
     await expect(runLlmClassificationEvaluation({

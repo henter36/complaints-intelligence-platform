@@ -256,7 +256,9 @@ export function computeLlmClassificationCacheKey(input: {
       subject: input.complaint.subject,
       description: input.complaint.description,
     },
-    candidates: [...input.candidateClassificationIds].sort(),
+    candidates: [...input.candidateClassificationIds].sort(
+      (left, right) => left.localeCompare(right, "en")
+    ),
     model: input.model,
     promptVersion: LLM_CLASSIFICATION_PROMPT_VERSION,
     taxonomyFingerprint: input.taxonomyFingerprint,
