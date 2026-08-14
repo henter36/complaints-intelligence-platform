@@ -7,6 +7,8 @@ import {
   computeComplaintStateHash,
   evaluateAuditApplyState,
   evaluateHistoricalClassification,
+  resolveApplyStatus,
+  scoreSemanticCandidates,
   type AuditComplaint,
   type AuditTaxonomyClassification,
 } from "./historical-classification-audit-service";
@@ -122,6 +124,26 @@ describe("historical classification evidence", () => {
     expect(decision.confidence).toBeGreaterThanOrEqual(0.95);
   });
 
+  it("preserves exact semantic scores, fields, phrases, and occurrence caps", () => {
+    const index = buildAuditTaxonomyIndex(taxonomy);
+    const scores = scoreSemanticCandidates(
+      {
+        subject: "صرف العلاج صرف العلاج صيدلية صيدلية صيدلية",
+        description:
+          "صرف العلاج صرف العلاج صرف العلاج صرف العلاج صيدلية صيدلية صيدلية صيدلية وصفة طبية وصفة طبية وصفة طبية وصفة طبية",
+      },
+      index
+    );
+    const health = scores.find((candidate) => candidate.classification.id === "cls-health");
+    expect(health).toBeDefined();
+    expect(health?.score).toBe(33);
+    expect(health?.descriptionPhraseCount).toBe(3);
+    expect([...health!.fields].sort()).toEqual(["description", "subject"]);
+    expect([...health!.phrases].sort()).toEqual(
+      ["صرف العلاج", "صيدليه", "وصفه طبيه"].sort()
+    );
+  });
+
   it("does not modify weak or generic text", () => {
     const decision = evaluateHistoricalClassification(
       complaint({ sourceDetail: null, subject: "طلب", description: "أرجو المساعدة" }),
@@ -170,6 +192,21 @@ describe("historical classification evidence", () => {
 });
 
 describe("apply concurrency decision", () => {
+  it("preserves every apply status outcome without nested conditions", () => {
+    expect(resolveApplyStatus({ failedCount: 1, appliedCount: 2, skippedCount: 0 })).toBe(
+      "PARTIALLY_APPLIED"
+    );
+    expect(resolveApplyStatus({ failedCount: 1, appliedCount: 0, skippedCount: 0 })).toBe(
+      "FAILED"
+    );
+    expect(resolveApplyStatus({ failedCount: 0, appliedCount: 0, skippedCount: 1 })).toBe(
+      "PARTIALLY_APPLIED"
+    );
+    expect(resolveApplyStatus({ failedCount: 0, appliedCount: 2, skippedCount: 0 })).toBe(
+      "APPLIED"
+    );
+  });
+
   it("skips a row whose version changed after preview", () => {
     const original = complaint();
     const item = {

@@ -299,7 +299,7 @@ type IndexedTaxonomy = {
   evidencePhrases: Map<string, string[]>;
 };
 
-type ScoredCandidate = {
+export type ScoredCandidate = {
   classification: AuditTaxonomyClassification;
   score: number;
   fields: Set<"subject" | "description">;
@@ -417,7 +417,61 @@ export function buildAuditTaxonomyIndex(
   return { allById, active, exactKeywordTargets, evidencePhrases };
 }
 
-function scoreSemanticCandidates(
+function scorePhraseEvidence(
+  subject: string,
+  description: string,
+  phrase: string
+): {
+  score: number;
+  subjectMatched: boolean;
+  descriptionMatched: boolean;
+} {
+  const tokenCount = phraseTokenCount(phrase);
+  if (tokenCount === 1 && phrase.length < 5) {
+    return { score: 0, subjectMatched: false, descriptionMatched: false };
+  }
+  const subjectCount = Math.min(phraseOccurrences(subject, phrase), 2);
+  const descriptionCount = Math.min(phraseOccurrences(description, phrase), 3);
+  const subjectWeight = tokenCount >= 2 ? 4 : 2;
+  const descriptionWeight = tokenCount >= 2 ? 3 : 1;
+  return {
+    score: subjectCount * subjectWeight + descriptionCount * descriptionWeight,
+    subjectMatched: subjectCount > 0,
+    descriptionMatched: descriptionCount > 0,
+  };
+}
+
+function scoreClassificationEvidence(
+  classification: AuditTaxonomyClassification,
+  phrases: readonly string[],
+  subject: string,
+  description: string
+): ScoredCandidate | null {
+  let score = 0;
+  let descriptionPhraseCount = 0;
+  const fields = new Set<"subject" | "description">();
+  const matchedPhrases = new Set<string>();
+  for (const phrase of phrases) {
+    const evidence = scorePhraseEvidence(subject, description, phrase);
+    score += evidence.score;
+    if (evidence.subjectMatched) fields.add("subject");
+    if (evidence.descriptionMatched) {
+      descriptionPhraseCount += 1;
+      fields.add("description");
+    }
+    if (evidence.subjectMatched || evidence.descriptionMatched) matchedPhrases.add(phrase);
+  }
+  if (score === 0) return null;
+  return {
+    classification,
+    score,
+    fields,
+    phrases: matchedPhrases,
+    descriptionPhraseCount,
+  };
+}
+
+export function scoreSemanticCandidates(
   complaint: Pick<AuditComplaint, "subject" | "description">,
   index: IndexedTaxonomy
 ): ScoredCandidate[] {
@@ -426,42 +480,140 @@ function scoreSemanticCandidates(
   const scores: ScoredCandidate[] = [];
 
   for (const classification of index.active) {
-    let score = 0;
-    let descriptionPhraseCount = 0;
-    const fields = new Set<"subject" | "description">();
-    const matchedPhrases = new Set<string>();
-    for (const phrase of index.evidencePhrases.get(classification.id) ?? []) {
-      const tokenCount = phraseTokenCount(phrase);
-      if (tokenCount === 1 && phrase.length < 5) continue;
-      const subjectCount = Math.min(phraseOccurrences(subject, phrase), 2);
-      const descriptionCount = Math.min(phraseOccurrences(description, phrase), 3);
-      if (subjectCount > 0) {
-        score += subjectCount * (tokenCount >= 2 ? 4 : 2);
-        fields.add("subject");
-        matchedPhrases.add(phrase);
-      }
-      if (descriptionCount > 0) {
-        score += descriptionCount * (tokenCount >= 2 ? 3 : 1);
-        descriptionPhraseCount += 1;
-        fields.add("description");
-        matchedPhrases.add(phrase);
-      }
-    }
-    if (score > 0) {
-      scores.push({
-        classification,
-        score,
-        fields,
-        phrases: matchedPhrases,
-        descriptionPhraseCount,
-      });
-    }
+    const candidate = scoreClassificationEvidence(
+      classification,
+      index.evidencePhrases.get(classification.id) ?? [],
+      subject,
+      description
+    );
+    if (candidate) scores.push(candidate);
   }
 
   return scores.sort((left, right) => {
     if (right.score !== left.score) return right.score - left.score;
     return compareCodeUnits(left.classification.id, right.classification.id);
   });
+}
+
+function unclassifiedDecision(): EvidenceDecision {
+  return {
+    result: AUDIT_RESULTS.KEEP,
+    reasonCode: AUDIT_REASON_CODES.NO_STRONG_TARGET,
+    confidence: 1,
+    targetClassificationId: null,
+    targetCategoryId: null,
+    evidenceSummary: "unclassified row is outside historical-correction scope",
+  };
+}
+
+function noEvidenceDecision(currentReferenceValid: boolean): EvidenceDecision {
+  if (!currentReferenceValid) {
+    return {
+      result: AUDIT_RESULTS.INVALID_TAXONOMY_REFERENCE,
+      reasonCode: AUDIT_REASON_CODES.TARGET_INACTIVE,
+      confidence: 0,
+      targetClassificationId: null,
+      targetCategoryId: null,
+      evidenceSummary: "no qualifying normalized phrase evidence",
+    };
+  }
+  return {
+    result: AUDIT_RESULTS.INSUFFICIENT_EVIDENCE,
+    reasonCode: AUDIT_REASON_CODES.NO_STRONG_TARGET,
+    confidence: 0,
+    targetClassificationId: null,
+    targetCategoryId: null,
+    evidenceSummary: "no qualifying normalized phrase evidence",
+  };
+}
+
+function ambiguousSemanticDecision(best: ScoredCandidate, lead: number): EvidenceDecision {
+  return {
+    result: AUDIT_RESULTS.AMBIGUOUS,
+    reasonCode: AUDIT_REASON_CODES.MULTIPLE_TARGETS,
+    confidence: 0,
+    targetClassificationId: null,
+    targetCategoryId: null,
+    evidenceSummary: `semantic tie topScore=${best.score} lead=${lead}`,
+  };
+}
+
+function currentClassificationDecision(best: ScoredCandidate): EvidenceDecision {
+  return {
+    result: AUDIT_RESULTS.KEEP,
+    reasonCode: AUDIT_REASON_CODES.CURRENT_CLASSIFICATION_ALREADY_SUPPORTED,
+    confidence: Math.min(0.99, 0.7 + best.score / 50),
+    targetClassificationId: best.classification.id,
+    targetCategoryId: best.classification.category.id,
+    evidenceSummary: `current assignment leads score=${best.score} fields=${best.fields.size}`,
+  };
+}
+
+function strongSemanticDecision(
+  best: ScoredCandidate,
+  lead: number,
+  multiFieldStrong: boolean
+): EvidenceDecision {
+  return {
+    result: AUDIT_RESULTS.CORRECT_HIGH_CONFIDENCE,
+    reasonCode: multiFieldStrong
+      ? AUDIT_REASON_CODES.SUBJECT_DESCRIPTION_AGREEMENT
+      : AUDIT_REASON_CODES.DESCRIPTION_STRONGLY_CONTRADICTS_CURRENT,
+    confidence: multiFieldStrong ? 0.95 : 0.92,
+    targetClassificationId: best.classification.id,
+    targetCategoryId: best.classification.category.id,
+    evidenceSummary: `local phrases=${best.phrases.size} fields=${best.fields.size} score=${best.score} lead=${lead}`,
+  };
+}
+
+function reviewDecision(best: ScoredCandidate, lead: number): EvidenceDecision {
+  return {
+    result: AUDIT_RESULTS.REVIEW,
+    reasonCode: AUDIT_REASON_CODES.NO_STRONG_TARGET,
+    confidence: Math.min(0.89, 0.5 + best.score / 50),
+    targetClassificationId: best.classification.id,
+    targetCategoryId: best.classification.category.id,
+    evidenceSummary: `candidate below correction threshold score=${best.score} lead=${lead}`,
+  };
+}
+
+function isAmbiguousSemanticLead(
+  runnerUp: ScoredCandidate | undefined,
+  lead: number
+): boolean {
+  return Boolean(runnerUp && runnerUp.score >= 3 && lead <= 1);
+}
+
+function isMultiFieldStrong(best: ScoredCandidate, lead: number): boolean {
+  const subjectAndDescription =
+    best.fields.has("subject") && best.fields.has("description");
+  return subjectAndDescription && best.phrases.size >= 2 && best.score >= 8 && lead >= 4;
+}
+
+function isDescriptionStrong(best: ScoredCandidate, lead: number): boolean {
+  return best.descriptionPhraseCount >= 3 && best.score >= 9 && lead >= 4;
+}
+
+function evaluateSemanticCandidates(
+  complaint: AuditComplaint,
+  currentReferenceValid: boolean,
+  scores: readonly ScoredCandidate[]
+): EvidenceDecision {
+  const best = scores[0];
+  const runnerUp = scores[1];
+  if (!best) return noEvidenceDecision(currentReferenceValid);
+
+  const lead = best.score - (runnerUp?.score ?? 0);
+  if (isAmbiguousSemanticLead(runnerUp, lead)) return ambiguousSemanticDecision(best, lead);
+  if (best.classification.id === complaint.classificationId) {
+    return currentClassificationDecision(best);
+  }
+
+  const multiFieldStrong = isMultiFieldStrong(best, lead);
+  if (multiFieldStrong || isDescriptionStrong(best, lead)) {
+    return strongSemanticDecision(best, lead, multiFieldStrong);
+  }
+  return reviewDecision(best, lead);
 }
 
 function isCurrentReferenceValid(
@@ -534,90 +686,14 @@ export function evaluateHistoricalClassification(
     : (taxonomyOrIndex as IndexedTaxonomy);
 
   // Unclassified rows belong to the existing historical-backfill workflow.
-  if (!complaint.classificationId) {
-    return {
-      result: AUDIT_RESULTS.KEEP,
-      reasonCode: AUDIT_REASON_CODES.NO_STRONG_TARGET,
-      confidence: 1,
-      targetClassificationId: null,
-      targetCategoryId: null,
-      evidenceSummary: "unclassified row is outside historical-correction scope",
-    };
-  }
+  if (!complaint.classificationId) return unclassifiedDecision();
 
   const exact = exactSourceDecision(complaint, index);
   if (exact) return exact;
 
   const currentReferenceValid = isCurrentReferenceValid(complaint, index);
   const scores = scoreSemanticCandidates(complaint, index);
-  const best = scores[0];
-  const runnerUp = scores[1];
-  if (!best) {
-    return {
-      result: currentReferenceValid
-        ? AUDIT_RESULTS.INSUFFICIENT_EVIDENCE
-        : AUDIT_RESULTS.INVALID_TAXONOMY_REFERENCE,
-      reasonCode: currentReferenceValid
-        ? AUDIT_REASON_CODES.NO_STRONG_TARGET
-        : AUDIT_REASON_CODES.TARGET_INACTIVE,
-      confidence: 0,
-      targetClassificationId: null,
-      targetCategoryId: null,
-      evidenceSummary: "no qualifying normalized phrase evidence",
-    };
-  }
-
-  const lead = best.score - (runnerUp?.score ?? 0);
-  if (runnerUp && runnerUp.score >= 3 && lead <= 1) {
-    return {
-      result: AUDIT_RESULTS.AMBIGUOUS,
-      reasonCode: AUDIT_REASON_CODES.MULTIPLE_TARGETS,
-      confidence: 0,
-      targetClassificationId: null,
-      targetCategoryId: null,
-      evidenceSummary: `semantic tie topScore=${best.score} lead=${lead}`,
-    };
-  }
-
-  if (best.classification.id === complaint.classificationId) {
-    return {
-      result: AUDIT_RESULTS.KEEP,
-      reasonCode: AUDIT_REASON_CODES.CURRENT_CLASSIFICATION_ALREADY_SUPPORTED,
-      confidence: Math.min(0.99, 0.7 + best.score / 50),
-      targetClassificationId: best.classification.id,
-      targetCategoryId: best.classification.category.id,
-      evidenceSummary: `current assignment leads score=${best.score} fields=${best.fields.size}`,
-    };
-  }
-
-  const subjectAndDescription =
-    best.fields.has("subject") && best.fields.has("description");
-  const multiFieldStrong =
-    subjectAndDescription && best.phrases.size >= 2 && best.score >= 8 && lead >= 4;
-  const descriptionStrong =
-    best.descriptionPhraseCount >= 3 && best.score >= 9 && lead >= 4;
-
-  if (multiFieldStrong || descriptionStrong) {
-    return {
-      result: AUDIT_RESULTS.CORRECT_HIGH_CONFIDENCE,
-      reasonCode: multiFieldStrong
-        ? AUDIT_REASON_CODES.SUBJECT_DESCRIPTION_AGREEMENT
-        : AUDIT_REASON_CODES.DESCRIPTION_STRONGLY_CONTRADICTS_CURRENT,
-      confidence: multiFieldStrong ? 0.95 : 0.92,
-      targetClassificationId: best.classification.id,
-      targetCategoryId: best.classification.category.id,
-      evidenceSummary: `local phrases=${best.phrases.size} fields=${best.fields.size} score=${best.score} lead=${lead}`,
-    };
-  }
-
-  return {
-    result: AUDIT_RESULTS.REVIEW,
-    reasonCode: AUDIT_REASON_CODES.NO_STRONG_TARGET,
-    confidence: Math.min(0.89, 0.5 + best.score / 50),
-    targetClassificationId: best.classification.id,
-    targetCategoryId: best.classification.category.id,
-    evidenceSummary: `candidate below correction threshold score=${best.score} lead=${lead}`,
-  };
+  return evaluateSemanticCandidates(complaint, currentReferenceValid, scores);
 }
 
 export function computeComplaintStateHash(
@@ -919,6 +995,177 @@ function emptyResultCounts(): Record<AuditResultCode, number> {
   };
 }
 
+function groupComplaintsBySource(
+  complaints: readonly AuditComplaint[]
+): Map<string, AuditComplaint[]> {
+  const grouped = new Map<string, AuditComplaint[]>();
+  for (const complaint of complaints) {
+    const key = sourceGroupKey(complaint);
+    const values = grouped.get(key) ?? [];
+    values.push(complaint);
+    grouped.set(key, values);
+  }
+  return grouped;
+}
+
+function buildCorrection(
+  complaint: AuditComplaint,
+  decision: EvidenceDecision,
+  taxonomyFingerprint: string
+): AuditManifestCorrection {
+  if (!decision.targetClassificationId || !decision.targetCategoryId) {
+    throw new HistoricalClassificationAuditError(
+      AUDIT_ERROR_CODES.MANIFEST_INVALID,
+      "قرار تصحيح بلا target صالح"
+    );
+  }
+  return {
+    complaintId: complaint.id,
+    expectedVersion: complaint.version,
+    previousClassificationId: complaint.classificationId,
+    previousCategoryId: complaint.categoryId,
+    previousAssignmentSource: complaint.classificationAssignmentSource,
+    previousAssignedAt: complaint.classificationAssignedAt?.toISOString() ?? null,
+    previousAssignedBy: complaint.classificationAssignedBy,
+    previousTaxonomyFingerprint: complaint.classificationTaxonomyFingerprint,
+    previousAssignmentRunId: complaint.classificationAssignmentRunId,
+    targetClassificationId: decision.targetClassificationId,
+    targetCategoryId: decision.targetCategoryId,
+    confidence: decision.confidence,
+    reasonCode: decision.reasonCode,
+    evidenceSummary: decision.evidenceSummary,
+    complaintStateHash: computeComplaintStateHash(complaint),
+    taxonomyFingerprint,
+  };
+}
+
+type AuditGroupAnalysis = {
+  counts: Record<AuditResultCode, number>;
+  corrections: AuditManifestCorrection[];
+  privateReview: unknown[];
+  groups: AuditGroupSummary[];
+  mismatchCount: number;
+  misclassifiedSourceDetailGroups: number;
+};
+
+function analyzeComplaintGroup(input: {
+  complaints: AuditComplaint[];
+  index: IndexedTaxonomy;
+  taxonomyFingerprint: string;
+  analysis: AuditGroupAnalysis;
+}): void {
+  const representative = input.complaints[0]!;
+  const homogeneousDecision = exactSourceDecision(representative, input.index);
+  let representativeDecision: EvidenceDecision | null = homogeneousDecision;
+  let groupCorrectionCount = 0;
+
+  for (const complaint of input.complaints) {
+    if (!isCurrentReferenceValid(complaint, input.index)) input.analysis.mismatchCount += 1;
+    const decision = homogeneousDecision ?? evaluateHistoricalClassification(complaint, input.index);
+    representativeDecision ??= decision;
+    input.analysis.counts[decision.result] += 1;
+    if (decision.result === AUDIT_RESULTS.CORRECT_HIGH_CONFIDENCE) {
+      groupCorrectionCount += 1;
+      input.analysis.corrections.push(
+        buildCorrection(complaint, decision, input.taxonomyFingerprint)
+      );
+    } else if (decision.result === AUDIT_RESULTS.REVIEW) {
+      input.analysis.privateReview.push(buildPrivateReviewEntry(complaint, decision));
+    }
+  }
+
+  if (groupCorrectionCount > 0) input.analysis.misclassifiedSourceDetailGroups += 1;
+  const groupDecision = representativeDecision!;
+  input.analysis.groups.push({
+    sourceDetailHash: sha256(normalizeEvidenceText(representative.sourceDetail)),
+    currentClassificationId: representative.classificationId,
+    currentCategoryId: representative.categoryId,
+    count: input.complaints.length,
+    result:
+      groupCorrectionCount > 0
+        ? AUDIT_RESULTS.CORRECT_HIGH_CONFIDENCE
+        : groupDecision.result,
+    targetClassificationId: groupDecision.targetClassificationId,
+    targetCategoryId: groupDecision.targetCategoryId,
+    confidence: groupDecision.confidence,
+    reasonCode: groupDecision.reasonCode,
+  });
+}
+
+function analyzeAuditGroups(
+  grouped: ReadonlyMap<string, AuditComplaint[]>,
+  index: IndexedTaxonomy,
+  taxonomyFingerprint: string
+): AuditGroupAnalysis {
+  const analysis: AuditGroupAnalysis = {
+    counts: emptyResultCounts(),
+    corrections: [],
+    privateReview: [],
+    groups: [],
+    mismatchCount: 0,
+    misclassifiedSourceDetailGroups: 0,
+  };
+  for (const complaints of grouped.values()) {
+    analyzeComplaintGroup({ complaints, index, taxonomyFingerprint, analysis });
+  }
+  analysis.corrections.sort((left, right) => compareCodeUnits(left.complaintId, right.complaintId));
+  return analysis;
+}
+
+function findUnusedClassificationCandidates(
+  complaints: readonly AuditComplaint[],
+  index: IndexedTaxonomy
+): UnusedClassificationCandidate[] {
+  const usedClassificationIds = new Set(
+    complaints
+      .map((complaint) => complaint.classificationId)
+      .filter((value): value is string => value !== null)
+  );
+  return index.active
+    .filter((classification) => !usedClassificationIds.has(classification.id))
+    .map((classification) => ({
+      classificationId: classification.id,
+      classificationName: classification.nameAr,
+      categoryId: classification.category.id,
+      categoryName: classification.category.nameAr,
+    }))
+    .sort((left, right) => compareCodeUnits(left.classificationName, right.classificationName));
+}
+
+function buildManifestPayload(input: {
+  generatedAt: string;
+  databaseFingerprint: DatabaseFingerprint;
+  taxonomyFingerprint: string;
+  totalComplaints: number;
+  groupCount: number;
+  analysis: AuditGroupAnalysis;
+  unusedClassificationCandidates: UnusedClassificationCandidate[];
+  distribution: DistributionEntry[];
+  categoryDistribution: CategoryDistributionEntry[];
+}): ManifestUnsigned {
+  return {
+    schemaVersion: CLASSIFICATION_AUDIT_SCHEMA_VERSION,
+    generatedAt: input.generatedAt,
+    databaseFingerprint: input.databaseFingerprint,
+    taxonomyFingerprint: input.taxonomyFingerprint,
+    totalComplaints: input.totalComplaints,
+    keepCount: input.analysis.counts.KEEP,
+    correctionCount: input.analysis.counts.CORRECT_HIGH_CONFIDENCE,
+    reviewCount: input.analysis.counts.REVIEW,
+    ambiguousCount: input.analysis.counts.AMBIGUOUS,
+    insufficientEvidenceCount: input.analysis.counts.INSUFFICIENT_EVIDENCE,
+    invalidReferenceCount: input.analysis.counts.INVALID_TAXONOMY_REFERENCE,
+    uniqueSourceDetailGroups: input.groupCount,
+    misclassifiedSourceDetailGroups: input.analysis.misclassifiedSourceDetailGroups,
+    categoryClassificationMismatchCountBefore: input.analysis.mismatchCount,
+    unusedClassificationCandidates: input.unusedClassificationCandidates,
+    distribution: input.distribution,
+    categoryDistribution: input.categoryDistribution,
+    groups: input.analysis.groups,
+    corrections: input.analysis.corrections,
+  };
+}
+
 export async function previewHistoricalClassificationAudit(
   db: AuditDb,
   input: {
@@ -948,119 +1195,28 @@ export async function previewHistoricalClassificationAudit(
     taxonomyFingerprint,
   });
   const index = buildAuditTaxonomyIndex(taxonomy);
-  const counts = emptyResultCounts();
-  const corrections: AuditManifestCorrection[] = [];
-  const privateReview: unknown[] = [];
-  const grouped = new Map<string, AuditComplaint[]>();
-  for (const complaint of complaints) {
-    const key = sourceGroupKey(complaint);
-    const values = grouped.get(key) ?? [];
-    values.push(complaint);
-    grouped.set(key, values);
-  }
-
-  const decisions = new Map<string, EvidenceDecision>();
-  const groups: AuditGroupSummary[] = [];
-  let mismatchCount = 0;
-  let misclassifiedSourceDetailGroups = 0;
-
-  for (const complaintsInGroup of grouped.values()) {
-    const representative = complaintsInGroup[0]!;
-    const exact = exactSourceDecision(representative, index);
-    const homogeneousDecision = exact ?? null;
-    let groupCorrectionCount = 0;
-    for (const complaint of complaintsInGroup) {
-      if (!isCurrentReferenceValid(complaint, index)) mismatchCount += 1;
-      const decision = homogeneousDecision ?? evaluateHistoricalClassification(complaint, index);
-      decisions.set(complaint.id, decision);
-      counts[decision.result] += 1;
-      if (decision.result === AUDIT_RESULTS.CORRECT_HIGH_CONFIDENCE) {
-        if (!decision.targetClassificationId || !decision.targetCategoryId) {
-          throw new HistoricalClassificationAuditError(
-            AUDIT_ERROR_CODES.MANIFEST_INVALID,
-            "قرار تصحيح بلا target صالح"
-          );
-        }
-        groupCorrectionCount += 1;
-        corrections.push({
-          complaintId: complaint.id,
-          expectedVersion: complaint.version,
-          previousClassificationId: complaint.classificationId,
-          previousCategoryId: complaint.categoryId,
-          previousAssignmentSource: complaint.classificationAssignmentSource,
-          previousAssignedAt: complaint.classificationAssignedAt?.toISOString() ?? null,
-          previousAssignedBy: complaint.classificationAssignedBy,
-          previousTaxonomyFingerprint: complaint.classificationTaxonomyFingerprint,
-          previousAssignmentRunId: complaint.classificationAssignmentRunId,
-          targetClassificationId: decision.targetClassificationId,
-          targetCategoryId: decision.targetCategoryId,
-          confidence: decision.confidence,
-          reasonCode: decision.reasonCode,
-          evidenceSummary: decision.evidenceSummary,
-          complaintStateHash: computeComplaintStateHash(complaint),
-          taxonomyFingerprint,
-        });
-      } else if (decision.result === AUDIT_RESULTS.REVIEW) {
-        privateReview.push(buildPrivateReviewEntry(complaint, decision));
-      }
-    }
-    if (groupCorrectionCount > 0) misclassifiedSourceDetailGroups += 1;
-    const groupDecision = homogeneousDecision ?? decisions.get(representative.id)!;
-    groups.push({
-      sourceDetailHash: sha256(normalizeEvidenceText(representative.sourceDetail)),
-      currentClassificationId: representative.classificationId,
-      currentCategoryId: representative.categoryId,
-      count: complaintsInGroup.length,
-      result: groupCorrectionCount > 0
-        ? AUDIT_RESULTS.CORRECT_HIGH_CONFIDENCE
-        : groupDecision.result,
-      targetClassificationId: groupDecision.targetClassificationId,
-      targetCategoryId: groupDecision.targetCategoryId,
-      confidence: groupDecision.confidence,
-      reasonCode: groupDecision.reasonCode,
-    });
-  }
-
-  corrections.sort((left, right) => compareCodeUnits(left.complaintId, right.complaintId));
-  const distribution = buildDistribution(complaints, corrections, taxonomy);
-  const categoryDistribution = buildCategoryDistribution(complaints, corrections, taxonomy);
-  const usedClassificationIds = new Set(
-    complaints
-      .map((complaint) => complaint.classificationId)
-      .filter((value): value is string => value !== null)
+  const grouped = groupComplaintsBySource(complaints);
+  const analysis = analyzeAuditGroups(grouped, index, taxonomyFingerprint);
+  const distribution = buildDistribution(complaints, analysis.corrections, taxonomy);
+  const categoryDistribution = buildCategoryDistribution(
+    complaints,
+    analysis.corrections,
+    taxonomy
   );
-  const unusedClassificationCandidates = index.active
-    .filter((classification) => !usedClassificationIds.has(classification.id))
-    .map((classification) => ({
-      classificationId: classification.id,
-      classificationName: classification.nameAr,
-      categoryId: classification.category.id,
-      categoryName: classification.category.nameAr,
-    }))
-    .sort((left, right) => compareCodeUnits(left.classificationName, right.classificationName));
-  const unsigned: ManifestUnsigned = {
-    schemaVersion: CLASSIFICATION_AUDIT_SCHEMA_VERSION,
+  const unusedClassificationCandidates = findUnusedClassificationCandidates(complaints, index);
+  const unsigned = buildManifestPayload({
     generatedAt: new Date().toISOString(),
     databaseFingerprint,
     taxonomyFingerprint,
     totalComplaints: complaints.length,
-    keepCount: counts.KEEP,
-    correctionCount: counts.CORRECT_HIGH_CONFIDENCE,
-    reviewCount: counts.REVIEW,
-    ambiguousCount: counts.AMBIGUOUS,
-    insufficientEvidenceCount: counts.INSUFFICIENT_EVIDENCE,
-    invalidReferenceCount: counts.INVALID_TAXONOMY_REFERENCE,
-    uniqueSourceDetailGroups: grouped.size,
-    misclassifiedSourceDetailGroups,
-    categoryClassificationMismatchCountBefore: mismatchCount,
+    groupCount: grouped.size,
+    analysis,
     unusedClassificationCandidates,
     distribution,
     categoryDistribution,
-    groups,
-    corrections,
-  };
+  });
   const manifestHash = computeAuditManifestHash(unsigned);
-  const confirmationToken = buildConfirmationToken(manifestHash, corrections.length);
+  const confirmationToken = buildConfirmationToken(manifestHash, analysis.corrections.length);
   const manifest: HistoricalClassificationAuditManifest = {
     ...unsigned,
     manifestHash,
@@ -1072,8 +1228,8 @@ export async function previewHistoricalClassificationAudit(
     await writeJsonAtomically(input.privateReviewPath, {
       generatedAt: manifest.generatedAt,
       manifestHash,
-      reviewCount: privateReview.length,
-      reviews: privateReview,
+      reviewCount: analysis.privateReview.length,
+      reviews: analysis.privateReview,
     });
   }
 
@@ -1085,17 +1241,17 @@ export async function previewHistoricalClassificationAudit(
     confirmationToken,
     taxonomyFingerprint,
     totalComplaints: complaints.length,
-    counts,
+    counts: analysis.counts,
     uniqueSourceDetailGroups: grouped.size,
-    misclassifiedSourceDetailGroups,
-    categoryClassificationMismatchCountBefore: mismatchCount,
+    misclassifiedSourceDetailGroups: analysis.misclassifiedSourceDetailGroups,
+    categoryClassificationMismatchCountBefore: analysis.mismatchCount,
     unusedClassificationCandidates,
     distribution,
     categoryDistribution,
     performance: {
       complaintsScanned: complaints.length,
       groupsAnalyzed: grouped.size,
-      candidateCorrections: corrections.length,
+      candidateCorrections: analysis.corrections.length,
       databaseQueries: 3,
       elapsedMs: Date.now() - started,
       heapUsedBytes: memory.heapUsed,
@@ -1129,8 +1285,7 @@ export function readAndValidateAuditManifest(path: string): HistoricalClassifica
   }
   const manifest = parsed as HistoricalClassificationAuditManifest;
   if (
-    !manifest ||
-    manifest.schemaVersion !== CLASSIFICATION_AUDIT_SCHEMA_VERSION ||
+    manifest?.schemaVersion !== CLASSIFICATION_AUDIT_SCHEMA_VERSION ||
     !Array.isArray(manifest.corrections) ||
     !Array.isArray(manifest.groups) ||
     !manifest.manifestHash ||
@@ -1208,7 +1363,7 @@ async function assertManifestStillCurrent(
   );
   for (const correction of manifest.corrections) {
     const target = activeById.get(correction.targetClassificationId);
-    if (!target || target.category.id !== correction.targetCategoryId) {
+    if (target?.category.id !== correction.targetCategoryId) {
       throw new HistoricalClassificationAuditError(
         AUDIT_ERROR_CODES.TAXONOMY_CHANGED,
         "target لم يعد فعالًا أو تغيرت فئته"
@@ -1431,6 +1586,115 @@ async function processApplyBatch(input: {
   });
 }
 
+function validateApplyConfirmation(
+  manifest: HistoricalClassificationAuditManifest,
+  confirmation: string | undefined
+): void {
+  if (!confirmation) {
+    throw new HistoricalClassificationAuditError(
+      AUDIT_ERROR_CODES.CONFIRMATION_REQUIRED,
+      "رمز التأكيد مطلوب"
+    );
+  }
+  if (confirmation !== manifest.confirmationToken) {
+    throw new HistoricalClassificationAuditError(
+      AUDIT_ERROR_CODES.CONFIRMATION_INVALID,
+      "رمز التأكيد غير صحيح"
+    );
+  }
+}
+
+async function createRequiredBackup(
+  createAndVerifyBackup: (() => Promise<BackupReceipt>) | undefined
+): Promise<BackupReceipt> {
+  if (!createAndVerifyBackup) {
+    throw new HistoricalClassificationAuditError(
+      AUDIT_ERROR_CODES.BACKUP_REQUIRED,
+      "apply يتطلب إنشاء backup والتحقق منه قبل الكتابة"
+    );
+  }
+  try {
+    const backup = await createAndVerifyBackup();
+    if (!backup.verified || !backup.backupName) throw new Error("invalid backup receipt");
+    return backup;
+  } catch (error) {
+    throw new HistoricalClassificationAuditError(
+      AUDIT_ERROR_CODES.BACKUP_FAILED,
+      "فشل إنشاء backup أو التحقق منه",
+      { cause: sanitizeFailure(error) }
+    );
+  }
+}
+
+type ApplyBatchProcessingResult = {
+  pendingCount: number;
+  appliedCount: number;
+  skippedCount: number;
+  failedCount: number;
+  failureMessage: string | null;
+};
+
+async function processPendingApplyBatches(input: {
+  db: AuditDb;
+  runId: string;
+  actor: string;
+  taxonomyFingerprint: string;
+  batchSize: number;
+}): Promise<ApplyBatchProcessingResult> {
+  const pending = await input.db.classificationAuditItem.findMany({
+    where: { runId: input.runId, result: "PLANNED" },
+    orderBy: { complaintId: "asc" },
+  });
+  let appliedCount = 0;
+  let skippedCount = 0;
+  let failedCount = 0;
+  let failureMessage: string | null = null;
+  for (const batch of chunks(pending, input.batchSize)) {
+    try {
+      const result = await processApplyBatch({
+        db: input.db,
+        runId: input.runId,
+        actor: input.actor,
+        taxonomyFingerprint: input.taxonomyFingerprint,
+        items: batch,
+      });
+      appliedCount += result.applied;
+      skippedCount += result.skipped;
+    } catch (error) {
+      failureMessage = sanitizeFailure(error);
+      failedCount += batch.length;
+      await input.db.classificationAuditItem.updateMany({
+        where: { id: { in: batch.map((item) => item.id) }, result: "PLANNED" },
+        data: { result: "FAILED", skipReason: "BATCH_TRANSACTION_FAILED" },
+      });
+      break;
+    }
+  }
+  return { pendingCount: pending.length, appliedCount, skippedCount, failedCount, failureMessage };
+}
+
+export function resolveApplyStatus(input: {
+  failedCount: number;
+  appliedCount: number;
+  skippedCount: number;
+}): "APPLIED" | "PARTIALLY_APPLIED" | "FAILED" {
+  if (input.failedCount > 0 && input.appliedCount === 0) return "FAILED";
+  if (input.failedCount > 0 || input.skippedCount > 0) return "PARTIALLY_APPLIED";
+  return "APPLIED";
+}
+
+function resolveApplyAuditAction(
+  status: "APPLIED" | "PARTIALLY_APPLIED" | "FAILED"
+): "CLASSIFICATION_HISTORICAL_AUDIT_APPLIED" | "CLASSIFICATION_HISTORICAL_AUDIT_PARTIALLY_APPLIED" {
+  if (status === "APPLIED") return "CLASSIFICATION_HISTORICAL_AUDIT_APPLIED";
+  return "CLASSIFICATION_HISTORICAL_AUDIT_PARTIALLY_APPLIED";
+}
+
+function resolveApplyFailureCode(failedCount: number): string | null {
+  if (failedCount > 0) return "BATCH_TRANSACTION_FAILED";
+  return null;
+}
+
 export async function applyHistoricalClassificationAudit(
   db: AuditDb,
   input: {
@@ -1443,18 +1707,7 @@ export async function applyHistoricalClassificationAudit(
 ): Promise<AuditApplyResult> {
   const started = Date.now();
   const manifest = readAndValidateAuditManifest(input.manifestPath);
-  if (!input.confirm) {
-    throw new HistoricalClassificationAuditError(
-      AUDIT_ERROR_CODES.CONFIRMATION_REQUIRED,
-      "رمز التأكيد مطلوب"
-    );
-  }
-  if (input.confirm !== manifest.confirmationToken) {
-    throw new HistoricalClassificationAuditError(
-      AUDIT_ERROR_CODES.CONFIRMATION_INVALID,
-      "رمز التأكيد غير صحيح"
-    );
-  }
+  validateApplyConfirmation(manifest, input.confirm);
   const batchSize = validateAuditBatchSize(input.batchSize ?? DEFAULT_AUDIT_BATCH_SIZE);
   const actor = input.actor ?? CLASSIFICATION_AUDIT_ACTOR;
   await assertManifestStillCurrent(db, manifest);
@@ -1469,61 +1722,22 @@ export async function applyHistoricalClassificationAudit(
       { runId: alreadyApplied.id }
     );
   }
-  if (!input.createAndVerifyBackup) {
-    throw new HistoricalClassificationAuditError(
-      AUDIT_ERROR_CODES.BACKUP_REQUIRED,
-      "apply يتطلب إنشاء backup والتحقق منه قبل الكتابة"
-    );
-  }
-  let backup: BackupReceipt;
-  try {
-    backup = await input.createAndVerifyBackup();
-    if (!backup.verified || !backup.backupName) throw new Error("invalid backup receipt");
-  } catch (error) {
-    throw new HistoricalClassificationAuditError(
-      AUDIT_ERROR_CODES.BACKUP_FAILED,
-      "فشل إنشاء backup أو التحقق منه",
-      { cause: sanitizeFailure(error) }
-    );
-  }
+  const backup = await createRequiredBackup(input.createAndVerifyBackup);
 
   const runId = await createAuditRunAndItems({ db, manifest, actor, batchSize, backupName: backup.backupName });
-  let appliedCount = 0;
-  let skippedCount = 0;
-  let failedCount = 0;
-  let failureMessage: string | null = null;
-  const pending = await db.classificationAuditItem.findMany({
-    where: { runId, result: "PLANNED" },
-    orderBy: { complaintId: "asc" },
+  const batchResult = await processPendingApplyBatches({
+    db,
+    runId,
+    actor,
+    taxonomyFingerprint: manifest.taxonomyFingerprint,
+    batchSize,
   });
-  for (const batch of chunks(pending, batchSize)) {
-    try {
-      const result = await processApplyBatch({
-        db,
-        runId,
-        actor,
-        taxonomyFingerprint: manifest.taxonomyFingerprint,
-        items: batch,
-      });
-      appliedCount += result.applied;
-      skippedCount += result.skipped;
-    } catch (error) {
-      failureMessage = sanitizeFailure(error);
-      failedCount += batch.length;
-      await db.classificationAuditItem.updateMany({
-        where: { id: { in: batch.map((item) => item.id) }, result: "PLANNED" },
-        data: { result: "FAILED", skipReason: "BATCH_TRANSACTION_FAILED" },
-      });
-      break;
-    }
-  }
+  const { appliedCount, skippedCount, failedCount, failureMessage } = batchResult;
   const [totalAfter, activeAfter] = await Promise.all([
     db.complaint.count(),
     db.complaint.count({ where: { isDeleted: false } }),
   ]);
-  const status = failedCount > 0
-    ? appliedCount > 0 ? "PARTIALLY_APPLIED" : "FAILED"
-    : skippedCount > 0 ? "PARTIALLY_APPLIED" : "APPLIED";
+  const status = resolveApplyStatus({ failedCount, appliedCount, skippedCount });
   await db.classificationAuditRun.update({
     where: { id: runId },
     data: {
@@ -1534,14 +1748,12 @@ export async function applyHistoricalClassificationAudit(
       totalComplaintCountAfter: totalAfter,
       activeComplaintCountAfter: activeAfter,
       completedAt: new Date(),
-      failureCode: failedCount > 0 ? "BATCH_TRANSACTION_FAILED" : null,
+      failureCode: resolveApplyFailureCode(failedCount),
       failureMessage,
     },
   });
   await writeAuditLog(db, {
-    action: status === "APPLIED"
-      ? "CLASSIFICATION_HISTORICAL_AUDIT_APPLIED"
-      : "CLASSIFICATION_HISTORICAL_AUDIT_PARTIALLY_APPLIED",
+    action: resolveApplyAuditAction(status),
     entityType: "ClassificationAuditRun",
     entityId: runId,
     actor,
@@ -1561,7 +1773,7 @@ export async function applyHistoricalClassificationAudit(
     rollbackToken: buildAuditRollbackToken({ runId, manifestHash: manifest.manifestHash, appliedCount }),
     elapsedMs,
     performance: {
-      databaseQueries: 11 + Math.ceil(pending.length / batchSize) * 2 + appliedCount * 3,
+      databaseQueries: 11 + Math.ceil(batchResult.pendingCount / batchSize) * 2 + appliedCount * 3,
       elapsedMs,
       heapUsedBytes: memory.heapUsed,
       rssBytes: memory.rss,

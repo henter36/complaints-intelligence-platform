@@ -129,6 +129,27 @@ describe("historical classification audit SQLite workflow", () => {
       })
     ).rejects.toMatchObject({ code: AUDIT_ERROR_CODES.BACKUP_REQUIRED });
 
+    await expect(
+      applyHistoricalClassificationAudit(client, {
+        manifestPath,
+        confirm: dryRun.confirmationToken,
+        createAndVerifyBackup: async () => {
+          throw new Error("backup creation failed");
+        },
+      })
+    ).rejects.toMatchObject({ code: AUDIT_ERROR_CODES.BACKUP_FAILED });
+    await expect(
+      applyHistoricalClassificationAudit(client, {
+        manifestPath,
+        confirm: dryRun.confirmationToken,
+        createAndVerifyBackup: async () => {
+          throw new Error("backup verification failed");
+        },
+      })
+    ).rejects.toMatchObject({ code: AUDIT_ERROR_CODES.BACKUP_FAILED });
+    expect(await client.classificationAuditRun.count()).toBe(0);
+    expect(await client.complaint.count()).toBe(countBefore);
+
     const backupGuard = vi.fn(async () => ({
       backupName: "backup-test-verified",
       verified: true as const,

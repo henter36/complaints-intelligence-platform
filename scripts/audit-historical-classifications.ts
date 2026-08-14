@@ -5,7 +5,6 @@
  * Raw complaint text and PII are never written to stdout.
  */
 
-import { execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { PrismaClient } from "@prisma/client";
@@ -17,8 +16,8 @@ import {
   previewHistoricalClassificationAudit,
   rollbackHistoricalClassificationAudit,
   verifyHistoricalClassificationAudit,
-  type BackupReceipt,
 } from "../src/server/classifications/historical-classification-audit-service";
+import { createVerifiedBackup, type BackupLogger } from "./lib/backup-service";
 
 const prisma = new PrismaClient();
 const PROJECT_ROOT = resolve(__dirname, "..");
@@ -93,90 +92,92 @@ function safeError(error: unknown): { error: { code: string; message: string; de
   };
 }
 
-async function createAndVerifyBackup(): Promise<BackupReceipt> {
-  const createOutput = execFileSync("npm", ["run", "backup:create"], {
-    cwd: PROJECT_ROOT,
+const silentBackupLogger: BackupLogger = {
+  log: () => undefined,
+  warn: () => undefined,
+  error: () => undefined,
+};
+
+async function createAndVerifyBackup() {
+  return createVerifiedBackup({
+    projectRoot: PROJECT_ROOT,
     env: process.env,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
+    logger: silentBackupLogger,
   });
-  const match = createOutput.match(/Backup complete:\s*(backup-[0-9T-]+)/);
-  if (!match?.[1]) {
+}
+
+async function runDryRunMode(options: CliOptions): Promise<number> {
+  const manifest = options.manifest ? resolve(options.manifest) : defaultManifestPath();
+  const privateReview = options.privateReview
+    ? resolve(options.privateReview)
+    : resolve(PROJECT_ROOT, ".local", "classification-audit", "private-review.json");
+  mkdirSync(resolve(PROJECT_ROOT, ".local", "classification-audit"), { recursive: true });
+  const result = await previewHistoricalClassificationAudit(prisma, {
+    manifestPath: manifest,
+    privateReviewPath: privateReview,
+    overwrite: options.overwrite,
+  });
+  safePrint(result);
+  return 0;
+}
+
+async function runApplyMode(options: CliOptions): Promise<number> {
+  if (!options.manifest) {
     throw new HistoricalClassificationAuditError(
-      AUDIT_ERROR_CODES.BACKUP_FAILED,
-      "تعذر تحديد اسم النسخة الاحتياطية"
+      AUDIT_ERROR_CODES.MANIFEST_REQUIRED,
+      "apply يتطلب --manifest"
     );
   }
-  const backupName = match[1];
-  execFileSync("npm", ["run", "backup:verify", "--", backupName], {
-    cwd: PROJECT_ROOT,
-    env: process.env,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
+  const result = await applyHistoricalClassificationAudit(prisma, {
+    manifestPath: options.manifest,
+    confirm: options.confirm ?? undefined,
+    actor: options.actor,
+    batchSize: options.batchSize,
+    createAndVerifyBackup,
   });
-  return { backupName, verified: true };
+  safePrint(result);
+  return result.status === "APPLIED" || result.status === "PARTIALLY_APPLIED" ? 0 : 1;
+}
+
+async function runVerifyMode(options: CliOptions): Promise<number> {
+  if (!options.runId) {
+    throw new HistoricalClassificationAuditError(
+      AUDIT_ERROR_CODES.RUN_NOT_FOUND,
+      "verify يتطلب --run-id"
+    );
+  }
+  const result = await verifyHistoricalClassificationAudit(prisma, { runId: options.runId });
+  safePrint(result);
+  return result.ok ? 0 : 1;
+}
+
+async function runRollbackMode(options: CliOptions): Promise<number> {
+  if (!options.runId) {
+    throw new HistoricalClassificationAuditError(
+      AUDIT_ERROR_CODES.RUN_NOT_FOUND,
+      "rollback يتطلب --run-id"
+    );
+  }
+  const result = await rollbackHistoricalClassificationAudit(prisma, {
+    runId: options.runId,
+    confirm: options.confirm ?? undefined,
+    actor: options.actor,
+    batchSize: options.batchSize,
+  });
+  safePrint(result);
+  return result.status === "ROLLED_BACK" || result.status === "PARTIALLY_ROLLED_BACK" ? 0 : 1;
 }
 
 async function run(options: CliOptions): Promise<number> {
   switch (options.mode) {
-    case "dry-run": {
-      const manifest = options.manifest ? resolve(options.manifest) : defaultManifestPath();
-      const privateReview = options.privateReview
-        ? resolve(options.privateReview)
-        : resolve(PROJECT_ROOT, ".local", "classification-audit", "private-review.json");
-      mkdirSync(resolve(PROJECT_ROOT, ".local", "classification-audit"), { recursive: true });
-      const result = await previewHistoricalClassificationAudit(prisma, {
-        manifestPath: manifest,
-        privateReviewPath: privateReview,
-        overwrite: options.overwrite,
-      });
-      safePrint(result);
-      return 0;
-    }
-    case "apply": {
-      if (!options.manifest) {
-        throw new HistoricalClassificationAuditError(
-          AUDIT_ERROR_CODES.MANIFEST_REQUIRED,
-          "apply يتطلب --manifest"
-        );
-      }
-      const result = await applyHistoricalClassificationAudit(prisma, {
-        manifestPath: options.manifest,
-        confirm: options.confirm ?? undefined,
-        actor: options.actor,
-        batchSize: options.batchSize,
-        createAndVerifyBackup,
-      });
-      safePrint(result);
-      return result.status === "APPLIED" || result.status === "PARTIALLY_APPLIED" ? 0 : 1;
-    }
-    case "verify": {
-      if (!options.runId) {
-        throw new HistoricalClassificationAuditError(
-          AUDIT_ERROR_CODES.RUN_NOT_FOUND,
-          "verify يتطلب --run-id"
-        );
-      }
-      const result = await verifyHistoricalClassificationAudit(prisma, { runId: options.runId });
-      safePrint(result);
-      return result.ok ? 0 : 1;
-    }
-    case "rollback": {
-      if (!options.runId) {
-        throw new HistoricalClassificationAuditError(
-          AUDIT_ERROR_CODES.RUN_NOT_FOUND,
-          "rollback يتطلب --run-id"
-        );
-      }
-      const result = await rollbackHistoricalClassificationAudit(prisma, {
-        runId: options.runId,
-        confirm: options.confirm ?? undefined,
-        actor: options.actor,
-        batchSize: options.batchSize,
-      });
-      safePrint(result);
-      return result.status === "ROLLED_BACK" || result.status === "PARTIALLY_ROLLED_BACK" ? 0 : 1;
-    }
+    case "dry-run":
+      return runDryRunMode(options);
+    case "apply":
+      return runApplyMode(options);
+    case "verify":
+      return runVerifyMode(options);
+    case "rollback":
+      return runRollbackMode(options);
     default:
       throw new HistoricalClassificationAuditError(
         AUDIT_ERROR_CODES.MANIFEST_INVALID,
