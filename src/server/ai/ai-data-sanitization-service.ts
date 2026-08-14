@@ -208,6 +208,46 @@ export interface SanitizedComplaintRecord {
   isOverdue?: boolean;
 }
 
+export interface ClassificationComplaintInput {
+  sourceDetail?: string | null;
+  subject: string;
+  description?: string | null;
+}
+
+export interface SanitizedClassificationComplaint {
+  opaqueId: string;
+  sourceDetail: string;
+  subject: string;
+  description: string;
+}
+
+const CLASSIFICATION_TEXT_LIMITS = {
+  sourceDetail: 500,
+  subject: 1_000,
+  description: 5_000,
+} as const;
+
+/**
+ * Minimal complaint projection allowed in the LLM classification boundary.
+ * The caller supplies an opaque request-local ID; database and external IDs are
+ * intentionally not accepted by this contract.
+ */
+export function sanitizeClassificationComplaint(
+  input: ClassificationComplaintInput,
+  opaqueId: string
+): SanitizedClassificationComplaint {
+  return {
+    opaqueId,
+    sourceDetail: sanitizeText(
+      (input.sourceDetail ?? "").slice(0, CLASSIFICATION_TEXT_LIMITS.sourceDetail)
+    ),
+    subject: sanitizeText(input.subject.slice(0, CLASSIFICATION_TEXT_LIMITS.subject)),
+    description: sanitizeText(
+      (input.description ?? "").slice(0, CLASSIFICATION_TEXT_LIMITS.description)
+    ),
+  };
+}
+
 export function sanitizeComplaint(c: ComplaintInputRecord): SanitizedComplaintRecord {
   const overdue = c.dueDate ? new Date(c.dueDate) < new Date() : false;
   const month = c.complaintDate
