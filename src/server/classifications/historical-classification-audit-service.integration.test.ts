@@ -8,6 +8,7 @@ import { CLASSIFICATION_ASSIGNMENT_SOURCES } from "./classification-assignment";
 import {
   AUDIT_ERROR_CODES,
   AUDIT_RESULTS,
+  AUDIT_TRANSACTION_OPTIONS,
   HistoricalClassificationAuditError,
   applyHistoricalClassificationAudit,
   previewHistoricalClassificationAudit,
@@ -49,8 +50,9 @@ function db(): PrismaClient {
 }
 
 describe("historical classification audit SQLite workflow", () => {
-  it("runs dry-run, guarded apply, verify, and concurrency-safe rollback without data loss", async () => {
+  it("runs apply and rollback through configured batch transactions without data loss", async () => {
     const client = db();
+    expect(AUDIT_TRANSACTION_OPTIONS).toEqual({ maxWait: 5_000, timeout: 30_000 });
     const category = await client.category.create({
       data: { nameAr: "التوجية والارشاد" },
     });

@@ -28,6 +28,10 @@ export const CLASSIFICATION_AUDIT_SCHEMA_VERSION = 1;
 export const CLASSIFICATION_AUDIT_ACTOR = "historical-classification-cleanup";
 export const DEFAULT_AUDIT_BATCH_SIZE = 200;
 export const MAX_AUDIT_BATCH_SIZE = 500;
+export const AUDIT_TRANSACTION_OPTIONS = {
+  maxWait: 5_000,
+  timeout: 30_000,
+} as const;
 
 export const AUDIT_RESULTS = {
   KEEP: "KEEP",
@@ -1583,7 +1587,7 @@ async function processApplyBatch(input: {
       applied += 1;
     }
     return { applied, skipped };
-  });
+  }, AUDIT_TRANSACTION_OPTIONS);
 }
 
 function validateApplyConfirmation(
@@ -2084,7 +2088,7 @@ export async function rollbackHistoricalClassificationAudit(
         });
         rolledBackCount += 1;
       }
-    });
+    }, AUDIT_TRANSACTION_OPTIONS);
   }
   const [totalAfter, activeAfter] = await Promise.all([
     db.complaint.count(),
