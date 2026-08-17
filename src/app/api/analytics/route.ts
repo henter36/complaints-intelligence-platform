@@ -3,6 +3,39 @@ import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 import { getComplaintKpis } from "@/server/complaints/complaint-kpi-service";
 import { isComplaintQueryValidationError } from "@/server/complaints/complaint-query-service";
 import { computeAnalyticsFindings } from "@/server/analytics/analytics-findings-service";
+import type { AnalyticalFinding } from "@/lib/analytics/analytical-finding";
+import type { PeriodChangeDigest } from "@/lib/analytics/period-change-digest";
+import { loadPatternAnalysisForFilters } from "@/server/analytics/pattern/pattern-report-integration-service";
+import { rankFindingsForExecutiveBrief } from "@/lib/analytics/finding-ranking";
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The multi-period pattern engine (chronic issues, repeat complainants,
+ * concentration, cross-facility spread, ...) needs an explicit current
+ * period to build its trailing analysis window from. Without one there is
+ * no reliable way to say "the last N periods" (spec §19: don't produce a
+ * definitive conclusion on insufficient/ambiguous data), so it is skipped
+ * rather than guessed. Scoped by region when the Analytics page has one
+ * selected — department scoping is intentionally not applied here; the
+ * engine aggregates by facility×classification, not department, so a
+ * department filter cannot be verified against a finding without guessing.
+ */
+async function loadPatternAnalysis(
+  fromDate: string | null,
+  toDate: string | null,
+  regionId: string | null
+): Promise<{ findings: AnalyticalFinding[]; periodChangeDigest: PeriodChangeDigest | null; periods: { from: string; to: string }[] }> {
+  if (!fromDate || !toDate) return { findings: [], periodChangeDigest: null, periods: [] };
+
+  const currentFrom = new Date(`${fromDate}T00:00:00.000Z`);
+  const currentToExclusive = new Date(new Date(`${toDate}T00:00:00.000Z`).getTime() + DAY_MS);
+  if (Number.isNaN(currentFrom.getTime()) || Number.isNaN(currentToExclusive.getTime())) {
+    return { findings: [], periodChangeDigest: null, periods: [] };
+  }
+
+  return loadPatternAnalysisForFilters(currentFrom, currentToExclusive, { region: regionId });
+}
 
 export const compareArabicLabels = (left: string, right: string): number =>
   left.localeCompare(right, "ar");
@@ -35,6 +68,12 @@ export async function GET(req: NextRequest) {
 
     const fromDate = url.searchParams.get("from");
     const toDate = url.searchParams.get("to");
+    const regionId = url.searchParams.get("regionId") ?? url.searchParams.get("region");
+    const patternAnalysis = await loadPatternAnalysis(fromDate, toDate, regionId);
+    const findings = rankFindingsForExecutiveBrief([
+      ...computeAnalyticsFindings(result, fromDate, toDate),
+      ...patternAnalysis.findings,
+    ]);
 
     return NextResponse.json({
       kpis: result.kpis,
@@ -78,7 +117,9 @@ export async function GET(req: NextRequest) {
           byChannel: result.previousDistributions.byChannel.map((r) => ({ name: r.name, count: r.total })),
         }
         : null,
-      findings: computeAnalyticsFindings(result, fromDate, toDate),
+      findings,
+      periodChangeDigest: patternAnalysis.periodChangeDigest,
+      patternAnalysisPeriods: patternAnalysis.periods,
       totalCount: result.volume.total,
       distributions: result.distributions,
     });

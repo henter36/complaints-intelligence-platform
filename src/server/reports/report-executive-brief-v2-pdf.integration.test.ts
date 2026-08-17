@@ -50,6 +50,7 @@ import type { ReportRequest } from "./report-definition-service";
 import { isExecutiveBriefV2Data } from "./report-data-service";
 import type { ExecutiveBriefV2Data } from "./report-data-service";
 import { renderExecutiveBriefV2Pdf } from "./report-executive-brief-v2-pdf-service";
+import { buildRegionOnlyConclusions } from "./report-executive-brief-data-service";
 import { monthKeyFromReportEndDate } from "./report-monthly-trend-sanitize";
 import { calculateMonthlyTrendTotals } from "./report-monthly-trend-presentation";
 
@@ -255,64 +256,65 @@ describe.skipIf(!DEV_DB_AVAILABLE)(
       expect(totals).toEqual(recomputed);
     });
 
-    it("data contract: topFacilities/bottomFacilities never overlap, and zero-volume facilities remain valid bottom rows", () => {
+    it("data contract: facilitiesNeedingFollowUp/facilitiesWithSustainedImprovement are well-formed and never expose the unspecified facility bucket", () => {
       const brief = requireV2Brief();
-      const topNames = new Set((brief.topFacilities ?? []).map((r) => r.name));
-      const bottomNames = (brief.bottomFacilities ?? []).map((r) => r.name);
-      expect(bottomNames.every((name) => !topNames.has(name))).toBe(true);
-      for (const row of brief.bottomFacilities ?? []) {
-        expect(row.total).toBeGreaterThanOrEqual(0);
+      for (const row of brief.facilitiesNeedingFollowUp ?? []) {
+        expect(row.facility).not.toBe("غير محدد");
+        expect(row.facility.trim().length).toBeGreaterThan(0);
+        expect(row.totalComplaints).toBeGreaterThanOrEqual(0);
+        expect(Number.isFinite(row.priorityScore)).toBe(true);
       }
-      for (const row of [...(brief.topFacilities ?? []), ...(brief.bottomFacilities ?? [])]) {
-        expect(row.name).not.toBe("غير محدد");
-        expect(row.name.trim().length).toBeGreaterThan(0);
+      for (const row of brief.facilitiesWithSustainedImprovement ?? []) {
+        expect(row.facility).not.toBe("غير محدد");
+        expect(row.facility.trim().length).toBeGreaterThan(0);
+        // A real, sustained decline: the engine only emits SUSTAINED_IMPROVEMENT
+        // for a genuine multi-period drop, never a single-period dip.
+        expect(row.decrease).toBeGreaterThan(0);
+        expect(row.currentValue).toBeLessThan(row.startValue);
       }
     });
 
-    it("data contract: V2 conclusions never mention departments, facilities, or classifications — only regions", () => {
+    it("data contract: buildRegionOnlyConclusions itself never mentions departments, facilities, or classifications — only regions", () => {
       const brief = requireV2Brief();
       const departmentNames = (brief.departmentPeriodMetrics ?? []).map((d) => d.departmentName);
-      const facilityNames = [...(brief.topFacilities ?? []), ...(brief.bottomFacilities ?? [])].map((f) => f.name);
-      // classificationPath is the name most likely to actually appear in report
-      // text; classificationName is checked too since either could leak in.
+      const facilityNames = [
+        ...(brief.facilitiesNeedingFollowUp ?? []).map((f) => f.facility),
+        ...(brief.facilitiesWithSustainedImprovement ?? []).map((f) => f.facility),
+      ];
       const classificationNames = (brief.topClassifications ?? []).flatMap((c) => [
         c.classificationPath,
         c.classificationName,
       ]);
-      const conclusionsText = (brief.conclusions ?? []).join(" ");
+      // Called directly (not through the merged brief.conclusions, which now
+      // deliberately leads with pattern-analysis sentences that DO name
+      // facilities/classifications per spec §10) so this still asserts the
+      // region-only base list's own guarantee precisely.
+      const regionOnlyText = buildRegionOnlyConclusions(reportData.comparisonData!).join(" ");
       for (const name of [...departmentNames, ...facilityNames, ...classificationNames]) {
         if (name && name !== "غير محدد") {
-          expect(conclusionsText).not.toContain(name);
+          expect(regionOnlyText).not.toContain(name);
         }
       }
     });
 
-    it("data contract: classificationChanges (V2 page 4 \"أبرز تحولات التصنيفات\") carries classification names, correct current/previous/difference, and never a department name (spec section 16)", () => {
+    it("data contract: classificationTrends (V2 page 4 \"أبرز اتجاهات التصنيفات عبر الفترات\") is priority-ranked, sourced from the pattern-analysis engine, and never a department name (spec section 16)", () => {
       const brief = requireV2Brief();
-      const rows = brief.classificationChanges ?? [];
+      const rows = brief.classificationTrends ?? [];
       const departmentNames = new Set((brief.departmentPeriodMetrics ?? []).map((d) => d.departmentName));
 
       expect(rows.length).toBeLessThanOrEqual(5);
       for (const row of rows) {
-        expect(row.classificationPath.length).toBeGreaterThan(0);
+        expect(row.facility.length).toBeGreaterThan(0);
+        expect(row.classification.length).toBeGreaterThan(0);
         expect(row).not.toHaveProperty("departmentName");
         expect(row).not.toHaveProperty("departmentId");
-        expect(departmentNames.has(row.classificationPath)).toBe(false);
-        expect(row.difference).toBe(row.currentCount - row.previousCount);
-        expect(row.difference).not.toBe(0);
-        if (row.previousCount === 0) {
-          expect(row.changeRate).toBeNull();
-          expect(row.direction).toBe("جديد");
-        } else {
-          expect(row.changeRate === null || Number.isFinite(row.changeRate)).toBe(true);
-        }
-        // Capability check: a classification that dropped to zero this
-        // period must be representable (not silently dropped for having no
-        // current-period row) — asserted whenever real data has such a case.
-        if (row.currentCount === 0) {
-          expect(row.previousCount).toBeGreaterThan(0);
-          expect(row.direction).toBe("انخفاض إلى صفر");
-        }
+        expect(departmentNames.has(row.classification)).toBe(false);
+        expect(row.streakPeriods).toBeGreaterThanOrEqual(0);
+        expect(Number.isFinite(row.priorityScore)).toBe(true);
+      }
+      // Priority-ranked, not difference-ranked (spec §2).
+      for (let i = 1; i < rows.length; i++) {
+        expect(rows[i - 1]!.priorityScore).toBeGreaterThanOrEqual(rows[i]!.priorityScore);
       }
     });
 

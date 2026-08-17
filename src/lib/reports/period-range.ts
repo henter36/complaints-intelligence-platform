@@ -38,6 +38,29 @@ export function comparisonHalfOpenPeriod(
   return previousHalfOpenPeriod(from, toExclusive);
 }
 
+/**
+ * Builds `count` consecutive, equal-duration, non-overlapping half-open
+ * periods ending at the current period, oldest first. `current` is always
+ * the last element. Used by the multi-period pattern-analysis engine, which
+ * needs several trailing measurement periods rather than just one
+ * current/previous pair.
+ */
+export function enumerateConsecutivePeriods(
+  currentFrom: Date,
+  currentToExclusive: Date,
+  count: number
+): HalfOpenDateRange[] {
+  if (count < 1) return [];
+  const periods: HalfOpenDateRange[] = [{ from: currentFrom, toExclusive: currentToExclusive }];
+  for (let i = 1; i < count; i++) {
+    const earliest = periods[0];
+    const prior = previousHalfOpenPeriod(earliest.from, earliest.toExclusive);
+    if (!prior) break;
+    periods.unshift(prior);
+  }
+  return periods;
+}
+
 export function previousInclusivePeriod(
   from: Date,
   to: Date,

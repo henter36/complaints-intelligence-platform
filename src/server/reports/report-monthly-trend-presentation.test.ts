@@ -62,6 +62,62 @@ describe("calculateMonthlyTrendTotals", () => {
 });
 
 describe("buildMonthlyTrendInsights", () => {
+  it("leads with the multi-period trend direction (spec §11), reusing classifyTrend — never the registered/closed flow gap", () => {
+    const insights = buildMonthlyTrendInsights({
+      points: [
+        point("2026-01", 20, 18, "يناير 2026"),
+        point("2026-02", 25, 20, "فبراير 2026"),
+        point("2026-03", 30, 22, "مارس 2026"),
+        point("2026-04", 35, 24, "أبريل 2026"),
+      ],
+      reportEndDate: "2026-04-30",
+    });
+    expect(insights[0]?.key).toBe("trend-direction");
+    expect(insights[0]?.text).toContain("اتجاه الشكاوى المسجلة");
+    expect(insights.some((item) => item.key === "flow-proximity")).toBe(false);
+    expect(insights.some((item) => item.key === "largest-gap")).toBe(false);
+  });
+
+  it("describes a continued decline across several months", () => {
+    const insights = buildMonthlyTrendInsights({
+      points: [
+        point("2026-01", 40, 10, "يناير 2026"),
+        point("2026-02", 30, 10, "فبراير 2026"),
+        point("2026-03", 20, 10, "مارس 2026"),
+        point("2026-04", 12, 10, "أبريل 2026"),
+      ],
+      reportEndDate: "2026-04-30",
+    });
+    const trend = insights.find((item) => item.key === "trend-direction");
+    expect(trend?.text).toContain("تحسن مستمر");
+  });
+
+  it("omits the trend-direction insight when there are fewer than three complete months (insufficient data)", () => {
+    const insights = buildMonthlyTrendInsights({
+      points: [
+        point("2026-01", 10, 9, "يناير 2026"),
+        point("2026-02", 25, 20, "فبراير 2026"),
+      ],
+      reportEndDate: "2026-02-28",
+    });
+    expect(insights.some((item) => item.key === "trend-direction")).toBe(false);
+  });
+
+  it("excludes the partial report-end month from the trend classification", () => {
+    // Only "مارس" is partial; the classifier still needs >=3 COMPLETE months,
+    // so with just جانفي/فبراير complete this must omit trend-direction rather
+    // than classify on an incomplete window.
+    const insights = buildMonthlyTrendInsights({
+      points: [
+        point("2026-01", 10, 10, "يناير 2026"),
+        point("2026-02", 10, 10, "فبراير 2026"),
+        point("2026-03", 100, 1, "مارس 2026"),
+      ],
+      reportEndDate: "2026-03-05",
+    });
+    expect(insights.some((item) => item.key === "trend-direction")).toBe(false);
+  });
+
   it("picks the highest registration month", () => {
     const insights = buildMonthlyTrendInsights({
       points: [
@@ -71,7 +127,7 @@ describe("buildMonthlyTrendInsights", () => {
       ],
       reportEndDate: "2026-03-31",
     });
-    expect(insights[0]).toEqual({
+    expect(insights.find((item) => item.key === "peak-registration")).toEqual({
       key: "peak-registration",
       text: "أعلى حجم تسجيل كان في فبراير 2026 بعدد 25 شكوى.",
     });
@@ -85,86 +141,7 @@ describe("buildMonthlyTrendInsights", () => {
       ],
       reportEndDate: "2026-02-28",
     });
-    expect(insights[0]?.text).toContain("فبراير 2026");
-  });
-
-  it("excludes the partial month from flow proximity", () => {
-    const insights = buildMonthlyTrendInsights({
-      points: [
-        point("2026-01", 10, 10, "يناير 2026"),
-        point("2026-02", 10, 10, "فبراير 2026"),
-        point("2026-03", 100, 1, "مارس 2026"),
-      ],
-      reportEndDate: "2026-03-05",
-    });
-    const flow = insights.find((item) => item.key === "flow-proximity");
-    expect(flow?.text).toBe(
-      "اقترب عدد المغلقة من عدد المسجلة في 2 من 2 شهرًا مكتملًا."
-    );
-  });
-
-  it("reports flow proximity when at least half of complete months match", () => {
-    const insights = buildMonthlyTrendInsights({
-      points: [
-        point("2026-01", 10, 9, "يناير 2026"),
-        point("2026-02", 10, 10, "فبراير 2026"),
-        point("2026-03", 10, 2, "مارس 2026"),
-        point("2026-04", 10, 10, "أبريل 2026"),
-      ],
-      reportEndDate: "2026-04-30",
-    });
-    expect(insights.some((item) => item.key === "flow-proximity")).toBe(true);
-  });
-
-  it("reports the largest positive gap when proximity does not hold", () => {
-    const insights = buildMonthlyTrendInsights({
-      points: [
-        point("2026-01", 20, 5, "يناير 2026"),
-        point("2026-02", 15, 14, "فبراير 2026"),
-        point("2026-03", 30, 8, "مارس 2026"),
-      ],
-      reportEndDate: "2026-03-31",
-    });
-    const gap = insights.find((item) => item.key === "largest-gap");
-    expect(gap?.text).toBe(
-      "أكبر فجوة بين المسجلة والمغلقة ظهرت في مارس 2026 بفارق 22 شكوى."
-    );
-  });
-
-  it("balanced convergence: a month with far more closed than received is NOT flow-proximate (regression)", () => {
-    // Regression for the one-sided `closed >= received * 0.9` bug, which
-    // treated 4,947 closed vs. 1,991 received (closed ~248% of received) as
-    // "close" simply because closed comfortably exceeded 90% of received.
-    const insights = buildMonthlyTrendInsights({
-      points: [point("2026-01", 1991, 4947, "يناير 2026")],
-      reportEndDate: "2026-01-31",
-    });
-    expect(insights.find((item) => item.key === "flow-proximity")).toBeUndefined();
-  });
-
-  it("balanced convergence: within ±10% counts, just past ±10% does not", () => {
-    const withinTen = buildMonthlyTrendInsights({
-      points: [point("2026-01", 100, 110, "يناير 2026")], // +10% exactly
-      reportEndDate: "2026-01-31",
-    });
-    expect(withinTen.find((item) => item.key === "flow-proximity")).toBeDefined();
-
-    const pastTen = buildMonthlyTrendInsights({
-      points: [point("2026-01", 100, 111, "يناير 2026")], // +11%, outside the band
-      reportEndDate: "2026-01-31",
-    });
-    expect(pastTen.find((item) => item.key === "flow-proximity")).toBeUndefined();
-  });
-
-  it("does not treat closed > registered as a defect gap", () => {
-    const insights = buildMonthlyTrendInsights({
-      points: [
-        point("2026-01", 5, 20, "يناير 2026"),
-        point("2026-02", 4, 18, "فبراير 2026"),
-      ],
-      reportEndDate: "2026-02-28",
-    });
-    expect(insights.some((item) => item.key === "largest-gap")).toBe(false);
+    expect(insights.find((item) => item.key === "peak-registration")?.text).toContain("فبراير 2026");
   });
 
   it("describes a complete report-end month", () => {
@@ -220,10 +197,23 @@ describe("buildMonthlyTrendInsights", () => {
       ],
       reportEndDate: "2026-03-31",
     });
-    expect(insights[0]).toEqual({
+    expect(insights.find((item) => item.key === "peak-registration")).toEqual({
       key: "peak-registration",
       text: "أعلى حجم تسجيل كان في فبراير 2026 بعدد 12 شكوى.",
     });
+  });
+
+  it("caps at three insights total", () => {
+    const insights = buildMonthlyTrendInsights({
+      points: [
+        point("2026-01", 20, 18, "يناير 2026"),
+        point("2026-02", 25, 20, "فبراير 2026"),
+        point("2026-03", 30, 22, "مارس 2026"),
+        point("2026-04", 35, 24, "أبريل 2026"),
+      ],
+      reportEndDate: "2026-04-05",
+    });
+    expect(insights.length).toBeLessThanOrEqual(3);
   });
 });
 

@@ -16,6 +16,7 @@ const baseFilters: FilterState = {
   search: "موعد",
   regionId: "الرياض",
   departmentId: "الدعم",
+  facility: "سجن الحائر",
   classificationId: "cls_1",
   channel: "الهاتف",
   status: "OPEN",
@@ -213,6 +214,59 @@ describe("complaints explorer dataFreshnessBucket UI", () => {
     const freshnessTrigger = freshnessField?.querySelector('[role="combobox"]');
     expect(freshnessTrigger).toHaveTextContent("3–7 أيام");
     expect(screen.getByRole("button", { name: /فلاتر متقدمة/ })).toHaveTextContent("1");
+  });
+
+  it("shows facility from URL in advanced filters (drilldown-safe on reload)", async () => {
+    window.history.replaceState(null, "", "/?facility=سجن+الحائر");
+    const user = userEvent.setup();
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo) => {
+        const url = String(input);
+        if (url.includes("/api/filters")) {
+          return Response.json({
+            regions: [],
+            departments: [],
+            facilities: [],
+            locations: [
+              { id: "سجن الحائر", name: "سجن الحائر" },
+              { id: "سجن الملز", name: "سجن الملز" },
+            ],
+            categories: [],
+            classifications: [],
+            statuses: [],
+            priorities: [],
+            channels: [],
+            sourceOrigins: [],
+            sourceStatuses: [],
+            sourceActionStatuses: [],
+            wingCodes: [],
+            dataFreshnessBuckets: [],
+          });
+        }
+        return Response.json({
+          items: [],
+          pagination: { total: 0, totalPages: 0, page: 1, pageSize: 25 },
+        });
+      })
+    );
+
+    render(<ComplaintsExplorer />);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /فلاتر متقدمة/ })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /فلاتر متقدمة/ }));
+    const facilityLabel = screen.getByText("الموقع");
+    const facilityField = facilityLabel.closest("div");
+    const facilityTrigger = facilityField?.querySelector('[role="combobox"]');
+    expect(facilityTrigger).toHaveTextContent("سجن الحائر");
+  });
+
+  it("includes facility in the built complaint query", () => {
+    const query = buildComplaintQuery(baseFilters, "receivedDate", "desc", 1);
+    expect(query.get("facility")).toBe("سجن الحائر");
   });
 
   it("updates and clears dataFreshnessBucket in query helpers without resetting other filters", () => {

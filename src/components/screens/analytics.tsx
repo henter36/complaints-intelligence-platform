@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useCallback, useRef } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef, type ReactNode } from "react";
 import { PageHeader } from "@/components/shared/page-header";
 import {
   Card, CardContent, CardHeader, CardTitle, CardDescription,
@@ -35,6 +35,10 @@ import {
   evaluateComparison,
   type ComparisonState,
 } from "@/lib/analytics/comparison-evaluation";
+import type { AnalyticalFinding } from "@/lib/analytics/analytical-finding";
+import type { PeriodChangeDigest } from "@/lib/analytics/period-change-digest";
+import { findingTypeLabel } from "@/lib/analytics/finding-labels";
+import { buildExplorerDrilldownQuery } from "@/lib/analytics/drilldown-query";
 import {
   apiErrorMessage,
   isAnalyticsData,
@@ -67,6 +71,191 @@ function ComparisonDirectionIcon({ state }: ComparisonDirectionIconProps) {
 export function formatComparisonDifference(difference: number | null): string {
   if (difference === null) return "—";
   return `${difference > 0 ? "+" : ""}${formatNumber(difference)}`;
+}
+
+// ---------- Pattern findings (notes tab) ----------
+
+function severityBadgeClassName(severity: string): string {
+  if (severity === "CRITICAL" || severity === "HIGH") return "bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-300";
+  if (severity === "MEDIUM") return "bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300";
+  return "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300";
+}
+
+function findingCardBorderClassName(severity: string): string {
+  if (severity === "CRITICAL" || severity === "HIGH") return "border-l-red-500";
+  if (severity === "MEDIUM") return "border-l-amber-500";
+  return "border-l-emerald-500";
+}
+
+function parseJsonArray(value: unknown): unknown[] | null {
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseStringArray(value: unknown): string[] {
+  return (parseJsonArray(value) ?? []).filter((v): v is string => typeof v === "string");
+}
+
+/** Minimal inline sparkline — no chart library needed for a few pixels of trend. */
+function MiniSparkline({ values }: Readonly<{ values: number[] }>) {
+  if (values.length < 2) return null;
+  const width = 120;
+  const height = 28;
+  const max = Math.max(...values, 1);
+  const min = Math.min(...values, 0);
+  const range = max - min || 1;
+  const step = width / (values.length - 1);
+  const points = values.map((v, i) => `${i * step},${height - ((v - min) / range) * height}`).join(" ");
+  return (
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="text-primary" aria-hidden="true">
+      <polyline points={points} fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+type FindingCardProps = Readonly<{
+  finding: AnalyticalFinding;
+  periods: { from: string; to: string }[];
+  onNavigateToExplorer?: (query: Record<string, string>) => void;
+}>;
+
+/**
+ * One analytical-finding card per spec §16: facility, classification, pattern
+ * type, current value, streak/repeat/concentration metrics when available,
+ * and the explanation behind the finding — never a bare severity label.
+ * Reasons/timeline reuse the engine's own output (spec §4, §5, §8) — nothing
+ * here is recomputed, and no extra query is made for the timeline.
+ */
+function FindingCard({ finding, periods, onNavigateToExplorer }: FindingCardProps) {
+  const metrics = finding.supportingMetrics;
+  const streakPeriods = typeof metrics.streakPeriods === "number" ? metrics.streakPeriods : null;
+  const repeatRatePercent = typeof metrics.repeatRatePercent === "number" ? metrics.repeatRatePercent : null;
+  const sharePercent = typeof metrics.facilitySharePercent === "number" ? metrics.facilitySharePercent : null;
+  const periodCounts = (parseJsonArray(metrics.periodCounts) ?? []).filter((v): v is number => typeof v === "number");
+  const reasons = parseStringArray(metrics.priorityReasons).length > 0
+    ? parseStringArray(metrics.priorityReasons)
+    : parseStringArray(metrics.chronicReasons);
+  const repeatEntries = parseJsonArray(metrics.repeatEntries) as
+    | { anonymizedComplainant: string; topicLabel: string; complaintCount: number; periodsSpanned: number }[]
+    | null;
+
+  return (
+    <Card className={`border-l-4 ${findingCardBorderClassName(finding.severity)}`}>
+      <CardHeader className="pb-2">
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle className="text-base">{finding.entityName}</CardTitle>
+          <Badge className={severityBadgeClassName(finding.severity)}>{findingTypeLabel(finding.type)}</Badge>
+        </div>
+        <CardDescription className="text-xs">{finding.explanation}</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex flex-wrap gap-x-5 gap-y-1.5 text-xs text-muted-foreground">
+            <span>الحالية: <span className="font-bold text-foreground tabular-nums">{formatNumber(finding.currentValue)}</span></span>
+            {finding.previousValue !== null && (
+              <span>السابقة: <span className="font-medium text-foreground tabular-nums">{formatNumber(finding.previousValue)}</span></span>
+            )}
+            {streakPeriods !== null && (
+              <span>الاستمرار: <span className="font-medium text-foreground tabular-nums">{streakPeriods} فترات</span></span>
+            )}
+            {repeatRatePercent !== null && (
+              <span>معدل التكرار: <span className="font-medium text-foreground tabular-nums">{formatPercent(repeatRatePercent)}</span></span>
+            )}
+            {sharePercent !== null && (
+              <span>حصة التصنيف: <span className="font-medium text-foreground tabular-nums">{formatPercent(sharePercent)}</span></span>
+            )}
+            <span>الأولوية: <span className="font-bold text-foreground tabular-nums">{finding.priorityScore}</span></span>
+          </div>
+          {periodCounts.length >= 2 && <MiniSparkline values={periodCounts} />}
+        </div>
+
+        {reasons.length > 0 && (
+          <div className="mt-2">
+            <p className="text-[11px] font-semibold text-muted-foreground">سبب الأولوية</p>
+            <ul className="mt-0.5 list-inside list-disc text-xs text-muted-foreground space-y-0.5">
+              {reasons.map((reason) => <li key={reason}>{reason}</li>)}
+            </ul>
+          </div>
+        )}
+
+        {repeatEntries && repeatEntries.length > 0 && (
+          <div className="mt-2">
+            <p className="text-[11px] font-semibold text-muted-foreground">أصحاب الشكاوى المتكررون (مجهّلون)</p>
+            <ul className="mt-0.5 text-xs text-muted-foreground space-y-0.5">
+              {repeatEntries.slice(0, 5).map((entry) => (
+                <li key={entry.anonymizedComplainant + entry.topicLabel}>
+                  {entry.anonymizedComplainant} — {entry.topicLabel} ({entry.complaintCount} شكوى عبر {entry.periodsSpanned} فترات)
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {periodCounts.length >= 2 && periods.length === periodCounts.length && (
+          <p className="mt-2 text-[11px] text-muted-foreground/70">
+            {periods.map((p, i) => `${p.from}: ${formatNumber(periodCounts[i])}`).join(" ← ")}
+          </p>
+        )}
+
+        {onNavigateToExplorer && Object.keys(finding.drilldownFilters).length > 0 && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="mt-3 h-7 text-xs"
+            onClick={() => onNavigateToExplorer(buildExplorerDrilldownQuery(finding))}
+          >
+            عرض الشكاوى المرتبطة
+          </Button>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+type PeriodChangeDigestCardProps = Readonly<{ digest: PeriodChangeDigest | null }>;
+
+/** Executive "what changed since the previous period" summary (spec §13). */
+function PeriodChangeDigestCard({ digest }: PeriodChangeDigestCardProps) {
+  if (!digest) return null;
+  const rows: { label: string; count: number; icon: ReactNode; tone: string }[] = [
+    { label: "مشكلات جديدة", count: digest.newProblems.length, icon: <Sparkles className="h-3.5 w-3.5" />, tone: "text-red-600" },
+    { label: "مشكلات مستمرة", count: digest.continuingProblems.length, icon: <Activity className="h-3.5 w-3.5" />, tone: "text-amber-600" },
+    { label: "مشكلات تفاقمت", count: digest.worsenedProblems.length, icon: <TrendingUp className="h-3.5 w-3.5" />, tone: "text-red-600" },
+    { label: "عادت بعد تحسن", count: digest.relapsedProblems.length, icon: <Zap className="h-3.5 w-3.5" />, tone: "text-amber-600" },
+    { label: "مواقع تحسنت", count: digest.improvedFacilities.length, icon: <CheckCircle2 className="h-3.5 w-3.5" />, tone: "text-emerald-600" },
+    { label: "خرجت من قائمة الأولوية", count: digest.exitedPriorityList.length, icon: <TrendingDown className="h-3.5 w-3.5" />, tone: "text-emerald-600" },
+    { label: "تصنيفات بدأت بالانتشار", count: digest.newlySpreadingClassifications.length, icon: <MapPin className="h-3.5 w-3.5" />, tone: "text-red-600" },
+  ];
+  const hasAny = rows.some((r) => r.count > 0);
+  if (!hasAny) return null;
+
+  return (
+    <Card className="border-l-4 border-l-primary/60">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-base flex items-center gap-2">
+          <Clock className="h-4 w-4" /> ما تغير منذ الفترة السابقة؟
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          {rows.filter((r) => r.count > 0).map((row) => (
+            <div key={row.label} className="flex items-center gap-2 rounded-lg border border-border bg-muted/30 p-2.5">
+              <span className={row.tone}>{row.icon}</span>
+              <div className="min-w-0">
+                <p className="text-xs text-muted-foreground truncate">{row.label}</p>
+                <p className="text-sm font-bold tabular-nums">{formatNumber(row.count)}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 // ---------- Types ----------
@@ -138,7 +327,12 @@ function formatDateShort(d: string): string {
 }
 
 // ---------- Main Component ----------
-export function Analytics() {
+type AnalyticsProps = Readonly<{
+  /** Navigates to the complaints explorer with the given query params applied (spec §6). */
+  onNavigateToExplorer?: (query: Record<string, string>) => void;
+}>;
+
+export function Analytics({ onNavigateToExplorer }: AnalyticsProps = {}) {
   // Filter state
   const [from, setFrom] = useState<string>(daysAgoIso(90));
   const [to, setTo] = useState<string>(todayIso());
@@ -456,6 +650,9 @@ export function Analytics() {
           </TabsTrigger>
           <TabsTrigger value="patterns" className="gap-1.5">
             <Activity className="h-4 w-4" /> كشف الأنماط
+          </TabsTrigger>
+          <TabsTrigger value="notes" className="gap-1.5">
+            <Flame className="h-4 w-4" /> الملاحظات
           </TabsTrigger>
           <TabsTrigger value="operational" className="gap-1.5">
             <Filter className="h-4 w-4" /> تشغيلي
@@ -1266,6 +1463,36 @@ export function Analytics() {
                   </ResponsiveContainer>
                 </CardContent>
               </Card>
+            </>
+          )}
+        </TabsContent>
+
+        {/* ===== Tab: Notes (chronic issues, repeats, concentration, spread — spec §16) ===== */}
+        <TabsContent value="notes" className="mt-4 space-y-4">
+          {loading ? (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <Skeleton className="h-64 rounded-xl" />
+              <Skeleton className="h-64 rounded-xl" />
+            </div>
+          ) : (
+            <>
+              <PeriodChangeDigestCard digest={analytics?.periodChangeDigest ?? null} />
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {(analytics?.findings || []).map((finding) => (
+                  <FindingCard
+                    key={finding.id}
+                    finding={finding}
+                    periods={analytics?.patternAnalysisPeriods ?? []}
+                    onNavigateToExplorer={onNavigateToExplorer}
+                  />
+                ))}
+              </div>
+              {(analytics?.findings || []).length === 0 && (
+                <div className="text-center py-12 text-sm text-muted-foreground">
+                  لا توجد ملاحظات تحليلية للفترة والفلاتر الحالية.
+                </div>
+              )}
             </>
           )}
         </TabsContent>

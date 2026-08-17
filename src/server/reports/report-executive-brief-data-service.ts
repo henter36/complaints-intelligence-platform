@@ -22,6 +22,11 @@ import { buildComplaintWhere, parseComplaintQuery } from "@/server/complaints/co
 import { comparisonWarningMessage } from "./report-comparison";
 import type { DeptClassPeriodCount, ComparisonResult, PeriodRange, RegionChangeRow } from "./report-comparison";
 import { buildComplaintQueryParams, type ReportFilters } from "./report-definition-service";
+import { loadPatternAnalysisForFilters } from "@/server/analytics/pattern/pattern-report-integration-service";
+import { buildPatternAnalysisBriefConclusions } from "@/lib/analytics/finding-brief-conclusions";
+import { rankFindingsForExecutiveBrief } from "@/lib/analytics/finding-ranking";
+import { PATTERN_ANALYSIS_CONFIG } from "@/lib/analytics/pattern-analysis-config";
+import type { AnalyticalFinding } from "@/lib/analytics/analytical-finding";
 import type {
   ExecutiveBriefData,
   ExecutiveBriefV2Data,
@@ -44,7 +49,9 @@ import type {
   RegionSnapshotAtEndRow,
   DepartmentPeriodMetricsRow,
   ClassificationSnapshotAtEndRow,
-  ClassificationChangeRow,
+  ClassificationTrendRow,
+  FacilityFollowUpRow,
+  FacilityImprovementRow,
 } from "@/lib/reports/report-contract";
 import {
   buildClassificationPath,
@@ -363,17 +370,6 @@ function compareExecutiveEntityRows(left: ExecutiveEntityRow, right: ExecutiveEn
   );
 }
 
-/** Mirror image of {@link compareExecutiveEntityRows} for "lowest volume" listings — the name tiebreak stays ascending. */
-function compareExecutiveEntityRowsAscending(left: ExecutiveEntityRow, right: ExecutiveEntityRow): number {
-  return (
-    left.total - right.total
-    || left.open - right.open
-    || left.currentlyLate - right.currentlyLate
-    || left.closed - right.closed
-    || left.name.localeCompare(right.name, "ar")
-  );
-}
-
 /**
  * Builds candidates directly from the period snapshot (not from
  * result.distributions, which only contains entities with inflow this
@@ -403,83 +399,267 @@ function buildEntityRows(
 }
 
 // ---------------------------------------------------------------------------
-// V2: top/bottom facilities (page 4 "أعلى السجون" / "أقل السجون")
+// V2: pattern-analysis-driven facility and classification sections
+// (page 4 "السجون الأكثر حاجة للمتابعة" / "أفضل السجون تحسناً" /
+// "أبرز اتجاهات التصنيفات عبر الفترات"). Every row here is built directly
+// from the shared pattern-analysis engine's own AnalyticalFinding[] — no
+// trend/chronic/repeat/concentration/priority logic is recomputed here.
 // ---------------------------------------------------------------------------
 
 const FACILITY_ROWS_LIMIT = 5;
+const CLASSIFICATION_TRENDS_LIMIT = 5;
+const TREND_TRAIL_MAX_PERIODS = 5;
 
 function isUnspecifiedOrEmptyFacilityName(name: string): boolean {
   return name === UNSPECIFIED_GROUP_LABEL || name.trim() === "";
 }
 
-function toFacilityEntityRow(
-  totalReceivedDuringPeriod: number,
-  name: string,
-  snapshot: ReportPeriodGroupSnapshot
-): ExecutiveEntityRow {
-  return {
-    name,
-    total: snapshot.receivedDuringPeriod,
-    open: snapshot.openAtEnd,
-    closed: snapshot.closedDuringPeriod,
-    currentlyLate: snapshot.lateAtEnd,
-    shareOfTotal:
-      totalReceivedDuringPeriod > 0
-        ? roundRate((snapshot.receivedDuringPeriod / totalReceivedDuringPeriod) * 100)
-        : 0,
-  };
+const TREND_PATTERN_LABELS: Record<string, ClassificationTrendRow["patternLabel"]> = {
+  CONTINUED_RISE: "استمرار مرتفع",
+  NO_MEANINGFUL_IMPROVEMENT: "استمرار مرتفع",
+  ESCALATING: "تصاعد مستمر",
+  SUSTAINED_IMPROVEMENT: "تحسن مستدام",
+  RELAPSE_AFTER_IMPROVEMENT: "عودة للارتفاع بعد تحسن",
+  EMERGING: "مشكلة ناشئة",
+  VOLATILE: "متذبذب",
+};
+
+function classificationTrendPatternLabel(pattern: unknown): ClassificationTrendRow["patternLabel"] {
+  if (typeof pattern === "string" && pattern in TREND_PATTERN_LABELS) return TREND_PATTERN_LABELS[pattern];
+  return "نمط ملحوظ";
+}
+
+/** `finding.entityName` is always "facility — classification" for CLASSIFICATION-scoped findings; this recovers just the classification half. */
+function classificationLabelFromEntityName(entityName: string): string {
+  const separatorIndex = entityName.indexOf(" — ");
+  return separatorIndex === -1 ? entityName : entityName.slice(separatorIndex + 3);
+}
+
+function facilityOfFinding(finding: AnalyticalFinding): string | null {
+  const value = finding.drilldownFilters.facility;
+  return typeof value === "string" && !isUnspecifiedOrEmptyFacilityName(value) ? value : null;
+}
+
+function parsePeriodCountsMetric(finding: AnalyticalFinding): number[] {
+  const raw = finding.supportingMetrics.periodCounts;
+  if (typeof raw !== "string") return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.every((v) => typeof v === "number") ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function formatPeriodTrail(counts: readonly number[]): string {
+  return counts.slice(-TREND_TRAIL_MAX_PERIODS).join("، ");
 }
 
 /**
- * Eligible for "highest volume": any facility with activity this period,
- * including a backlog-only facility (zero registrations, but complaints
- * carried over from before the period are still open/late).
+ * "أبرز المشكلات المستمرة حسب السجن والتصنيف" (spec §1-4): the top facility×
+ * classification trends by priorityScore — chronic issues, escalation,
+ * relapse, emerging problems, volatility, and sustained improvement all in
+ * one ranked list, each with its own trailing-period trail and its OWN real
+ * streak length (which can exceed how many trail values are shown).
  */
-function buildTopFacilityCandidates(
-  totalReceivedDuringPeriod: number,
-  byFacility: Record<string, ReportPeriodGroupSnapshot>
-): ExecutiveEntityRow[] {
-  return Object.entries(byFacility)
-    .filter(([name, snapshot]) => !isUnspecifiedOrEmptyFacilityName(name) && hasEntityActivity(snapshot))
-    .map(([name, snapshot]) => toFacilityEntityRow(totalReceivedDuringPeriod, name, snapshot))
-    .sort(compareExecutiveEntityRows);
-}
-
-/**
- * Eligible for "lowest volume": every period-eligible registry facility,
- * including a facility with zero inflow and zero stock. The snapshot service
- * left-joins the registry before this point, so absence is now authoritative.
- */
-function buildBottomFacilityCandidates(
-  totalReceivedDuringPeriod: number,
-  byFacility: Record<string, ReportPeriodGroupSnapshot>
-): ExecutiveEntityRow[] {
-  return Object.entries(byFacility)
-    .filter(([name]) => !isUnspecifiedOrEmptyFacilityName(name))
-    .map(([name, snapshot]) => toFacilityEntityRow(totalReceivedDuringPeriod, name, snapshot))
-    .sort(compareExecutiveEntityRowsAscending);
-}
-
-/**
- * Builds the V2-only top/bottom facility lists. The two lists are always
- * disjoint: a facility already shown as highest-volume must never also be
- * shown as lowest-volume, so when the facility pool is small, the bottom
- * list shrinks (down to zero) rather than repeating a top entry.
- */
-export function buildTopAndBottomFacilities(
-  totalReceivedDuringPeriod: number,
-  byFacility: Record<string, ReportPeriodGroupSnapshot>
-): { topFacilities: ExecutiveEntityRow[]; bottomFacilities: ExecutiveEntityRow[] } {
-  const topFacilities = buildTopFacilityCandidates(totalReceivedDuringPeriod, byFacility).slice(
-    0,
-    FACILITY_ROWS_LIMIT
+export function buildClassificationTrendRows(
+  findings: readonly AnalyticalFinding[],
+  limit: number = CLASSIFICATION_TRENDS_LIMIT
+): ClassificationTrendRow[] {
+  const relevant = findings.filter(
+    (f) =>
+      f.entityType === "CLASSIFICATION"
+      && (f.type === "CHRONIC_ISSUE" || f.type === "TREND_PATTERN" || f.type === "SUSTAINED_IMPROVEMENT")
   );
-  const topNames = new Set(topFacilities.map((row) => row.name));
-  const bottomFacilities = buildBottomFacilityCandidates(totalReceivedDuringPeriod, byFacility)
-    .filter((row) => !topNames.has(row.name))
-    .slice(0, FACILITY_ROWS_LIMIT);
+  return rankFindingsForExecutiveBrief(relevant)
+    .slice(0, limit)
+    .map((finding) => ({
+      facility: facilityOfFinding(finding) ?? "—",
+      classification: classificationLabelFromEntityName(finding.entityName),
+      currentCount: finding.currentValue,
+      difference: finding.difference ?? 0,
+      trail: formatPeriodTrail(parsePeriodCountsMetric(finding)),
+      streakPeriods: typeof finding.supportingMetrics.streakPeriods === "number" ? finding.supportingMetrics.streakPeriods : 0,
+      patternLabel: classificationTrendPatternLabel(finding.supportingMetrics.pattern),
+      priorityScore: finding.priorityScore,
+    }));
+}
 
-  return { topFacilities, bottomFacilities };
+function priorityBandLabel(score: number): FacilityFollowUpRow["priorityBand"] {
+  const { high, medium } = PATTERN_ANALYSIS_CONFIG.priorityBandThresholds;
+  if (score >= high) return "مرتفعة";
+  if (score >= medium) return "متوسطة";
+  return "منخفضة";
+}
+
+/**
+ * "المشكلات المستمرة" cover-page count (spec §6): findings that represent a
+ * continuing or escalating problem — CONTINUED_RISE / ESCALATING trend
+ * findings, plus high-priority chronic issues — never a raw finding count
+ * that would also sweep in improvements or low-signal trend findings.
+ */
+function computeContinuedProblemFindingCount(findings: readonly AnalyticalFinding[]): number {
+  const { high } = PATTERN_ANALYSIS_CONFIG.priorityBandThresholds;
+  return findings.filter((f) => {
+    if (f.type === "CHRONIC_ISSUE") return f.priorityScore >= high;
+    if (f.type === "TREND_PATTERN") {
+      const pattern = f.supportingMetrics.pattern;
+      return pattern === "CONTINUED_RISE" || pattern === "ESCALATING";
+    }
+    return false;
+  }).length;
+}
+
+/**
+ * Tie-breakers for follow-up ranking (spec §11), applied only once
+ * priorityScore itself is equal: 1. priorityScore (caller sorts this first
+ * implicitly since it's the primary key), 2. a real chronic issue outranks a
+ * non-chronic one, 3. longer streak, 4. more distinct complainants involved,
+ * 5. larger current-period volume, 6. facility name for a deterministic
+ * final order. Never falls back to raw volume alone.
+ */
+function compareFacilityFollowUpRows(a: FacilityFollowUpRow, b: FacilityFollowUpRow): number {
+  return (
+    b.priorityScore - a.priorityScore
+    || Number(b.isChronic) - Number(a.isChronic)
+    || (b.streakPeriods ?? -1) - (a.streakPeriods ?? -1)
+    || b.distinctComplainantsForRanking - a.distinctComplainantsForRanking
+    || b.totalComplaints - a.totalComplaints
+    || a.facility.localeCompare(b.facility, "ar")
+  );
+}
+
+/**
+ * "السجون الأكثر حاجة للمتابعة" (spec §1/§3/§10/§11): facilities ranked by
+ * the highest priorityScore among ALL their findings (classification-level
+ * chronic/trend issues, plus facility-level repeat/mass-complaint/multi-issue
+ * signals) — never by raw period volume alone. `totalComplaints` is sourced
+ * from `facilityCurrentPeriodTotals` — the SAME aggregation that produced
+ * every finding here — so it can never show 0 while a current-period-bound
+ * finding (chronic issue, trend, mass complaint) is driving the row. A
+ * facility whose real current-period total is 0 is only kept when a genuine
+ * chronic/relapse finding (whose evidence can legitimately span periods
+ * before the current one) justifies it, and is flagged `isHistoricalOnly` so
+ * the renderer can say so explicitly instead of showing a bare, misleading 0.
+ * Repeat complainant vs. mass/collective complaint are surfaced as real
+ * numbers (spec §10) but never with a person's identifier.
+ */
+export function buildFacilitiesNeedingFollowUp(
+  findings: readonly AnalyticalFinding[],
+  facilityCurrentPeriodTotals: Record<string, number>,
+  limit: number = FACILITY_ROWS_LIMIT
+): FacilityFollowUpRow[] {
+  const byFacilityFindings = new Map<string, AnalyticalFinding[]>();
+  for (const finding of findings) {
+    const facility = facilityOfFinding(finding);
+    if (!facility) continue;
+    const list = byFacilityFindings.get(facility) ?? [];
+    list.push(finding);
+    byFacilityFindings.set(facility, list);
+  }
+
+  const rows: FacilityFollowUpRow[] = [];
+  for (const [facility, facilityFindings] of byFacilityFindings) {
+    const classificationFindings = facilityFindings.filter(
+      (f) => f.entityType === "CLASSIFICATION" && f.type !== "SUSTAINED_IMPROVEMENT"
+    );
+    const topIssue = rankFindingsForExecutiveBrief(classificationFindings)[0] as AnalyticalFinding | undefined;
+    const priorityScore = Math.max(...facilityFindings.map((f) => f.priorityScore));
+
+    const repeatFinding = facilityFindings.find((f) => f.type === "REPEAT_COMPLAINANT");
+    const massFindings = facilityFindings.filter((f) => f.type === "MASS_COMPLAINT");
+    const massFinding = massFindings.length > 0
+      ? massFindings.reduce((best, f) => (f.currentValue > best.currentValue ? f : best))
+      : undefined;
+
+    const repeatComplainants =
+      typeof repeatFinding?.supportingMetrics.repeatComplainantCount === "number"
+        ? repeatFinding.supportingMetrics.repeatComplainantCount
+        : null;
+    const repeatComplaints = repeatFinding ? repeatFinding.currentValue : null;
+    const spreadComplainants =
+      typeof massFinding?.supportingMetrics.distinctComplainants === "number"
+        ? massFinding.supportingMetrics.distinctComplainants
+        : null;
+    const spreadComplaints = massFinding ? massFinding.currentValue : null;
+
+    const hasChronicIssue = classificationFindings.some((f) => f.type === "CHRONIC_ISSUE");
+    const hasRelapse = classificationFindings.some(
+      (f) => f.type === "TREND_PATTERN" && f.supportingMetrics.pattern === "RELAPSE_AFTER_IMPROVEMENT"
+    );
+
+    const totalComplaints = facilityCurrentPeriodTotals[facility] ?? 0;
+    const isHistoricalOnly = totalComplaints === 0;
+
+    // §1: zero real current-period activity is only worth showing when a
+    // genuinely historical/chronic signal justifies it — never on the
+    // strength of a repeat/mass-complaint finding alone (those are always
+    // current-period-bound once sourced from the same aggregation above, so
+    // a real one can no longer coincide with a 0 total).
+    if (isHistoricalOnly && !hasChronicIssue && !hasRelapse) continue;
+
+    const topIssueDistinct =
+      topIssue?.type === "CHRONIC_ISSUE" && typeof topIssue.supportingMetrics.distinctComplainants === "number"
+        ? topIssue.supportingMetrics.distinctComplainants
+        : 0;
+    const distinctComplainantsForRanking = Math.max(topIssueDistinct, repeatComplainants ?? 0, spreadComplainants ?? 0);
+
+    rows.push({
+      facility,
+      totalComplaints,
+      isHistoricalOnly,
+      topIssueLabel: topIssue ? classificationLabelFromEntityName(topIssue.entityName) : "—",
+      patternLabel: topIssue ? classificationTrendPatternLabel(topIssue.supportingMetrics.pattern) : "—",
+      streakPeriods:
+        topIssue && typeof topIssue.supportingMetrics.streakPeriods === "number"
+          ? topIssue.supportingMetrics.streakPeriods
+          : null,
+      repeatComplainants,
+      repeatComplaints,
+      spreadComplainants,
+      spreadComplaints,
+      priorityBand: priorityBandLabel(priorityScore),
+      priorityScore,
+      isChronic: hasChronicIssue,
+      distinctComplainantsForRanking,
+    });
+  }
+
+  return rows.sort(compareFacilityFollowUpRows).slice(0, limit);
+}
+
+/**
+ * "أفضل السجون تحسناً" (spec §4): facilities with a real SUSTAINED_IMPROVEMENT
+ * finding (the engine already requires a multi-period decline, never a
+ * single-period drop) — ranked by the size of the actual decrease, so the
+ * facility with the lowest current count is never assumed to be "best".
+ */
+export function buildFacilitiesWithSustainedImprovement(
+  findings: readonly AnalyticalFinding[],
+  limit: number = FACILITY_ROWS_LIMIT
+): FacilityImprovementRow[] {
+  const bestPerFacility = new Map<string, AnalyticalFinding>();
+  for (const finding of findings) {
+    if (finding.type !== "SUSTAINED_IMPROVEMENT") continue;
+    const facility = facilityOfFinding(finding);
+    if (!facility) continue;
+    const candidateDecrease = (finding.previousValue ?? 0) - finding.currentValue;
+    const existing = bestPerFacility.get(facility);
+    const existingDecrease = existing ? (existing.previousValue ?? 0) - existing.currentValue : -Infinity;
+    if (candidateDecrease > existingDecrease) bestPerFacility.set(facility, finding);
+  }
+
+  return [...bestPerFacility.entries()]
+    .map(([facility, finding]) => ({
+      facility,
+      startValue: finding.previousValue ?? 0,
+      currentValue: finding.currentValue,
+      decrease: (finding.previousValue ?? 0) - finding.currentValue,
+      streakPeriods: typeof finding.supportingMetrics.streakPeriods === "number" ? finding.supportingMetrics.streakPeriods : 0,
+      classificationLabel: classificationLabelFromEntityName(finding.entityName),
+    }))
+    .sort((a, b) => b.decrease - a.decrease)
+    .slice(0, limit);
 }
 
 // ---------------------------------------------------------------------------
@@ -773,147 +953,6 @@ export function buildTopClassifications(
   });
 }
 
-// ---------------------------------------------------------------------------
-// V2: classification changes (page 4 "أبرز تحولات التصنيفات")
-// ---------------------------------------------------------------------------
-
-const CLASSIFICATION_CHANGES_LIMIT = 5;
-
-/**
- * previousCount===0 handling matches the region-conclusions rule: never
- * fabricate a rate. currentCount===previousCount returns null — the caller
- * excludes that classification entirely ("دون تغير" is not a "change").
- */
-function resolveClassificationChangeDirection(
-  currentCount: number,
-  previousCount: number
-): ClassificationChangeRow["direction"] | null {
-  if (currentCount === previousCount) return null;
-  if (previousCount === 0 && currentCount > 0) return "جديد";
-  if (previousCount > 0 && currentCount === 0) return "انخفاض إلى صفر";
-  return currentCount > previousCount ? "ارتفاع" : "انخفاض";
-}
-
-/**
- * Ranks by the raw complaint-count swing first (a large numeric jump matters
- * more operationally than a large percentage of a tiny base), then by
- * |changeRate| when at least one side has one, then by total volume, then by
- * name — fully deterministic.
- */
-function compareClassificationChangeMagnitude(
-  a: ClassificationChangeRow,
-  b: ClassificationChangeRow
-): number {
-  const byAbsDifference = Math.abs(b.difference) - Math.abs(a.difference);
-  if (byAbsDifference !== 0) return byAbsDifference;
-
-  if (a.changeRate !== null || b.changeRate !== null) {
-    const byRate = Math.abs(b.changeRate ?? 0) - Math.abs(a.changeRate ?? 0);
-    if (byRate !== 0) return byRate;
-  }
-
-  const bySum = (b.currentCount + b.previousCount) - (a.currentCount + a.previousCount);
-  if (bySum !== 0) return bySum;
-  return a.classificationPath.localeCompare(b.classificationPath, "ar");
-}
-
-/**
- * Guarantees both directions are represented (when both exist), mirroring
- * {@link selectBalancedRegionConclusions}'s shape: up to 2 guaranteed per side
- * within the requested capacity, then remaining slots go to whichever side's
- * next-strongest unselected row ranks first by the shared magnitude comparator.
- */
-function selectBalancedClassificationChanges(
-  rising: readonly ClassificationChangeRow[],
-  declining: readonly ClassificationChangeRow[],
-  maxTotal: number
-): ClassificationChangeRow[] {
-  if (maxTotal <= 0) return [];
-  if (declining.length === 0) return rising.slice(0, maxTotal);
-  if (rising.length === 0) return declining.slice(0, maxTotal);
-
-  const guaranteedEach = Math.min(
-    2,
-    rising.length,
-    declining.length,
-    Math.floor(maxTotal / 2)
-  );
-  const selected: ClassificationChangeRow[] = [
-    ...rising.slice(0, guaranteedEach),
-    ...declining.slice(0, guaranteedEach),
-  ];
-
-  let nextRisingIndex = guaranteedEach;
-  let nextDecliningIndex = guaranteedEach;
-  while (
-    selected.length < maxTotal
-    && (nextRisingIndex < rising.length || nextDecliningIndex < declining.length)
-  ) {
-    const nextRising = rising[nextRisingIndex];
-    const nextDeclining = declining[nextDecliningIndex];
-    if (
-      nextRising
-      && (!nextDeclining || compareClassificationChangeMagnitude(nextRising, nextDeclining) <= 0)
-    ) {
-      selected.push(nextRising);
-      nextRisingIndex++;
-    } else if (nextDeclining) {
-      selected.push(nextDeclining);
-      nextDecliningIndex++;
-    }
-  }
-  return selected.slice(0, maxTotal);
-}
-
-/**
- * V2-only. Built from the UNION of current- and previous-period
- * classification distributions (not just `buildTopClassifications`'s
- * current-period top N) so a classification that dropped to zero this
- * period — "انخفاض إلى صفر" — is never silently dropped for having no
- * current-period row. No department involvement anywhere in this path.
- */
-export function buildClassificationChanges(
-  currentDistributions: ComplaintGroupMetrics[],
-  previousDistributions: ComplaintGroupMetrics[],
-  hasPreviousPeriod: boolean,
-  limit: number = CLASSIFICATION_CHANGES_LIMIT
-): ClassificationChangeRow[] {
-  if (!hasPreviousPeriod) return [];
-
-  const currentMap = new Map(currentDistributions.map((g) => [classificationRowKey(g), g] as const));
-  const previousMap = new Map(previousDistributions.map((g) => [classificationRowKey(g), g] as const));
-  const allKeys = new Set<string>([...currentMap.keys(), ...previousMap.keys()]);
-
-  const rows: ClassificationChangeRow[] = [];
-  for (const key of allKeys) {
-    const currentGroup = currentMap.get(key);
-    const previousGroup = previousMap.get(key);
-    const currentCount = currentGroup?.total ?? 0;
-    const previousCount = previousGroup?.total ?? 0;
-    const direction = resolveClassificationChangeDirection(currentCount, previousCount);
-    if (direction === null) continue;
-    const info = resolveClassificationRowInfo(currentGroup ?? previousGroup!);
-    rows.push({
-      classificationId: info.classificationId,
-      classificationName: info.classificationName,
-      classificationPath: info.classificationPath,
-      currentCount,
-      previousCount,
-      difference: currentCount - previousCount,
-      changeRate: computeChangeRate(currentCount, previousCount),
-      direction,
-    });
-  }
-
-  const rising = rows
-    .filter((r) => r.direction === "ارتفاع" || r.direction === "جديد")
-    .sort(compareClassificationChangeMagnitude);
-  const declining = rows
-    .filter((r) => r.direction === "انخفاض" || r.direction === "انخفاض إلى صفر")
-    .sort(compareClassificationChangeMagnitude);
-
-  return selectBalancedClassificationChanges(rising, declining, limit).sort(compareClassificationChangeMagnitude);
-}
 
 // ---------------------------------------------------------------------------
 // Monthly timeline buckets (UTC calendar months)
@@ -1324,11 +1363,21 @@ async function buildExecutiveBriefDataWithSnapshot(
   // Sequenced after the timeline fetch (not folded into the Promise.all above)
   // so this query's position in the call order stays stable regardless of the
   // timeline's own (1 or 2, depending on whether a previous period exists) calls.
-  const snapshotData = await buildExecutiveReportSnapshotData(
-    filters,
-    { currentPeriod: comparison.currentPeriod, previousPeriod: comparison.previousPeriod },
-    now
-  );
+  // Pattern analysis runs alongside the snapshot query — neither depends on
+  // the other — strictly AFTER every call above, so its own query never
+  // shifts their fixed call order.
+  const [snapshotData, patternAnalysis] = await Promise.all([
+    buildExecutiveReportSnapshotData(
+      filters,
+      { currentPeriod: comparison.currentPeriod, previousPeriod: comparison.previousPeriod },
+      now
+    ),
+    loadPatternAnalysisForFilters(comparison.currentPeriod.from, comparison.currentPeriod.toExclusive, {
+      facility: filters.facility ?? null,
+      region: filters.region ?? null,
+      classificationId: filters.classificationId ?? null,
+    }),
+  ]);
 
   const periodMetrics = toExecutivePeriodMetrics(snapshotData);
   const briefKpis = buildBriefKpis(result, previousResult, hasPrevious, periodMetrics);
@@ -1367,13 +1416,21 @@ async function buildExecutiveBriefDataWithSnapshot(
       periodMetrics.current.receivedDuringPeriod,
       snapshotData.byDepartment
     ),
-    conclusions: buildConclusions(result, comparison, snapshotData.byDepartment, snapshotData.byClassification),
+    // Highest-priority pattern-analysis findings lead the conclusions list — the
+    // engine's own explanation text, never re-derived — capped small enough
+    // (spec §1: "دون إغراق التقرير بالتفاصيل") to stay inside the existing
+    // conclusions-box budget alongside the base region/department conclusions.
+    conclusions: [
+      ...buildPatternAnalysisBriefConclusions(patternAnalysis, 2),
+      ...buildConclusions(result, comparison, snapshotData.byDepartment, snapshotData.byClassification),
+    ],
     notes: buildNotes(result, comparison),
     warnings,
     periodMetrics,
     regionSnapshotAtEnd: toRegionSnapshotRows(snapshotData.byRegion),
     departmentPeriodMetrics: toDepartmentPeriodMetricsRows(snapshotData.byDepartment),
     classificationSnapshotAtEnd: toClassificationSnapshotRows(snapshotData.byClassification),
+    patternAnalysis,
   };
 
   return { briefData, snapshotData };
@@ -1913,6 +1970,31 @@ async function fetchAllTimeTotal(
  * query, so it can never disagree with the classification table or the
  * openAtEnd/lateAtEnd reconciliation totals — see spec section 14.
  */
+/**
+ * "عدد السجون المتأثرة" (spec §14): per classificationId, how many distinct
+ * facilities have a CLASSIFICATION-scoped finding for it this period — i.e.
+ * crossed the pattern engine's own significance threshold there, not merely
+ * "has any complaint". Sourced entirely from `findings`, never a separate
+ * raw-presence count.
+ */
+function computeClassificationAffectedFacilityCounts(
+  findings: readonly AnalyticalFinding[]
+): Record<string, number> {
+  const byClassification = new Map<string, Set<string>>();
+  for (const finding of findings) {
+    if (finding.entityType !== "CLASSIFICATION") continue;
+    const facility = facilityOfFinding(finding);
+    if (!facility) continue;
+    const key = classificationKey(finding.entityId);
+    const set = byClassification.get(key) ?? new Set<string>();
+    set.add(facility);
+    byClassification.set(key, set);
+  }
+  const result: Record<string, number> = {};
+  for (const [key, facilities] of byClassification) result[key] = facilities.size;
+  return result;
+}
+
 function toClassificationOpenLate(
   rows: ClassificationSnapshotAtEndRow[]
 ): Record<string, { openAtEnd: number; lateAtEnd: number }> {
@@ -1930,34 +2012,47 @@ export async function buildExecutiveBriefV2Data(
   previousResult?: ComplaintKpiResult,
   now: Date = new Date()
 ): Promise<ExecutiveBriefV2Data> {
-  const [{ briefData, snapshotData }, allTimeTotal, monthlyStockFlow] = await Promise.all([
+  const [{ briefData }, allTimeTotal, monthlyStockFlow] = await Promise.all([
     buildExecutiveBriefDataWithSnapshot(filters, result, comparison, previousResult, now),
     fetchAllTimeTotal(filters, now),
     buildMonthlyStockFlow(filters, comparison, now),
   ]);
 
   const classificationOpenLate = toClassificationOpenLate(briefData.classificationSnapshotAtEnd ?? []);
+  const patternFindings = briefData.patternAnalysis?.findings ?? [];
+  const facilityCurrentPeriodTotals = briefData.patternAnalysis?.facilityCurrentPeriodTotals ?? {};
 
-  const { topFacilities, bottomFacilities } = buildTopAndBottomFacilities(
-    snapshotData.current.receivedDuringPeriod,
-    snapshotData.byFacility
+  // Unlimited pass first so the cover-page count (spec §6) reflects every
+  // qualifying facility, not just the top FACILITY_ROWS_LIMIT shown on page 4.
+  const allFacilityFollowUpRows = buildFacilitiesNeedingFollowUp(
+    patternFindings,
+    facilityCurrentPeriodTotals,
+    Number.POSITIVE_INFINITY
   );
-
-  const classificationChanges = buildClassificationChanges(
-    result.distributions.byClassification,
-    previousResult?.distributions.byClassification ?? [],
-    comparison.previousPeriod !== null
-  );
+  const facilitiesNeedingFollowUp = allFacilityFollowUpRows.slice(0, FACILITY_ROWS_LIMIT);
+  const highPriorityFacilityCount = allFacilityFollowUpRows.filter((r) => r.priorityBand === "مرتفعة").length;
+  const continuedProblemFindingCount = computeContinuedProblemFindingCount(patternFindings);
+  const facilitiesWithSustainedImprovement = buildFacilitiesWithSustainedImprovement(patternFindings);
+  const classificationTrends = buildClassificationTrendRows(patternFindings);
+  const classificationAffectedFacilityCounts = computeClassificationAffectedFacilityCounts(patternFindings);
 
   return {
     ...briefData,
     allTimeTotal,
     monthlyStockFlow,
     classificationOpenLate,
-    topFacilities,
-    bottomFacilities,
-    classificationChanges,
-    // V2-only: region-only conclusions replace the department/classification-based base conclusions.
-    conclusions: buildRegionOnlyConclusions(comparison),
+    classificationAffectedFacilityCounts,
+    highPriorityFacilityCount,
+    continuedProblemFindingCount,
+    facilitiesNeedingFollowUp,
+    facilitiesWithSustainedImprovement,
+    classificationTrends,
+    // V2-only: region-only conclusions stay the base, led by up to 3
+    // high-priority pattern-analysis sentences (spec §10) — the engine's own
+    // explanation text, never re-derived here.
+    conclusions: [
+      ...buildPatternAnalysisBriefConclusions(briefData.patternAnalysis, 3),
+      ...buildRegionOnlyConclusions(comparison),
+    ],
   };
 }

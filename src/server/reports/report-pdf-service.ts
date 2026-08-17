@@ -14,7 +14,7 @@ import type {
   ReportTableColumn,
   ReportTextSection,
 } from "./report-data-service";
-import { isFullAnalyticalData } from "./report-data-service";
+import { isFullAnalyticalData, type FullAnalyticalData } from "./report-data-service";
 import { renderLineChartPng } from "./report-chart-service";
 import { buildMatrixTruncationMessage } from "@/lib/reports/matrix-truncation";
 import {
@@ -24,6 +24,8 @@ import {
 import { getComparisonModeDescription } from "@/lib/reports/comparison-mode-labels";
 import { drawComplaintsReportCover } from "./report-cover";
 import { preparePdfText } from "./arabic-pdf-text";
+import { groupFindingsByCategory } from "@/lib/analytics/finding-category-groups";
+import { toFindingTableRows } from "@/lib/analytics/finding-table-rows";
 
 const ASSETS_DIR = path.join(process.cwd(), "src/server/reports/assets");
 const FONT_REGULAR_PATH = path.join(ASSETS_DIR, "fonts/Amiri-Regular.ttf");
@@ -288,6 +290,64 @@ function buildFullAnalyticalPdfSections(data: ReportData): ReportSection[] {
       },
     });
   }
+  sections.push(...buildPatternAnalysisSections(full.patternAnalysis));
+  return sections;
+}
+
+const FINDING_TABLE_COLUMNS: ReportTableColumn[] = [
+  { key: "facility", label: "الموقع", format: "text" },
+  { key: "classification", label: "التصنيف", format: "text" },
+  { key: "currentValue", label: "الحالية", format: "number" },
+  { key: "previousValue", label: "السابقة", format: "number" },
+  { key: "periodsObserved", label: "عدد الفترات", format: "number" },
+  { key: "direction", label: "الاتجاه", format: "text" },
+  { key: "priorityScore", label: "درجة الأولوية", format: "number" },
+  { key: "reasons", label: "السبب", format: "text" },
+];
+
+/**
+ * Renders every group from groupFindingsByCategory(...) as its own table
+ * (spec §3), plus a compact "what changed since the previous period" KPI
+ * strip (spec §2). Pure presentation — every value comes straight from the
+ * already-computed AnalyticalFinding[]/PeriodChangeDigest, never recomputed.
+ */
+function buildPatternAnalysisSections(patternAnalysis: FullAnalyticalData["patternAnalysis"]): ReportSection[] {
+  if (!patternAnalysis) return [];
+  const sections: ReportSection[] = [];
+  const digest = patternAnalysis.periodChangeDigest;
+
+  if (digest) {
+    const digestCards: ReportKpiCard[] = [
+      { key: "new", label: "مشكلات جديدة", value: digest.newProblems.length, format: "number" },
+      { key: "continuing", label: "مشكلات مستمرة", value: digest.continuingProblems.length, format: "number" },
+      { key: "worsened", label: "مشكلات تفاقمت", value: digest.worsenedProblems.length, format: "number" },
+      { key: "relapsed", label: "عادت بعد تحسن", value: digest.relapsedProblems.length, format: "number" },
+      { key: "improved", label: "مواقع تحسنت", value: digest.improvedFacilities.length, format: "number" },
+      { key: "exited", label: "خرجت من الأولوية", value: digest.exitedPriorityList.length, format: "number" },
+      { key: "spreading", label: "تصنيفات بدأت بالانتشار", value: digest.newlySpreadingClassifications.length, format: "number" },
+    ];
+    if (digestCards.some((card) => (card.value ?? 0) > 0)) {
+      sections.push({ id: "pattern_digest", kind: "kpi", title: "ما تغير منذ الفترة السابقة؟", cards: digestCards });
+    }
+  }
+
+  for (const group of groupFindingsByCategory(patternAnalysis.findings)) {
+    const rows = toFindingTableRows(group.findings);
+    sections.push({
+      id: `pattern_${group.id}`,
+      kind: "table",
+      title: group.label,
+      table: {
+        id: `pattern_${group.id}`,
+        title: group.label,
+        columns: FINDING_TABLE_COLUMNS,
+        rows,
+        truncated: false,
+        totalMatched: rows.length,
+      },
+    });
+  }
+
   return sections;
 }
 

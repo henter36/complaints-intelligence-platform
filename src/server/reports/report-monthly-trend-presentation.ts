@@ -1,5 +1,6 @@
 import type { MonthlyComplaintTrendPoint } from "@/lib/reports/report-contract";
 import { ARABIC_MONTH_NAMES } from "./report-executive-brief-data-service";
+import { classifyTrend } from "@/lib/analytics/multi-period-trend";
 
 export type MonthlyTrendTotals = {
   registeredTotal: number;
@@ -109,7 +110,15 @@ function buildPeakRegistrationInsight(
   };
 }
 
-function buildFlowInsight(
+/**
+ * Applies the SAME multi-period trend classifier the pattern-analysis engine
+ * uses elsewhere (never a duplicate/rewritten trend rule) to the registered-
+ * complaints series, so page 2's key note is about the trend itself —
+ * continued rise, continued decline, relapse after improvement, an emerging
+ * spike, or volatility — rather than the registered/closed flow gap (spec
+ * §11: closure/lateness should not be the page's interpretive lens).
+ */
+function buildTrendDirectionInsight(
   points: readonly MonthlyComplaintTrendPoint[],
   reportEndDate: string
 ): MonthlyTrendInsight | null {
@@ -119,39 +128,12 @@ function buildFlowInsight(
   const complete = points.filter((point) => point.monthKey !== partialKey);
   if (complete.length === 0) return null;
 
-  // Balanced convergence: closed within ±10% of received (90%-110%), not a
-  // one-sided "closed at least 90% of received" test — the latter also
-  // flags months where far more was closed than received as "converged".
-  const proximate = complete.filter(
-    (point) =>
-      point.receivedCount > 0
-      && Math.abs(point.closedDuringMonthCount - point.receivedCount) / point.receivedCount <= 0.10
-  );
-  if (proximate.length >= Math.ceil(complete.length / 2)) {
-    return {
-      key: "flow-proximity",
-      text: `اقترب عدد المغلقة من عدد المسجلة في ${proximate.length} من ${complete.length} شهرًا مكتملًا.`,
-    };
-  }
+  const classification = classifyTrend(complete.map((p) => p.receivedCount), undefined, "شهر");
+  if (classification.pattern === "INSUFFICIENT_DATA") return null;
 
-  let gapPoint: MonthlyComplaintTrendPoint | null = null;
-  let gap = 0;
-  for (const point of complete) {
-    const delta = point.receivedCount - point.closedDuringMonthCount;
-    if (delta <= 0) continue;
-    if (
-      gapPoint === null
-      || delta > gap
-      || (delta === gap && point.monthKey > gapPoint.monthKey)
-    ) {
-      gap = delta;
-      gapPoint = point;
-    }
-  }
-  if (!gapPoint || gap <= 0) return null;
   return {
-    key: "largest-gap",
-    text: `أكبر فجوة بين المسجلة والمغلقة ظهرت في ${gapPoint.monthLabel} بفارق ${gap} شكوى.`,
+    key: "trend-direction",
+    text: `اتجاه الشكاوى المسجلة: ${classification.durationLabel}.`,
   };
 }
 
@@ -173,18 +155,21 @@ function buildMonthStatusInsight(
 }
 
 /**
- * Builds up to three key notes for the monthly registered/closed trend page.
- * Flow comparison excludes the partial report-end month when applicable.
+ * Builds up to three key notes for page 2 (spec §11): the multi-period trend
+ * direction leads (continued rise/decline, relapse, emerging spike,
+ * volatility), followed by the peak period and the report's month-completion
+ * status — never registered/closed flow proximity, which is not this page's
+ * interpretive lens anymore.
  */
 export function buildMonthlyTrendInsights(options: {
   points: readonly MonthlyComplaintTrendPoint[];
   reportEndDate: string;
 }): MonthlyTrendInsight[] {
   const insights: MonthlyTrendInsight[] = [];
+  const trendDirection = buildTrendDirectionInsight(options.points, options.reportEndDate);
+  if (trendDirection) insights.push(trendDirection);
   const peak = buildPeakRegistrationInsight(options.points);
   if (peak) insights.push(peak);
-  const flow = buildFlowInsight(options.points, options.reportEndDate);
-  if (flow) insights.push(flow);
   const monthStatus = buildMonthStatusInsight(options.reportEndDate);
   if (monthStatus) insights.push(monthStatus);
   return insights.slice(0, 3);

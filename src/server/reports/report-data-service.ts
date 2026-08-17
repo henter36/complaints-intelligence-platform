@@ -43,10 +43,14 @@ import type {
   RegionSnapshotAtEndRow,
   DepartmentPeriodMetricsRow,
   ClassificationSnapshotAtEndRow,
-  ClassificationChangeRow,
+  ClassificationTrendRow,
+  FacilityFollowUpRow,
+  FacilityImprovementRow,
 } from "@/lib/reports/report-contract";
 // Types that are only re-exported (not used locally) — direct re-export avoids a redundant import.
 export type { KpiAssessment, ComparativeTimelinePoint, ComparativeTimelineSeries } from "@/lib/reports/report-contract";
+import type { PatternAnalysisReportData } from "@/server/analytics/pattern/pattern-report-integration-service";
+export type { PatternAnalysisReportData } from "@/server/analytics/pattern/pattern-report-integration-service";
 import {
   buildExecutiveBriefData,
   buildExecutiveBriefV2Data,
@@ -189,6 +193,14 @@ export type ExecutiveBriefData = {
   departmentPeriodMetrics?: DepartmentPeriodMetricsRow[];
   /** Per-classification openAtEnd/lateAtEnd at current period end, covering every classification. */
   classificationSnapshotAtEnd?: ClassificationSnapshotAtEndRow[];
+  /**
+   * Multi-period pattern-analysis findings (chronic issues, repeat
+   * complainants, concentration, cross-facility spread, ...), scoped to this
+   * report's filters and period — sourced from the SAME engine used by the
+   * Analytics API and the XLSX export (spec §11). Optional so every existing
+   * fixture/test keeps compiling; renderers skip the section when absent.
+   */
+  patternAnalysis?: PatternAnalysisReportData;
 };
 
 /** Extended payload for PRINT_EXECUTIVE_BRIEF_V2 (super-set of ExecutiveBriefData). */
@@ -197,12 +209,18 @@ export type ExecutiveBriefV2Data = ExecutiveBriefData & {
   monthlyStockFlow: MonthlyComplaintTrendPoint[];
   /** Per-classificationId open and late counts at current period end. */
   classificationOpenLate: Record<string, { openAtEnd: number; lateAtEnd: number }>;
-  /** V2-only: facilities with the highest complaint volume this period (page 4 "أعلى السجون"). Not used by other report modes. */
-  topFacilities?: ExecutiveEntityRow[];
-  /** V2-only: facilities with the lowest (non-zero) complaint volume this period (page 4 "أقل السجون"). Never overlaps topFacilities. */
-  bottomFacilities?: ExecutiveEntityRow[];
-  /** V2-only: classifications with the biggest shift vs. the previous period (page 4 "أبرز تحولات التصنيفات"). Built from the current/previous union, never department-based. */
-  classificationChanges?: ClassificationChangeRow[];
+  /** Per-classificationId count of distinct facilities where this classification crossed the pattern engine's significance threshold this period (spec §14 "عدد السجون المتأثرة"). */
+  classificationAffectedFacilityCounts: Record<string, number>;
+  /** Cover-page count (spec §6): distinct facilities with a HIGH priority-band finding, computed from the FULL follow-up list, not just the top rows shown on page 4. */
+  highPriorityFacilityCount: number;
+  /** Cover-page count (spec §6): CONTINUED_RISE/ESCALATING trend findings plus high-priority chronic issues. */
+  continuedProblemFindingCount: number;
+  /** V2-only: facilities ranked by follow-up priority, from the pattern-analysis engine (page 4 "السجون الأكثر حاجة للمتابعة"). Not used by other report modes. */
+  facilitiesNeedingFollowUp?: FacilityFollowUpRow[];
+  /** V2-only: facilities with a real, sustained, multi-period decline (page 4 "أفضل السجون تحسناً"). Never overlaps facilitiesNeedingFollowUp. */
+  facilitiesWithSustainedImprovement?: FacilityImprovementRow[];
+  /** V2-only: classification×facility multi-period trends from the pattern-analysis engine (page 4 "أبرز اتجاهات التصنيفات عبر الفترات"). */
+  classificationTrends?: ClassificationTrendRow[];
 };
 
 /** Extended payload for FULL_ANALYTICAL mode (super-set of ExecutiveBriefData). */

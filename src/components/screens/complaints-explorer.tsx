@@ -161,6 +161,7 @@ export interface FilterState {
   search: string;
   regionId: string;
   departmentId: string;
+  facility: string;
   classificationId: string;
   channel: string;
   status: string;
@@ -184,6 +185,7 @@ const DEFAULT_FILTERS: FilterState = {
   search: "",
   regionId: "",
   departmentId: "",
+  facility: "",
   classificationId: "",
   channel: "",
   status: "",
@@ -314,6 +316,7 @@ function initialFilterState(): FilterState {
     search: params.get("search") ?? "",
     regionId: params.get("regionId") ?? "",
     departmentId: params.get("departmentId") ?? "",
+    facility: params.get("facility") ?? "",
     classificationId: params.get("classificationId") ?? "",
     channel: params.get("channel") ?? "",
     status: normalizeApiComplaintStatus(params.get("status") ?? ""),
@@ -368,6 +371,7 @@ export function buildComplaintQuery(
     search: filters.search,
     regionId: filters.regionId,
     departmentId: filters.departmentId,
+    facility: filters.facility,
     classificationId: filters.classificationId,
     channel: filters.channel,
     status: filters.status,
@@ -552,6 +556,7 @@ export function countActiveFilters(filters: FilterState): number {
     "search",
     "regionId",
     "departmentId",
+    "facility",
     "classificationId",
     "channel",
     "status",
@@ -921,6 +926,34 @@ export function ComplaintsExplorer() {
                       {filterOptions?.departments.map((d) => (
                         <SelectItem key={d.id} value={d.id}>
                           {d.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {/* Facility */}
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">
+                    الموقع
+                  </Label>
+                  <Select
+                    value={filters.facility}
+                    onValueChange={(v) =>
+                      setFilters((f) => ({
+                        ...f,
+                        facility: v === "all" ? "" : v,
+                      }))
+                    }
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="كل المواقع" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">كل المواقع</SelectItem>
+                      {filterOptions?.locations.map((l) => (
+                        <SelectItem key={l.id} value={l.id}>
+                          {l.name}
                         </SelectItem>
                       ))}
                     </SelectContent>

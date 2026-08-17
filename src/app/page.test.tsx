@@ -14,10 +14,15 @@ vi.mock("@/components/screens/import-center", () => ({
   ImportCenter: () => <div>Import center screen</div>,
 }));
 vi.mock("@/components/screens/complaints-explorer", () => ({
-  ComplaintsExplorer: () => <div>Complaints explorer screen</div>,
+  ComplaintsExplorer: () => <div>Complaints explorer screen: {window.location.search}</div>,
 }));
 vi.mock("@/components/screens/analytics", () => ({
-  Analytics: () => <div>Analytics screen</div>,
+  Analytics: ({ onNavigateToExplorer }: { onNavigateToExplorer?: (query: Record<string, string>) => void }) => (
+    <div>
+      Analytics screen
+      <button onClick={() => onNavigateToExplorer?.({ facility: "سجن أ" })}>عرض الشكاوى المرتبطة (test)</button>
+    </div>
+  ),
 }));
 vi.mock("@/components/screens/reports-center", () => ({
   ReportsCenter: () => <div>Reports screen</div>,
@@ -51,5 +56,31 @@ describe("Home page smoke", () => {
     await user.click(screen.getByText("مركز الاستيراد"));
 
     expect(screen.getByText("Import center screen")).toBeInTheDocument();
+  });
+
+  it("drills down from Analytics into the explorer with the finding's filters applied via a real URL", async () => {
+    const user = userEvent.setup();
+    render(await Home());
+
+    await user.click(screen.getByText("التحليلات"));
+    expect(screen.getByText("Analytics screen")).toBeInTheDocument();
+
+    await user.click(screen.getByText("عرض الشكاوى المرتبطة (test)"));
+
+    expect(await screen.findByText(/Complaints explorer screen:/)).toBeInTheDocument();
+    expect(window.location.search).toContain("facility=");
+    expect(window.location.search).toContain("screen=explorer");
+  });
+
+  it("Back after a drilldown returns to the previous screen (real history entry, not replaceState)", async () => {
+    const user = userEvent.setup();
+    render(await Home());
+
+    await user.click(screen.getByText("التحليلات"));
+    await user.click(screen.getByText("عرض الشكاوى المرتبطة (test)"));
+    expect(await screen.findByText(/Complaints explorer screen:/)).toBeInTheDocument();
+
+    window.history.back();
+    await screen.findByText("Analytics screen");
   });
 });

@@ -24,12 +24,10 @@ import { UNCLASSIFIED_CLASSIFICATION_KEY } from "@/lib/reports/classification-ke
 import { MIN_CHART_HEIGHT } from "./report-chart-service";
 
 const DANGER = REPORT_DESIGN_TOKENS.colors.danger;
-const NO_CLASSIFICATION_COMPARISON_MESSAGE =
-  "لا تتوفر فترة سابقة صالحة لاستخراج تحولات التصنيفات.";
-const UNAVAILABLE_CLASSIFICATION_CHANGES_MESSAGE =
-  "تعذر احتساب تحولات التصنيفات لهذه الفترة.";
-const NO_CLASSIFICATION_CHANGES_MESSAGE =
-  "لم تسجل التصنيفات تغيرات مقارنة بالفترة السابقة.";
+const UNAVAILABLE_TREND_DATA_MESSAGE =
+  "تعذر احتساب اتجاهات التصنيفات لهذه الفترة.";
+const NO_TREND_DATA_MESSAGE =
+  "لا تتوفر بيانات كافية عبر عدة فترات لاستخراج اتجاهات التصنيفات.";
 
 function countPageObjects(buffer: Buffer): number {
   return (buffer.toString("binary").match(/\/Type\s*\/Page\s*\/Parent/g) ?? []).length;
@@ -77,19 +75,28 @@ function makeV2Brief(overrides: Partial<ExecutiveBriefV2Data> = {}): ExecutiveBr
     topDepartments: [
       { name: "المتابعة", total: 40, open: 10, closed: 30, currentlyLate: 3, shareOfTotal: 40 },
     ],
-    topFacilities: [
-      { name: "سجن الملز", total: 25, open: 8, closed: 17, currentlyLate: 2, shareOfTotal: 25 },
-      { name: "سجن الشميسي", total: 15, open: 4, closed: 11, currentlyLate: 1, shareOfTotal: 15 },
+    facilitiesNeedingFollowUp: [
+      {
+        facility: "سجن الملز", totalComplaints: 25, isHistoricalOnly: false, topIssueLabel: "الرعاية الصحية",
+        patternLabel: "استمرار مرتفع", streakPeriods: 4,
+        repeatComplainants: 8, repeatComplaints: 21, spreadComplainants: null, spreadComplaints: null,
+        priorityBand: "مرتفعة", priorityScore: 80, isChronic: true, distinctComplainantsForRanking: 8,
+      },
+      {
+        facility: "سجن الشميسي", totalComplaints: 15, isHistoricalOnly: false, topIssueLabel: "التغذية",
+        patternLabel: "تصاعد مستمر", streakPeriods: 3,
+        repeatComplainants: null, repeatComplaints: null, spreadComplainants: null, spreadComplaints: null,
+        priorityBand: "متوسطة", priorityScore: 55, isChronic: false, distinctComplainantsForRanking: 0,
+      },
     ],
-    bottomFacilities: [
-      { name: "سجن الدمام", total: 2, open: 0, closed: 2, currentlyLate: 0, shareOfTotal: 2 },
-      { name: "سجن أبها", total: 3, open: 1, closed: 2, currentlyLate: 0, shareOfTotal: 3 },
+    facilitiesWithSustainedImprovement: [
+      { facility: "سجن الدمام", startValue: 30, currentValue: 2, decrease: 28, streakPeriods: 4, classificationLabel: "الاتصال" },
+      { facility: "سجن أبها", startValue: 20, currentValue: 3, decrease: 17, streakPeriods: 3, classificationLabel: "الزيارات" },
     ],
-    classificationChanges: [
-      { classificationId: "c1", classificationName: "نقل", classificationPath: "فئة اختبار / نقل", currentCount: 60, previousCount: 20, difference: 40, changeRate: 200, direction: "ارتفاع" },
-      { classificationId: "c3", classificationName: "استفسار", classificationPath: "فئة اختبار / استفسار", currentCount: 12, previousCount: 0, difference: 12, changeRate: null, direction: "جديد" },
-      { classificationId: "c4", classificationName: "صيانة", classificationPath: "فئة اختبار / صيانة", currentCount: 5, previousCount: 30, difference: -25, changeRate: -83.3, direction: "انخفاض" },
-      { classificationId: "c5", classificationName: "شكوى إدارية قديمة", classificationPath: "فئة اختبار / شكوى إدارية قديمة", currentCount: 0, previousCount: 18, difference: -18, changeRate: -100, direction: "انخفاض إلى صفر" },
+    classificationTrends: [
+      { facility: "سجن الملز", classification: "نقل", currentCount: 60, difference: 40, trail: "20، 35، 48، 60", streakPeriods: 4, patternLabel: "استمرار مرتفع", priorityScore: 80 },
+      { facility: "سجن الشميسي", classification: "استفسار", currentCount: 12, difference: 12, trail: "0، 0، 1، 12", streakPeriods: 1, patternLabel: "مشكلة ناشئة", priorityScore: 55 },
+      { facility: "سجن الدمام", classification: "صيانة", currentCount: 5, difference: -25, trail: "30، 22، 12، 5", streakPeriods: 4, patternLabel: "تحسن مستدام", priorityScore: 0 },
     ],
     conclusions: ["استنتاج تجريبي."],
     notes: ["ملاحظة جودة بيانات تجريبية."],
@@ -103,6 +110,9 @@ function makeV2Brief(overrides: Partial<ExecutiveBriefV2Data> = {}): ExecutiveBr
       c2: { openAtEnd: 4, lateAtEnd: 1 },
       [UNCLASSIFIED_CLASSIFICATION_KEY]: { openAtEnd: 163, lateAtEnd: 163 },
     },
+    classificationAffectedFacilityCounts: { c1: 2, c2: 1, [UNCLASSIFIED_CLASSIFICATION_KEY]: 1 },
+    highPriorityFacilityCount: 1,
+    continuedProblemFindingCount: 2,
     periodMetrics: {
       current: { receivedDuringPeriod: 100, closedDuringPeriod: 65, openAtEnd: 30, lateAtEnd: 8 },
       previous: { receivedDuringPeriod: 80, closedDuringPeriod: 50, openAtEnd: 25, lateAtEnd: 10 },
@@ -381,7 +391,7 @@ describe("renderExecutiveBriefV2Pdf", () => {
         "الدمام",
         "الاستنتاجات",
         "استنتاج",
-        "تحولات",
+        "المستمرة",
         "نقل",
         "صيانة",
       ]) {
@@ -435,21 +445,21 @@ describe("V2 page 4 — facilities replace departments (spec sections 5-9, 14-16
     }
   });
 
-  it("still renders a valid 4-page PDF when topFacilities/bottomFacilities are both empty", async () => {
+  it("still renders a valid 4-page PDF when facilitiesNeedingFollowUp/facilitiesWithSustainedImprovement are both empty", async () => {
     const result = await renderExecutiveBriefV2Pdf(
       makeV2Report({
-        briefData: makeV2Brief({ topFacilities: [], bottomFacilities: [] }),
+        briefData: makeV2Brief({ facilitiesNeedingFollowUp: [], facilitiesWithSustainedImprovement: [] }),
       })
     );
     expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
     expect(countPageObjects(result.buffer)).toBe(4);
   });
 
-  it("still renders a valid 4-page PDF when topFacilities/bottomFacilities are undefined (older/fallback brief shape)", async () => {
+  it("still renders a valid 4-page PDF when facilitiesNeedingFollowUp/facilitiesWithSustainedImprovement are undefined (older/fallback brief shape)", async () => {
     const brief = makeV2Brief();
     const withoutFacilities = { ...brief } as Partial<ExecutiveBriefV2Data>;
-    delete withoutFacilities.topFacilities;
-    delete withoutFacilities.bottomFacilities;
+    delete withoutFacilities.facilitiesNeedingFollowUp;
+    delete withoutFacilities.facilitiesWithSustainedImprovement;
     const result = await renderExecutiveBriefV2Pdf(
       makeV2Report({ briefData: withoutFacilities as ExecutiveBriefV2Data })
     );
@@ -483,15 +493,13 @@ describe("V2 page 4 — facilities replace departments (spec sections 5-9, 14-16
   });
 });
 
-describe("V2 page 4 — classification shifts replace notable rises (spec sections 1-2, 9, 14-16)", () => {
-  it("renders 'أبرز تحولات التصنيفات' and every classification name/direction label, never the old rises heading or its department-based text", async () => {
+describe("V2 page 4 — classification trends replace classification changes (spec sections 1-2, 9, 14-16)", () => {
+  it("renders 'المستمرة' and every facility/classification/pattern label, never the old rises heading or its department-based text", async () => {
     const textSpy = vi.spyOn(PDFDocument.prototype, "text");
     try {
       await renderExecutiveBriefV2Pdf(makeV2Report());
       const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
-      // "أبرز تحولات التصنيفات" reorders under RTL shaping; check the
-      // distinctive single word rather than the exact phrase.
-      expect(joined).toContain("تحولات");
+      expect(joined).toContain("المستمرة");
       for (const token of ["نقل", "استفسار", "صيانة"]) {
         expect(joined).toContain(token);
       }
@@ -506,12 +514,12 @@ describe("V2 page 4 — classification shifts replace notable rises (spec sectio
     }
   });
 
-  it("1/2/16. never reads comparisonData.deptClassRises for page 4, even when it has real department data and classificationChanges is empty", async () => {
+  it("never reads comparisonData.deptClassRises for page 4, even when it has real department data and classificationTrends is empty", async () => {
     const textSpy = vi.spyOn(PDFDocument.prototype, "text");
     try {
       await renderExecutiveBriefV2Pdf(
         makeV2Report({
-          briefData: makeV2Brief({ classificationChanges: [] }),
+          briefData: makeV2Brief({ classificationTrends: [] }),
           comparisonData: {
             ...makeV2Report().comparisonData!,
             deptClassRises: [
@@ -534,125 +542,109 @@ describe("V2 page 4 — classification shifts replace notable rises (spec sectio
       const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
       expect(joined).not.toContain("إدارة يجب ألا تظهر");
       expect(joined).not.toContain("تصنيف تسريب");
-      // classificationChanges is explicitly empty with a previous period
-      // present. "تغيرات" is the distinctive word from the message (RTL
-      // shaping reorders whole-phrase word order, so check a single word).
-      expect(joined).toContain("تغيرات");
+      // classificationTrends is explicitly empty. "كافية" is the distinctive
+      // word from the message (RTL shaping reorders whole-phrase word order,
+      // so check a single word).
+      expect(joined).toContain("كافية");
     } finally {
       textSpy.mockRestore();
     }
   });
 
-  it("empty state A: no previous period reports that classification comparison is unavailable", async () => {
+  it("empty state: an explicitly computed empty result reports insufficient multi-period data", async () => {
     const textSpy = vi.spyOn(PDFDocument.prototype, "text");
     try {
       await renderExecutiveBriefV2Pdf(
-        makeV2Report({
-          previousPeriod: null,
-          briefData: makeV2Brief({ classificationChanges: [] }),
-        })
+        makeV2Report({ briefData: makeV2Brief({ classificationTrends: [] }) })
       );
       const rendered = textSpy.mock.calls.map((call) => String(call[0]));
-      expect(rendered).toContain(preparePdfText(NO_CLASSIFICATION_COMPARISON_MESSAGE));
-      expect(rendered).not.toContain(preparePdfText(UNAVAILABLE_CLASSIFICATION_CHANGES_MESSAGE));
-      expect(rendered).not.toContain(preparePdfText(NO_CLASSIFICATION_CHANGES_MESSAGE));
+      expect(rendered).toContain(preparePdfText(NO_TREND_DATA_MESSAGE));
+      expect(rendered).not.toContain(preparePdfText(UNAVAILABLE_TREND_DATA_MESSAGE));
     } finally {
       textSpy.mockRestore();
     }
   });
 
-  it("empty state C: an explicitly computed empty result reports no classification changes", async () => {
-    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
-    try {
-      await renderExecutiveBriefV2Pdf(
-        makeV2Report({ briefData: makeV2Brief({ classificationChanges: [] }) })
-      );
-      const rendered = textSpy.mock.calls.map((call) => String(call[0]));
-      expect(rendered).toContain(preparePdfText(NO_CLASSIFICATION_CHANGES_MESSAGE));
-      expect(rendered).not.toContain(preparePdfText(NO_CLASSIFICATION_COMPARISON_MESSAGE));
-      expect(rendered).not.toContain(preparePdfText(UNAVAILABLE_CLASSIFICATION_CHANGES_MESSAGE));
-    } finally {
-      textSpy.mockRestore();
-    }
-  });
-
-  it("renders all four direction labels from their unique page-4 classification rows", async () => {
-    const classificationChanges = [
-      { classificationId: "rise-v2", classificationName: "تصنيف-ارتفاع-V2", classificationPath: "فئة-V2 / تصنيف-ارتفاع-V2", currentCount: 60, previousCount: 20, difference: 40, changeRate: 200, direction: "ارتفاع" as const },
-      { classificationId: "decline-v2", classificationName: "تصنيف-انخفاض-V2", classificationPath: "فئة-V2 / تصنيف-انخفاض-V2", currentCount: 5, previousCount: 30, difference: -25, changeRate: -83.3, direction: "انخفاض" as const },
-      { classificationId: "new-v2", classificationName: "تصنيف-جديد-V2", classificationPath: "فئة-V2 / تصنيف-جديد-V2", currentCount: 12, previousCount: 0, difference: 12, changeRate: null, direction: "جديد" as const },
-      { classificationId: "zero-v2", classificationName: "تصنيف-صفر-V2", classificationPath: "فئة-V2 / تصنيف-صفر-V2", currentCount: 0, previousCount: 18, difference: -18, changeRate: -100, direction: "انخفاض إلى صفر" as const },
-    ];
-    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
-    try {
-      await renderExecutiveBriefV2Pdf(
-        makeV2Report({ briefData: makeV2Brief({ classificationChanges }) })
-      );
-      const rendered = textSpy.mock.calls.map((call) => String(call[0]));
-
-      for (const row of classificationChanges) {
-        const pathCallIndex = rendered.indexOf(preparePdfText(row.classificationPath));
-        expect(pathCallIndex).toBeGreaterThanOrEqual(0);
-        expect(rendered[pathCallIndex + 4]).toBe(preparePdfText(row.direction));
-      }
-    } finally {
-      textSpy.mockRestore();
-    }
-  });
-
-  it("20/21. stays exactly 4 pages with no warnings when classificationChanges has 5 rows", async () => {
-    const fiveChanges = [
-      { classificationId: "c1", classificationName: "أ", classificationPath: "فئة / أ", currentCount: 60, previousCount: 20, difference: 40, changeRate: 200, direction: "ارتفاع" as const },
-      { classificationId: "c2", classificationName: "ب", classificationPath: "فئة / ب", currentCount: 50, previousCount: 15, difference: 35, changeRate: 233.3, direction: "ارتفاع" as const },
-      { classificationId: "c3", classificationName: "ج", classificationPath: "فئة / ج", currentCount: 10, previousCount: 0, difference: 10, changeRate: null, direction: "جديد" as const },
-      { classificationId: "c4", classificationName: "د", classificationPath: "فئة / د", currentCount: 5, previousCount: 40, difference: -35, changeRate: -87.5, direction: "انخفاض" as const },
-      { classificationId: "c5", classificationName: "هـ", classificationPath: "فئة / هـ", currentCount: 0, previousCount: 22, difference: -22, changeRate: -100, direction: "انخفاض إلى صفر" as const },
-    ];
-    const result = await renderExecutiveBriefV2Pdf(
-      makeV2Report({ briefData: makeV2Brief({ classificationChanges: fiveChanges }) })
-    );
-    expect(countPageObjects(result.buffer)).toBe(4);
-    expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
-    expect(result.warnings.every((w) => !w.includes("بدلًا من"))).toBe(true);
-  });
-
-  it("empty state B: undefined classificationChanges reports unavailable data and keeps the PDF at 4 pages", async () => {
+  it("empty state: undefined classificationTrends reports unavailable data and keeps the PDF at 4 pages", async () => {
     const brief = makeV2Brief();
-    const withoutChanges = { ...brief } as Partial<ExecutiveBriefV2Data>;
-    delete withoutChanges.classificationChanges;
+    const withoutTrends = { ...brief } as Partial<ExecutiveBriefV2Data>;
+    delete withoutTrends.classificationTrends;
     const textSpy = vi.spyOn(PDFDocument.prototype, "text");
     try {
       const result = await renderExecutiveBriefV2Pdf(
-        makeV2Report({ briefData: withoutChanges as ExecutiveBriefV2Data })
+        makeV2Report({ briefData: withoutTrends as ExecutiveBriefV2Data })
       );
       const rendered = textSpy.mock.calls.map((call) => String(call[0]));
-      expect(rendered).toContain(preparePdfText(UNAVAILABLE_CLASSIFICATION_CHANGES_MESSAGE));
-      expect(rendered).not.toContain(preparePdfText(NO_CLASSIFICATION_COMPARISON_MESSAGE));
-      expect(rendered).not.toContain(preparePdfText(NO_CLASSIFICATION_CHANGES_MESSAGE));
+      expect(rendered).toContain(preparePdfText(UNAVAILABLE_TREND_DATA_MESSAGE));
+      expect(rendered).not.toContain(preparePdfText(NO_TREND_DATA_MESSAGE));
       expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
       expect(countPageObjects(result.buffer)).toBe(4);
     } finally {
       textSpy.mockRestore();
     }
   });
-});
 
-describe("V2 cover cards — periodMetrics (spec sections 10-11, 17)", () => {
-  it("cover cards read receivedDuringPeriod/closedDuringPeriod/openAtEnd/lateAtEnd from periodMetrics", async () => {
+  it("renders the pattern label and trail for every trend row", async () => {
+    const classificationTrends = [
+      { facility: "سجن-V2", classification: "تصنيف-ارتفاع-V2", currentCount: 60, difference: 40, trail: "20، 40، 60", streakPeriods: 3, patternLabel: "استمرار مرتفع" as const, priorityScore: 80 },
+      { facility: "سجن-V2", classification: "تصنيف-تحسن-V2", currentCount: 5, difference: -25, trail: "30، 15، 5", streakPeriods: 3, patternLabel: "تحسن مستدام" as const, priorityScore: 0 },
+    ];
     const textSpy = vi.spyOn(PDFDocument.prototype, "text");
     try {
-      await renderExecutiveBriefV2Pdf(makeV2Report());
-      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
-      // periodMetrics.current: received=100, closed=65, open=30, late=8 (fixture).
-      expect(joined).toContain("100");
-      expect(joined).toContain("65");
-      expect(joined).toContain("30 / 8");
+      await renderExecutiveBriefV2Pdf(
+        makeV2Report({ briefData: makeV2Brief({ classificationTrends }) })
+      );
+      const rendered = textSpy.mock.calls.map((call) => String(call[0]));
+      for (const row of classificationTrends) {
+        expect(rendered).toContain(preparePdfText(row.facility));
+        expect(rendered).toContain(preparePdfText(row.classification));
+        expect(rendered).toContain(preparePdfText(row.patternLabel));
+        expect(rendered).toContain(preparePdfText(row.trail));
+      }
     } finally {
       textSpy.mockRestore();
     }
   });
 
-  it("shows جديد (never 0% or Infinity) on the closed-period cover card when the previous period had zero closures", async () => {
+  it("stays exactly 4 pages with no warnings when classificationTrends has 5 rows", async () => {
+    const fiveTrends = Array.from({ length: 5 }, (_, i) => ({
+      facility: "سجن",
+      classification: `تصنيف ${i}`,
+      currentCount: 60 - i * 5,
+      difference: 10 - i,
+      trail: "10، 20، 30",
+      streakPeriods: 3,
+      patternLabel: "استمرار مرتفع" as const,
+      priorityScore: 90 - i,
+    }));
+    const result = await renderExecutiveBriefV2Pdf(
+      makeV2Report({ briefData: makeV2Brief({ classificationTrends: fiveTrends }) })
+    );
+    expect(countPageObjects(result.buffer)).toBe(4);
+    expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
+    expect(result.warnings.every((w) => !w.includes("بدلًا من"))).toBe(true);
+  });
+});
+
+describe("V2 cover cards — decision-focused KPIs (spec §6)", () => {
+  it("cover cards show period-volume comparison, continued-problem count, and high-priority facility count; open/late move to the secondary footer line", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(makeV2Report());
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      // periodMetrics.current: received=100 (fixture); continuedProblemFindingCount=2; highPriorityFacilityCount=1.
+      expect(joined).toContain("100");
+      expect(joined).toContain(preparePdfText("المشكلات المستمرة"));
+      expect(joined).toContain(preparePdfText("سجون ذات أولوية متابعة مرتفعة"));
+      // open=30, late=8 (fixture) still appear, but only as the secondary footer line.
+      expect(joined).toContain("30");
+      expect(joined).toContain("8");
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("shows جديد (never 0% or Infinity) on the period-volume card when the previous period had zero registrations", async () => {
     const textSpy = vi.spyOn(PDFDocument.prototype, "text");
     try {
       await renderExecutiveBriefV2Pdf(
@@ -660,21 +652,24 @@ describe("V2 cover cards — periodMetrics (spec sections 10-11, 17)", () => {
           briefData: makeV2Brief({
             periodMetrics: {
               current: { receivedDuringPeriod: 100, closedDuringPeriod: 12, openAtEnd: 30, lateAtEnd: 8 },
-              previous: { receivedDuringPeriod: 80, closedDuringPeriod: 0, openAtEnd: 25, lateAtEnd: 10 },
+              previous: { receivedDuringPeriod: 0, closedDuringPeriod: 0, openAtEnd: 25, lateAtEnd: 10 },
             },
           }),
         })
       );
       const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
       expect(joined).toContain("جديد");
-      expect(joined).not.toContain("0%");
+      // A literal computed "(0%)" would mean a bogus 0-from-0 percentage leaked in;
+      // other unrelated percentages on the page (e.g. a classification's 30% share)
+      // legitimately contain the bare substring "0%", so this must stay specific.
+      expect(joined).not.toContain("(0%)");
       expect(joined).not.toContain("Infinity");
     } finally {
       textSpy.mockRestore();
     }
   });
 
-  it("uses periodMetrics.previous.closedDuringPeriod for the closed-card comparison, not the previous period's currently-closed registration count", async () => {
+  it("uses periodMetrics.previous.receivedDuringPeriod for the period-volume card's difference/rate", async () => {
     const textSpy = vi.spyOn(PDFDocument.prototype, "text");
     try {
       await renderExecutiveBriefV2Pdf(
@@ -688,9 +683,9 @@ describe("V2 cover cards — periodMetrics (spec sections 10-11, 17)", () => {
         })
       );
       const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
-      // difference = 65 - 40 = 25, changeRate = +62.5%
-      expect(joined).toMatch(/\+25/);
-      expect(joined).toContain("62.5");
+      // difference = 100 - 80 = 20, changeRate = +25%
+      expect(joined).toMatch(/\+20/);
+      expect(joined).toContain("25");
     } finally {
       textSpy.mockRestore();
     }
@@ -1155,7 +1150,7 @@ describe("V2 monthly chart contract + KPI packing", () => {
       expect(joined).not.toContain(preparePdfText(deletedMethodology));
       expect(joined).not.toContain(preparePdfText(policyNote));
       expect(joined).toContain(preparePdfText("ملاحظات رئيسية"));
-      expect(joined).toContain(preparePdfText("الاتجاه الزمني للشكاوى المسجلة والمغلقة"));
+      expect(joined).toContain(preparePdfText("الاتجاه الزمني للشكاوى"));
       expect(joined).not.toContain(preparePdfText("ملخص المؤشرات والاتجاه الزمني"));
       expect(joined).not.toContain(preparePdfText("ملاحظات جودة البيانات وتأثيرها على المؤشرات"));
       expect(joined).toContain(preparePdfText("إجمالي المسجلة"));

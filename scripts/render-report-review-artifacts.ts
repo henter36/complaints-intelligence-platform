@@ -212,23 +212,29 @@ function zeroTrendReport(): ReportData {
 const v2BriefData: ExecutiveBriefV2Data = {
   ...briefData,
   allTimeTotal: 18560,
-  topFacilities: [
-    { name: "سجن نشط ذو شكاوى", total: 22, open: 5, closed: 17, currentlyLate: 2, shareOfTotal: 7.3 },
+  facilitiesNeedingFollowUp: [
+    {
+      facility: "سجن نشط ذو شكاوى", totalComplaints: 22, isHistoricalOnly: false, topIssueLabel: "الرعاية الصحية",
+      patternLabel: "استمرار مرتفع", streakPeriods: 4,
+      repeatComplainants: 8, repeatComplaints: 21, spreadComplainants: null, spreadComplaints: null,
+      priorityBand: "مرتفعة", priorityScore: 78, isChronic: true, distinctComplainantsForRanking: 8,
+    },
   ],
-  bottomFacilities: [
-    { name: "سجن نشط بلا شكاوى", total: 0, open: 0, closed: 0, currentlyLate: 0, shareOfTotal: 0 },
-    { name: "سجن نشط برصيد سابق", total: 0, open: 4, closed: 0, currentlyLate: 1, shareOfTotal: 0 },
+  facilitiesWithSustainedImprovement: [
+    { facility: "سجن نشط برصيد سابق", startValue: 40, currentValue: 12, decrease: 28, streakPeriods: 4, classificationLabel: "التغذية" },
   ],
   classificationOpenLate: {
     c1: { openAtEnd: 41, lateAtEnd: 11 },
     c2: { openAtEnd: 26, lateAtEnd: 4 },
     c3: { openAtEnd: 18, lateAtEnd: 5 },
   },
-  classificationChanges: [
-    { classificationId: "change-rise", classificationName: "طلب نقل", classificationPath: "الخدمات / طلب نقل", currentCount: 60, previousCount: 20, difference: 40, changeRate: 200, direction: "ارتفاع" },
-    { classificationId: "change-decline", classificationName: "طلب علاج", classificationPath: "الخدمات / طلب علاج", currentCount: 5, previousCount: 30, difference: -25, changeRate: -83.3, direction: "انخفاض" },
-    { classificationId: "change-new", classificationName: "استفسار جديد", classificationPath: "الاستفسارات / استفسار جديد", currentCount: 12, previousCount: 0, difference: 12, changeRate: null, direction: "جديد" },
-    { classificationId: "change-zero", classificationName: "معاملة قديمة", classificationPath: "المعاملات / معاملة قديمة", currentCount: 0, previousCount: 18, difference: -18, changeRate: -100, direction: "انخفاض إلى صفر" },
+  classificationAffectedFacilityCounts: { c1: 3, c2: 2, c3: 1 },
+  highPriorityFacilityCount: 1,
+  continuedProblemFindingCount: 2,
+  classificationTrends: [
+    { facility: "سجن نشط ذو شكاوى", classification: "طلب نقل", currentCount: 60, difference: 40, trail: "20، 35، 48، 60", streakPeriods: 4, patternLabel: "استمرار مرتفع", priorityScore: 78 },
+    { facility: "سجن نشط برصيد سابق", classification: "طلب علاج", currentCount: 5, difference: -25, trail: "30، 22، 12، 5", streakPeriods: 4, patternLabel: "تحسن مستدام", priorityScore: 0 },
+    { facility: "سجن نشط ذو شكاوى", classification: "استفسار جديد", currentCount: 12, difference: 12, trail: "0، 0، 1، 12", streakPeriods: 1, patternLabel: "مشكلة ناشئة", priorityScore: 55 },
   ],
   monthlyStockFlow: [
     { monthKey: "2025-08", monthLabel: "أغسطس 2025", receivedCount: 1552, closedDuringMonthCount: 1412, openAtMonthEndCount: 158, lateAtMonthEndCount: 34 },
@@ -292,7 +298,7 @@ function v2NoReferenceReport(): ReportData {
   base.comparisonData = undefined;
   base.briefData = {
     ...v2BriefData,
-    classificationChanges: [],
+    classificationTrends: [],
     allRegions: v2BriefData.allRegions.map((row) => ({
       ...row,
       previousCount: 0,

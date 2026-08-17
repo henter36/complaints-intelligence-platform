@@ -62,6 +62,14 @@ vi.mock("@/lib/db", () => ({
     complaint: {
       findMany: async () => activeComplaints,
       count: async () => activeComplaints.length,
+      groupBy: async () => [],
+    },
+    complaintStatusHistory: {
+      groupBy: async () => [],
+      count: async () => 0,
+    },
+    facility: {
+      findMany: async () => [],
     },
   },
 }));
@@ -126,6 +134,33 @@ describe("report engine performance (10,000 complaints)", () => {
     console.log(`[perf] renderReportXlsx COMPLAINT_DETAIL (10k rows): ${xlsxMs.toFixed(1)}ms, size=${(detailXlsx.buffer.length / 1024).toFixed(1)}KB`);
     expect(xlsxMs).toBeLessThan(15_000);
     expect(detailXlsx.buffer.length).toBeLessThan(25 * 1024 * 1024);
+  }, 120_000);
+
+  it("pattern-analysis engine (chronic issues, repeat complainants, concentration, spread) stays within budget over 10k complaints", async () => {
+    const { buildReportData } = await import("./report-data-service");
+    const { parseReportRequest } = await import("./report-definition-service");
+    const { renderReportPdf } = await import("./report-pdf-service");
+
+    const request = parseReportRequest({
+      type: "EXECUTIVE_SUMMARY",
+      filters: { from: "2026-07-01", to: "2026-07-31" },
+      options: { includeComparison: true, reportMode: "FULL_ANALYTICAL" },
+    });
+
+    const dataStart = performance.now();
+    const data = await buildReportData(request, "run", new Date("2026-07-31T00:00:00Z"));
+    const dataMs = performance.now() - dataStart;
+    console.log(`[perf] buildReportData FULL_ANALYTICAL (with pattern analysis) over 10k complaints: ${dataMs.toFixed(1)}ms`);
+    // The pattern engine issues exactly one extra findMany (loadPatternSeries) regardless
+    // of facility/classification cardinality — no N+1 across the analysis window.
+    expect(dataMs).toBeLessThan(15_000);
+
+    const pdfStart = performance.now();
+    const { buffer } = await renderReportPdf(data);
+    const pdfMs = performance.now() - pdfStart;
+    console.log(`[perf] renderReportPdf FULL_ANALYTICAL (with pattern analysis): ${pdfMs.toFixed(1)}ms`);
+    expect(pdfMs).toBeLessThan(60_000);
+    expect(buffer.subarray(0, 5).toString("latin1")).toBe("%PDF-");
   }, 120_000);
 
   it("PDF for the overdue-complaints report spans multiple pages without erroring", async () => {

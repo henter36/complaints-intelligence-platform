@@ -10,6 +10,8 @@
  */
 
 import { isAbortError } from "@/lib/abort";
+import { AnalyticalFindingSchema, type AnalyticalFinding } from "./analytical-finding";
+import type { PeriodChangeDigest } from "./period-change-digest";
 
 export type NameCountItem = {
   name: string;
@@ -83,6 +85,10 @@ export interface AnalyticsData {
   previousDistributions: CoreDistributions | null;
   regionPriorityBreakdown: CrossTabRow[];
   totalCount: number;
+  findings: AnalyticalFinding[];
+  periodChangeDigest: PeriodChangeDigest | null;
+  /** The exact periods behind every finding's per-period series — reused for timelines, never requeried (spec §5). */
+  patternAnalysisPeriods: { from: string; to: string }[];
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -293,6 +299,58 @@ function isPreviousDistributions(value: unknown): value is AnalyticsData["previo
   return value === null || isDistributionRecord(value, CORE_DISTRIBUTION_KEYS);
 }
 
+function isFindingArray(value: unknown): value is AnalyticalFinding[] {
+  return Array.isArray(value) && value.every((item) => AnalyticalFindingSchema.safeParse(item).success);
+}
+
+function isPatternSnapshotArray(value: unknown): boolean {
+  return (
+    Array.isArray(value)
+    && value.every(
+      (item) =>
+        isRecord(item)
+        && typeof item.key === "string"
+        && typeof item.facility === "string"
+        && typeof item.classificationLabel === "string"
+        && typeof item.pattern === "string"
+        && typeof item.priorityBand === "string"
+    )
+  );
+}
+
+function isWorsenedProblemArray(value: unknown): boolean {
+  return (
+    Array.isArray(value)
+    && value.every(
+      (item) =>
+        isRecord(item)
+        && typeof item.key === "string"
+        && typeof item.facility === "string"
+        && typeof item.classificationLabel === "string"
+        && typeof item.from === "string"
+        && typeof item.to === "string"
+    )
+  );
+}
+
+function isPeriodChangeDigest(value: unknown): value is AnalyticsData["periodChangeDigest"] {
+  if (value === null) return true;
+  if (!isRecord(value)) return false;
+  return (
+    isPatternSnapshotArray(value.newProblems)
+    && isPatternSnapshotArray(value.continuingProblems)
+    && isWorsenedProblemArray(value.worsenedProblems)
+    && isPatternSnapshotArray(value.relapsedProblems)
+    && isPatternSnapshotArray(value.improvedFacilities)
+    && isPatternSnapshotArray(value.exitedPriorityList)
+    && isStringArray(value.newlySpreadingClassifications)
+  );
+}
+
+function isPatternAnalysisPeriodsArray(value: unknown): value is AnalyticsData["patternAnalysisPeriods"] {
+  return Array.isArray(value) && value.every((item) => isRecord(item) && typeof item.from === "string" && typeof item.to === "string");
+}
+
 export function isAnalyticsData(value: unknown): value is AnalyticsData {
   if (!isRecord(value)) return false;
 
@@ -303,5 +361,8 @@ export function isAnalyticsData(value: unknown): value is AnalyticsData {
     && isAnomalies(value.anomalies)
     && isPreviousDistributions(value.previousDistributions)
     && isFiniteNumber(value.totalCount)
+    && isFindingArray(value.findings)
+    && isPeriodChangeDigest(value.periodChangeDigest)
+    && isPatternAnalysisPeriodsArray(value.patternAnalysisPeriods)
   );
 }

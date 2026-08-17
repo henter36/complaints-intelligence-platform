@@ -12,6 +12,11 @@ import type { NetBacklogFlow, PerfVolumeRow, ContinuityRow } from "@/lib/reports
 import { getComparisonModeLabelForTable } from "@/lib/reports/comparison-mode-labels";
 import { formatRiyadhDateTime } from "./report-time";
 import { REPORT_XLSX_NUMBER_FORMATS } from "@/lib/reports/design-tokens";
+import type { PatternAnalysisReportData } from "@/server/analytics/pattern/pattern-report-integration-service";
+import { toFindingTableRows } from "@/lib/analytics/finding-table-rows";
+import { findingTypeLabel } from "@/lib/analytics/finding-labels";
+import type { AnalyticalFinding } from "@/lib/analytics/analytical-finding";
+import type { PatternSnapshot } from "@/lib/analytics/period-change-digest";
 
 const FORMULA_INJECTION_PATTERN = /^[=+\-@]/;
 
@@ -541,6 +546,271 @@ function buildContinuitySheet(workbook: ExcelJS.Workbook, rows: ContinuityRow[],
   }
 }
 
+// ---------------------------------------------------------------------------
+// Pattern-analysis sheets (spec §9) — every value comes straight from the
+// already-computed AnalyticalFinding[]/PeriodChangeDigest; nothing here
+// recomputes a trend, a chronic classification, or a priority score.
+// ---------------------------------------------------------------------------
+
+function buildFindingsSheet(workbook: ExcelJS.Workbook, findings: readonly AnalyticalFinding[], usedNames: Set<string>): void {
+  const sheet = workbook.addWorksheet(sanitizeSheetName("الملاحظات التحليلية", usedNames));
+  applyRtlView(sheet);
+  sheet.columns = [
+    { header: "المعرف", key: "findingId", width: 30 },
+    { header: "الموقع", key: "facility", width: 24 },
+    { header: "التصنيف", key: "classification", width: 24 },
+    { header: "نوع الملاحظة", key: "findingType", width: 18 },
+    { header: "درجة الأولوية", key: "priorityScore", width: 14 },
+    { header: "الحالية", key: "currentValue", width: 12 },
+    { header: "السابقة", key: "previousValue", width: 12 },
+    { header: "عدد الفترات", key: "periodsObserved", width: 12 },
+    { header: "معدل التكرار %", key: "repeatRate", width: 14 },
+    { header: "نسبة التركّز %", key: "concentrationRate", width: 14 },
+    { header: "أصحاب الشكاوى المتأثرون", key: "affectedComplainants", width: 20 },
+    { header: "الاتجاه", key: "direction", width: 12 },
+    { header: "السبب", key: "reasons", width: 40 },
+    { header: "الخلاصة", key: "summary", width: 50 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+  sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: sheet.columns.length } };
+  for (const row of toFindingTableRows(findings)) {
+    sheet.addRow({
+      findingId: sanitizeText(row.findingId),
+      facility: sanitizeText(row.facility),
+      classification: sanitizeText(row.classification),
+      findingType: sanitizeText(row.findingType),
+      priorityScore: row.priorityScore,
+      currentValue: row.currentValue,
+      previousValue: row.previousValue,
+      periodsObserved: row.periodsObserved,
+      repeatRate: row.repeatRate,
+      concentrationRate: row.concentrationRate,
+      affectedComplainants: row.affectedComplainants,
+      direction: sanitizeText(row.direction),
+      reasons: sanitizeText(row.reasons),
+      summary: sanitizeText(row.summary),
+    });
+  }
+}
+
+function buildPeriodChangeDigestSheet(
+  workbook: ExcelJS.Workbook,
+  patternAnalysis: PatternAnalysisReportData,
+  usedNames: Set<string>
+): void {
+  const sheet = workbook.addWorksheet(sanitizeSheetName("التغير منذ الفترة السابقة", usedNames));
+  applyRtlView(sheet);
+  sheet.columns = [
+    { header: "الفئة", key: "category", width: 22 },
+    { header: "الموقع", key: "facility", width: 24 },
+    { header: "التصنيف", key: "classification", width: 24 },
+    { header: "التفاصيل", key: "details", width: 30 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+
+  const digest = patternAnalysis.periodChangeDigest;
+  const snapshotRows = (category: string, snapshots: readonly PatternSnapshot[]) =>
+    snapshots.map((s) => ({ category, facility: s.facility, classification: s.classificationLabel, details: s.pattern }));
+
+  const rows = [
+    ...snapshotRows("مشكلة جديدة", digest.newProblems),
+    ...snapshotRows("مشكلة مستمرة", digest.continuingProblems),
+    ...digest.worsenedProblems.map((w) => ({
+      category: "مشكلة تفاقمت",
+      facility: w.facility,
+      classification: w.classificationLabel,
+      details: `${w.from} → ${w.to}`,
+    })),
+    ...snapshotRows("عادت بعد تحسن", digest.relapsedProblems),
+    ...snapshotRows("موقع تحسن", digest.improvedFacilities),
+    ...snapshotRows("خرجت من الأولوية", digest.exitedPriorityList),
+    ...digest.newlySpreadingClassifications.map((label) => ({
+      category: "تصنيف بدأ بالانتشار",
+      facility: "",
+      classification: label,
+      details: "",
+    })),
+  ];
+
+  for (const row of rows) {
+    sheet.addRow({
+      category: sanitizeText(row.category),
+      facility: sanitizeText(row.facility),
+      classification: sanitizeText(row.classification),
+      details: sanitizeText(row.details),
+    });
+  }
+}
+
+function parseRepeatEntries(finding: AnalyticalFinding): { anonymizedComplainant: string; topicLabel: string; complaintCount: number; periodsSpanned: number }[] {
+  const raw = finding.supportingMetrics.repeatEntries;
+  if (typeof raw !== "string") return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function buildRepeatSheet(workbook: ExcelJS.Workbook, findings: readonly AnalyticalFinding[], usedNames: Set<string>): void {
+  const repeatFindings = findings.filter((f) => f.type === "REPEAT_COMPLAINANT");
+  const massFindings = findings.filter((f) => f.type === "MASS_COMPLAINT");
+  if (repeatFindings.length === 0 && massFindings.length === 0) return;
+
+  const sheet = workbook.addWorksheet(sanitizeSheetName("التكرار", usedNames));
+  applyRtlView(sheet);
+  sheet.columns = [
+    { header: "النوع", key: "kind", width: 18 },
+    { header: "الموقع", key: "facility", width: 24 },
+    { header: "الموضوع", key: "topic", width: 24 },
+    { header: "صاحب الشكوى (مجهّل)", key: "complainant", width: 20 },
+    { header: "عدد الشكاوى", key: "count", width: 14 },
+    { header: "عدد الفترات", key: "periods", width: 14 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+
+  for (const finding of repeatFindings) {
+    for (const entry of parseRepeatEntries(finding)) {
+      sheet.addRow({
+        kind: "تكرار فردي",
+        facility: sanitizeText(finding.entityName),
+        topic: sanitizeText(entry.topicLabel),
+        complainant: sanitizeText(entry.anonymizedComplainant),
+        count: entry.complaintCount,
+        periods: entry.periodsSpanned,
+      });
+    }
+  }
+  for (const finding of massFindings) {
+    sheet.addRow({
+      kind: "تكرار جماعي",
+      facility: sanitizeText(finding.entityName),
+      topic: "",
+      complainant: "",
+      count: finding.currentValue,
+      periods: "",
+    });
+  }
+}
+
+function buildSpreadSheet(workbook: ExcelJS.Workbook, findings: readonly AnalyticalFinding[], usedNames: Set<string>): void {
+  const spreadTypes = new Set(["CROSS_FACILITY_SPREAD", "COMPOSITION_SHIFT", "MULTI_ISSUE_FACILITY"]);
+  const relevant = findings.filter((f) => spreadTypes.has(f.type));
+  if (relevant.length === 0) return;
+
+  const sheet = workbook.addWorksheet(sanitizeSheetName("الانتشار", usedNames));
+  applyRtlView(sheet);
+  sheet.columns = [
+    { header: "النوع", key: "type", width: 20 },
+    { header: "الموقع/التصنيف", key: "entity", width: 30 },
+    { header: "القيمة الحالية", key: "currentValue", width: 14 },
+    { header: "التغير", key: "difference", width: 14 },
+    { header: "الخلاصة", key: "summary", width: 60 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+  for (const finding of relevant) {
+    sheet.addRow({
+      type: sanitizeText(findingTypeLabel(finding.type)),
+      entity: sanitizeText(finding.entityName),
+      currentValue: finding.currentValue,
+      difference: finding.difference,
+      summary: sanitizeText(finding.explanation),
+    });
+  }
+}
+
+function buildConcentrationFindingsSheet(workbook: ExcelJS.Workbook, findings: readonly AnalyticalFinding[], usedNames: Set<string>): void {
+  const relevant = findings.filter((f) => f.type === "CONCENTRATION" || f.type === "WING_CONCENTRATION");
+  if (relevant.length === 0) return;
+
+  const sheet = workbook.addWorksheet(sanitizeSheetName("التركيز", usedNames));
+  applyRtlView(sheet);
+  sheet.columns = [
+    { header: "الموقع", key: "facility", width: 24 },
+    { header: "التصنيف", key: "classification", width: 24 },
+    { header: "النوع", key: "type", width: 18 },
+    { header: "عدد الشكاوى", key: "count", width: 14 },
+    { header: "نسبة التركّز %", key: "share", width: 16 },
+    { header: "الخلاصة", key: "summary", width: 50 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+  for (const row of toFindingTableRows(relevant)) {
+    sheet.addRow({
+      facility: sanitizeText(row.facility),
+      classification: sanitizeText(row.classification),
+      type: sanitizeText(row.findingType),
+      count: row.currentValue,
+      share: row.concentrationRate,
+      summary: sanitizeText(row.summary),
+    });
+  }
+}
+
+function parsePeriodCounts(finding: AnalyticalFinding): number[] | null {
+  const raw = finding.supportingMetrics.periodCounts;
+  if (typeof raw !== "string") return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.every((v) => typeof v === "number") ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function buildPatternTimelineSheet(
+  workbook: ExcelJS.Workbook,
+  patternAnalysis: PatternAnalysisReportData,
+  usedNames: Set<string>
+): void {
+  const withSeries = patternAnalysis.findings.filter((f) => parsePeriodCounts(f) !== null);
+  if (withSeries.length === 0) return;
+
+  const sheet = workbook.addWorksheet(sanitizeSheetName("السلاسل الزمنية", usedNames));
+  applyRtlView(sheet);
+  sheet.columns = [
+    { header: "المعرف", key: "findingId", width: 30 },
+    { header: "الموقع/التصنيف", key: "entity", width: 30 },
+    { header: "من", key: "periodFrom", width: 14 },
+    { header: "إلى", key: "periodTo", width: 14 },
+    { header: "عدد الشكاوى", key: "count", width: 14 },
+  ];
+  sheet.getRow(1).font = { bold: true };
+
+  for (const finding of withSeries) {
+    const counts = parsePeriodCounts(finding);
+    if (!counts) continue;
+    counts.forEach((count, index) => {
+      const period = patternAnalysis.periods[index];
+      sheet.addRow({
+        findingId: sanitizeText(finding.id),
+        entity: sanitizeText(finding.entityName),
+        periodFrom: period?.from ?? "",
+        periodTo: period?.to ?? "",
+        count,
+      });
+    });
+  }
+}
+
+function appendPatternAnalysisSheets(context: WorkbookBuildContext, briefData: ExecutiveBriefData): void {
+  const patternAnalysis = briefData.patternAnalysis;
+  if (!patternAnalysis || patternAnalysis.findings.length === 0) return;
+  const { workbook, warnings, usedNames } = context;
+  const { findings } = patternAnalysis;
+
+  runSheetBuilder(warnings, 'تعذر إنشاء ورقة "الملاحظات التحليلية".', () => buildFindingsSheet(workbook, findings, usedNames));
+  runSheetBuilder(warnings, 'تعذر إنشاء ورقة "التغير منذ الفترة السابقة".', () =>
+    buildPeriodChangeDigestSheet(workbook, patternAnalysis, usedNames)
+  );
+  runSheetBuilder(warnings, 'تعذر إنشاء ورقة "التكرار".', () => buildRepeatSheet(workbook, findings, usedNames));
+  runSheetBuilder(warnings, 'تعذر إنشاء ورقة "الانتشار".', () => buildSpreadSheet(workbook, findings, usedNames));
+  runSheetBuilder(warnings, 'تعذر إنشاء ورقة "التركيز".', () => buildConcentrationFindingsSheet(workbook, findings, usedNames));
+  runSheetBuilder(warnings, 'تعذر إنشاء ورقة "السلاسل الزمنية".', () =>
+    buildPatternTimelineSheet(workbook, patternAnalysis, usedNames)
+  );
+}
+
 export type XlsxRenderResult = {
   buffer: Buffer;
   warnings: string[];
@@ -712,6 +982,7 @@ export async function renderReportXlsx(data: ReportData): Promise<XlsxRenderResu
   const briefData = data.briefData;
   if (briefData) {
     appendBriefSheets(context, briefData);
+    appendPatternAnalysisSheets(context, briefData);
     if (isFullAnalyticalData(briefData)) appendFullAnalyticalSheets(context, briefData);
   }
 

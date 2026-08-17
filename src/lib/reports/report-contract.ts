@@ -184,27 +184,87 @@ export type ExecutiveEntityRow = {
 };
 
 // ---------------------------------------------------------------------------
-// Classification change row (V2-only "أبرز تحولات التصنيفات")
+// Classification trend row (V2-only "أبرز اتجاهات التصنيفات عبر الفترات")
 // ---------------------------------------------------------------------------
 
-export type ClassificationChangeDirection = "ارتفاع" | "انخفاض" | "جديد" | "انخفاض إلى صفر";
+/** The six pattern labels spec §1 requires — see classificationTrendPatternLabel(). */
+export type ClassificationTrendPatternLabel =
+  | "استمرار مرتفع"
+  | "تصاعد مستمر"
+  | "تحسن مستدام"
+  | "عودة للارتفاع بعد تحسن"
+  | "مشكلة ناشئة"
+  | "متذبذب"
+  | "نمط ملحوظ";
 
 /**
- * One classification's change vs. the previous period — built from the union
- * of current- and previous-period classifications (not just the current
- * period's top N), so a classification that existed previously but has zero
- * complaints now is never silently dropped. V2-only; independent of
- * ClassificationBriefRow, which only covers the current period's top N.
+ * One facility×classification's multi-period trend, sourced directly from
+ * the pattern-analysis engine's own AnalyticalFinding[] (never recomputed
+ * here) — replaces the old current/previous-only ClassificationChangeRow.
+ * `facility` and `classification` are split from the finding's own
+ * entityName ("facility — classification") into independent columns so a
+ * long facility or classification name is never silently concatenated and
+ * truncated together (spec §3).
  */
-export type ClassificationChangeRow = {
-  classificationId: string;
-  classificationName: string;
-  classificationPath: string;
+export type ClassificationTrendRow = {
+  facility: string;
+  classification: string;
   currentCount: number;
-  previousCount: number;
   difference: number;
-  changeRate: number | null;
-  direction: ClassificationChangeDirection;
+  /** Last up to 5 period counts, oldest→newest, e.g. "38، 42، 43، 46" — NOT the full streak (spec §4). */
+  trail: string;
+  /** Real streak length, which may exceed the number of values shown in `trail`. */
+  streakPeriods: number;
+  patternLabel: ClassificationTrendPatternLabel;
+  priorityScore: number;
+};
+
+// ---------------------------------------------------------------------------
+// Facility follow-up / improvement rows (V2-only page 4 facility sections)
+// ---------------------------------------------------------------------------
+
+export type FacilityPriorityBandLabel = "مرتفعة" | "متوسطة" | "منخفضة";
+
+/**
+ * A facility ranked by follow-up priority (spec §3, revised §1/§10/§11) —
+ * replaces the old volume-only "أعلى السجون". `totalComplaints` is always
+ * sourced from the SAME per-facility current-period total the pattern engine
+ * itself computed internally (never a separately-computed snapshot number),
+ * so it can never contradict the finding that drove this row onto the list.
+ * `isHistoricalOnly` is true only for the narrow, explicitly-justified case
+ * where the facility's real current-period total is 0 but a chronic/relapse
+ * finding with genuine multi-period history still warrants follow-up.
+ */
+export type FacilityFollowUpRow = {
+  facility: string;
+  totalComplaints: number;
+  isHistoricalOnly: boolean;
+  topIssueLabel: string;
+  patternLabel: ClassificationTrendPatternLabel | "—";
+  streakPeriods: number | null;
+  /** Distinct repeat complainants at this facility, or null when no REPEAT_COMPLAINANT finding applies. */
+  repeatComplainants: number | null;
+  /** Total repeated complaints tied to those complainants, or null. */
+  repeatComplaints: number | null;
+  /** Distinct complainants behind a mass/collective complaint, or null when no MASS_COMPLAINT finding applies. */
+  spreadComplainants: number | null;
+  /** Total complaints behind that mass/collective complaint, or null. */
+  spreadComplaints: number | null;
+  priorityBand: FacilityPriorityBandLabel;
+  priorityScore: number;
+  /** Tie-break inputs (spec §11) — not rendered directly. */
+  isChronic: boolean;
+  distinctComplainantsForRanking: number;
+};
+
+/** A facility with a real, multi-period, sustained decline (spec §4) — replaces the old lowest-volume "أقل السجون". */
+export type FacilityImprovementRow = {
+  facility: string;
+  startValue: number;
+  currentValue: number;
+  decrease: number;
+  streakPeriods: number;
+  classificationLabel: string;
 };
 
 // ---------------------------------------------------------------------------

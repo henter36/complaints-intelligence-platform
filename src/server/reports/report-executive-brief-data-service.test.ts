@@ -18,9 +18,10 @@ import {
   dedupeTrendComplaintsById,
   buildMonthlyTrendPrimaryWhere,
   buildTopClassifications,
-  buildTopAndBottomFacilities,
+  buildFacilitiesNeedingFollowUp,
+  buildFacilitiesWithSustainedImprovement,
+  buildClassificationTrendRows,
   buildRegionOnlyConclusions,
-  buildClassificationChanges,
   MONTHLY_WINDOW_SIZE,
   ARABIC_MONTH_NAMES,
 } from "./report-executive-brief-data-service";
@@ -30,6 +31,7 @@ import type { ReportFilters } from "./report-definition-service";
 import type { ComparisonResult, DeptClassPeriodCount, PeriodRange, RegionChangeRow } from "./report-comparison";
 import type { ReportPeriodGroupSnapshot } from "./report-period-snapshot-service";
 import type { ComplaintGroupMetrics, ComplaintKpiResult } from "@/server/complaints/complaint-kpi-service";
+import type { AnalyticalFinding } from "@/lib/analytics/analytical-finding";
 import {
   UNCLASSIFIED_CLASSIFICATION_KEY,
   UNCLASSIFIED_CLASSIFICATION_LABEL,
@@ -654,11 +656,12 @@ describe("buildExecutiveBriefData — comparativeTimeline", () => {
     expect(prevPoints[0].count).toBe(2);
   });
 
-  it("now is passed from caller — findMany is called for current period, previous period, and snapshot candidates", async () => {
+  it("now is passed from caller — findMany is called for current period, previous period, snapshot candidates, and the pattern-analysis window", async () => {
     // buildComparativeTimeline calls findMany twice (current + previous period);
-    // the period-snapshot service adds one more fixed call (snapshot candidates).
+    // the period-snapshot service adds one more fixed call (snapshot candidates);
+    // the pattern-analysis engine adds its own single windowed call.
     await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
-    expect(dbMocks.complaintFindMany).toHaveBeenCalledTimes(3);
+    expect(dbMocks.complaintFindMany).toHaveBeenCalledTimes(4);
   });
 
   it("complaintDate present but outside period is not counted by receivedAt", async () => {
@@ -666,8 +669,8 @@ describe("buildExecutiveBriefData — comparativeTimeline", () => {
     // Service relies on Prisma OR clause — our mock returns only what Prisma would return.
     // We verify that the mock was called with the OR clause for the current period.
     await buildExecutiveBriefData(BASE_FILTERS, makeKpiResult(), makeComparison(), undefined, NOW);
-    // findMany called 3 times: current period timeline, previous period timeline, snapshot candidates.
-    expect(dbMocks.complaintFindMany).toHaveBeenCalledTimes(3);
+    // findMany called 4 times: current period timeline, previous period timeline, snapshot candidates, pattern-analysis window.
+    expect(dbMocks.complaintFindMany).toHaveBeenCalledTimes(4);
     // Verify the WHERE passed to first findMany (current period) includes the OR clause.
     const [[callArg]] = dbMocks.complaintFindMany.mock.calls;
     expect(callArg.where).toHaveProperty("OR");
@@ -2519,114 +2522,254 @@ describe("classification + region reconciliation", () => {
   });
 });
 
-describe("buildTopAndBottomFacilities — V2 only (spec sections 5-6, 17 items 6-11)", () => {
-  function snapshot(overrides: Partial<ReportPeriodGroupSnapshot> = {}): ReportPeriodGroupSnapshot {
-    return { receivedDuringPeriod: 0, closedDuringPeriod: 0, openAtEnd: 0, lateAtEnd: 0, ...overrides };
-  }
+function makeFinding(overrides: Partial<AnalyticalFinding> & { facility?: string }): AnalyticalFinding {
+  const { facility, ...rest } = overrides;
+  return {
+    id: rest.id ?? "f",
+    type: "CHRONIC_ISSUE",
+    entityType: "CLASSIFICATION",
+    entityId: null,
+    entityName: "سجن — التغذية",
+    currentValue: 10,
+    previousValue: 5,
+    difference: 5,
+    changeRate: 100,
+    severity: "MEDIUM",
+    priorityScore: 50,
+    confidence: "MEDIUM",
+    detectionSource: "QUANTITATIVE",
+    explanation: "x",
+    supportingMetrics: {},
+    evidenceComplaintIds: [],
+    evidenceSpans: [],
+    limitations: [],
+    drilldownFilters: facility ? { facility } : {},
+    firstDetectedAt: "2026-01-01T00:00:00.000Z",
+    lastDetectedAt: "2026-01-01T00:00:00.000Z",
+    detectorVersion: "pattern-v1",
+    ...rest,
+  };
+}
 
-  it("6. sorts top facilities by receivedDuringPeriod desc, then openAtEnd desc, lateAtEnd desc, closedDuringPeriod desc, name asc", () => {
-    const byFacility: Record<string, ReportPeriodGroupSnapshot> = {
-      "سجن أ": snapshot({ receivedDuringPeriod: 10, openAtEnd: 2, lateAtEnd: 1, closedDuringPeriod: 8 }),
-      "سجن ب": snapshot({ receivedDuringPeriod: 10, openAtEnd: 5, lateAtEnd: 1, closedDuringPeriod: 5 }),
-      "سجن ج": snapshot({ receivedDuringPeriod: 20, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 19 }),
-    };
-    const { topFacilities } = buildTopAndBottomFacilities(40, byFacility);
-    expect(topFacilities.map((r) => r.name)).toEqual(["سجن ج", "سجن ب", "سجن أ"]);
+describe("buildFacilitiesNeedingFollowUp — V2 only, spec §1/§3/§10/§11 (priority-driven, scope-unified, never volume-driven)", () => {
+  it("ranks by the facility's highest priorityScore, not by raw complaint volume", () => {
+    const findings = [
+      makeFinding({ id: "low-priority-high-volume", facility: "سجن أ", entityName: "سجن أ — الاتصال", priorityScore: 20, currentValue: 200 }),
+      makeFinding({ id: "high-priority-low-volume", facility: "سجن ب", entityName: "سجن ب — الرعاية الصحية", priorityScore: 90, currentValue: 8 }),
+    ];
+    const totals = { "سجن أ": 200, "سجن ب": 8 };
+    const rows = buildFacilitiesNeedingFollowUp(findings, totals);
+    expect(rows[0].facility).toBe("سجن ب");
   });
 
-  it("7. sorts bottom facilities by receivedDuringPeriod asc, then openAtEnd asc, lateAtEnd asc, closedDuringPeriod asc, name asc", () => {
-    const byFacility: Record<string, ReportPeriodGroupSnapshot> = {
-      // High-volume facilities fill the top-5 list so the low-volume trio
-      // below is never touched by the top/bottom anti-overlap rule (item 10),
-      // keeping this test focused purely on bottom's own sort order.
-      "سجن مرتفع 1": snapshot({ receivedDuringPeriod: 50, openAtEnd: 5, lateAtEnd: 2, closedDuringPeriod: 45 }),
-      "سجن مرتفع 2": snapshot({ receivedDuringPeriod: 40, openAtEnd: 4, lateAtEnd: 1, closedDuringPeriod: 36 }),
-      "سجن مرتفع 3": snapshot({ receivedDuringPeriod: 30, openAtEnd: 3, lateAtEnd: 1, closedDuringPeriod: 27 }),
-      "سجن مرتفع 4": snapshot({ receivedDuringPeriod: 20, openAtEnd: 2, lateAtEnd: 0, closedDuringPeriod: 18 }),
-      "سجن مرتفع 5": snapshot({ receivedDuringPeriod: 15, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 14 }),
-      "سجن أ": snapshot({ receivedDuringPeriod: 3, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 2 }),
-      "سجن ب": snapshot({ receivedDuringPeriod: 1, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 0 }),
-      "سجن ج": snapshot({ receivedDuringPeriod: 1, openAtEnd: 0, lateAtEnd: 0, closedDuringPeriod: 1 }),
-    };
-    const { bottomFacilities } = buildTopAndBottomFacilities(160, byFacility);
-    expect(bottomFacilities.slice(0, 3).map((r) => r.name)).toEqual(["سجن ج", "سجن ب", "سجن أ"]);
+  it("takes topIssueLabel/patternLabel/streakPeriods from the facility's highest-ranked classification finding, excluding SUSTAINED_IMPROVEMENT", () => {
+    const findings = [
+      makeFinding({
+        id: "improvement", facility: "سجن أ", entityName: "سجن أ — الاتصال", type: "SUSTAINED_IMPROVEMENT",
+        priorityScore: 0, supportingMetrics: { pattern: "SUSTAINED_IMPROVEMENT", streakPeriods: 4 },
+      }),
+      makeFinding({
+        id: "chronic", facility: "سجن أ", entityName: "سجن أ — الرعاية الصحية", priorityScore: 70,
+        supportingMetrics: { pattern: "CONTINUED_RISE", streakPeriods: 5 },
+      }),
+    ];
+    const rows = buildFacilitiesNeedingFollowUp(findings, { "سجن أ": 50 });
+    expect(rows[0].topIssueLabel).toBe("الرعاية الصحية");
+    expect(rows[0].patternLabel).toBe("استمرار مرتفع");
+    expect(rows[0].streakPeriods).toBe(5);
   });
 
-  it("includes an authoritative ACTIVE zero-volume facility in the bottom list", () => {
-    const byFacility: Record<string, ReportPeriodGroupSnapshot> = {
-      "سجن مرتفع 1": snapshot({ receivedDuringPeriod: 50 }),
-      "سجن مرتفع 2": snapshot({ receivedDuringPeriod: 40 }),
-      "سجن مرتفع 3": snapshot({ receivedDuringPeriod: 30 }),
-      "سجن مرتفع 4": snapshot({ receivedDuringPeriod: 20 }),
-      "سجن مرتفع 5": snapshot({ receivedDuringPeriod: 10 }),
-      "سجن نشط بلا شكاوى": snapshot(),
-      "سجن نشط برصيد": snapshot({ openAtEnd: 3, lateAtEnd: 1 }),
-      "سجن منخفض": snapshot({ receivedDuringPeriod: 1 }),
-    };
-    const { bottomFacilities } = buildTopAndBottomFacilities(151, byFacility);
-    expect(bottomFacilities.map((row) => row.name)).toEqual([
-      "سجن نشط بلا شكاوى",
-      "سجن نشط برصيد",
-      "سجن منخفض",
+  it("surfaces mass/collective complaints and repeat complainants as real numbers, never a vague qualitative label (spec §10)", () => {
+    const withMass = buildFacilitiesNeedingFollowUp(
+      [
+        makeFinding({ id: "c", facility: "سجن أ", priorityScore: 60 }),
+        makeFinding({
+          id: "mass", facility: "سجن أ", type: "MASS_COMPLAINT", entityType: "FACILITY",
+          priorityScore: 40, currentValue: 34, supportingMetrics: { distinctComplainants: 29 },
+        }),
+      ],
+      { "سجن أ": 40 }
+    );
+    expect(withMass[0].spreadComplainants).toBe(29);
+    expect(withMass[0].spreadComplaints).toBe(34);
+    expect(withMass[0].repeatComplainants).toBeNull();
+    expect(withMass[0].repeatComplaints).toBeNull();
+
+    const withRepeat = buildFacilitiesNeedingFollowUp(
+      [
+        makeFinding({ id: "c", facility: "سجن ب", priorityScore: 60 }),
+        makeFinding({
+          id: "repeat", facility: "سجن ب", type: "REPEAT_COMPLAINANT", entityType: "FACILITY",
+          priorityScore: 30, currentValue: 21, supportingMetrics: { repeatComplainantCount: 8 },
+        }),
+      ],
+      { "سجن ب": 40 }
+    );
+    expect(withRepeat[0].repeatComplainants).toBe(8);
+    expect(withRepeat[0].repeatComplaints).toBe(21);
+    expect(withRepeat[0].spreadComplainants).toBeNull();
+    expect(withRepeat[0].spreadComplaints).toBeNull();
+
+    const withNeither = buildFacilitiesNeedingFollowUp(
+      [makeFinding({ id: "c", facility: "سجن ج", priorityScore: 60 })],
+      { "سجن ج": 40 }
+    );
+    expect(withNeither[0].repeatComplainants).toBeNull();
+    expect(withNeither[0].spreadComplainants).toBeNull();
+  });
+
+  it("excludes the unspecified (غير محدد) facility bucket", () => {
+    const rows = buildFacilitiesNeedingFollowUp(
+      [makeFinding({ id: "c", facility: "غير محدد", priorityScore: 90 })],
+      { "غير محدد": 100 }
+    );
+    expect(rows).toEqual([]);
+  });
+
+  it("caps at the requested limit", () => {
+    const findings = Array.from({ length: 8 }, (_, i) =>
+      makeFinding({ id: `f${i}`, facility: `سجن ${i}`, priorityScore: 100 - i })
+    );
+    const totals = Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`سجن ${i}`, 10]));
+    expect(buildFacilitiesNeedingFollowUp(findings, totals, 5)).toHaveLength(5);
+  });
+
+  it("reads totalComplaints from facilityCurrentPeriodTotals — the SAME aggregation that produced the finding — never from a separately-computed snapshot or the finding's own currentValue", () => {
+    const rows = buildFacilitiesNeedingFollowUp(
+      [makeFinding({ id: "c", facility: "سجن أ", currentValue: 9, priorityScore: 60 })],
+      { "سجن أ": 142 }
+    );
+    expect(rows[0].totalComplaints).toBe(142);
+  });
+
+  describe("spec §1 regression: totalComplaints=0 must never coexist with a misleading high-priority row", () => {
+    it("excludes a facility whose real current-period total is 0 when only a repeat/mass finding (no chronic/relapse) drives it", () => {
+      const rows = buildFacilitiesNeedingFollowUp(
+        [
+          makeFinding({
+            id: "mass", facility: "سجن أ", type: "MASS_COMPLAINT", entityType: "FACILITY",
+            priorityScore: 90, currentValue: 34, supportingMetrics: { distinctComplainants: 29 },
+          }),
+        ],
+        { "سجن أ": 0 }
+      );
+      expect(rows).toEqual([]);
+    });
+
+    it("keeps a facility whose real current-period total is 0 when a genuine CHRONIC_ISSUE justifies it, flagged isHistoricalOnly with an explicit total of 0", () => {
+      const rows = buildFacilitiesNeedingFollowUp(
+        [makeFinding({ id: "chronic", facility: "سجن أ", type: "CHRONIC_ISSUE", priorityScore: 80 })],
+        { "سجن أ": 0 }
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].totalComplaints).toBe(0);
+      expect(rows[0].isHistoricalOnly).toBe(true);
+    });
+
+    it("keeps a facility whose real current-period total is 0 when a RELAPSE_AFTER_IMPROVEMENT trend justifies it", () => {
+      const rows = buildFacilitiesNeedingFollowUp(
+        [
+          makeFinding({
+            id: "relapse", facility: "سجن أ", type: "TREND_PATTERN", priorityScore: 65,
+            supportingMetrics: { pattern: "RELAPSE_AFTER_IMPROVEMENT", streakPeriods: 2 },
+          }),
+        ],
+        { "سجن أ": 0 }
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].isHistoricalOnly).toBe(true);
+    });
+
+    it("never marks isHistoricalOnly when the real current-period total is positive", () => {
+      const rows = buildFacilitiesNeedingFollowUp(
+        [makeFinding({ id: "chronic", facility: "سجن أ", type: "CHRONIC_ISSUE", priorityScore: 80 })],
+        { "سجن أ": 12 }
+      );
+      expect(rows[0].isHistoricalOnly).toBe(false);
+      expect(rows[0].totalComplaints).toBe(12);
+    });
+  });
+
+  describe("spec §11 tie-breakers (priorityScore -> chronic -> streak -> distinct complainants -> volume -> name)", () => {
+    it("breaks an exact priorityScore tie in favor of a chronic issue over a non-chronic trend", () => {
+      const rows = buildFacilitiesNeedingFollowUp(
+        [
+          makeFinding({ id: "trend", facility: "سجن ب", type: "TREND_PATTERN", priorityScore: 50, supportingMetrics: { pattern: "ESCALATING", streakPeriods: 3 } }),
+          makeFinding({ id: "chronic", facility: "سجن أ", type: "CHRONIC_ISSUE", priorityScore: 50 }),
+        ],
+        { "سجن أ": 10, "سجن ب": 10 }
+      );
+      expect(rows.map((r) => r.facility)).toEqual(["سجن أ", "سجن ب"]);
+    });
+
+    it("breaks a chronic-vs-chronic tie by longer streak", () => {
+      const rows = buildFacilitiesNeedingFollowUp(
+        [
+          makeFinding({ id: "short", facility: "سجن ب", type: "CHRONIC_ISSUE", priorityScore: 50, supportingMetrics: { streakPeriods: 3 } }),
+          makeFinding({ id: "long", facility: "سجن أ", type: "CHRONIC_ISSUE", priorityScore: 50, supportingMetrics: { streakPeriods: 6 } }),
+        ],
+        { "سجن أ": 10, "سجن ب": 10 }
+      );
+      expect(rows.map((r) => r.facility)).toEqual(["سجن أ", "سجن ب"]);
+    });
+
+    it("falls back to facility name for a fully deterministic order when everything else ties", () => {
+      const rows = buildFacilitiesNeedingFollowUp(
+        [
+          makeFinding({ id: "b", facility: "سجن ب", type: "CHRONIC_ISSUE", priorityScore: 50, currentValue: 10 }),
+          makeFinding({ id: "a", facility: "سجن أ", type: "CHRONIC_ISSUE", priorityScore: 50, currentValue: 10 }),
+        ],
+        { "سجن أ": 10, "سجن ب": 10 }
+      );
+      expect(rows.map((r) => r.facility)).toEqual(["سجن أ", "سجن ب"]);
+    });
+  });
+});
+
+describe("buildFacilitiesWithSustainedImprovement — V2 only, spec section 4 (real multi-period decline only)", () => {
+  it("requires an actual SUSTAINED_IMPROVEMENT finding — a low current value alone is never 'best'", () => {
+    const rows = buildFacilitiesWithSustainedImprovement([
+      makeFinding({ id: "chronic-but-small", facility: "سجن أ", type: "CHRONIC_ISSUE", currentValue: 2, previousValue: 2 }),
     ]);
-    expect(bottomFacilities[0]).toMatchObject({ total: 0, open: 0, currentlyLate: 0, closed: 0 });
+    expect(rows).toEqual([]);
   });
 
-  it("8. excludes the unspecified (غير محدد) and empty-name buckets from both lists", () => {
-    const byFacility: Record<string, ReportPeriodGroupSnapshot> = {
-      "غير محدد": snapshot({ receivedDuringPeriod: 50, openAtEnd: 10, lateAtEnd: 5, closedDuringPeriod: 40 }),
-      "": snapshot({ receivedDuringPeriod: 20, openAtEnd: 3, lateAtEnd: 1, closedDuringPeriod: 17 }),
-      "سجن أ": snapshot({ receivedDuringPeriod: 5, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 4 }),
-    };
-    const { topFacilities, bottomFacilities } = buildTopAndBottomFacilities(75, byFacility);
-    expect(topFacilities.map((r) => r.name)).toEqual(["سجن أ"]);
-    // The single remaining eligible facility is consumed by the top list, so
-    // it correctly never repeats in bottom (spec item 10's anti-overlap rule).
-    expect(bottomFacilities).toEqual([]);
+  it("picks the classification with the largest decrease when a facility has more than one improving classification", () => {
+    const rows = buildFacilitiesWithSustainedImprovement([
+      makeFinding({
+        id: "small-drop", facility: "سجن أ", entityName: "سجن أ — الاتصال", type: "SUSTAINED_IMPROVEMENT",
+        currentValue: 8, previousValue: 10, supportingMetrics: { streakPeriods: 3 },
+      }),
+      makeFinding({
+        id: "big-drop", facility: "سجن أ", entityName: "سجن أ — التغذية", type: "SUSTAINED_IMPROVEMENT",
+        currentValue: 5, previousValue: 40, supportingMetrics: { streakPeriods: 4 },
+      }),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].classificationLabel).toBe("التغذية");
+    expect(rows[0].decrease).toBe(35);
   });
 
-  it("9. a backlog-only facility (receivedDuringPeriod=0 but open>0) is eligible for top but never for bottom", () => {
-    const byFacility: Record<string, ReportPeriodGroupSnapshot> = {
-      "سجن الرصيد": snapshot({ receivedDuringPeriod: 0, openAtEnd: 4, lateAtEnd: 2, closedDuringPeriod: 0 }),
-      "سجن نشط": snapshot({ receivedDuringPeriod: 3, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 2 }),
-    };
-    const { topFacilities, bottomFacilities } = buildTopAndBottomFacilities(3, byFacility);
-    expect(topFacilities.some((r) => r.name === "سجن الرصيد")).toBe(true);
-    expect(bottomFacilities.some((r) => r.name === "سجن الرصيد")).toBe(false);
+  it("ranks facilities by decrease magnitude, descending", () => {
+    const rows = buildFacilitiesWithSustainedImprovement([
+      makeFinding({ id: "a", facility: "سجن صغير", type: "SUSTAINED_IMPROVEMENT", currentValue: 8, previousValue: 12 }),
+      makeFinding({ id: "b", facility: "سجن كبير", type: "SUSTAINED_IMPROVEMENT", currentValue: 5, previousValue: 40 }),
+    ]);
+    expect(rows.map((r) => r.facility)).toEqual(["سجن كبير", "سجن صغير"]);
   });
 
-  it("10. never lets the same facility appear in both lists — shrinks bottom instead when the facility pool is small", () => {
-    const byFacility: Record<string, ReportPeriodGroupSnapshot> = {
-      "سجن أ": snapshot({ receivedDuringPeriod: 10, openAtEnd: 2, lateAtEnd: 1, closedDuringPeriod: 8 }),
-      "سجن ب": snapshot({ receivedDuringPeriod: 5, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 4 }),
-    };
-    const { topFacilities, bottomFacilities } = buildTopAndBottomFacilities(15, byFacility);
-    // Only 2 facilities exist; both are consumed by the top-5 list, so bottom shrinks to empty.
-    expect(topFacilities.map((r) => r.name)).toEqual(["سجن أ", "سجن ب"]);
-    expect(bottomFacilities).toEqual([]);
-    const topNames = new Set(topFacilities.map((r) => r.name));
-    expect(bottomFacilities.every((r) => !topNames.has(r.name))).toBe(true);
+  it("excludes the unspecified (غير محدد) facility bucket", () => {
+    const rows = buildFacilitiesWithSustainedImprovement([
+      makeFinding({ id: "a", facility: "غير محدد", type: "SUSTAINED_IMPROVEMENT", currentValue: 5, previousValue: 40 }),
+    ]);
+    expect(rows).toEqual([]);
   });
 
-  it("11. tie-breaks by Arabic name ascending are stable for both lists", () => {
-    const byFacility: Record<string, ReportPeriodGroupSnapshot> = {
-      "سجن ياء": snapshot({ receivedDuringPeriod: 5, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 4 }),
-      "سجن ألف": snapshot({ receivedDuringPeriod: 5, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 4 }),
-      "سجن باء": snapshot({ receivedDuringPeriod: 5, openAtEnd: 1, lateAtEnd: 0, closedDuringPeriod: 4 }),
-    };
-    const { topFacilities } = buildTopAndBottomFacilities(15, byFacility);
-    const names = topFacilities.map((r) => r.name);
-    expect(names).toEqual([...names].sort((a, b) => a.localeCompare(b, "ar")));
-  });
-
-  it("caps each list at 5 rows and computes shareOfTotal from the overall receivedDuringPeriod", () => {
-    const byFacility: Record<string, ReportPeriodGroupSnapshot> = {};
-    for (let i = 0; i < 8; i++) {
-      byFacility[`سجن ${i}`] = snapshot({ receivedDuringPeriod: 10 - i, openAtEnd: 1, closedDuringPeriod: 9 - i });
-    }
-    const { topFacilities } = buildTopAndBottomFacilities(100, byFacility);
-    expect(topFacilities).toHaveLength(5);
-    expect(topFacilities[0]!.shareOfTotal).toBe(10);
+  it("caps at the requested limit", () => {
+    const findings = Array.from({ length: 7 }, (_, i) =>
+      makeFinding({ id: `f${i}`, facility: `سجن ${i}`, type: "SUSTAINED_IMPROVEMENT", currentValue: 5, previousValue: 40 - i })
+    );
+    expect(buildFacilitiesWithSustainedImprovement(findings, 5)).toHaveLength(5);
   });
 });
 
@@ -2737,7 +2880,7 @@ describe("buildRegionOnlyConclusions — V2 only (spec sections 10-15, 17 items 
   });
 });
 
-describe("buildClassificationChanges — V2 only (spec sections 3-8, 17 items 4-15)", () => {
+describe("buildTopClassifications — unaffected by the V2 classification-trend refactor", () => {
   function classificationGroup(overrides: Partial<ComplaintGroupMetrics> & { id: string | null; name: string; total: number }): ComplaintGroupMetrics {
     return {
       count: overrides.total,
@@ -2760,182 +2903,7 @@ describe("buildClassificationChanges — V2 only (spec sections 3-8, 17 items 4-
     };
   }
 
-  function balancedClassificationGroups(): {
-    current: ComplaintGroupMetrics[];
-    previous: ComplaintGroupMetrics[];
-  } {
-    return {
-      current: [
-        classificationGroup({ id: "r1", name: "ارتفاع 1", total: 110 }),
-        classificationGroup({ id: "r2", name: "ارتفاع 2", total: 100 }),
-        classificationGroup({ id: "r3", name: "ارتفاع 3", total: 70 }),
-        classificationGroup({ id: "d1", name: "انخفاض 1", total: 5 }),
-        classificationGroup({ id: "d2", name: "انخفاض 2", total: 10 }),
-        classificationGroup({ id: "d3", name: "انخفاض 3", total: 10 }),
-      ],
-      previous: [
-        classificationGroup({ id: "r1", name: "ارتفاع 1", total: 10 }),
-        classificationGroup({ id: "r2", name: "ارتفاع 2", total: 10 }),
-        classificationGroup({ id: "r3", name: "ارتفاع 3", total: 10 }),
-        classificationGroup({ id: "d1", name: "انخفاض 1", total: 100 }),
-        classificationGroup({ id: "d2", name: "انخفاض 2", total: 90 }),
-        classificationGroup({ id: "d3", name: "انخفاض 3", total: 80 }),
-      ],
-    };
-  }
-
-  it("4. current > previous (both > 0) → ارتفاع", () => {
-    const current = [classificationGroup({ id: "c1", name: "نقل", total: 30 })];
-    const previous = [classificationGroup({ id: "c1", name: "نقل", total: 10 })];
-    const [row] = buildClassificationChanges(current, previous, true);
-    expect(row?.direction).toBe("ارتفاع");
-    expect(row?.difference).toBe(20);
-  });
-
-  it("5/11. previous=0, current>0 → جديد, with no fabricated change rate", () => {
-    const current = [classificationGroup({ id: "c1", name: "استفسار", total: 12 })];
-    const [row] = buildClassificationChanges(current, [], true);
-    expect(row?.direction).toBe("جديد");
-    expect(row?.previousCount).toBe(0);
-    expect(row?.changeRate).toBeNull();
-  });
-
-  it("6. current < previous, current > 0 → انخفاض", () => {
-    const current = [classificationGroup({ id: "c1", name: "صيانة", total: 5 })];
-    const previous = [classificationGroup({ id: "c1", name: "صيانة", total: 30 })];
-    const [row] = buildClassificationChanges(current, previous, true);
-    expect(row?.direction).toBe("انخفاض");
-    expect(row?.difference).toBe(-25);
-  });
-
-  it("7/10. previous > 0, current = 0 → انخفاض إلى صفر, and a classification only present in the previous period is never lost", () => {
-    const previous = [classificationGroup({ id: "c1", name: "شكوى قديمة", total: 18 })];
-    const rows = buildClassificationChanges([], previous, true);
-    expect(rows).toHaveLength(1);
-    expect(rows[0]?.direction).toBe("انخفاض إلى صفر");
-    expect(rows[0]?.currentCount).toBe(0);
-    expect(rows[0]?.previousCount).toBe(18);
-  });
-
-  it("8. current === previous → excluded entirely (not \"دون تغير\")", () => {
-    const current = [classificationGroup({ id: "c1", name: "نقل", total: 10 })];
-    const previous = [classificationGroup({ id: "c1", name: "نقل", total: 10 })];
-    const rows = buildClassificationChanges(current, previous, true);
-    expect(rows).toHaveLength(0);
-  });
-
-  it("9. never renders Infinity or NaN in changeRate for any generated row", () => {
-    const current = [
-      classificationGroup({ id: "c1", name: "جديد كليًا", total: 5 }),
-      classificationGroup({ id: "c2", name: "منخفض", total: 2 }),
-    ];
-    const previous = [classificationGroup({ id: "c2", name: "منخفض", total: 40 })];
-    const rows = buildClassificationChanges(current, previous, true);
-    for (const row of rows) {
-      expect(row.changeRate === null || Number.isFinite(row.changeRate)).toBe(true);
-    }
-  });
-
-  it("12. selects by |difference| descending, not by change-rate percentage", () => {
-    // A small-base classification with a huge percentage swing (+400%) must
-    // not outrank a much larger absolute swing from a bigger base.
-    const current = [
-      classificationGroup({ id: "big", name: "كبير", total: 120 }),
-      classificationGroup({ id: "small", name: "صغير", total: 5 }),
-    ];
-    const previous = [
-      classificationGroup({ id: "big", name: "كبير", total: 20 }),
-      classificationGroup({ id: "small", name: "صغير", total: 1 }),
-    ];
-    const rows = buildClassificationChanges(current, previous, true);
-    expect(rows[0]?.classificationId).toBe("big");
-  });
-
-  it("13. represents both rising and declining classifications when both exist", () => {
-    const current = [
-      classificationGroup({ id: "r1", name: "ارتفاع1", total: 100 }),
-      classificationGroup({ id: "r2", name: "ارتفاع2", total: 90 }),
-      classificationGroup({ id: "d1", name: "انخفاض1", total: 5 }),
-      classificationGroup({ id: "d2", name: "انخفاض2", total: 5 }),
-    ];
-    const previous = [
-      classificationGroup({ id: "r1", name: "ارتفاع1", total: 10 }),
-      classificationGroup({ id: "r2", name: "ارتفاع2", total: 10 }),
-      classificationGroup({ id: "d1", name: "انخفاض1", total: 95 }),
-      classificationGroup({ id: "d2", name: "انخفاض2", total: 85 }),
-    ];
-    const rows = buildClassificationChanges(current, previous, true);
-    expect(rows.some((r) => r.direction === "ارتفاع")).toBe(true);
-    expect(rows.some((r) => r.direction === "انخفاض")).toBe(true);
-  });
-
-  it("14. caps at 5 rows even when many classifications changed", () => {
-    const current = Array.from({ length: 10 }, (_, i) =>
-      classificationGroup({ id: `c${i}`, name: `تصنيف ${i}`, total: 100 - i * 5 })
-    );
-    const previous = Array.from({ length: 10 }, (_, i) =>
-      classificationGroup({ id: `c${i}`, name: `تصنيف ${i}`, total: 10 })
-    );
-    const rows = buildClassificationChanges(current, previous, true);
-    expect(rows).toHaveLength(5);
-  });
-
-  it("fills limit 5 with at least two rows per direction and gives the final seat to the strongest remaining change", () => {
-    const { current, previous } = balancedClassificationGroups();
-    const rows = buildClassificationChanges(current, previous, true, 5);
-
-    expect(rows).toHaveLength(5);
-    expect(rows.filter((row) => row.direction === "ارتفاع")).toHaveLength(2);
-    expect(rows.filter((row) => row.direction === "انخفاض")).toHaveLength(3);
-    expect(rows.map((row) => row.classificationId)).toContain("d3");
-    expect(rows.map((row) => row.classificationId)).not.toContain("r3");
-  });
-
-  it.each([
-    { limit: 0, expectedIds: [] },
-    { limit: 1, expectedIds: ["r1"] },
-    { limit: 2, expectedIds: ["r1", "d1"] },
-    { limit: 3, expectedIds: ["r1", "d1", "r2"] },
-    { limit: 4, expectedIds: ["r1", "d1", "r2", "d2"] },
-    { limit: 5, expectedIds: ["r1", "d1", "r2", "d2", "d3"] },
-  ])("honors and fills the requested balanced limit=$limit", ({ limit, expectedIds }) => {
-    const { current, previous } = balancedClassificationGroups();
-    const rows = buildClassificationChanges(current, previous, true, limit);
-
-    expect(rows.length).toBeLessThanOrEqual(limit);
-    expect(rows).toHaveLength(limit);
-    expect(rows.map((row) => row.classificationId)).toEqual(expectedIds);
-  });
-
-  it("15. tie-breaks (equal |difference|) are deterministic: |changeRate| desc, then volume desc, then Arabic name asc", () => {
-    const current = [
-      classificationGroup({ id: "b", name: "ب", total: 20 }),
-      classificationGroup({ id: "a", name: "أ", total: 20 }),
-    ];
-    const previous = [
-      classificationGroup({ id: "b", name: "ب", total: 10 }),
-      classificationGroup({ id: "a", name: "أ", total: 10 }),
-    ];
-    const first = buildClassificationChanges(current, previous, true);
-    const second = buildClassificationChanges(current, previous, true);
-    expect(first).toEqual(second);
-    expect(first[0]?.classificationId).toBe("a");
-  });
-
-  it("no previous period → returns an empty list rather than fabricating a comparison", () => {
-    const current = [classificationGroup({ id: "c1", name: "نقل", total: 10 })];
-    expect(buildClassificationChanges(current, [], false)).toEqual([]);
-  });
-
-  it("the unclassified sentinel bucket can appear when its own change is significant, keyed consistently with buildTopClassifications", () => {
-    const current = [classificationGroup({ id: null, name: UNCLASSIFIED_CLASSIFICATION_LABEL, total: 50 })];
-    const previous = [classificationGroup({ id: null, name: UNCLASSIFIED_CLASSIFICATION_LABEL, total: 10 })];
-    const [row] = buildClassificationChanges(current, previous, true);
-    expect(row?.classificationId).toBe(UNCLASSIFIED_CLASSIFICATION_KEY);
-    expect(row?.classificationPath).toBe(UNCLASSIFIED_CLASSIFICATION_LABEL);
-  });
-
-  it("17. buildTopClassifications output is unaffected by the classificationRowKey/resolveClassificationRowInfo refactor", () => {
+  it("output is unaffected by the classificationRowKey/resolveClassificationRowInfo refactor", () => {
     const current = [classificationGroup({ id: "c1", name: "نقل", total: 30, categoryName: "فئة أ" })];
     const previous = [classificationGroup({ id: "c1", name: "نقل", total: 20 })];
     const rows = buildTopClassifications(current, previous, 30);
@@ -2954,12 +2922,65 @@ describe("buildClassificationChanges — V2 only (spec sections 3-8, 17 items 4-
       },
     ]);
   });
+});
 
-  it("generated rows never carry a department-shaped field", () => {
-    const current = [classificationGroup({ id: "c1", name: "نقل", total: 30 })];
-    const [row] = buildClassificationChanges(current, [], true);
-    expect(row).toBeDefined();
-    expect(row).not.toHaveProperty("departmentName");
-    expect(row).not.toHaveProperty("departmentId");
+describe("buildClassificationTrendRows — V2 only, spec sections 1-2 (multi-period, engine-sourced, priority-ranked)", () => {
+  it("includes only CLASSIFICATION-scoped chronic/trend/improvement findings", () => {
+    const findings = [
+      makeFinding({ id: "chronic", entityType: "CLASSIFICATION", type: "CHRONIC_ISSUE", priorityScore: 80 }),
+      makeFinding({ id: "trend", entityType: "CLASSIFICATION", type: "TREND_PATTERN", priorityScore: 60 }),
+      makeFinding({ id: "improvement", entityType: "CLASSIFICATION", type: "SUSTAINED_IMPROVEMENT", priorityScore: 0 }),
+      makeFinding({ id: "facility-level", entityType: "FACILITY", type: "MULTI_ISSUE_FACILITY", priorityScore: 90 }),
+    ];
+    const rows = buildClassificationTrendRows(findings);
+    expect(rows.map((r) => r.priorityScore).sort((a, b) => b - a)).toEqual([80, 60, 0]);
+  });
+
+  it("ranks by priorityScore, not by raw difference", () => {
+    const findings = [
+      makeFinding({ id: "big-jump-low-priority", entityType: "CLASSIFICATION", type: "TREND_PATTERN", currentValue: 3, previousValue: 1, difference: 2, priorityScore: 10 }),
+      makeFinding({ id: "small-jump-high-priority", entityType: "CLASSIFICATION", type: "CHRONIC_ISSUE", currentValue: 46, previousValue: 43, difference: 3, priorityScore: 85 }),
+    ];
+    const rows = buildClassificationTrendRows(findings);
+    expect(rows[0]!.priorityScore).toBe(85);
+  });
+
+  it("splits the finding's entityName into independent facility/classification columns, and builds the trail from periodCounts (spec §3)", () => {
+    const findings = [
+      makeFinding({
+        id: "f", entityType: "CLASSIFICATION", type: "CHRONIC_ISSUE", entityName: "سجن أ — التغذية", facility: "سجن أ",
+        currentValue: 46, difference: 3, supportingMetrics: { streakPeriods: 4, periodCounts: JSON.stringify([38, 42, 43, 46]) },
+      }),
+    ];
+    const rows = buildClassificationTrendRows(findings);
+    expect(rows[0].facility).toBe("سجن أ");
+    expect(rows[0].classification).toBe("التغذية");
+    expect(rows[0].trail).toBe("38، 42، 43، 46");
+    expect(rows[0].streakPeriods).toBe(4);
+  });
+
+  it.each([
+    ["CONTINUED_RISE", "استمرار مرتفع"],
+    ["ESCALATING", "تصاعد مستمر"],
+    ["SUSTAINED_IMPROVEMENT", "تحسن مستدام"],
+    ["RELAPSE_AFTER_IMPROVEMENT", "عودة للارتفاع بعد تحسن"],
+    ["EMERGING", "مشكلة ناشئة"],
+    ["VOLATILE", "متذبذب"],
+  ])("maps the engine pattern %s to the Arabic label %s", (pattern, label) => {
+    const rows = buildClassificationTrendRows([
+      makeFinding({ id: "f", entityType: "CLASSIFICATION", type: "TREND_PATTERN", supportingMetrics: { pattern } }),
+    ]);
+    expect(rows[0].patternLabel).toBe(label);
+  });
+
+  it("caps at the requested limit", () => {
+    const findings = Array.from({ length: 8 }, (_, i) =>
+      makeFinding({ id: `f${i}`, entityType: "CLASSIFICATION", type: "CHRONIC_ISSUE", priorityScore: 100 - i })
+    );
+    expect(buildClassificationTrendRows(findings, 5)).toHaveLength(5);
+  });
+
+  it("returns an empty list when there are no relevant findings", () => {
+    expect(buildClassificationTrendRows([])).toEqual([]);
   });
 });

@@ -95,6 +95,9 @@ export function makeAnalyticsData(overrides: Partial<AnalyticsData> = {}): Analy
     previousDistributions: null,
     regionPriorityBreakdown: [],
     totalCount: 10,
+    findings: [],
+    periodChangeDigest: null,
+    patternAnalysisPeriods: [],
     ...overrides,
   };
 }

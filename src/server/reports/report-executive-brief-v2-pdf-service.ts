@@ -22,10 +22,11 @@ import {
 import type {
   RegionReferenceRow,
   ClassificationBriefRow,
-  ExecutiveEntityRow,
   ExecutiveBriefKpiCard,
   PeriodSnapshotMetrics,
-  ClassificationChangeRow,
+  ClassificationTrendRow,
+  FacilityFollowUpRow,
+  FacilityImprovementRow,
 } from "@/lib/reports/report-contract";
 import type { ExecutiveBriefV2Data, ReportData } from "./report-data-service";
 import { isExecutiveBriefV2Data } from "./report-data-service";
@@ -58,6 +59,8 @@ const COLORS = REPORT_DESIGN_TOKENS.colors;
 const WORD_SPACING = REPORT_DESIGN_TOKENS.typography.wordSpacing;
 const PAGE_COUNT = 4;
 const MAX_REGION_ROWS = 13;
+/** Spec §14: top classifications table shrinks to 5 rows to make room for higher-priority page-4 content. */
+const TOP_CLASSIFICATIONS_V2_LIMIT = 5;
 
 let fontRegularBuffer: Buffer | null = null;
 let fontBoldBuffer: Buffer | null = null;
@@ -748,26 +751,24 @@ function renderCoverPage(ctx: V2Context): void {
   const r = REPORT_DESIGN_TOKENS.card.radius;
   const circR = 30;
 
+  // Cover cards focus on executive decision-making (spec §6): period volume,
+  // continuing/escalating problems, and facilities needing follow-up —
+  // closure/lateness moves to a small secondary line below the cards instead
+  // of owning a full card, since actual lateness is typically limited.
   const coverCards: Array<{ key: string; icon: IconType; label: string; primary: string; sub: string }> = (() => {
-    // Cover cards read directly from the period snapshot (flow: received/closed
-    // during the period; stock: open/late at period end) rather than the
-    // generic briefKpis grid, per the explicit periodMetrics contract.
     const metrics = brief.periodMetrics ?? { current: EMPTY_PERIOD_SNAPSHOT_METRICS, previous: null };
     const { current, previous } = metrics;
 
     const totalVal = formatReportNumber(current.receivedDuringPeriod, { maximumFractionDigits: 0 });
     const totalSub = formatPeriodMetricSub(current.receivedDuringPeriod, previous?.receivedDuringPeriod ?? null);
 
-    const closedVal = formatReportNumber(current.closedDuringPeriod, { maximumFractionDigits: 0 });
-    const closedSub = formatPeriodMetricSub(current.closedDuringPeriod, previous?.closedDuringPeriod ?? null);
-
-    const openLateVal = `${formatReportNumber(current.openAtEnd)} / ${formatReportNumber(current.lateAtEnd)}`;
-    const openLateSub = `مفتوحة ${formatReportNumber(current.openAtEnd)} | متأخرة ${formatReportNumber(current.lateAtEnd)}`;
+    const continuedVal = formatReportNumber(brief.continuedProblemFindingCount, { maximumFractionDigits: 0 });
+    const highPriorityVal = formatReportNumber(brief.highPriorityFacilityCount, { maximumFractionDigits: 0 });
 
     return [
       { key: "total", icon: "clipboard" as IconType, label: "شكاوى الفترة", primary: totalVal, sub: totalSub },
-      { key: "closed", icon: "check" as IconType, label: "المغلقة خلال الفترة", primary: closedVal, sub: closedSub },
-      { key: "openLate", icon: "hourglass" as IconType, label: "المفتوحة والمتأخرة نهاية الفترة", primary: openLateVal, sub: openLateSub },
+      { key: "continuedProblems", icon: "clock-x" as IconType, label: "المشكلات المستمرة", primary: continuedVal, sub: "استمرار مرتفع أو تصاعد أو مشكلة مزمنة" },
+      { key: "highPriorityFacilities", icon: "target" as IconType, label: "سجون ذات أولوية متابعة مرتفعة", primary: highPriorityVal, sub: "من واقع تحليل الأنماط متعددة الفترات" },
     ];
   })();
 
@@ -808,16 +809,23 @@ function renderCoverPage(ctx: V2Context): void {
     doc.lineWidth(1).strokeColor(COLORS.border);
   });
 
-  // All-time total footer
+  // All-time total footer — open/late moves here as a small secondary line
+  // (spec §6) rather than owning its own KPI card.
   const footerY = cardY + cardH + 24;
   const footerBoxH = 46;
+  const periodMetricsForFooter = brief.periodMetrics ?? { current: EMPTY_PERIOD_SNAPSHOT_METRICS, previous: null };
   doc.roundedRect(margin, footerY, contentWidth, footerBoxH, r).fillAndStroke(COLORS.background, COLORS.border);
   drawIcon(doc, "database", margin + 24, footerY + footerBoxH / 2, 16);
   doc.font("Bold").fontSize(13).fillColor(COLORS.primary);
   const allTimeTotalText = `إجمالي الشكاوى المسجلة في النظام منذ بدء التشغيل: ${formatReportNumber(brief.allTimeTotal)}`;
-  doc.text(preparePdfText(allTimeTotalText), margin + 44, footerY + (footerBoxH - 13) / 2, {
+  doc.text(preparePdfText(allTimeTotalText), margin + 44, footerY + 7, {
     width: contentWidth - 56, align: "right", wordSpacing: WORD_SPACING, lineBreak: false,
   });
+  const openLateText = `مفتوحة نهاية الفترة: ${formatReportNumber(periodMetricsForFooter.current.openAtEnd)} | متأخرة: ${formatReportNumber(periodMetricsForFooter.current.lateAtEnd)}`;
+  doc.font("Body").fontSize(9.5).fillColor(COLORS.neutral).text(
+    preparePdfText(openLateText), margin + 44, footerY + 25,
+    { width: contentWidth - 56, align: "right", wordSpacing: WORD_SPACING, lineBreak: false }
+  );
   resetInk(doc);
 }
 
@@ -864,7 +872,7 @@ async function renderPage2(ctx: V2Context): Promise<void> {
   const { doc, data, brief, layout, warnings } = ctx;
   const { margin, contentWidth } = layout;
 
-  let y = drawPageHeader(ctx, "الاتجاه الزمني للشكاوى المسجلة والمغلقة");
+  let y = drawPageHeader(ctx, "الاتجاه الزمني للشكاوى");
   y += 8;
 
   const reportEndDate = data.period.to;
@@ -1027,9 +1035,9 @@ type RegionComparisonTableRow = RegionReferenceRow & {
   subjectChange: string;
 };
 
+/** §14: openAtEnd/lateAtEnd are replaced on page 4 by share-of-total and affected-facility-count. */
 type EnrichedClassificationRow = ClassificationBriefRow & {
-  openAtEnd: number;
-  lateAtEnd: number;
+  affectedFacilityCount: number;
 };
 
 function formatRegionalSubjectChange(input: {
@@ -1079,26 +1087,59 @@ function formatClassificationTableCell(
   if (key === "changeRate") {
     return formatNullableReportNumber(row.changeRate, { percent: true });
   }
+  if (key === "shareOfTotal") {
+    return formatReportNumber(row.shareOfTotal, { percent: true });
+  }
   if (key === "classificationPath") {
     return row.classificationPath;
   }
   return formatTableValue((row as Record<string, unknown>)[key]);
 }
 
-/** Shared cell formatter for any {@link ExecutiveEntityRow} table (facilities, and — outside V2 — departments). */
-function formatEntityTableCell(row: ExecutiveEntityRow, key: string): string {
+/**
+ * No arrow glyphs anywhere in these cells — the Amiri font used by this PDF
+ * has no glyph for U+2191/U+2193 (confirmed via a real generated PDF), so
+ * the period trail uses an Arabic comma ("، ") between values instead. `trail`
+ * is capped at 5 values (spec §4) and is NOT the same thing as `streakPeriods`
+ * (the real streak length, which can be longer) — each has its own column.
+ */
+function formatClassificationTrendCell(row: ClassificationTrendRow, key: string): string {
+  if (key === "trail") return row.trail || "—";
   return formatTableValue((row as Record<string, unknown>)[key]);
 }
 
+/** "0 — ظهرت خلال فترات سابقة" for the narrow, explicitly-justified historical-only case (spec §1). */
+function formatFollowUpTotalComplaints(row: FacilityFollowUpRow): string {
+  if (row.isHistoricalOnly) return "0 — ظهرت خلال فترات سابقة";
+  return formatReportNumber(row.totalComplaints);
+}
+
 /**
- * Plain Arabic words only — no arrow glyphs. The Amiri font used by this PDF
- * has no glyph for U+2191/U+2193, which rendered as a visible tofu box next
- * to the direction word (confirmed via a real generated PDF); spec section 9
- * made arrows conditional on RTL/font compatibility, and they are not.
+ * Numeric repeat/spread text (spec §10) — never a person's identifier, and
+ * never a vague qualitative label like "منتشر بين عدة أشخاص". Shows both
+ * signals together when both apply.
  */
-function formatClassificationChangeCell(row: ClassificationChangeRow, key: string): string {
-  if (key === "difference") return formatReportNumber(row.difference, { sign: true });
-  if (key === "classificationPath") return row.classificationPath;
+function formatRepeatOrSpreadCell(row: FacilityFollowUpRow): string {
+  const segments: string[] = [];
+  if (row.repeatComplainants !== null) {
+    const complaints = row.repeatComplaints !== null ? ` / ${formatReportNumber(row.repeatComplaints)} شكوى` : "";
+    segments.push(`تكرار: ${formatReportNumber(row.repeatComplainants)} أشخاص${complaints}`);
+  }
+  if (row.spreadComplainants !== null) {
+    const complaints = row.spreadComplaints !== null ? ` / ${formatReportNumber(row.spreadComplaints)} شكوى` : "";
+    segments.push(`انتشار: ${formatReportNumber(row.spreadComplainants)} شخصاً${complaints}`);
+  }
+  return segments.length > 0 ? segments.join(" | ") : "—";
+}
+
+function formatFacilityFollowUpCell(row: FacilityFollowUpRow, key: string): string {
+  if (key === "streakPeriods") return row.streakPeriods === null ? "—" : formatReportNumber(row.streakPeriods);
+  if (key === "totalComplaints") return formatFollowUpTotalComplaints(row);
+  if (key === "repeatOrSpread") return formatRepeatOrSpreadCell(row);
+  return formatTableValue((row as Record<string, unknown>)[key]);
+}
+
+function formatFacilityImprovementCell(row: FacilityImprovementRow, key: string): string {
   return formatTableValue((row as Record<string, unknown>)[key]);
 }
 
@@ -1162,12 +1203,23 @@ async function renderPage3(ctx: V2Context): Promise<void> {
       { width: cardW - 12, align: "right", ellipsis: true, wordSpacing: WORD_SPACING, lineBreak: false }
     );
 
+    // §8: difference/change-rate replace open/late so the card reads as a
+    // decision signal (is this region rising or falling?) rather than a
+    // backlog snapshot — backlog stock stays in the detailed table below.
     const metricW = cardW / 3;
     const bodyY = cy + hdrH + 4;
+    const hasComparisonPeriod = Boolean(data.previousPeriod);
+    const differenceText = hasComparisonPeriod ? formatReportNumber(region.difference, { sign: true }) : "—";
+    const changeRateText = !hasComparisonPeriod
+      ? "—"
+      : region.previousCount === 0 && region.currentCount > 0
+        ? "جديد"
+        : formatNullableReportNumber(region.changeRate, { percent: true });
+    const isNegative = hasComparisonPeriod && region.difference < 0;
     const metrics = [
-      { label: "متأخرة", value: region.currentlyLate },
-      { label: "مفتوحة", value: region.openCount ?? 0 },
-      { label: "شكاوى الفترة", value: region.currentCount },
+      { label: "نسبة التغير", value: changeRateText, colored: true },
+      { label: "الفرق", value: differenceText, colored: true },
+      { label: "شكاوى الفترة", value: formatReportNumber(region.currentCount), colored: false },
     ];
     metrics.forEach((m, mi) => {
       const mx = x + mi * metricW;
@@ -1180,8 +1232,8 @@ async function renderPage3(ctx: V2Context): Promise<void> {
         preparePdfText(m.label), mx + 2, bodyY + 8,
         { width: metricW - 4, align: "center", wordSpacing: WORD_SPACING }
       );
-      doc.font("Bold").fontSize(16).fillColor(COLORS.primary).text(
-        formatReportNumber(m.value), mx + 2, bodyY + 24,
+      doc.font("Bold").fontSize(16).fillColor(m.colored && isNegative ? COLORS.danger : COLORS.primary).text(
+        preparePdfText(m.value), mx + 2, bodyY + 24,
         { width: metricW - 4, align: "center", wordSpacing: WORD_SPACING }
       );
     });
@@ -1244,74 +1296,73 @@ async function renderPage3(ctx: V2Context): Promise<void> {
 // ── Page 4: Classifications + Facilities + Conclusions ─────────────────────────
 
 function renderPage4(ctx: V2Context): void {
-  const { doc, data, brief, layout } = ctx;
+  const { doc, brief, layout } = ctx;
   const { margin, contentWidth } = layout;
-  const hasPrevPeriod = Boolean(data.previousPeriod);
-  const classRows = brief.topClassifications.slice(0, 8);
-  const topFacilityRows = brief.topFacilities ?? [];
-  const bottomFacilityRows = brief.bottomFacilities ?? [];
+  const classRows = brief.topClassifications.slice(0, TOP_CLASSIFICATIONS_V2_LIMIT);
+  const followUpRows = brief.facilitiesNeedingFollowUp ?? [];
+  const improvementRows = brief.facilitiesWithSustainedImprovement ?? [];
   const conclusions = (brief.conclusions ?? []).slice(0, 5);
-  const classificationChangeRows = brief.classificationChanges;
+  const trendRows = brief.classificationTrends;
   const hasClassComparison = classRows.some((r) => r.previousCount > 0);
 
   let y = drawPageHeader(ctx, "التصنيفات والسجون والاستنتاجات");
   const gap = 14;
   const rowH = 26;
 
-  // ── Classification shifts (V2-only; region page has its own region deltas, page 4 stays classification-only — never department-based) ──
-  y = drawSectionTitle(doc, "أبرز تحولات التصنيفات", margin, y, contentWidth);
-  if (classificationChangeRows && classificationChangeRows.length > 0) {
-    const changeCols: ColDef[] = [
-      { key: "classificationPath", label: "التصنيف", weight: 2.0 },
-      { key: "currentCount", label: "الحالية", weight: 0.8 },
-      { key: "previousCount", label: "السابقة", weight: 0.8 },
-      { key: "difference", label: "الفرق", weight: 0.8 },
-      { key: "direction", label: "الاتجاه", weight: 1.4 },
+  // ── Continuing problems by facility × classification (V2-only; multi-period, sourced from the shared pattern-analysis engine — never department-based) ──
+  y = drawSectionTitle(doc, "أبرز المشكلات المستمرة حسب السجن والتصنيف", margin, y, contentWidth);
+  if (trendRows && trendRows.length > 0) {
+    const trendCols: ColDef[] = [
+      { key: "facility", label: "السجن", weight: 1.3 },
+      { key: "classification", label: "التصنيف", weight: 1.55 },
+      { key: "currentCount", label: "الحالية", weight: 0.5 },
+      { key: "trail", label: "آخر 5 فترات", weight: 1.55 },
+      { key: "streakPeriods", label: "مدة الاستمرار", weight: 0.7 },
+      { key: "patternLabel", label: "النمط", weight: 1.0 },
     ];
     y = drawTable({
       doc,
-      rows: classificationChangeRows,
-      columns: changeCols,
+      rows: trendRows,
+      columns: trendCols,
       x: margin,
       y,
       width: contentWidth,
       rowHeight: 22,
-      formatCell: formatClassificationChangeCell,
+      formatCell: formatClassificationTrendCell,
     });
     y += gap;
   } else {
-    let message = "لا تتوفر فترة سابقة صالحة لاستخراج تحولات التصنيفات.";
-    if (hasPrevPeriod) {
-      message = classificationChangeRows === undefined
-        ? "تعذر احتساب تحولات التصنيفات لهذه الفترة."
-        : "لم تسجل التصنيفات تغيرات مقارنة بالفترة السابقة.";
-    }
+    const message = trendRows === undefined
+      ? "تعذر احتساب اتجاهات التصنيفات لهذه الفترة."
+      : "لا تتوفر بيانات كافية عبر عدة فترات لاستخراج اتجاهات التصنيفات.";
     y = drawInfoBox(doc, message, margin, y, contentWidth) + gap;
   }
 
-  // ── Classifications table ─────────────────────────────────────────────────
+  // ── Classifications table (spec §14: top 5 only; share-of-total + affected-facility-count replace open/late) ──
   y = drawSectionTitle(doc, "أعلى التصنيفات", margin, y, contentWidth);
   const classCols: ColDef[] = hasClassComparison
     ? [
-        { key: "classificationPath", label: "التصنيف", weight: 2.4 },
+        { key: "classificationPath", label: "التصنيف", weight: 2.2 },
         { key: "currentCount", label: "شكاوى الفترة", weight: 0.9 },
-        { key: "previousCount", label: "السابق", weight: 0.85 },
-        { key: "difference", label: "الفرق", weight: 0.8 },
-        { key: "openAtEnd", label: "مفتوحة نهاية الفترة", weight: 0.95 },
-        { key: "lateAtEnd", label: "متأخرة نهاية الفترة", weight: 0.95 },
+        { key: "previousCount", label: "السابق", weight: 0.8 },
+        { key: "difference", label: "الفرق", weight: 0.75 },
+        { key: "shareOfTotal", label: "الحصة", weight: 0.75 },
+        { key: "affectedFacilityCount", label: "السجون المتأثرة", weight: 0.95 },
       ]
     : [
         { key: "classificationPath", label: "التصنيف", weight: 2.6 },
         { key: "currentCount", label: "شكاوى الفترة", weight: 1 },
-        { key: "openAtEnd", label: "مفتوحة نهاية الفترة", weight: 1 },
-        { key: "lateAtEnd", label: "متأخرة نهاية الفترة", weight: 1 },
+        { key: "shareOfTotal", label: "الحصة", weight: 0.85 },
+        { key: "affectedFacilityCount", label: "السجون المتأثرة", weight: 1.05 },
       ];
 
-  // Enrich classification rows with open/late from V2 data
-  const enrichedClass: EnrichedClassificationRow[] = classRows.map((row) => {
-    const ol = brief.classificationOpenLate[row.classificationId] ?? { openAtEnd: 0, lateAtEnd: 0 };
-    return { ...row, openAtEnd: ol.openAtEnd, lateAtEnd: ol.lateAtEnd };
-  });
+  // Enrich classification rows with the count of distinct facilities where
+  // this classification crossed the pattern engine's own significance
+  // threshold (spec §14) — never a raw-presence count computed separately.
+  const enrichedClass: EnrichedClassificationRow[] = classRows.map((row) => ({
+    ...row,
+    affectedFacilityCount: brief.classificationAffectedFacilityCounts[row.classificationId] ?? 0,
+  }));
 
   y = drawTable({
     doc,
@@ -1325,7 +1376,7 @@ function renderPage4(ctx: V2Context): void {
   });
   y += gap;
 
-  // ── Facilities: top + bottom ────────────────────────────────────────────────
+  // ── Facilities: needing follow-up + sustained improvement ───────────────────
   // Row counts flex (5 down to 0) so the conclusions box below always keeps
   // room for every actual conclusion — facility rows never cause truncation.
   const facilityRowCounts = resolveV2FacilityRowCounts({
@@ -1333,41 +1384,51 @@ function renderPage4(ctx: V2Context): void {
     margin,
     y,
     gap,
-    topAvailableRows: topFacilityRows.length,
-    bottomAvailableRows: bottomFacilityRows.length,
+    topAvailableRows: followUpRows.length,
+    bottomAvailableRows: improvementRows.length,
     requiredConclusionsHeight: computeV2ConclusionsBoxHeight(conclusions.length),
   });
-  const facilityCols: ColDef[] = [
-    { key: "name", label: "السجن", weight: 2.2 },
-    { key: "total", label: "شكاوى الفترة", weight: 0.9 },
-    { key: "closed", label: "مغلقة خلال الفترة", weight: 0.9 },
-    { key: "open", label: "مفتوحة نهاية الفترة", weight: 0.95 },
-    { key: "currentlyLate", label: "متأخرة نهاية الفترة", weight: 0.95 },
+  const followUpCols: ColDef[] = [
+    { key: "facility", label: "السجن", weight: 1.3 },
+    { key: "totalComplaints", label: "شكاوى الفترة", weight: 0.85 },
+    { key: "topIssueLabel", label: "أبرز مشكلة", weight: 1.2 },
+    { key: "patternLabel", label: "النمط", weight: 0.9 },
+    { key: "streakPeriods", label: "مدة الاستمرار", weight: 0.85 },
+    { key: "repeatOrSpread", label: "التكرار/الانتشار", weight: 1.5 },
+    { key: "priorityBand", label: "الأولوية", weight: 0.65 },
+  ];
+  const improvementCols: ColDef[] = [
+    { key: "facility", label: "السجن", weight: 1.5 },
+    { key: "classificationLabel", label: "التصنيف المتحسن", weight: 1.5 },
+    { key: "startValue", label: "البداية", weight: 0.75 },
+    { key: "currentValue", label: "الحالية", weight: 0.75 },
+    { key: "decrease", label: "الانخفاض", weight: 0.75 },
+    { key: "streakPeriods", label: "مدة التحسن", weight: 0.85 },
   ];
 
-  y = drawSectionTitle(doc, "أعلى السجون", margin, y, contentWidth);
+  y = drawSectionTitle(doc, "السجون الأكثر حاجة للمتابعة", margin, y, contentWidth);
   y = drawTable({
     doc,
-    rows: topFacilityRows.slice(0, facilityRowCounts.topRows),
-    columns: facilityCols,
+    rows: followUpRows.slice(0, facilityRowCounts.topRows),
+    columns: followUpCols,
     x: margin,
     y,
     width: contentWidth,
     rowHeight: rowH,
-    formatCell: formatEntityTableCell,
+    formatCell: formatFacilityFollowUpCell,
   });
   y += gap;
 
-  y = drawSectionTitle(doc, "أقل السجون", margin, y, contentWidth);
+  y = drawSectionTitle(doc, "أفضل التحسنات المستدامة", margin, y, contentWidth);
   y = drawTable({
     doc,
-    rows: bottomFacilityRows.slice(0, facilityRowCounts.bottomRows),
-    columns: facilityCols,
+    rows: improvementRows.slice(0, facilityRowCounts.bottomRows),
+    columns: improvementCols,
     x: margin,
     y,
     width: contentWidth,
     rowHeight: rowH,
-    formatCell: formatEntityTableCell,
+    formatCell: formatFacilityImprovementCell,
   });
   y += gap;
 
@@ -1444,9 +1505,12 @@ const EMPTY_V2: ExecutiveBriefV2Data = {
   allTimeTotal: 0,
   monthlyStockFlow: [],
   classificationOpenLate: {},
-  topFacilities: [],
-  bottomFacilities: [],
-  classificationChanges: [],
+  classificationAffectedFacilityCounts: {},
+  highPriorityFacilityCount: 0,
+  continuedProblemFindingCount: 0,
+  facilitiesNeedingFollowUp: [],
+  facilitiesWithSustainedImprovement: [],
+  classificationTrends: [],
   periodMetrics: { current: EMPTY_PERIOD_SNAPSHOT_METRICS, previous: null },
   regionSnapshotAtEnd: [],
   departmentPeriodMetrics: [],

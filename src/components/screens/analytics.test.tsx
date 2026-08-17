@@ -8,6 +8,7 @@ import {
 } from "./analytics";
 import type { AnalyticsData, DashboardData } from "@/lib/analytics/analytics-api-contract";
 import { makeAnalyticsData, makeDashboardData } from "@/lib/analytics/analytics-api-fixtures";
+import type { AnalyticalFinding } from "@/lib/analytics/analytical-finding";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -431,6 +432,82 @@ describe("Analytics — API error response handling", () => {
     expect(() => render(<Analytics />)).not.toThrow();
     await waitFor(() => {
       expect(screen.getByText("استجابة التحليلات غير مكتملة.")).toBeInTheDocument();
+    });
+  });
+});
+
+describe("Analytics — notes tab (pattern-analysis findings)", () => {
+  function chronicFinding(): AnalyticalFinding {
+    return {
+      id: "chronic_issue:سجن أ:cls-1:2026-01-01",
+      type: "CHRONIC_ISSUE",
+      entityType: "CLASSIFICATION",
+      entityId: "cls-1",
+      entityName: "سجن أ — التغذية",
+      currentValue: 46,
+      previousValue: 43,
+      difference: 3,
+      changeRate: 7,
+      severity: "HIGH",
+      priorityScore: 78,
+      confidence: "HIGH",
+      detectionSource: "QUANTITATIVE",
+      explanation: "مشكلة مزمنة بسبب: استمرار 5 فترات",
+      supportingMetrics: {
+        streakPeriods: 5,
+        repeatRatePercent: 18.4,
+        facilitySharePercent: 29,
+        periodCounts: JSON.stringify([8, 9, 8, 9, 46]),
+        priorityReasons: JSON.stringify(["استمرار 5 فترات", "معدل تكرار مرتفع"]),
+      },
+      evidenceComplaintIds: [],
+      evidenceSpans: [],
+      limitations: [],
+      drilldownFilters: { facility: "سجن أ", classificationId: "cls-1", from: "2026-01-01", to: "2026-01-31" },
+      firstDetectedAt: "2026-01-31T00:00:00.000Z",
+      lastDetectedAt: "2026-01-31T00:00:00.000Z",
+      detectorVersion: "pattern-v1",
+    };
+  }
+
+  it("renders the finding's own priority reasons and drills down with the right query", async () => {
+    stubFetch({ analytics: () => jsonResponse(analyticsData({ findings: [chronicFinding()] }), 200) });
+    const onNavigateToExplorer = vi.fn();
+    const user = userEvent.setup();
+
+    render(<Analytics onNavigateToExplorer={onNavigateToExplorer} />);
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: /الملاحظات/ })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("tab", { name: /الملاحظات/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText("سجن أ — التغذية")).toBeInTheDocument();
+    });
+    expect(screen.getByText("استمرار 5 فترات")).toBeInTheDocument();
+    expect(screen.getByText("معدل تكرار مرتفع")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "عرض الشكاوى المرتبطة" }));
+    expect(onNavigateToExplorer).toHaveBeenCalledWith({
+      facility: "سجن أ",
+      classificationId: "cls-1",
+      from: "2026-01-01",
+      to: "2026-01-31",
+    });
+  });
+
+  it("shows the empty-state message when there are no findings", async () => {
+    stubFetch({ analytics: () => jsonResponse(analyticsData({ findings: [] }), 200) });
+    const user = userEvent.setup();
+
+    render(<Analytics />);
+    await waitFor(() => {
+      expect(screen.getByRole("tab", { name: /الملاحظات/ })).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole("tab", { name: /الملاحظات/ }));
+
+    await waitFor(() => {
+      expect(screen.getByText("لا توجد ملاحظات تحليلية للفترة والفلاتر الحالية.")).toBeInTheDocument();
     });
   });
 });

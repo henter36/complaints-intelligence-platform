@@ -18,6 +18,11 @@ import type { ScreenId } from "@/app/page";
 export function HomeShell({ username }: Readonly<{ username: string }>) {
   const [activeScreen, setActiveScreen] = useState<ScreenId>("dashboard");
   const [resumeBatchId, setResumeBatchId] = useState<string | null>(null);
+  // Remount key for screens that read their own filters from the URL on
+  // mount (e.g. the complaints explorer) — bumped on every navigation so a
+  // drilldown or a Back/Forward that lands back on the same screen with
+  // different query params still re-reads them instead of keeping stale state.
+  const [locationVersion, setLocationVersion] = useState(0);
 
   const navigate = useCallback((screen: ScreenId, batchId?: string | null) => {
     setActiveScreen(screen);
@@ -27,20 +32,44 @@ export function HomeShell({ username }: Readonly<{ username: string }>) {
     if (batchId) params.set("batchId", batchId);
     const query = params.toString();
     window.history.replaceState(null, "", query ? `/?${query}` : "/");
+    setLocationVersion((v) => v + 1);
+  }, []);
+
+  /**
+   * Deliberate cross-screen navigation carrying explicit filters (e.g. a
+   * finding's drilldown into the complaints explorer) — a real jump the user
+   * chose to make, so it gets its own history entry (Back returns to where
+   * they were), unlike the sidebar's plain screen switches above which
+   * intentionally keep using replaceState.
+   */
+  const navigateWithFilters = useCallback((screen: ScreenId, query: Record<string, string>) => {
+    setActiveScreen(screen);
+    setResumeBatchId(null);
+    const params = new URLSearchParams(query);
+    if (screen !== "dashboard") params.set("screen", screen);
+    window.history.pushState(null, "", `/?${params.toString()}`);
+    setLocationVersion((v) => v + 1);
   }, []);
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const screen = params.get("screen") as ScreenId | null;
-    const batchId = params.get("batchId");
-    void Promise.resolve().then(() => {
+    const applyFromUrl = () => {
+      const params = new URLSearchParams(window.location.search);
+      const screen = params.get("screen") as ScreenId | null;
+      const batchId = params.get("batchId");
       if (batchId) {
         setActiveScreen("import");
         setResumeBatchId(batchId);
-      } else if (screen) {
-        setActiveScreen(screen);
+      } else {
+        setActiveScreen(screen ?? "dashboard");
+        setResumeBatchId(null);
       }
-    });
+      setLocationVersion((v) => v + 1);
+    };
+
+    void Promise.resolve().then(applyFromUrl);
+
+    window.addEventListener("popstate", applyFromUrl);
+    return () => window.removeEventListener("popstate", applyFromUrl);
   }, []);
 
   return (
@@ -51,8 +80,10 @@ export function HomeShell({ username }: Readonly<{ username: string }>) {
           <main className="flex-1 p-4 md:p-6 lg:p-8 overflow-x-hidden">
             {activeScreen === "dashboard" && <Dashboard onNavigate={setActiveScreen} />}
             {activeScreen === "import" && <ImportCenter batchId={resumeBatchId} />}
-            {activeScreen === "explorer" && <ComplaintsExplorer />}
-            {activeScreen === "analytics" && <Analytics />}
+            {activeScreen === "explorer" && <ComplaintsExplorer key={locationVersion} />}
+            {activeScreen === "analytics" && (
+              <Analytics onNavigateToExplorer={(query) => navigateWithFilters("explorer", query)} />
+            )}
             {activeScreen === "text-risks" && <TextRisks />}
             {activeScreen === "reports" && <ReportsCenter />}
             {activeScreen === "classifications" && <ClassificationsManager />}
