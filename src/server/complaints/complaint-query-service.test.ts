@@ -74,6 +74,18 @@ describe("central complaint query service", () => {
     expect(where.AND).toEqual([{ classificationId: { not: null } }]);
   });
 
+  it("filters by an exact complainantIdentifier match (repeat-complainant drillthrough)", () => {
+    const parsed = parseComplaintQuery(query("complainantIdentifier=9988776655"));
+    const where = buildComplaintWhere(parsed);
+    expect(where.complainantIdentifier).toBe("9988776655");
+  });
+
+  it("omits complainantIdentifier from the where clause when absent", () => {
+    const parsed = parseComplaintQuery(query(""));
+    const where = buildComplaintWhere(parsed);
+    expect(where.complainantIdentifier).toBeUndefined();
+  });
+
   it("turns the visible facility filter into its canonical indexed key", () => {
     const where = buildComplaintWhere(parseComplaintQuery(query("facility=سجن%20%20الرياض")));
     expect(where.facility).toBeUndefined();

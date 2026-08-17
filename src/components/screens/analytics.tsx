@@ -18,7 +18,7 @@ import { Label } from "@/components/ui/label";
 import {
   BarChart3, TrendingUp, TrendingDown, Calendar, Filter, Layers,
   GitCompare, AlertTriangle, Sparkles, Activity, RefreshCw,
-  MapPin, Building2, Clock, CheckCircle2, Flame, Zap, ArrowLeft,
+  MapPin, Building2, Clock, CheckCircle2, Flame, Zap, ArrowLeft, Repeat2,
 } from "lucide-react";
 import {
   ResponsiveContainer, AreaChart, Area, XAxis, YAxis, CartesianGrid,
@@ -49,6 +49,7 @@ import {
   type DashboardData,
 } from "@/lib/analytics/analytics-api-contract";
 import { OperationalAnalyticsPanel } from "@/components/screens/operational-analytics-panel";
+import { RepeatComplainantsPanel } from "@/components/screens/repeat-complainants-panel";
 
 // ---------- Comparison helpers ----------
 
@@ -656,6 +657,9 @@ export function Analytics({ onNavigateToExplorer }: AnalyticsProps = {}) {
           </TabsTrigger>
           <TabsTrigger value="operational" className="gap-1.5">
             <Filter className="h-4 w-4" /> تشغيلي
+          </TabsTrigger>
+          <TabsTrigger value="repeat-complainants" className="gap-1.5">
+            <Repeat2 className="h-4 w-4" /> تكرار الشكاوى
           </TabsTrigger>
         </TabsList>
 
@@ -1503,6 +1507,15 @@ export function Analytics({ onNavigateToExplorer }: AnalyticsProps = {}) {
             to={to}
             regionId={regionId}
             departmentId={departmentId}
+          />
+        </TabsContent>
+
+        <TabsContent value="repeat-complainants" className="mt-4 space-y-4">
+          <RepeatComplainantsPanel
+            from={from}
+            to={to}
+            regionId={regionId}
+            onNavigateToExplorer={onNavigateToExplorer}
           />
         </TabsContent>
       </Tabs>

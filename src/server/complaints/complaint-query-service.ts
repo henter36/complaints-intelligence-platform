@@ -80,6 +80,8 @@ const querySchema = z.object({
   departmentId: optionalText,
   categoryId: optionalText,
   classificationId: optionalText,
+  /** Exact match, never a partial/contains search — used by repeat-complainant drillthrough, never a general free-text field. */
+  complainantIdentifier: optionalText,
   importBatchId: optionalText,
   operationalScope: z.enum(["current", "historical"]).optional(),
   from: dateSchema,
@@ -329,6 +331,7 @@ function applyScalarFilters(where: Prisma.ComplaintWhereInput, query: ComplaintQ
   if (query.department ?? query.departmentId) where.department = query.department ?? query.departmentId;
   if (query.categoryId) where.categoryId = query.categoryId;
   if (query.classificationId) where.classificationId = query.classificationId;
+  if (query.complainantIdentifier) where.complainantIdentifier = query.complainantIdentifier;
   if (query.isRepeated !== undefined) where.isRepeated = query.isRepeated;
   if (query.isValidated !== undefined) where.isValidated = query.isValidated;
   if (query.aiAnalyzed !== undefined) where.aiAnalyzedAt = query.aiAnalyzed ? { not: null } : null;
