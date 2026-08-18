@@ -266,21 +266,29 @@ pm2 start complaints-platform
 
 ## Health Monitoring
 
-Every route except `/login` and a couple of `/api/auth/*` paths requires an
-authenticated admin session cookie (see `src/proxy.ts`) — this is a
-deliberate, pre-existing application policy, not something this guide
-controls. **Both** health endpoints below return `401 UNAUTHORIZED` without
-a valid session cookie; an unauthenticated `curl` is only useful to confirm
-the process is accepting connections at all, not to read the actual
-liveness/readiness payload.
+Every route except `/login`, a couple of `/api/auth/*` paths, and exactly
+two exact-path monitoring probes — `/api/health/live` and
+`/api/health/ready` — requires an authenticated admin session cookie (see
+`src/proxy.ts`'s `PUBLIC_API_PATHS`). Those two are allowlisted by their
+**exact path only**, not an `/api/health` prefix — any other route added
+under `/api/health/` later stays behind the session gate by default unless
+it is explicitly allowlisted too. This does not open up the rest of the
+API: `/api/analytics`, `/api/complaints`, and everything else still return
+`401` without a session, exactly as before (see `src/proxy.test.ts`).
 
 ```bash
-# Process-up check: connects and gets a JSON response (401 without a
-# session — see note above), rather than a connection refused/timeout.
-curl http://localhost:3000/api/health/live
+# Liveness — always 200 while the process is up. Trivial by design: never
+# touches the database, filesystem, or network, so it can't itself become
+# the thing that's unavailable.
+curl --fail http://127.0.0.1:3000/api/health/live
 
-# Readiness: checks DB, storage, auth config (also 401 without a session)
-curl http://localhost:3000/api/health/ready
+# Readiness — 200 with status "ready" when DB/storage/auth config are all
+# healthy; 503 with status "degraded" otherwise. Observational only (a
+# SELECT 1 and filesystem access() checks — never writes, creates, or
+# migrates anything) and never returns a secret, a raw database/filesystem
+# error, or an absolute path — see src/app/api/health/ready/route.ts and
+# its tests for the exact contract.
+curl --fail http://127.0.0.1:3000/api/health/ready
 
 # Integrity check
 npm run integrity:check
@@ -289,12 +297,12 @@ npm run integrity:check
 npm run release:check
 ```
 
-If your monitoring needs an unauthenticated liveness signal (e.g. an
-external uptime check or a load balancer health probe), authenticate it
-with a session cookie the same way an admin would, or treat the process
-itself accepting TCP connections on `PORT` as the liveness signal instead.
-Changing the health endpoints' auth requirement is a separate decision,
-out of scope here.
+Point your uptime checker / load balancer / orchestrator health probe at
+these directly (no session needed) — prefer hitting them over `127.0.0.1`
+from the same host or through your reverse proxy's internal network,
+rather than exposing them on a public hostname unnecessarily. See the
+[operations runbook](./operations-runbook.md#monitoring) for what a
+liveness vs. readiness failure means operationally.
 
 ## Minimal Web-Process Footprint (optional)
 

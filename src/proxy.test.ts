@@ -110,6 +110,55 @@ describe("proxy nonce", () => {
   });
 });
 
+describe("proxy public path allowlist — /api/health/{live,ready} (spec: exact-path only, no wildcard)", () => {
+  afterEach(() => {
+    vi.resetModules();
+    vi.unstubAllEnvs();
+  });
+
+  it.each([
+    ["/api/health/live", "health liveness probe"],
+    ["/api/health/ready", "health readiness probe"],
+    ["/login", "pre-existing public login path"],
+    ["/api/internal/reports/run-due", "internal report scheduler exact path (unchanged contract)"],
+  ])("allows %s without a session cookie (%s)", async (pathname) => {
+    vi.stubEnv("NODE_ENV", "production");
+    const proxy = await loadProxy();
+    const response = proxy(new NextRequest(`http://localhost${pathname}`));
+    expect(response.status).not.toBe(401);
+  });
+
+  it("ordinary protected API routes remain 401 without a session cookie", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const proxy = await loadProxy();
+    for (const pathname of ["/api/analytics", "/api/complaints"]) {
+      const response = proxy(new NextRequest(`http://localhost${pathname}`));
+      expect(response.status).toBe(401);
+    }
+  });
+
+  it("an unlisted child of /api/health/ (e.g. a future debug endpoint) is NOT public — no accidental prefix/wildcard allowlisting", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const proxy = await loadProxy();
+    for (const pathname of ["/api/health", "/api/health/", "/api/health/debug", "/api/health/live/extra"]) {
+      const response = proxy(new NextRequest(`http://localhost${pathname}`));
+      expect(response.status).toBe(401);
+    }
+  });
+
+  it("security headers (CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy) are still applied to the public health routes", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const proxy = await loadProxy();
+    for (const pathname of ["/api/health/live", "/api/health/ready"]) {
+      const response = proxy(new NextRequest(`http://localhost${pathname}`));
+      expect(response.headers.get("Content-Security-Policy")).toBeTruthy();
+      expect(response.headers.get("X-Frame-Options")).toBe("DENY");
+      expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+      expect(response.headers.get("Referrer-Policy")).toBe("strict-origin-when-cross-origin");
+    }
+  });
+});
+
 describe("proxy CSP on different response types", () => {
   afterEach(() => {
     vi.resetModules();

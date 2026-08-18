@@ -31,12 +31,35 @@ Both must pass without failures. `release:check` requires Node 24.x; it fails (n
 
 ## Daily Operations
 
-### Health Checks
+### Monitoring
+
+`/api/health/live` and `/api/health/ready` are unauthenticated, exact-path
+probes — no login cookie needed (see
+[production-deployment-guide.md](./production-deployment-guide.md) for the
+full contract). Point your uptime checker / orchestrator liveness+readiness
+probes at them directly:
 
 ```bash
-curl http://localhost:3000/api/health/live    # → {"status":"live"}
-curl http://localhost:3000/api/health/ready   # → {"status":"ready","checks":{...}}
+# Liveness — the process itself is up. Never fails for any reason other
+# than the process being down/unresponsive (it never touches the DB,
+# filesystem, or network).
+curl --fail http://127.0.0.1:3000/api/health/live    # → 200 {"status":"live"}
+
+# Readiness — the process is up AND its dependencies (DB, storage, auth
+# config) are healthy.
+curl --fail http://127.0.0.1:3000/api/health/ready   # → 200 {"status":"ready","checks":{...}}
 ```
+
+**`live` fails (connection refused / timeout / non-200)**: the process
+itself is down or unresponsive — restart it (see "Application Won't
+Start" below).
+
+**`ready` returns `503` (`--fail` makes curl exit non-zero)**: the process
+is up and answering requests, but one of its dependencies isn't — check
+`body.checks` for which one (`database`, `importStorage`, `reportStorage`,
+`auth`, or `ai`); the response never contains secrets, raw error text, or
+absolute paths, so it's safe to paste into a ticket, but for a full error
+message check the application logs on this host.
 
 ### Integrity Check
 
