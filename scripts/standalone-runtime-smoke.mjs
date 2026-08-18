@@ -11,7 +11,7 @@
 // timeout — and always kills the child process, even on failure.
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -33,6 +33,7 @@ const READY_TIMEOUT_MS = 30_000;
 const READY_POLL_INTERVAL_MS = 300;
 
 let tempDbDir = null;
+let tempStorageDir = null;
 let child = null;
 const failures = [];
 
@@ -72,6 +73,22 @@ function prepareTempDatabase() {
     stdio: "inherit",
   });
   return databaseUrl;
+}
+
+/**
+ * Absolute, writable import/report storage dirs — required for the
+ * readiness probe to report "ok" (spec: prove /api/health/ready is
+ * genuinely healthy under standalone, not just that the route exists).
+ * Never the repo's own storage/ — that's excluded from the standalone
+ * artifact entirely (see next.config.ts's outputFileTracingExcludes).
+ */
+function prepareTempStorage() {
+  tempStorageDir = mkdtempSync(path.join(tmpdir(), "cip-standalone-smoke-storage-"));
+  const importsDir = path.join(tempStorageDir, "imports");
+  const reportsDir = path.join(tempStorageDir, "reports");
+  mkdirSync(importsDir, { recursive: true });
+  mkdirSync(reportsDir, { recursive: true });
+  return { importsDir, reportsDir };
 }
 
 function findRealStaticAsset() {
@@ -125,6 +142,45 @@ async function checkStatus(pathname, expectedStatus, label) {
   }
 }
 
+/**
+ * /api/health/live and /api/health/ready are unauthenticated exact-path
+ * monitoring probes (see src/proxy.ts) — this is the one place that
+ * exercises them against a REAL production process (unit tests cover the
+ * route handlers directly; src/proxy.test.ts covers the allowlist).
+ */
+async function checkHealthEndpoint(pathname, expectedStatus, expectedTopStatus, label) {
+  let res;
+  try {
+    res = await fetch(`${BASE_URL}${pathname}`);
+  } catch (e) {
+    recordFailure(label, e instanceof Error ? e.message : String(e));
+    return;
+  }
+  if (res.status !== expectedStatus) {
+    recordFailure(label, `expected HTTP ${expectedStatus}, got ${res.status}`);
+    return;
+  }
+  let body;
+  try {
+    body = await res.json();
+  } catch (e) {
+    recordFailure(label, `response was not valid JSON: ${e instanceof Error ? e.message : String(e)}`);
+    return;
+  }
+  if (body.status !== expectedTopStatus) {
+    recordFailure(label, `expected body.status === ${JSON.stringify(expectedTopStatus)}, got ${JSON.stringify(body.status)}`);
+    return;
+  }
+  if (body.checks) {
+    const notOk = Object.entries(body.checks).filter(([, v]) => v !== "ok");
+    if (notOk.length > 0) {
+      recordFailure(label, `checks not ok: ${JSON.stringify(Object.fromEntries(notOk))}`);
+      return;
+    }
+  }
+  ok(`${label} (${pathname}) -> HTTP ${res.status}, body.status=${JSON.stringify(body.status)}${body.checks ? ", all checks ok" : ""}`);
+}
+
 function checkSecurityHeaders(res, label) {
   if (!res) {
     recordFailure(`security headers (${label})`, "no response to check");
@@ -146,6 +202,7 @@ async function main() {
   }
 
   const databaseUrl = arg("database-url", null) ?? prepareTempDatabase();
+  const { importsDir, reportsDir } = prepareTempStorage();
 
   log(`Starting standalone server from ${STANDALONE_DIR} on ${BASE_URL}`);
   child = spawn(process.execPath, [SERVER_ENTRY], {
@@ -155,6 +212,8 @@ async function main() {
       PORT,
       HOSTNAME,
       DATABASE_URL: databaseUrl,
+      IMPORT_STORAGE_PATH: importsDir,
+      REPORT_STORAGE_PATH: reportsDir,
       AUTH_SECRET: arg("auth-secret", "a".repeat(64)),
       INTERNAL_SCHEDULER_SECRET: arg("scheduler-secret", "b".repeat(64)),
       COMPLAINANT_TOKEN_SECRET: arg("complainant-token-secret", "c".repeat(64)),
@@ -172,6 +231,8 @@ async function main() {
     await checkStatus("/login", 200, "login page");
     await checkStatus("/logo.svg", 200, "public asset");
     const robotsRes = await checkStatus("/robots.txt", 200, "public asset");
+    await checkHealthEndpoint("/api/health/live", 200, "live", "liveness probe (unauthenticated)");
+    await checkHealthEndpoint("/api/health/ready", 200, "ready", "readiness probe (unauthenticated)");
 
     const staticAssetPath = findRealStaticAsset();
     if (staticAssetPath) {
@@ -195,6 +256,7 @@ async function main() {
       });
     });
     if (tempDbDir) rmSync(tempDbDir, { recursive: true, force: true });
+    if (tempStorageDir) rmSync(tempStorageDir, { recursive: true, force: true });
   }
 
   if (failures.length > 0) {

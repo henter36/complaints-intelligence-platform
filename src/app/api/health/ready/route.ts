@@ -10,11 +10,19 @@ interface CheckResult {
   detail?: string;
 }
 
-function safeCheckFailure(err: unknown, label: string): CheckResult {
-  if (err instanceof Error) {
-    const msg = err.message.replace(/\/[^\s]+(\/[^\s]+)*/g, "<path>");
-    return { status: "error", detail: `${label}: ${msg}` };
-  }
+/**
+ * This route is on the unauthenticated allowlist (see src/proxy.ts's
+ * PUBLIC_API_PATHS) — a monitoring tool with no admin session hits it
+ * directly, so the response `detail` string is the ONLY thing this
+ * function is allowed to control. It is a fixed, static label, never a
+ * raw caught error's `.message` — an earlier version tried to redact
+ * absolute paths out of `err.message` with a regex, which is fragile by
+ * construction (e.g. a storage path containing a space defeats a
+ * whitespace-delimited pattern, leaking path fragments). The actual error
+ * always still goes to the server-side logger for real diagnostics —
+ * operators read logs, monitoring tools read this JSON.
+ */
+function checkFailure(label: string): CheckResult {
   return { status: "error", detail: label };
 }
 
@@ -23,45 +31,47 @@ async function checkDatabase(): Promise<CheckResult> {
     await db.$queryRaw`SELECT 1`;
     return { status: "ok" };
   } catch (err) {
-    // Log server-side for diagnostics but never expose the raw error to callers
     logger.error("Readiness database check failed", { err });
-    return { status: "error", detail: "database unreachable" };
+    return checkFailure("database unreachable");
   }
 }
 
-function checkStoragePath(storagePath: string): CheckResult {
+function checkStoragePath(label: string, storagePath: string): CheckResult {
   // Observational only — never create directories in a readiness probe.
   // Directory creation is a startup/deployment concern, not runtime health.
   try {
     accessSync(storagePath, fsConstants.R_OK | fsConstants.W_OK);
     return { status: "ok" };
   } catch (err) {
-    return safeCheckFailure(err, `storage path inaccessible: ${basename(storagePath)}`);
+    logger.error(`Readiness ${label} storage check failed`, { err, storagePath });
+    return checkFailure(`storage path inaccessible: ${basename(storagePath)}`);
   }
 }
 
 function checkAuth(): CheckResult {
-  try {
-    const secret = env.authSecret;
-    if (!secret || secret.length < 8) return { status: "error", detail: "AUTH_SECRET not configured" };
-    return { status: "ok" };
-  } catch (err) {
-    return safeCheckFailure(err, "auth config error");
-  }
+  const secret = env.authSecret;
+  if (!secret || secret.length < 8) return checkFailure("AUTH_SECRET not configured");
+  return { status: "ok" };
 }
 
+/**
+ * Deliberately config-only — never a network call to the AI provider.
+ * Production startup already refuses to boot with AI_ENABLED=true and a
+ * missing/placeholder OPENAI_API_KEY (see src/lib/env.ts), so this branch
+ * is effectively unreachable in production; it only matters in dev/test
+ * where that startup guard doesn't run.
+ */
 function checkAi(): CheckResult {
   if (!env.aiEnabled) return { status: "ok" };
-  const key = env.openAiApiKey;
-  if (!key) return { status: "error", detail: "AI_ENABLED but OPENAI_API_KEY missing" };
+  if (!env.openAiApiKey) return checkFailure("AI_ENABLED but OPENAI_API_KEY missing");
   return { status: "ok" };
 }
 
 export async function GET() {
   const [database, importStorage, reportStorage, auth, ai] = await Promise.all([
     checkDatabase(),
-    Promise.resolve(checkStoragePath(env.importStoragePath)),
-    Promise.resolve(checkStoragePath(env.reportStoragePath)),
+    Promise.resolve(checkStoragePath("importStorage", env.importStoragePath)),
+    Promise.resolve(checkStoragePath("reportStorage", env.reportStoragePath)),
     Promise.resolve(checkAuth()),
     Promise.resolve(checkAi()),
   ]);

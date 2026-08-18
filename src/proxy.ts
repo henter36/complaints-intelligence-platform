@@ -23,11 +23,23 @@ const PUBLIC_PATH_PREFIXES = [
 // interactive admin session. Listed by exact path (not an /api/internal/
 // prefix) so any other internal route added later stays behind the session
 // gate by default unless explicitly allowlisted here too.
+//
+// /api/health/live and /api/health/ready are production monitoring probes
+// (uptime checks, load balancer health checks, orchestrators) that by
+// definition run with no admin session — see docs/operations-runbook.md.
+// Listed by EXACT path on purpose, not an "/api/health" prefix: any other
+// route added under /api/health/ later (e.g. a future debug/diagnostics
+// endpoint) stays behind the session gate by default unless it is
+// explicitly allowlisted here too. Both routes are deliberately
+// side-effect-free and never return secrets/stack traces/absolute paths —
+// see their own route.ts docstrings.
 const PUBLIC_API_PATHS = new Set([
   "/api",
   "/api/auth/login",
   "/api/auth/logout",
   "/api/internal/reports/run-due",
+  "/api/health/live",
+  "/api/health/ready",
 ]);
 
 function isPublicPath(pathname: string): boolean {
