@@ -5,6 +5,7 @@ import {
   listComplaints,
   parseComplaintQuery,
 } from "./complaint-query-service";
+import { encodeComplainantToken } from "./complainant-token";
 
 const dbMocks = vi.hoisted(() => ({
   findMany: vi.fn(),
@@ -72,6 +73,25 @@ describe("central complaint query service", () => {
 
     expect(where.classificationId).toBe("cls_1");
     expect(where.AND).toEqual([{ classificationId: { not: null } }]);
+  });
+
+  it("decodes an opaque complainantToken server-side into the real identifier (never a raw identifier in the query)", () => {
+    const token = encodeComplainantToken("9988776655");
+    const parsed = parseComplaintQuery(query(`complainantToken=${encodeURIComponent(token)}`));
+    const where = buildComplaintWhere(parsed);
+    expect(where.complainantIdentifier).toBe("9988776655");
+  });
+
+  it("fails closed (matches nothing) for a garbled/tampered complainantToken, never widening to no filter", () => {
+    const parsed = parseComplaintQuery(query("complainantToken=not-a-real-token"));
+    const where = buildComplaintWhere(parsed);
+    expect(where.complainantIdentifier).toBe("__INVALID_COMPLAINANT_TOKEN__");
+  });
+
+  it("omits complainantIdentifier from the where clause when no token is given", () => {
+    const parsed = parseComplaintQuery(query(""));
+    const where = buildComplaintWhere(parsed);
+    expect(where.complainantIdentifier).toBeUndefined();
   });
 
   it("turns the visible facility filter into its canonical indexed key", () => {

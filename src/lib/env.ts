@@ -43,6 +43,10 @@ const envSchema = z.object({
   REPORT_MAX_ROWS: z.coerce.number().int().positive().optional(),
   REPORT_MAX_FILE_SIZE_MB: z.coerce.number().positive().optional(),
   INTERNAL_SCHEDULER_SECRET: z.string().min(1).optional(),
+  // Encrypts the opaque drillthrough token for the repeat-complainant
+  // directory (never the raw complainantIdentifier in a URL). Its own
+  // secret, never AUTH_SECRET — same reasoning as INTERNAL_SCHEDULER_SECRET.
+  COMPLAINANT_TOKEN_SECRET: z.string().min(1).optional(),
   NEXTAUTH_URL: z.string().url().optional(),
   // AI settings — all optional; key only validated when AI_ENABLED=true
   OPENAI_API_KEY: z.string().optional(),
@@ -84,6 +88,9 @@ if (isProductionRuntime) {
   if (!parsed.data.INTERNAL_SCHEDULER_SECRET || parsed.data.INTERNAL_SCHEDULER_SECRET.length < 32) {
     throw new Error("INTERNAL_SCHEDULER_SECRET must be at least 32 characters in production.");
   }
+  if (!parsed.data.COMPLAINANT_TOKEN_SECRET || parsed.data.COMPLAINANT_TOKEN_SECRET.length < 32) {
+    throw new Error("COMPLAINANT_TOKEN_SECRET must be at least 32 characters in production.");
+  }
   if (aiEnabled) {
     const key = parsed.data.OPENAI_API_KEY;
     if (isMissingOrPlaceholderSecret(key)) {
@@ -118,6 +125,7 @@ const envBase = {
   reportMaxRows: parsed.data.REPORT_MAX_ROWS ?? 10_000,
   reportMaxFileSizeMb: parsed.data.REPORT_MAX_FILE_SIZE_MB ?? 25,
   internalSchedulerSecret: parsed.data.INTERNAL_SCHEDULER_SECRET,
+  complainantTokenSecret: parsed.data.COMPLAINANT_TOKEN_SECRET,
   nextAuthUrl: parsed.data.NEXTAUTH_URL,
   aiEnabled,
   aiProvider: parsed.data.AI_PROVIDER || "openai",
