@@ -148,7 +148,7 @@ function checkDependencyClassification() {
   const devDeps = pkg.devDependencies ?? {};
 
   if (deps.prisma) {
-    fail("dependency_classification", "\"prisma\" (the CLI) must not be in dependencies — move it to devDependencies (see checkDependencyClassification's docstring)");
+    fail("dependency_classification", "\"prisma\" (the CLI) must not be in dependencies — move it to devDependencies (see docs/production-deployment-guide.md#dependency-policy)");
     return;
   }
   if (!devDeps.prisma) {
