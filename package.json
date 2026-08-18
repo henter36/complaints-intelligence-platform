@@ -7,8 +7,9 @@
   },
   "scripts": {
     "dev": "next dev -p 3000",
-    "build": "next build",
-    "start": "next start",
+    "build": "next build && node scripts/prepare-standalone-runtime.mjs",
+    "start": "node .next/standalone/server.js",
+    "standalone:smoke": "node scripts/standalone-runtime-smoke.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",

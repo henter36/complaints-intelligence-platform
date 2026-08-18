@@ -162,6 +162,79 @@ function checkDependencyClassification() {
   pass("dependency_classification", "prisma is dev-only, @prisma/client is a runtime dependency");
 }
 
+/**
+ * Regression guard for the Next.js standalone runtime strategy (see
+ * docs/production-deployment-guide.md). `next.config.ts` declaring
+ * `output: "standalone"` and `package.json`'s `start` script still invoking
+ * plain `next start` is an inconsistent, broken combination — `next start`
+ * logs a warning and serves from the full (non-pruned) `.next` build, not
+ * the traced standalone artifact `npm run build` actually produces. This
+ * script itself runs under tsx (see the shebang above), so it can import
+ * next.config.ts directly and check the REAL resolved config value instead
+ * of pattern-matching the source text.
+ */
+async function checkStandaloneRuntimeConfig() {
+  let output: unknown;
+  try {
+    const configPath = path.join(ROOT, "next.config.ts");
+    const mod = (await import(configPath)) as { default?: { output?: unknown } };
+    output = mod.default?.output;
+  } catch (err) {
+    fail("standalone_runtime_config", `could not load next.config.ts: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  if (output !== "standalone") {
+    fail("standalone_runtime_config", `next.config.ts output is ${JSON.stringify(output)}, expected "standalone"`);
+    return;
+  }
+
+  const pkgPath = path.join(ROOT, "package.json");
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as { scripts?: Record<string, string> };
+  const startScript = pkg.scripts?.start ?? "";
+  if (startScript.trim() === "next start") {
+    fail(
+      "standalone_runtime_config",
+      "package.json's \"start\" script is plain \"next start\", which does not work with output: \"standalone\" — it must run .next/standalone/server.js"
+    );
+    return;
+  }
+  if (!startScript.includes(".next/standalone/server.js")) {
+    fail("standalone_runtime_config", `package.json's "start" script (${JSON.stringify(startScript)}) does not run .next/standalone/server.js`);
+    return;
+  }
+  pass("standalone_runtime_config", "next.config.ts declares standalone and \"start\" runs the standalone server");
+}
+
+/**
+ * Separate from checkStandaloneRuntimeConfig on purpose: release-check does
+ * not always run after a build (e.g. right after cloning, before the first
+ * `npm run build`), so a missing `.next` directory is a warning, not a
+ * failure — but if a build DOES exist, the standalone artifact inside it
+ * must be complete, or "npm run start" will fail at deploy time.
+ */
+function checkStandaloneArtifact() {
+  const nextDir = path.join(ROOT, ".next");
+  if (!fs.existsSync(nextDir)) {
+    warn("standalone_artifact", "no .next build found yet — run \"npm run build\" before deploying");
+    return;
+  }
+  const serverEntry = path.join(nextDir, "standalone", "server.js");
+  if (!fs.existsSync(serverEntry)) {
+    fail("standalone_artifact", ".next/standalone/server.js is missing — the build did not produce a standalone artifact");
+    return;
+  }
+  const publicDir = path.join(nextDir, "standalone", "public");
+  const staticDir = path.join(nextDir, "standalone", ".next", "static");
+  if (!fs.existsSync(publicDir) || !fs.existsSync(staticDir)) {
+    fail(
+      "standalone_artifact",
+      "public/ and/or .next/static/ missing from .next/standalone — run \"npm run build\" (which runs scripts/prepare-standalone-runtime.mjs) again"
+    );
+    return;
+  }
+  pass("standalone_artifact", "server.js, public/, and .next/static/ present");
+}
+
 function checkGitignore() {
   const gitignorePath = path.join(ROOT, ".gitignore");
   if (!fs.existsSync(gitignorePath)) { fail("gitignore", ".gitignore not found"); return; }
@@ -223,6 +296,8 @@ async function main() {
   checkManifest();
   checkPrismaSchema();
   checkDependencyClassification();
+  await checkStandaloneRuntimeConfig();
+  checkStandaloneArtifact();
   checkGitignore();
   checkStorageDirectories();
   checkNodeVersion();
