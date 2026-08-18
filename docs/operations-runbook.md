@@ -15,6 +15,15 @@ Both must pass without failures. `release:check` requires Node 24.x; it fails (n
 
 - **Node.js 24.x** — required at runtime and for all operational scripts.
   (`node --version` must report `v24.x.y`)
+- **devDependencies installed** (`npm ci` — never `npm ci --omit=dev` on a
+  host that runs these commands). Every `npm run` command on this page
+  (`backup:*`, `integrity:check`, `reports:cleanup`, `release:*`, `auth:*`)
+  is `tsx`-based, and `prisma migrate status`/`migrate deploy` need the
+  `prisma` CLI — both are devDependencies (see
+  [production-deployment-guide.md](./production-deployment-guide.md#dependency-policy)
+  for why). If this host's web process runs from a pruned
+  (`npm prune --omit=dev`) tree, run these commands from a separate,
+  un-pruned checkout instead.
 - **SQLite3 CLI** (optional but recommended) — used by `backup:create` for a
   WAL-safe atomic snapshot via `.backup`. When absent, the script falls back to
   a raw file copy (copies main + WAL + SHM sidecars).
