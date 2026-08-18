@@ -69,11 +69,14 @@ export async function renderRepeatComplainantPersonPdf(
 
   y = drawSectionHeading(doc, "بيانات الشخص", y);
   const isMultiFacility = detail.person.facilitiesCount > 1;
+  const facilityLine = isMultiFacility
+    ? `عدة سجون (${formatReportNumber(detail.person.facilitiesCount)})`
+    : detail.person.facility;
   const headerLines = [
     `الاسم: ${detail.person.complainantName ?? "غير متوفر"}`,
     `الهوية: ${identifierDisplay}`,
     `المنطقة: ${isMultiFacility ? "عدة مناطق" : detail.person.region}`,
-    `السجن: ${isMultiFacility ? `عدة سجون (${formatReportNumber(detail.person.facilitiesCount)})` : detail.person.facility}`,
+    `السجن: ${facilityLine}`,
     `إجمالي الشكاوى: ${formatReportNumber(detail.person.totalComplaints)}`,
     `عدد الأنواع: ${formatReportNumber(detail.person.distinctComplaintTypesCount)}`,
   ];

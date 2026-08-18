@@ -344,7 +344,7 @@ describe("RepeatComplainantsPanel", () => {
     render(<RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" />);
     const facilityRow = await expandRegion(user);
     await user.click(facilityRow);
-    await screen.findByText("غير متوفر");
+    expect(await screen.findByText("غير متوفر")).toBeInTheDocument();
   });
 
   it("searches org-wide via POST (never a GET query string) and shows results without the local facility scope", async () => {
@@ -549,7 +549,7 @@ describe("RepeatComplainantsPanel — cross-facility person (spec §1/§11/§12/
     await screen.findByRole("button", { name: /منطقة الرياض/ });
 
     await user.type(screen.getByLabelText(/البحث بالاسم/), "محمد");
-    await waitFor(() => expect(screen.getByRole("button", { name: "عرض التكرارات" })).toBeInTheDocument());
+    expect(await screen.findByRole("button", { name: "عرض التكرارات" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "عرض التكرارات" }));
 
     await waitFor(() => {
