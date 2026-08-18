@@ -34,8 +34,10 @@ vi.mock("@/lib/db", () => ({
   },
 }));
 
-const { getRepeatComplainantSummary } = await import("./repeat-complainant-analytics-service");
+const { getRepeatComplainantSummary, searchRepeatComplainants } = await import("./repeat-complainant-analytics-service");
 const { getRepeatComplainantPeoplePage } = await import("./repeat-complainant-people-service");
+const { getRepeatComplainantPersonDetail } = await import("./repeat-complainant-person-detail-service");
+const { encodeComplainantToken } = await import("@/server/complaints/complainant-token");
 
 const ORIGINAL_DATABASE_URL = process.env.DATABASE_URL;
 let tempDir: string | null = null;
@@ -114,6 +116,9 @@ async function seedDataset(prisma: PrismaClient) {
       // Makkah facility: Person F, 2 complaints.
       { ...base, externalId: "rc-f1", region: "مكة", facility: MAKKAH_FACILITY, facilityNormalizedName: makkahKey, classificationId: health.id, complainantIdentifier: "5000000005", complaintDate: new Date("2026-01-09T00:00:00.000Z") },
       { ...base, externalId: "rc-f2", region: "مكة", facility: MAKKAH_FACILITY, facilityNormalizedName: makkahKey, classificationId: health.id, complainantIdentifier: "5000000005", complaintDate: new Date("2026-01-20T00:00:00.000Z") },
+      // Person G: a named complainant, 2 complaints (for name-search + person-detail tests).
+      { ...base, externalId: "rc-g1", region: "الرياض", facility: RIYADH_FACILITY, facilityNormalizedName: riyadhKey, classificationId: food.id, complainantIdentifier: "6000000006", complainantName: "خالد سعيد", subject: "طلب وجبة بديلة", description: "الوصف الكامل لأول شكوى من خالد سعيد حول التغذية في السجن.", complaintDate: new Date("2026-01-11T00:00:00.000Z") },
+      { ...base, externalId: "rc-g2", region: "الرياض", facility: RIYADH_FACILITY, facilityNormalizedName: riyadhKey, classificationId: health.id, complainantIdentifier: "6000000006", complainantName: "خالد سعيد", subject: "طلب مراجعة طبيب", description: "الوصف الكامل للشكوى الثانية من خالد سعيد حول الرعاية الصحية.", complaintDate: new Date("2026-01-25T00:00:00.000Z") },
     ],
   });
 }
@@ -125,27 +130,27 @@ function params(query: string): URLSearchParams {
 describe("getRepeatComplainantSummary — real db (temp sqlite)", () => {
   it("flags repeated people, excludes duplicates/empty identifiers, and rolls up by facility and region", async () => {
     const summary = await getRepeatComplainantSummary(params("from=2026-01-01&to=2026-03-01"));
-    // A, B, D(1 real complaint each after dup exclusion -> D not repeated), F => repeated: A, B, F = 3 people
-    expect(summary.kpis.repeatedPeopleCount).toBe(3);
+    // A, B, G, D(1 real complaint each after dup exclusion -> D not repeated), F => repeated: A, B, G, F = 4 people
+    expect(summary.kpis.repeatedPeopleCount).toBe(4);
 
     const riyadh = summary.facilities.find((f) => f.facility === RIYADH_FACILITY)!;
-    expect(riyadh.repeatedPeopleCount).toBe(2); // A and B
-    expect(riyadh.repeatedComplaintsCount).toBe(5); // 3 + 2
+    expect(riyadh.repeatedPeopleCount).toBe(3); // A, B, G
+    expect(riyadh.repeatedComplaintsCount).toBe(7); // 3 + 2 + 2
     // facilityTotalComplaints counts ALL eligible-scope complaints at the facility,
     // including non-repeated C and D's surviving real complaint (dup excluded upstream of totals too? see below).
-    expect(riyadh.facilityTotalComplaints).toBeGreaterThanOrEqual(6);
+    expect(riyadh.facilityTotalComplaints).toBeGreaterThanOrEqual(8);
 
     const makkah = summary.facilities.find((f) => f.facility === MAKKAH_FACILITY)!;
     expect(makkah.repeatedPeopleCount).toBe(1);
     expect(makkah.repeatedComplaintsCount).toBe(2);
 
     const riyadhRegion = summary.regions.find((r) => r.region.includes("الرياض"))!;
-    expect(riyadhRegion.repeatedPeopleCount).toBe(2);
+    expect(riyadhRegion.repeatedPeopleCount).toBe(3);
     expect(riyadhRegion.facilitiesAffectedCount).toBe(1);
 
     expect(summary.conclusions.length).toBeGreaterThan(0);
     for (const line of summary.conclusions) {
-      expect(line).not.toMatch(/1000000001|2000000002|5000000005/);
+      expect(line).not.toMatch(/1000000001|2000000002|5000000005|6000000006|خالد سعيد/);
     }
   });
 
@@ -183,7 +188,7 @@ describe("getRepeatComplainantPeoplePage — real db (temp sqlite)", () => {
     const page1 = await getRepeatComplainantPeoplePage(
       params(`from=2026-01-01&to=2026-03-01&facility=${encodeURIComponent(RIYADH_FACILITY)}&pageSize=1&page=1&peopleSortBy=totalComplaints`)
     );
-    expect(page1.total).toBe(2); // A and B at Riyadh
+    expect(page1.total).toBe(3); // A, B, and G at Riyadh
     expect(page1.people).toHaveLength(1);
     expect(page1.people[0]!.totalComplaints).toBe(3); // Person A ranks first by total complaints
 
@@ -191,7 +196,7 @@ describe("getRepeatComplainantPeoplePage — real db (temp sqlite)", () => {
       params(`from=2026-01-01&to=2026-03-01&facility=${encodeURIComponent(RIYADH_FACILITY)}&pageSize=1&page=2&peopleSortBy=totalComplaints`)
     );
     expect(page2.people).toHaveLength(1);
-    expect(page2.people[0]!.totalComplaints).toBe(2); // Person B
+    expect(page2.people[0]!.totalComplaints).toBe(2); // Person B or G (tied at 2 complaints)
   });
 
   it("never exposes the raw identifier as a table-visible field name other than the explicit raw field", async () => {
@@ -199,8 +204,112 @@ describe("getRepeatComplainantPeoplePage — real db (temp sqlite)", () => {
       params(`from=2026-01-01&to=2026-03-01&facility=${encodeURIComponent(RIYADH_FACILITY)}`)
     );
     for (const person of page.people) {
-      expect(person.complainantIdentifierMasked).not.toBe(person.complainantIdentifierRaw);
-      expect(person.complainantIdentifierMasked.startsWith("*")).toBe(true);
+      expect(person.complainantIdentifierMasked.startsWith("****")).toBe(true);
+      expect(person).not.toHaveProperty("complainantIdentifierRaw");
+      // The token round-trips server-side but is never the raw value itself.
+      expect(person.complainantToken).not.toContain("1000000001");
+      expect(person.complainantToken).not.toContain("2000000002");
+    }
+  });
+});
+
+describe("getRepeatComplainantPersonDetail — real db (temp sqlite)", () => {
+  it("returns the person's header, full complaint list (newest-first by default), type grouping, and timeline", async () => {
+    const token = encodeComplainantToken("6000000006");
+    const detail = await getRepeatComplainantPersonDetail(
+      token,
+      RIYADH_FACILITY,
+      params("from=2026-01-01&to=2026-03-01")
+    );
+    expect(detail).not.toBeNull();
+    expect(detail!.person.complainantName).toBe("خالد سعيد");
+    expect(detail!.person.complainantIdentifierMasked).toBe("****0006");
+    expect(detail!.person).not.toHaveProperty("complainantIdentifierRaw");
+    expect(detail!.complaints).toHaveLength(2);
+    // newest-first by default
+    expect(detail!.complaints[0]!.date >= detail!.complaints[1]!.date).toBe(true);
+    expect(detail!.complaints[0]!.subject).toBeTruthy();
+    expect(detail!.complaints[0]!.descriptionSnippet).toBeTruthy();
+
+    expect(detail!.complaintsByType).toHaveLength(2); // food + health, one complaint each
+    for (const group of detail!.complaintsByType) {
+      expect(group.complaints).toHaveLength(1);
+    }
+
+    expect(detail!.timeline.length).toBeGreaterThan(0);
+    const totalFromTimeline = detail!.timeline.reduce((sum, p) => sum + p.count, 0);
+    expect(totalFromTimeline).toBe(2);
+  });
+
+  it("sorts oldest-first when explicitly requested", async () => {
+    const token = encodeComplainantToken("6000000006");
+    const detail = await getRepeatComplainantPersonDetail(
+      token,
+      RIYADH_FACILITY,
+      params("from=2026-01-01&to=2026-03-01"),
+      new Date(),
+      "asc"
+    );
+    expect(detail!.complaints[0]!.date <= detail!.complaints[1]!.date).toBe(true);
+  });
+
+  it("returns null (fails closed) for a garbled/tampered token instead of throwing", async () => {
+    const detail = await getRepeatComplainantPersonDetail(
+      "not-a-real-token",
+      RIYADH_FACILITY,
+      params("from=2026-01-01&to=2026-03-01")
+    );
+    expect(detail).toBeNull();
+  });
+
+  it("returns null when the token is valid but the person has no complaints at the given facility", async () => {
+    const token = encodeComplainantToken("6000000006"); // Person G is at Riyadh, not Makkah
+    const detail = await getRepeatComplainantPersonDetail(
+      token,
+      MAKKAH_FACILITY,
+      params("from=2026-01-01&to=2026-03-01")
+    );
+    expect(detail).toBeNull();
+  });
+
+  it("respects the same date-range filter as the rest of the directory", async () => {
+    const token = encodeComplainantToken("6000000006");
+    const detail = await getRepeatComplainantPersonDetail(
+      token,
+      RIYADH_FACILITY,
+      params("from=2030-01-01&to=2030-02-01")
+    );
+    expect(detail).toBeNull();
+  });
+});
+
+describe("searchRepeatComplainants — real db (temp sqlite)", () => {
+  it("finds a person by (normalized) name", async () => {
+    const results = await searchRepeatComplainants("خالد", params("from=2026-01-01&to=2026-03-01"));
+    expect(results.some((p) => p.complainantName === "خالد سعيد")).toBe(true);
+  });
+
+  it("finds a person by exact identifier", async () => {
+    const results = await searchRepeatComplainants("6000000006", params("from=2026-01-01&to=2026-03-01"));
+    expect(results.some((p) => p.complainantName === "خالد سعيد")).toBe(true);
+  });
+
+  it("finds people by facility name", async () => {
+    const results = await searchRepeatComplainants(MAKKAH_FACILITY, params("from=2026-01-01&to=2026-03-01"));
+    expect(results.length).toBeGreaterThan(0);
+    expect(results.every((p) => p.facility === MAKKAH_FACILITY)).toBe(true);
+  });
+
+  it("returns an empty list for a blank query, never the full directory", async () => {
+    const results = await searchRepeatComplainants("   ", params("from=2026-01-01&to=2026-03-01"));
+    expect(results).toEqual([]);
+  });
+
+  it("returns tokens, never raw identifiers, in search results", async () => {
+    const results = await searchRepeatComplainants("خالد", params("from=2026-01-01&to=2026-03-01"));
+    for (const person of results) {
+      expect(person).not.toHaveProperty("complainantIdentifierRaw");
+      expect(typeof person.complainantToken).toBe("string");
     }
   });
 });

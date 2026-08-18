@@ -10,9 +10,19 @@ import type {
   RepeatComplainantKpis,
   RepeatFacilitySummaryRow,
   RepeatRegionSummaryRow,
-  RepeatPersonRow,
   ComplaintTypeCount,
 } from "./repeat-complainant-directory";
+// Types only — erased at compile time, so no server runtime (node:crypto,
+// Prisma, node:fs font loading) ever reaches the client bundle. Same
+// established cross-layer-import-is-safe convention as
+// `repeat-complainant-directory.ts`'s own `maskIdentifier` import.
+import type { RepeatPersonRowForClient } from "@/server/analytics/repeat-complainants/repeat-complainant-analytics-service";
+import type {
+  RepeatComplainantPersonDetail,
+  PersonComplaintRow,
+  PersonComplaintTypeGroup,
+  PersonTimelinePoint,
+} from "@/server/analytics/repeat-complainants/repeat-complainant-person-detail-service";
 
 export type RepeatComplainantSummaryData = {
   kpis: RepeatComplainantKpis;
@@ -22,7 +32,7 @@ export type RepeatComplainantSummaryData = {
 };
 
 export type RepeatComplainantPeopleData = {
-  people: RepeatPersonRow[];
+  people: RepeatPersonRowForClient[];
   total: number;
   page: number;
   pageSize: number;
@@ -109,11 +119,12 @@ export function isRepeatComplainantSummaryData(value: unknown): value is RepeatC
   );
 }
 
-function isPersonRow(value: unknown): value is RepeatPersonRow {
+function isPersonRow(value: unknown): value is RepeatPersonRowForClient {
   return (
     isRecord(value)
     && typeof value.complainantIdentifierMasked === "string"
-    && typeof value.complainantIdentifierRaw === "string"
+    && typeof value.complainantToken === "string"
+    && (value.complainantName === null || typeof value.complainantName === "string")
     && typeof value.region === "string"
     && typeof value.facility === "string"
     && isFiniteNumber(value.totalComplaints)
@@ -121,9 +132,11 @@ function isPersonRow(value: unknown): value is RepeatPersonRow {
     && isFiniteNumber(value.distinctComplaintTypesCount)
     && Array.isArray(value.topComplaintTypes)
     && value.topComplaintTypes.every(isComplaintTypeCount)
+    && typeof value.firstComplaintDate === "string"
     && typeof value.lastComplaintDate === "string"
     && isFiniteNumber(value.periodsPresent)
     && typeof value.spansMultiplePeriods === "boolean"
+    && typeof value.recentActivity === "boolean"
     && (value.pattern === "CONCENTRATED" || value.pattern === "DIVERSE")
     && Array.isArray(value.complaintIds)
     && isRecord(value.drilldownFilters)
@@ -138,6 +151,63 @@ export function isRepeatComplainantPeopleData(value: unknown): value is RepeatCo
     && isFiniteNumber(value.total)
     && isFiniteNumber(value.page)
     && isFiniteNumber(value.pageSize)
+  );
+}
+
+export type RepeatComplainantSearchData = { people: RepeatPersonRowForClient[] };
+
+/** /api/analytics/repeat-complainants/search response: `{ people: [...] }`. */
+export function isRepeatComplainantSearchData(value: unknown): value is RepeatComplainantSearchData {
+  return isRecord(value) && Array.isArray(value.people) && value.people.every(isPersonRow);
+}
+
+function isPersonComplaintRow(value: unknown): value is PersonComplaintRow {
+  return (
+    isRecord(value)
+    && typeof value.complaintId === "string"
+    && typeof value.complaintNumber === "string"
+    && typeof value.date === "string"
+    && typeof value.region === "string"
+    && typeof value.facility === "string"
+    && typeof value.classificationId === "string"
+    && typeof value.classificationLabel === "string"
+    && typeof value.subject === "string"
+    && (value.descriptionSnippet === null || typeof value.descriptionSnippet === "string")
+    && typeof value.status === "string"
+    && typeof value.monthKey === "string"
+  );
+}
+
+function isPersonComplaintTypeGroup(value: unknown): value is PersonComplaintTypeGroup {
+  return (
+    isRecord(value)
+    && typeof value.classificationId === "string"
+    && typeof value.label === "string"
+    && Array.isArray(value.complaints)
+    && value.complaints.every(isPersonComplaintRow)
+  );
+}
+
+function isPersonTimelinePoint(value: unknown): value is PersonTimelinePoint {
+  return (
+    isRecord(value)
+    && typeof value.monthKey === "string"
+    && typeof value.monthLabel === "string"
+    && isFiniteNumber(value.count)
+  );
+}
+
+/** /api/analytics/repeat-complainants/person — full detail for one person, fetched on demand. */
+export function isRepeatComplainantPersonDetail(value: unknown): value is RepeatComplainantPersonDetail {
+  return (
+    isRecord(value)
+    && isPersonRow(value.person)
+    && Array.isArray(value.complaints)
+    && value.complaints.every(isPersonComplaintRow)
+    && Array.isArray(value.complaintsByType)
+    && value.complaintsByType.every(isPersonComplaintTypeGroup)
+    && Array.isArray(value.timeline)
+    && value.timeline.every(isPersonTimelinePoint)
   );
 }
 

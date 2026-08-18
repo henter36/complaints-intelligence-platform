@@ -40,6 +40,7 @@ function record(overrides: Partial<RepeatDirectoryRecord> & { complaintId: strin
   return {
     complaintId: overrides.complaintId,
     complainantIdentifier: overrides.complainantIdentifier ?? "1234567890",
+    complainantName: overrides.complainantName ?? null,
     region: overrides.region ?? "منطقة الرياض",
     facility: overrides.facility ?? "سجن أ",
     classificationId: overrides.classificationId ?? "cls-food",
@@ -51,16 +52,16 @@ function record(overrides: Partial<RepeatDirectoryRecord> & { complaintId: strin
 }
 
 describe("maskComplainantIdentifier", () => {
-  it("keeps the last 4 characters visible and masks the rest, per spec example format", () => {
-    expect(maskComplainantIdentifier("1234567894821")).toBe("*********4821");
+  it("uses the established codebase masking convention: fixed '****' prefix + last 4 characters", () => {
+    expect(maskComplainantIdentifier("1234567894821")).toBe("****4821");
     expect(maskComplainantIdentifier("10004821")).toBe("****4821");
   });
 
-  it("never exposes more than the last 4 characters even for short identifiers", () => {
-    expect(maskComplainantIdentifier("123")).toBe("*23");
-    expect(maskComplainantIdentifier("12345")).toBe("*2345");
-    expect(maskComplainantIdentifier("1")).toBe("*");
-    expect(maskComplainantIdentifier("")).toBe("");
+  it("never leaks the identifier's true length — always exactly 4 stars regardless of input length", () => {
+    expect(maskComplainantIdentifier("123")).toBe("****");
+    expect(maskComplainantIdentifier("12345")).toBe("****2345");
+    expect(maskComplainantIdentifier("1")).toBe("****");
+    expect(maskComplainantIdentifier("")).toBe("****");
   });
 });
 
@@ -225,6 +226,69 @@ describe("buildRepeatComplainantDirectory", () => {
     const row = directory.facilities.find((f) => f.facility === "سجن هـ")!;
     expect(Number.isFinite(row.priorityScore)).toBe(true);
     expect(["HIGH", "MEDIUM", "LOW"]).toContain(row.priorityBand);
+  });
+});
+
+describe("buildRepeatComplainantDirectory — name, dates, drilldownFilters, recent activity", () => {
+  it("surfaces the complainant name when the import source recorded one", () => {
+    const records = [
+      record({ complaintId: "n1", complainantIdentifier: "P10", complainantName: "محمد أحمد" }),
+      record({ complaintId: "n2", complainantIdentifier: "P10", complainantName: "محمد أحمد" }),
+    ];
+    const directory = buildRepeatComplainantDirectory(records, 10);
+    expect(directory.people[0]!.complainantName).toBe("محمد أحمد");
+  });
+
+  it("never fabricates a name — stays null when the source never recorded one", () => {
+    const records = [
+      record({ complaintId: "n3", complainantIdentifier: "P11", complainantName: null }),
+      record({ complaintId: "n4", complainantIdentifier: "P11", complainantName: null }),
+    ];
+    const directory = buildRepeatComplainantDirectory(records, 10);
+    expect(directory.people[0]!.complainantName).toBeNull();
+  });
+
+  it("tracks firstComplaintDate and lastComplaintDate independently", () => {
+    const records = [
+      record({ complaintId: "d1", complainantIdentifier: "P12", effectiveDate: "2026-01-05" }),
+      record({ complaintId: "d2", complainantIdentifier: "P12", effectiveDate: "2026-03-20" }),
+      record({ complaintId: "d3", complainantIdentifier: "P12", effectiveDate: "2026-02-10" }),
+    ];
+    const directory = buildRepeatComplainantDirectory(records, 10);
+    const person = directory.people[0]!;
+    expect(person.firstComplaintDate).toBe("2026-01-05");
+    expect(person.lastComplaintDate).toBe("2026-03-20");
+  });
+
+  it("never includes the identifier in drilldownFilters — only facility/region", () => {
+    const records = [
+      record({ complaintId: "e1", complainantIdentifier: "P13" }),
+      record({ complaintId: "e2", complainantIdentifier: "P13" }),
+    ];
+    const directory = buildRepeatComplainantDirectory(records, 10);
+    expect(directory.people[0]!.drilldownFilters).toEqual({ facility: "سجن أ", region: "منطقة الرياض" });
+    expect(Object.keys(directory.people[0]!.drilldownFilters)).not.toContain("complainantIdentifier");
+  });
+
+  it("flags recentActivity when most of a person's complaints land in their own most-recent month", () => {
+    const records = [
+      record({ complaintId: "r1", complainantIdentifier: "P14", effectiveDate: "2026-01-05" }),
+      record({ complaintId: "r2", complainantIdentifier: "P14", effectiveDate: "2026-03-01" }),
+      record({ complaintId: "r3", complainantIdentifier: "P14", effectiveDate: "2026-03-10" }),
+      record({ complaintId: "r4", complainantIdentifier: "P14", effectiveDate: "2026-03-15" }),
+    ];
+    const directory = buildRepeatComplainantDirectory(records, 10);
+    expect(directory.people[0]!.recentActivity).toBe(true);
+  });
+
+  it("does not flag recentActivity when complaints are evenly spread across periods", () => {
+    const records = [
+      record({ complaintId: "s1", complainantIdentifier: "P15", effectiveDate: "2026-01-05" }),
+      record({ complaintId: "s2", complainantIdentifier: "P15", effectiveDate: "2026-02-05" }),
+      record({ complaintId: "s3", complainantIdentifier: "P15", effectiveDate: "2026-03-05" }),
+    ];
+    const directory = buildRepeatComplainantDirectory(records, 10);
+    expect(directory.people[0]!.recentActivity).toBe(false);
   });
 });
 

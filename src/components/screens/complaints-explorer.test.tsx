@@ -18,7 +18,7 @@ const baseFilters: FilterState = {
   departmentId: "الدعم",
   facility: "سجن الحائر",
   classificationId: "cls_1",
-  complainantIdentifier: "9988776655",
+  complainantToken: "opaque-token-value",
   channel: "الهاتف",
   status: "OPEN",
   priority: "HIGH",
@@ -87,17 +87,18 @@ describe("complaints explorer helpers", () => {
     expect(exportQuery.get("aiAnalyzed")).toBe("true");
   });
 
-  it("carries the raw complainantIdentifier through the URL query (repeat-complainant drillthrough)", () => {
+  it("carries the opaque complainantToken (never a raw identifier) through the URL query", () => {
     const listQuery = buildComplaintQuery(baseFilters, "receivedDate", "desc");
-    expect(listQuery.get("complainantIdentifier")).toBe("9988776655");
+    expect(listQuery.get("complainantToken")).toBe("opaque-token-value");
+    expect(listQuery.get("complainantIdentifier")).toBeNull();
   });
 
-  it("counts complainantIdentifier as an active filter and allows clearing it alone", () => {
-    const withId = { ...baseFilters };
-    const withoutId = { ...baseFilters, complainantIdentifier: "" };
-    expect(countActiveFilters(withId)).toBe(countActiveFilters(withoutId) + 1);
-    const cleared = buildComplaintQuery(withoutId, "receivedDate", "desc");
-    expect(cleared.get("complainantIdentifier")).toBeNull();
+  it("counts complainantToken as an active filter and allows clearing it alone", () => {
+    const withToken = { ...baseFilters };
+    const withoutToken = { ...baseFilters, complainantToken: "" };
+    expect(countActiveFilters(withToken)).toBe(countActiveFilters(withoutToken) + 1);
+    const cleared = buildComplaintQuery(withoutToken, "receivedDate", "desc");
+    expect(cleared.get("complainantToken")).toBeNull();
   });
 
   it("counts dataFreshnessBucket in active filters and allows clearing it alone", () => {
@@ -278,8 +279,8 @@ describe("complaints explorer dataFreshnessBucket UI", () => {
     expect(facilityTrigger).toHaveTextContent("سجن الحائر");
   });
 
-  it("reads complainantIdentifier from the URL on mount and sends it on every list fetch (reload-safe drillthrough)", async () => {
-    window.history.replaceState(null, "", "/?complainantIdentifier=9988776655&facility=سجن+الحائر");
+  it("reads complainantToken from the URL on mount and sends it on every list fetch (reload-safe drillthrough)", async () => {
+    window.history.replaceState(null, "", "/?complainantToken=opaque-abc123&facility=سجن+الحائر");
 
     const fetchSpy = vi.fn(async (input: RequestInfo) => {
       const url = String(input);
@@ -298,7 +299,8 @@ describe("complaints explorer dataFreshnessBucket UI", () => {
     await waitFor(() => {
       const listCall = fetchSpy.mock.calls.find(([input]) => String(input).includes("/api/complaints") && !String(input).includes("/api/complaints/export"));
       expect(listCall).toBeDefined();
-      expect(String(listCall![0])).toContain("complainantIdentifier=9988776655");
+      expect(String(listCall![0])).toContain("complainantToken=opaque-abc123");
+      expect(String(listCall![0])).not.toContain("complainantIdentifier=");
     });
   });
 

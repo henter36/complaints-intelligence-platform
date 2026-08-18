@@ -5,6 +5,7 @@ import {
   listComplaints,
   parseComplaintQuery,
 } from "./complaint-query-service";
+import { encodeComplainantToken } from "./complainant-token";
 
 const dbMocks = vi.hoisted(() => ({
   findMany: vi.fn(),
@@ -74,13 +75,20 @@ describe("central complaint query service", () => {
     expect(where.AND).toEqual([{ classificationId: { not: null } }]);
   });
 
-  it("filters by an exact complainantIdentifier match (repeat-complainant drillthrough)", () => {
-    const parsed = parseComplaintQuery(query("complainantIdentifier=9988776655"));
+  it("decodes an opaque complainantToken server-side into the real identifier (never a raw identifier in the query)", () => {
+    const token = encodeComplainantToken("9988776655");
+    const parsed = parseComplaintQuery(query(`complainantToken=${encodeURIComponent(token)}`));
     const where = buildComplaintWhere(parsed);
     expect(where.complainantIdentifier).toBe("9988776655");
   });
 
-  it("omits complainantIdentifier from the where clause when absent", () => {
+  it("fails closed (matches nothing) for a garbled/tampered complainantToken, never widening to no filter", () => {
+    const parsed = parseComplaintQuery(query("complainantToken=not-a-real-token"));
+    const where = buildComplaintWhere(parsed);
+    expect(where.complainantIdentifier).toBe("__INVALID_COMPLAINANT_TOKEN__");
+  });
+
+  it("omits complainantIdentifier from the where clause when no token is given", () => {
     const parsed = parseComplaintQuery(query(""));
     const where = buildComplaintWhere(parsed);
     expect(where.complainantIdentifier).toBeUndefined();

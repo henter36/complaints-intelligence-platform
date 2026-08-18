@@ -163,8 +163,8 @@ export interface FilterState {
   departmentId: string;
   facility: string;
   classificationId: string;
-  /** Exact-match drillthrough filter from the repeat-complainant directory — never surfaced as a free-text search box. */
-  complainantIdentifier: string;
+  /** Opaque, server-decoded drillthrough token from the repeat-complainant directory — never the raw identifier, never surfaced as a free-text search box. */
+  complainantToken: string;
   channel: string;
   status: string;
   priority: string;
@@ -189,7 +189,7 @@ const DEFAULT_FILTERS: FilterState = {
   departmentId: "",
   facility: "",
   classificationId: "",
-  complainantIdentifier: "",
+  complainantToken: "",
   channel: "",
   status: "",
   priority: "",
@@ -321,7 +321,7 @@ function initialFilterState(): FilterState {
     departmentId: params.get("departmentId") ?? "",
     facility: params.get("facility") ?? "",
     classificationId: params.get("classificationId") ?? "",
-    complainantIdentifier: params.get("complainantIdentifier") ?? "",
+    complainantToken: params.get("complainantToken") ?? "",
     channel: params.get("channel") ?? "",
     status: normalizeApiComplaintStatus(params.get("status") ?? ""),
     priority: params.get("priority") ?? "",
@@ -377,7 +377,7 @@ export function buildComplaintQuery(
     departmentId: filters.departmentId,
     facility: filters.facility,
     classificationId: filters.classificationId,
-    complainantIdentifier: filters.complainantIdentifier,
+    complainantToken: filters.complainantToken,
     channel: filters.channel,
     status: filters.status,
     priority: filters.priority,
@@ -563,7 +563,7 @@ export function countActiveFilters(filters: FilterState): number {
     "departmentId",
     "facility",
     "classificationId",
-    "complainantIdentifier",
+    "complainantToken",
     "channel",
     "status",
     "priority",

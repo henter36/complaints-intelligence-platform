@@ -13,6 +13,7 @@ import {
   combineComplaintWhere,
 } from "@/server/facilities/facility-operational-scope-service";
 import { normalizeFacilityName } from "@/server/facilities/facility-name";
+import { decodeComplainantToken } from "./complainant-token";
 
 const DEFAULT_PAGE = 1;
 const DEFAULT_PAGE_SIZE = 25;
@@ -80,8 +81,13 @@ const querySchema = z.object({
   departmentId: optionalText,
   categoryId: optionalText,
   classificationId: optionalText,
-  /** Exact match, never a partial/contains search — used by repeat-complainant drillthrough, never a general free-text field. */
-  complainantIdentifier: optionalText,
+  /**
+   * Opaque, server-decoded drillthrough token (never the raw identifier —
+   * see complainant-token.ts) from the repeat-complainant directory. Never
+   * exposed as a general free-text field; nothing sets this except that
+   * one drillthrough flow.
+   */
+  complainantToken: optionalText,
   importBatchId: optionalText,
   operationalScope: z.enum(["current", "historical"]).optional(),
   from: dateSchema,
@@ -331,7 +337,13 @@ function applyScalarFilters(where: Prisma.ComplaintWhereInput, query: ComplaintQ
   if (query.department ?? query.departmentId) where.department = query.department ?? query.departmentId;
   if (query.categoryId) where.categoryId = query.categoryId;
   if (query.classificationId) where.classificationId = query.classificationId;
-  if (query.complainantIdentifier) where.complainantIdentifier = query.complainantIdentifier;
+  if (query.complainantToken) {
+    // A malformed/foreign/tampered token must filter to nothing, never to
+    // "no filter at all" — that would silently widen the result set to
+    // every complaint instead of failing closed.
+    const decoded = decodeComplainantToken(query.complainantToken);
+    where.complainantIdentifier = decoded ?? "__INVALID_COMPLAINANT_TOKEN__";
+  }
   if (query.isRepeated !== undefined) where.isRepeated = query.isRepeated;
   if (query.isValidated !== undefined) where.isValidated = query.isValidated;
   if (query.aiAnalyzed !== undefined) where.aiAnalyzedAt = query.aiAnalyzed ? { not: null } : null;

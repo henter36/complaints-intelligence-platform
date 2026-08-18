@@ -7,6 +7,13 @@ import { normalizeRegionName, displayRegionName } from "@/lib/reports/region-nor
 import { computePriorityScore, type PriorityBand } from "./priority-score";
 import { PATTERN_ANALYSIS_CONFIG, type PatternAnalysisConfig } from "./pattern-analysis-config";
 import type { AnalyticalFinding } from "./analytical-finding";
+// This module runs server-side only (consumers that also run in the browser
+// import ONLY its types via `import type`, which TypeScript erases at
+// compile time — no runtime code from here, or from this import, ever
+// reaches a client bundle). Reusing the codebase's one established PII
+// masking convention (already relied on to keep identifiers out of AI
+// payloads/fingerprints) instead of inventing a second masking format.
+import { maskIdentifier } from "@/server/imports/privacy";
 
 /**
  * General-purpose "repeat complainant directory" — deliberately distinct
@@ -22,6 +29,8 @@ import type { AnalyticalFinding } from "./analytical-finding";
 export type RepeatDirectoryRecord = {
   complaintId: string;
   complainantIdentifier: string | null;
+  /** As stored on the complaint (from the import source's "اسم مقدم الشكوى"/"اسم السجين" column) — never inferred from the identifier, never fabricated when absent. */
+  complainantName: string | null;
   /** Raw region as stored on the complaint; normalized internally. */
   region: string | null;
   facility: string;
@@ -34,7 +43,7 @@ export type RepeatDirectoryRecord = {
 };
 
 /** A technical import duplicate is never a real complaint — excluded from every count, not just repeat evidence. */
-export function isTechnicalDuplicate(record: RepeatDirectoryRecord): boolean {
+export function isTechnicalDuplicate(record: Pick<RepeatDirectoryRecord, "isPotentialDuplicate" | "duplicateOfId">): boolean {
   return record.isPotentialDuplicate || Boolean(record.duplicateOfId);
 }
 
@@ -46,18 +55,14 @@ function isEligible(record: RepeatDirectoryRecord): boolean {
 }
 
 /**
- * `*******4821`-style masking (spec: never show the raw identifier in
- * general tables/cards/exports) — keeps up to the last 4 characters visible,
- * masks the rest with `*`, so two masked values are still visually
- * distinguishable without exposing the underlying value.
+ * `****4821`-style masking (spec: never show the raw identifier in general
+ * tables/cards/exports) — a fixed-length `****` prefix plus the last 4
+ * characters, so the identifier's true LENGTH is never leaked either (the
+ * established codebase convention — see `server/imports/privacy.ts`, already
+ * relied on to keep identifiers out of AI payloads/fingerprints).
  */
 export function maskComplainantIdentifier(identifier: string): string {
-  const trimmed = identifier.trim();
-  if (trimmed.length === 0) return "";
-  const visibleCount = Math.min(4, Math.max(0, trimmed.length - 1));
-  const visible = visibleCount > 0 ? trimmed.slice(trimmed.length - visibleCount) : "";
-  const maskedCount = trimmed.length - visibleCount;
-  return `${"*".repeat(maskedCount)}${visible}`;
+  return maskIdentifier(identifier);
 }
 
 function monthKeyOf(effectiveDate: string): string {
@@ -71,11 +76,15 @@ export type RepeatPersonPattern = "CONCENTRATED" | "DIVERSE";
 
 /** Share of a person's complaints in their single most-common type at/above which the pattern is "concentrated". */
 const CONCENTRATION_SHARE_THRESHOLD = 0.6;
+/** Share of a person's complaints falling in their own most-recent month at/above which "نشاط حديث" applies. */
+const RECENT_ACTIVITY_SHARE_THRESHOLD = 0.5;
 
 export type RepeatPersonRow = {
   complainantIdentifierMasked: string;
-  /** Internal-use only — never rendered as visible text; used solely to build drillthrough filters. */
+  /** Internal-use only — never rendered as visible text, never put in a URL; used only for the explicit reveal toggle (client-state, never URL state) and to derive the drillthrough token server-side. */
   complainantIdentifierRaw: string;
+  /** From the import source; null (never inferred/fabricated) when the source never recorded a name. */
+  complainantName: string | null;
   region: string;
   facility: string;
   totalComplaints: number;
@@ -83,14 +92,18 @@ export type RepeatPersonRow = {
   sameTypeRepeatCount: number;
   distinctComplaintTypesCount: number;
   topComplaintTypes: ComplaintTypeCount[];
+  firstComplaintDate: string;
   lastComplaintDate: string;
   /** Distinct calendar months this person's complaints fall in, within the queried range. */
   periodsPresent: number;
   spansMultiplePeriods: boolean;
+  /** Most of this person's complaints landed in their own most-recent month within the range ("نشاط حديث") — independent of `pattern`, not mutually exclusive with it. */
+  recentActivity: boolean;
   pattern: RepeatPersonPattern;
   /** Capped list of complaint ids for evidence; drillthrough itself uses the filters below, not this list. */
   complaintIds: string[];
-  drilldownFilters: { complainantIdentifier: string; facility: string; region: string };
+  /** Never includes the identifier — the server layer attaches an opaque `complainantToken` on top of this for drillthrough (see `attachPersonDrillthroughTokens`). */
+  drilldownFilters: { facility: string; region: string };
 };
 
 export type RepeatFacilitySummaryRow = {
@@ -139,6 +152,8 @@ export type RepeatComplainantDirectory = {
 
 type PersonGroup = {
   complainantIdentifier: string;
+  /** The most-recently-seen non-empty name for this person in the scanned records; names are never merged/guessed across conflicting values. */
+  complainantName: string | null;
   region: string;
   facility: string;
   complaintIds: string[];
@@ -166,26 +181,33 @@ function buildPersonRow(group: PersonGroup): RepeatPersonRow {
   const topType = topComplaintTypes[0] ?? null;
   const sameTypeRepeatCount = topType && topType.count >= 2 ? topType.count : 0;
   const distinctComplaintTypesCount = group.typeCounts.size;
+  const sortedDates = [...group.effectiveDates].sort();
   const periodsPresent = new Set(group.effectiveDates.map(monthKeyOf)).size;
-  const lastComplaintDate = [...group.effectiveDates].sort().at(-1) ?? "";
+  const firstComplaintDate = sortedDates[0] ?? "";
+  const lastComplaintDate = sortedDates.at(-1) ?? "";
   const concentrationShare = totalComplaints > 0 ? (topType?.count ?? 0) / totalComplaints : 0;
+  const mostRecentMonth = monthKeyOf(lastComplaintDate);
+  const complaintsInMostRecentMonth = group.effectiveDates.filter((d) => monthKeyOf(d) === mostRecentMonth).length;
+  const recentActivityShare = totalComplaints > 0 ? complaintsInMostRecentMonth / totalComplaints : 0;
 
   return {
     complainantIdentifierMasked: maskComplainantIdentifier(group.complainantIdentifier),
     complainantIdentifierRaw: group.complainantIdentifier,
+    complainantName: group.complainantName,
     region: group.region,
     facility: group.facility,
     totalComplaints,
     sameTypeRepeatCount,
     distinctComplaintTypesCount,
     topComplaintTypes,
+    firstComplaintDate,
     lastComplaintDate,
     periodsPresent,
     spansMultiplePeriods: periodsPresent >= 2,
+    recentActivity: periodsPresent >= 2 && recentActivityShare >= RECENT_ACTIVITY_SHARE_THRESHOLD,
     pattern: concentrationShare >= CONCENTRATION_SHARE_THRESHOLD ? "CONCENTRATED" : "DIVERSE",
     complaintIds: group.complaintIds.slice(0, MAX_EVIDENCE_IDS),
     drilldownFilters: {
-      complainantIdentifier: group.complainantIdentifier,
       facility: group.facility,
       region: group.region,
     },
@@ -266,6 +288,7 @@ export function buildRepeatComplainantDirectory(
 
     const group = groups.get(groupKey) ?? {
       complainantIdentifier: record.complainantIdentifier!,
+      complainantName: null,
       region,
       facility,
       complaintIds: [],
@@ -274,6 +297,7 @@ export function buildRepeatComplainantDirectory(
     };
     group.complaintIds.push(record.complaintId);
     group.effectiveDates.push(record.effectiveDate);
+    if (record.complainantName?.trim()) group.complainantName = record.complainantName.trim();
     const typeEntry = group.typeCounts.get(typeKey) ?? { label: typeLabel, count: 0 };
     typeEntry.count += 1;
     group.typeCounts.set(typeKey, typeEntry);

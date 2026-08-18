@@ -1,5 +1,6 @@
 import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
+import { normalizeArabic } from "@/server/imports/arabic-normalize";
 import {
   buildComplaintWhere,
   parseComplaintQuery,
@@ -12,6 +13,7 @@ import {
   loadFacilityOperationalRegistry,
 } from "@/server/facilities/facility-operational-scope-service";
 import { loadPatternAnalysisForFilters } from "@/server/analytics/pattern/pattern-report-integration-service";
+import { encodeComplainantToken } from "@/server/complaints/complainant-token";
 import {
   buildRepeatComplainantDirectory,
   buildRepeatComplainantConclusions,
@@ -20,7 +22,18 @@ import {
   type RepeatComplainantDirectory,
   type RepeatComplainantDirectoryOptions,
   type RepeatDirectoryRecord,
+  type RepeatPersonRow,
 } from "@/lib/analytics/repeat-complainant-directory";
+
+/** The only shape a person row is ever sent to the client in — the raw identifier stays server-side, replaced by an opaque drillthrough token. */
+export type RepeatPersonRowForClient = Omit<RepeatPersonRow, "complainantIdentifierRaw"> & {
+  complainantToken: string;
+};
+
+export function toClientPersonRow(person: RepeatPersonRow): RepeatPersonRowForClient {
+  const { complainantIdentifierRaw, ...rest } = person;
+  return { ...rest, complainantToken: encodeComplainantToken(complainantIdentifierRaw) };
+}
 
 /**
  * ONE lean `findMany` (no N+1) — mirrors the exact select/eligibility
@@ -38,6 +51,7 @@ const repeatSelect = {
   classificationId: true,
   classification: { select: { nameAr: true } },
   complainantIdentifier: true,
+  complainantName: true,
   isPotentialDuplicate: true,
   duplicateOfId: true,
 } satisfies Prisma.ComplaintSelect;
@@ -72,6 +86,7 @@ export async function fetchScopedRecords(
     records.push({
       complaintId: row.id,
       complainantIdentifier: row.complainantIdentifier,
+      complainantName: row.complainantName,
       region: row.region,
       facility: row.facility?.trim() || "غير محدد",
       classificationId: row.classificationId,
@@ -107,15 +122,17 @@ function parseDirectoryOptions(params: URLSearchParams): RepeatComplainantDirect
 }
 
 /**
- * Summary endpoint data: KPIs + facility/region rollups only — never the
- * full person list (spec: don't make the whole Analytics load wait on every
- * person's detail; those are fetched lazily per facility, see
- * `repeat-complainant-people-service.ts`).
+ * Shared by the summary endpoint and the PDF export: fetch + aggregate +
+ * enrich with pattern-engine signals. `params` are the same query params
+ * used everywhere in this feature (period/region/facility/classification +
+ * the local minComplaints/sameTypeOnly/minDistinctTypes/topFacilities
+ * filters), so "ما يظهر في PDF = نفس نطاق البيانات الظاهر في التحليل" holds
+ * by construction — one code path, not two.
  */
-export async function getRepeatComplainantSummary(
+async function buildEnrichedDirectory(
   params: URLSearchParams,
-  now: Date = new Date()
-): Promise<RepeatComplainantSummary> {
+  now: Date
+): Promise<RepeatComplainantDirectory> {
   const query = parseComplaintQuery(params);
   const options = parseDirectoryOptions(params);
   const { records, totalComplaintsInScope } = await fetchScopedRecords(query, now);
@@ -146,11 +163,86 @@ export async function getRepeatComplainantSummary(
   const topFacilities = params.get("topFacilities");
   if (topFacilities) facilities = facilities.slice(0, Number(topFacilities));
 
-  const enrichedDirectory: RepeatComplainantDirectory = { ...directory, facilities };
+  return { ...directory, facilities };
+}
+
+/**
+ * Summary endpoint data: KPIs + facility/region rollups only — never the
+ * full person list (spec: don't make the whole Analytics load wait on every
+ * person's detail; those are fetched lazily per facility, see
+ * `repeat-complainant-people-service.ts`).
+ */
+export async function getRepeatComplainantSummary(
+  params: URLSearchParams,
+  now: Date = new Date()
+): Promise<RepeatComplainantSummary> {
+  const directory = await buildEnrichedDirectory(params, now);
   return {
     kpis: directory.kpis,
     regions: directory.regions,
-    facilities,
-    conclusions: buildRepeatComplainantConclusions(enrichedDirectory),
+    facilities: directory.facilities,
+    conclusions: buildRepeatComplainantConclusions(directory),
   };
+}
+
+export type RepeatComplainantExportData = {
+  kpis: RepeatComplainantDirectory["kpis"];
+  regions: RepeatComplainantDirectory["regions"];
+  facilities: RepeatComplainantDirectory["facilities"];
+  conclusions: string[];
+  /** The FULL org-wide (filter-scoped) person list — PDF export only, never sent to the summary/tab UI. */
+  people: RepeatPersonRowForClient[];
+};
+
+/** Only ever called from the PDF export route — loads the full person list, unlike the summary endpoint. */
+export async function getRepeatComplainantExportData(
+  params: URLSearchParams,
+  now: Date = new Date()
+): Promise<RepeatComplainantExportData> {
+  const directory = await buildEnrichedDirectory(params, now);
+  return {
+    kpis: directory.kpis,
+    regions: directory.regions,
+    facilities: directory.facilities,
+    conclusions: buildRepeatComplainantConclusions(directory),
+    people: directory.people.map(toClientPersonRow),
+  };
+}
+
+const MAX_SEARCH_RESULTS = 50;
+
+function searchKey(value: string): string {
+  return normalizeArabic(value).toLocaleLowerCase("ar-SA");
+}
+
+/**
+ * Org-wide person search by name/identifier/region/facility/classification
+ * (spec §2), scoped by the same filters as the main directory. Deliberately
+ * a POST body in the route layer (never a GET query string) — an identifier
+ * or name typed into search must never land in the URL/browser history the
+ * way a bookmarkable filter would.
+ */
+export async function searchRepeatComplainants(
+  q: string,
+  params: URLSearchParams,
+  now: Date = new Date()
+): Promise<RepeatPersonRowForClient[]> {
+  const trimmed = q.trim();
+  if (!trimmed) return [];
+  const needle = searchKey(trimmed);
+
+  const query = parseComplaintQuery(params);
+  const options = parseDirectoryOptions(params);
+  const { records, totalComplaintsInScope } = await fetchScopedRecords(query, now);
+  const directory = buildRepeatComplainantDirectory(records, totalComplaintsInScope, undefined, options);
+
+  const matches = directory.people.filter((person) => {
+    if (person.complainantName && searchKey(person.complainantName).includes(needle)) return true;
+    if (person.complainantIdentifierRaw.includes(trimmed)) return true;
+    if (searchKey(person.region).includes(needle)) return true;
+    if (searchKey(person.facility).includes(needle)) return true;
+    return person.topComplaintTypes.some((t) => searchKey(t.label).includes(needle));
+  });
+
+  return matches.slice(0, MAX_SEARCH_RESULTS).map(toClientPersonRow);
 }

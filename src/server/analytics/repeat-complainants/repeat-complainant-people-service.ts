@@ -1,9 +1,9 @@
 import { parseComplaintQuery } from "@/server/complaints/complaint-query-service";
 import { buildRepeatComplainantDirectory, type RepeatComplainantDirectoryOptions, type RepeatPersonRow } from "@/lib/analytics/repeat-complainant-directory";
-import { fetchScopedRecords } from "./repeat-complainant-analytics-service";
+import { fetchScopedRecords, toClientPersonRow, type RepeatPersonRowForClient } from "./repeat-complainant-analytics-service";
 
 export type RepeatComplainantPeoplePage = {
-  people: RepeatPersonRow[];
+  people: RepeatPersonRowForClient[];
   total: number;
   page: number;
   pageSize: number;
@@ -12,12 +12,17 @@ export type RepeatComplainantPeoplePage = {
 const DEFAULT_PAGE_SIZE = 25;
 const MAX_PAGE_SIZE = 100;
 
-export type PeopleSortKey = "totalComplaints" | "lastComplaintDate" | "distinctComplaintTypesCount";
+export type PeopleSortKey =
+  | "totalComplaints"
+  | "lastComplaintDate"
+  | "distinctComplaintTypesCount"
+  | "sameTypeRepeatCount";
 
 const SORT_COMPARATORS: Record<PeopleSortKey, (a: RepeatPersonRow, b: RepeatPersonRow) => number> = {
   totalComplaints: (a, b) => b.totalComplaints - a.totalComplaints,
   lastComplaintDate: (a, b) => b.lastComplaintDate.localeCompare(a.lastComplaintDate),
   distinctComplaintTypesCount: (a, b) => b.distinctComplaintTypesCount - a.distinctComplaintTypesCount,
+  sameTypeRepeatCount: (a, b) => b.sameTypeRepeatCount - a.sameTypeRepeatCount,
 };
 
 function parseDirectoryOptions(params: URLSearchParams): RepeatComplainantDirectoryOptions {
@@ -56,7 +61,7 @@ export async function getRepeatComplainantPeoplePage(
   const page = Math.max(1, Number(params.get("page") ?? "1") || 1);
   const pageSize = Math.min(MAX_PAGE_SIZE, Math.max(1, Number(params.get("pageSize") ?? String(DEFAULT_PAGE_SIZE)) || DEFAULT_PAGE_SIZE));
   const start = (page - 1) * pageSize;
-  const people = sorted.slice(start, start + pageSize);
+  const people = sorted.slice(start, start + pageSize).map(toClientPersonRow);
 
   return { people, total: sorted.length, page, pageSize };
 }
