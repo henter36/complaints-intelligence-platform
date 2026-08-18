@@ -10,19 +10,18 @@
 // Never uses a fixed sleep to wait for the server — polls with a bounded
 // timeout — and always kills the child process, even on failure.
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function arg(name, fallback) {
   const flag = `--${name}=`;
   const found = process.argv.find((a) => a.startsWith(flag));
-  return found ? found.slice(flag.length) : (process.env[name.toUpperCase().replace(/-/g, "_")] ?? fallback);
+  return found ? found.slice(flag.length) : (process.env[name.toUpperCase().replaceAll("-", "_")] ?? fallback);
 }
 
 const STANDALONE_DIR = path.resolve(arg("standalone-dir", path.join(ROOT, ".next", "standalone")));
@@ -45,9 +44,15 @@ function ok(label) {
   console.log(`  ✓ ${label}`);
 }
 
+function formatLabel(label, detail) {
+  const suffix = detail ? ` — ${detail}` : "";
+  return `${label}${suffix}`;
+}
+
 function recordFailure(label, detail) {
-  failures.push(`${label}${detail ? ` — ${detail}` : ""}`);
-  console.error(`  ✗ ${label}${detail ? ` — ${detail}` : ""}`);
+  const message = formatLabel(label, detail);
+  failures.push(message);
+  console.error(`  ✗ ${message}`);
 }
 
 /** A migrated, throwaway SQLite DB — never prisma/dev.db. */
@@ -56,7 +61,12 @@ function prepareTempDatabase() {
   const dbPath = path.join(tempDbDir, "smoke.db");
   const databaseUrl = `file:${dbPath}`;
   log(`Preparing temp database at ${dbPath}`);
-  execFileSync("npx", ["prisma", "migrate", "deploy"], {
+  // The local prisma CLI binary by absolute path, not a bare "npx" resolved
+  // via PATH (Sonar S4036: a PATH-resolved command can be shadowed by
+  // anything earlier on PATH — irrelevant to a solo dev machine, but this
+  // runs unattended in CI too).
+  const prismaBin = path.join(ROOT, "node_modules", ".bin", "prisma");
+  execFileSync(prismaBin, ["migrate", "deploy"], {
     cwd: ROOT,
     env: { ...process.env, DATABASE_URL: databaseUrl },
     stdio: "inherit",
@@ -195,9 +205,11 @@ async function main() {
   console.log("\n✓ Standalone runtime smoke passed.");
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error("Standalone runtime smoke error:", err instanceof Error ? err.message : err);
-  if (child && child.exitCode === null) child.kill("SIGKILL");
+  if (child?.exitCode === null) child.kill("SIGKILL");
   if (tempDbDir) rmSync(tempDbDir, { recursive: true, force: true });
   process.exit(1);
-});
+}
