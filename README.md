@@ -73,7 +73,7 @@ npm run build
 npm run audit:runtime
 ```
 
-Runtime high audit is expected to pass. Known exception: the full audit currently reports high findings in development tooling through `brace-expansion`/`minimatch` chains:
+Runtime high audit is expected to pass. Known exception: the full audit currently reports high findings in development tooling through `brace-expansion`/`minimatch` chains, and through `deepmerge-ts` (a transitive dependency of the `prisma` CLI's `@prisma/config`, with no fix available within the Prisma 6.x line — `prisma` is a devDependency, so `npm run audit:runtime` never sees it):
 
 ```bash
 npm audit --audit-level=high

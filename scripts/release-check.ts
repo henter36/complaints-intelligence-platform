@@ -127,6 +127,41 @@ function checkPrismaSchema() {
   pass("prisma_schema");
 }
 
+/**
+ * Regression guard for the `prisma` CLI vs `@prisma/client` dependency split
+ * (see docs/production-deployment-guide.md#dependency-policy). `prisma` is a
+ * build/deploy CLI tool — it pulls in `@prisma/config` -> `deepmerge-ts`,
+ * which has no fix within the Prisma 6.x line (GHSA-ggr8-5vv4-36mx) — so it
+ * must live in devDependencies, where `npm audit --omit=dev` (the CI
+ * "Runtime high vulnerability audit" hard gate) never sees it. `@prisma/client`
+ * is the actual runtime dependency (the generated client the app imports) and
+ * must stay in dependencies. If either regresses, the runtime audit gate
+ * silently starts failing again on the next Prisma/deepmerge-ts advisory.
+ */
+function checkDependencyClassification() {
+  const pkgPath = path.join(ROOT, "package.json");
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as {
+    dependencies?: Record<string, string>;
+    devDependencies?: Record<string, string>;
+  };
+  const deps = pkg.dependencies ?? {};
+  const devDeps = pkg.devDependencies ?? {};
+
+  if (deps.prisma) {
+    fail("dependency_classification", "\"prisma\" (the CLI) must not be in dependencies — move it to devDependencies (see docs/production-deployment-guide.md#dependency-policy)");
+    return;
+  }
+  if (!devDeps.prisma) {
+    fail("dependency_classification", "\"prisma\" (the CLI) is missing from devDependencies");
+    return;
+  }
+  if (!deps["@prisma/client"]) {
+    fail("dependency_classification", "\"@prisma/client\" is missing from dependencies — the app cannot run without it");
+    return;
+  }
+  pass("dependency_classification", "prisma is dev-only, @prisma/client is a runtime dependency");
+}
+
 function checkGitignore() {
   const gitignorePath = path.join(ROOT, ".gitignore");
   if (!fs.existsSync(gitignorePath)) { fail("gitignore", ".gitignore not found"); return; }
@@ -187,6 +222,7 @@ async function main() {
   checkUncommittedChanges();
   checkManifest();
   checkPrismaSchema();
+  checkDependencyClassification();
   checkGitignore();
   checkStorageDirectories();
   checkNodeVersion();

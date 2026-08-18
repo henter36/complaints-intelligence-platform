@@ -70,9 +70,14 @@ jobs:
         run: npm run audit:runtime
 
       - name: Full high vulnerability audit
-        # Dev tooling vulnerabilities (brace-expansion, minimatch, eslint-config-next, @vitest/coverage-v8)
-        # have no available fix without major breaking upgrades. Runtime audit above is the hard gate.
-        # Tracked for resolution when upstream packages publish fixes.
+        # Dev tooling vulnerabilities (brace-expansion, minimatch, eslint-config-next,
+        # @vitest/coverage-v8, js-yaml, deepmerge-ts via prisma's devDependency-only
+        # CLI/@prisma/config) have no available fix without major breaking upgrades
+        # (deepmerge-ts's fix requires Prisma 7). Runtime audit above is the hard gate
+        # and is unaffected — prisma is a devDependency, so `npm audit --omit=dev`
+        # never sees this subtree. Tracked for resolution when upstream packages
+        # publish fixes (deepmerge-ts: reassess on the next Prisma 6.x patch or when
+        # a Prisma 7 migration is planned).
         run: npm audit --audit-level=high
         continue-on-error: true
 
