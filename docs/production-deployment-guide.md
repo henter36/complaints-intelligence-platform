@@ -29,6 +29,49 @@ Web-Process Footprint (optional)" at the end of this guide for a validated,
 opt-in alternative for operators who run the web process and operational
 tooling on separate hosts/containers.
 
+## Production Runtime: Next.js Standalone
+
+`next.config.ts` sets `output: "standalone"`, so `npm run build` (`next
+build && node scripts/prepare-standalone-runtime.mjs`) produces a
+self-contained `.next/standalone/` directory: a traced `node_modules`
+(generated Prisma Client included, but never the `prisma`/`tsx`/`typescript`
+CLIs — see "Dependency Policy"), `server.js`, plus `public/` and
+`.next/static/` copied in by the prepare script (Next's tracer does not
+copy those on its own — they're not `require()`d by any server code).
+`npm run start` runs that artifact directly (`node
+.next/standalone/server.js`) — **never `next start`**, which serves from
+the untraced, full `.next` build and does not match what was actually built
+and tested (CI's "Standalone runtime smoke" step boots this exact artifact
+and checks static assets, a real page render, and security headers on
+every push — see `.github/workflows/ci.yml`).
+
+### Working Directory & Paths
+
+The generated `server.js` calls `process.chdir(__dirname)` as its very
+first action — regardless of where you invoke `node .next/standalone/server.js`
+from, the running process's working directory becomes `.next/standalone/`
+itself. `src/lib/env.ts` falls back to relative paths when some env vars are
+unset (`IMPORT_STORAGE_PATH` → `./storage/imports`, `REPORT_STORAGE_PATH` →
+`./storage/reports`, `BACKUP_PATH` → `./backups`, and `DATABASE_URL` would
+fall back to `file:./dev.db` if it weren't required in production) — left
+unset, these would silently resolve to paths *inside the build artifact*
+(`.next/standalone/storage/...`), not the intended project/data
+directories. `.env.production.example` already sets all of these as
+**absolute** paths for exactly this reason — absolute paths are immune to
+`process.cwd()` regardless of what invokes the server or from where. Treat
+that as mandatory, not a suggestion: every `DATABASE_URL` /
+`IMPORT_STORAGE_PATH` / `REPORT_STORAGE_PATH` / `BACKUP_PATH` in this guide
+is an absolute path.
+
+Also worth knowing: `next build` bakes a snapshot of whatever `.env*` files
+exist on the build host at build time into `.next/standalone/.env` (a core
+Next.js behavior — the standalone directory is meant to be fully portable).
+`scripts/prepare-standalone-runtime.mjs` deletes that snapshot after every
+build so a stale or misplaced copy of your secrets never ships inside a
+build artifact — supply real env vars to the running process instead
+(the commands below do this via `VAR=... npm run start`; systemd/PM2
+examples further down use `EnvironmentFile=`/an ecosystem `env` block).
+
 ## Initial Setup
 
 ```bash
@@ -43,7 +86,9 @@ npm ci --ignore-scripts
 
 # 3. Configure environment
 cp .env.production.example .env
-# Edit .env with real values (see file comments)
+# Edit .env with real values (see file comments) — DATABASE_URL,
+# IMPORT_STORAGE_PATH, REPORT_STORAGE_PATH, and BACKUP_PATH must all be
+# absolute paths (see "Working Directory & Paths" above).
 
 # 4. Validate and generate the Prisma client, then apply migrations
 DATABASE_URL="file:/opt/complaints-platform/data/database.sqlite" npm run db:validate
@@ -65,10 +110,17 @@ mkdir -p /opt/complaints-platform/backups
 chmod 700 /opt/complaints-platform/storage
 chmod 700 /opt/complaints-platform/backups
 
-# 8. Build
+# 8. Build — produces .next/standalone/ (see "Production Runtime" above)
 npm run build
 
-# 9. Start
+# 9. Start — runs .next/standalone/server.js. Bind to 127.0.0.1 when nginx
+#    (see "HTTPS Configuration" below) is fronting it on the same host —
+#    never expose the standalone server directly to the internet.
+PORT=3000 HOSTNAME=127.0.0.1 \
+DATABASE_URL="file:/opt/complaints-platform/data/database.sqlite" \
+IMPORT_STORAGE_PATH="/opt/complaints-platform/storage/imports" \
+REPORT_STORAGE_PATH="/opt/complaints-platform/storage/reports" \
+BACKUP_PATH="/opt/complaints-platform/backups" \
 npm run start
 ```
 
@@ -91,6 +143,60 @@ server {
     }
 }
 ```
+
+## Process Management (PM2 / systemd)
+
+Either way, `WorkingDirectory`/PM2's cwd doesn't affect the app's OWN
+relative-path behavior (`server.js` always `chdir`s to its own directory —
+see "Working Directory & Paths" above); it's still good practice to set it,
+because a relative `EnvironmentFile=`/`.env` path (if you use one) resolves
+against it.
+
+**PM2:**
+
+```bash
+PORT=3000 HOSTNAME=127.0.0.1 \
+DATABASE_URL="file:/opt/complaints-platform/data/database.sqlite" \
+IMPORT_STORAGE_PATH="/opt/complaints-platform/storage/imports" \
+REPORT_STORAGE_PATH="/opt/complaints-platform/storage/reports" \
+BACKUP_PATH="/opt/complaints-platform/backups" \
+pm2 start /opt/complaints-platform/.next/standalone/server.js \
+  --name complaints-platform \
+  --cwd /opt/complaints-platform
+```
+
+(Or put the same env vars in a PM2 ecosystem file's `env` block instead of
+the command line — either way, PM2 must pass them through to the process;
+a bare `pm2 start ... --name complaints-platform` with no env vars set
+will fall back to the risky relative defaults described above.)
+
+**systemd** (`/etc/systemd/system/complaints-platform.service`):
+
+```ini
+[Unit]
+Description=Complaints Intelligence Platform
+After=network.target
+
+[Service]
+Type=simple
+User=nodeuser
+WorkingDirectory=/opt/complaints-platform
+EnvironmentFile=/opt/complaints-platform/.env
+Environment=PORT=3000
+Environment=HOSTNAME=127.0.0.1
+ExecStart=/usr/bin/node /opt/complaints-platform/.next/standalone/server.js
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`EnvironmentFile=` here should point at the real `.env` you configured in
+"Initial Setup" step 3 (on the project root, not inside
+`.next/standalone/` — that copy is deleted by the build, see "Working
+Directory & Paths"). This repo does not ship a systemd unit file; add one
+like the above at `/etc/systemd/system/` on the host if you use systemd
+instead of PM2.
 
 ## Scheduled Reports
 
@@ -160,11 +266,20 @@ pm2 start complaints-platform
 
 ## Health Monitoring
 
+Every route except `/login` and a couple of `/api/auth/*` paths requires an
+authenticated admin session cookie (see `src/proxy.ts`) — this is a
+deliberate, pre-existing application policy, not something this guide
+controls. **Both** health endpoints below return `401 UNAUTHORIZED` without
+a valid session cookie; an unauthenticated `curl` is only useful to confirm
+the process is accepting connections at all, not to read the actual
+liveness/readiness payload.
+
 ```bash
-# Liveness: always returns 200 if process is up
+# Process-up check: connects and gets a JSON response (401 without a
+# session — see note above), rather than a connection refused/timeout.
 curl http://localhost:3000/api/health/live
 
-# Readiness: checks DB, storage, auth config
+# Readiness: checks DB, storage, auth config (also 401 without a session)
 curl http://localhost:3000/api/health/ready
 
 # Integrity check
@@ -174,58 +289,71 @@ npm run integrity:check
 npm run release:check
 ```
 
+If your monitoring needs an unauthenticated liveness signal (e.g. an
+external uptime check or a load balancer health probe), authenticate it
+with a session cookie the same way an admin would, or treat the process
+itself accepting TCP connections on `PORT` as the liveness signal instead.
+Changing the health endpoints' auth requirement is a separate decision,
+out of scope here.
+
 ## Minimal Web-Process Footprint (optional)
 
-The default flow above keeps devDependencies installed for the life of the
-host, because the operational scripts under "Scheduled Reports" and
-[operations runbook](./operations-runbook.md) (`backup:*`,
-`integrity:check`, `reports:cleanup`, `release:*`, `auth:*`) are `tsx`-based
-and are meant to keep running indefinitely, not just at deploy time.
+The default flow above keeps a full checkout with devDependencies
+installed for the life of the host, because the operational scripts under
+"Scheduled Reports" and the [operations runbook](./operations-runbook.md)
+(`backup:*`, `integrity:check`, `reports:cleanup`, `release:*`, `auth:*`)
+are `tsx`-based and are meant to keep running indefinitely, not just at
+deploy time.
 
 If your topology instead runs the web process and operational tooling on
-**separate** hosts/containers (e.g. the web container only ever runs `npm
-run start`, and backups/integrity checks run from a different, fully-`npm
-ci`'d checkout against the same database/storage volumes), the web
-process's own footprint can be pruned down to production dependencies only,
-*after* build:
+**separate** hosts/containers, the standalone artifact `next build` already
+produces (see "Production Runtime: Next.js Standalone" above) *is* the
+minimal web-process footprint — there is no separate pruning step to run,
+because the standalone tracer only ever included the runtime dependencies
+(`@prisma/client` and friends) in the first place. It never needed
+`prisma`, `tsx`, `typescript`, `eslint`, or `vitest` to begin with:
+
+**Build host** (needs devDependencies — Prisma CLI generates the client
+that gets traced into the artifact):
 
 ```bash
 npm ci --ignore-scripts
-npm run db:validate
 npm run db:generate
-DATABASE_URL="..." npm run db:migrate:deploy
-npm run build
-# --legacy-peer-deps works around a pre-existing, unrelated optional peer
-# conflict (openai's optional zod@3.x peer vs. this project's zod@4.x) that
-# otherwise makes `npm prune` refuse to compute the ideal tree. `npm ci`
-# above is unaffected (it never re-resolves), so this is only needed here.
-npm prune --omit=dev --legacy-peer-deps   # removes prisma, tsx, typescript, eslint, vitest, ...
-npm run start
+npm run build   # -> .next/standalone/ (server.js, traced node_modules,
+                #    public/, .next/static/, report PDF assets — see
+                #    "Production Runtime" above)
 ```
 
-This has been verified to work: `npm audit --omit=dev --audit-level=high`
-reports 0 vulnerabilities post-prune, `prisma`/`tsx`/`typescript` are
-physically absent from `node_modules`, and a direct `@prisma/client` check
-(`new PrismaClient()` + a real query against a test database) succeeds using
-only the pruned tree — the generated client (built by `db:generate`
-*before* pruning) has no runtime dependency on the `prisma` CLI. The web
-process itself starts and serves requests (`next start` logs "Ready").
-**Note:** every route except `/login` and a couple of `/api/auth/*` paths
-requires an authenticated admin session cookie (see `src/proxy.ts`) — this
-is a pre-existing, unrelated application policy, not something pruning
-changes, so an unauthenticated `curl /api/health/live` returns 401 by
-design; point uptime monitoring at it through a session, or treat process
-liveness (`next start` logged "Ready", HTTP port accepting connections) as
-your liveness signal.
+**Deploy**: copy `.next/standalone/` to the web-only host/container by
+whatever mechanism you already use (rsync, a container COPY layer, a
+tarball) — nothing else from the repo is needed there.
 
-**After pruning, `npm run backup:create`, `npm run integrity:check`, `npm
-run reports:cleanup`, `npm run release:check`, `npm run auth:*`, and `npm
-run db:migrate:deploy` itself no longer work on this host** (they need
-`tsx`/`prisma`) — run them from an un-pruned checkout, or reinstall
-devDependencies (`npm ci --ignore-scripts`) before running them, then prune
-again afterward. `reports-run-due.ts` and `ai-cleanup.ts` still work
-post-prune (invoked via plain `node`, not `npm run` — see "Scheduled
-Reports").
+**Runtime host** — no `npm install`/`npm ci`/`npm prune` at all, no
+`prisma`/`tsx`/`typescript`, just the copied directory and Node itself:
+
+```bash
+PORT=3000 HOSTNAME=127.0.0.1 \
+DATABASE_URL="file:/opt/complaints-platform/data/database.sqlite" \
+IMPORT_STORAGE_PATH="/opt/complaints-platform/storage/imports" \
+REPORT_STORAGE_PATH="/opt/complaints-platform/storage/reports" \
+node server.js
+```
+
+This has been verified to work: a copy of `.next/standalone/` moved
+completely outside the repository (no access to its `node_modules`) boots,
+serves `/login`/static assets/`.next/static` chunks with the expected
+security headers, and a direct `@prisma/client` query against a real
+migrated test database succeeds — all using only files inside that copy.
+`npm audit --omit=dev --audit-level=high` already reports 0 vulnerabilities
+against the full `dependencies` tree (see "Dependency Policy"), so nothing
+extra needs pruning or auditing on this host.
+
+**Migrations, backups, integrity checks, and any other `tsx`-based
+operational command still need to run from a full, un-pruned checkout**
+(the build host, or a separate operational host — see "Scheduled Reports"
+and the operations runbook) — they were never part of this minimal
+artifact and copying `.next/standalone/` alone does not give you a way to
+run them.
 
 ## Cookie Security
 

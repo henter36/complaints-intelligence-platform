@@ -60,6 +60,14 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Standalone runtime smoke
+        # Hard gate: proves the ACTUAL production startup path — the
+        # standalone artifact `next build` just produced, not `next start` —
+        # boots and serves a real request (static assets, a page render,
+        # security headers) against a freshly migrated temp database. See
+        # scripts/standalone-runtime-smoke.mjs.
+        run: npm run standalone:smoke
+
       - name: Generate release manifest
         run: npm run release:manifest
 

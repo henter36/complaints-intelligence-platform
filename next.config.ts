@@ -32,6 +32,27 @@ const nextConfig: NextConfig = {
       "./src/server/reports/assets/**",
     ],
   },
+  // Without this, the standalone tracer copies whole top-level project
+  // directories it has no business including — confirmed by inspecting a
+  // real build: `.env` (build-time secrets), `backups/`, `storage/`
+  // (real uploaded imports and generated reports), and a stray
+  // `templates/` file all ended up inside `.next/standalone/`, none of
+  // them referenced by any import/require path the app actually uses at
+  // runtime. Shipping that artifact anywhere (a registry, a separate
+  // web-only host per the deployment guide's "Minimal Web-Process
+  // Footprint" section) would leak real operational data and secrets.
+  // Runtime storage/backup paths are configured via IMPORT_STORAGE_PATH /
+  // REPORT_STORAGE_PATH / BACKUP_PATH env vars (see src/lib/env.ts) — the
+  // app never reads these directories by relative path, so excluding them
+  // from the trace changes nothing about runtime behavior.
+  outputFileTracingExcludes: {
+    "*": [
+      "./storage/**",
+      "./backups/**",
+      "./templates/**",
+      "./.env*",
+    ],
+  },
   async headers() {
     return [
       {
