@@ -11,6 +11,7 @@ import type {
   RepeatFacilitySummaryRow,
   RepeatRegionSummaryRow,
   ComplaintTypeCount,
+  PersonFacilityMembership,
 } from "./repeat-complainant-directory";
 // Types only — erased at compile time, so no server runtime (node:crypto,
 // Prisma, node:fs font loading) ever reaches the client bundle. Same
@@ -119,6 +120,15 @@ export function isRepeatComplainantSummaryData(value: unknown): value is RepeatC
   );
 }
 
+function isPersonFacilityMembership(value: unknown): value is PersonFacilityMembership {
+  return (
+    isRecord(value)
+    && typeof value.region === "string"
+    && typeof value.facility === "string"
+    && isFiniteNumber(value.complaintsCount)
+  );
+}
+
 function isPersonRow(value: unknown): value is RepeatPersonRowForClient {
   return (
     isRecord(value)
@@ -127,6 +137,9 @@ function isPersonRow(value: unknown): value is RepeatPersonRowForClient {
     && (value.complainantName === null || typeof value.complainantName === "string")
     && typeof value.region === "string"
     && typeof value.facility === "string"
+    && isFiniteNumber(value.facilitiesCount)
+    && Array.isArray(value.facilities)
+    && value.facilities.every(isPersonFacilityMembership)
     && isFiniteNumber(value.totalComplaints)
     && isFiniteNumber(value.sameTypeRepeatCount)
     && isFiniteNumber(value.distinctComplaintTypesCount)

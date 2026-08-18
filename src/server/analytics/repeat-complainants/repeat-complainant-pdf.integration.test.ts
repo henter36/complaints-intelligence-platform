@@ -60,12 +60,16 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+const SECOND_FACILITY = "سجن اختبار PDF 2";
+const MULTI_FACILITY_IDENTIFIER = "9922334455";
+
 async function seed(prisma: PrismaClient) {
   const category = await prisma.category.create({ data: { nameAr: "فئة PDF", nameEn: "PDF", isActive: true } });
   const cls = await prisma.classification.create({
     data: { categoryId: category.id, nameAr: "التغذية", nameEn: "Food", isActive: true },
   });
   const key = normalizeFacilityName(FACILITY);
+  const secondKey = normalizeFacilityName(SECOND_FACILITY);
   const base = {
     subject: "شكوى اختبار PDF",
     description: "وصف تفصيلي طويل نسبياً لاختبار قص النص داخل التقرير المولد بصيغة PDF للتأكد من عدم حدوث تجاوز.",
@@ -85,6 +89,9 @@ async function seed(prisma: PrismaClient) {
       { ...base, externalId: "pdf-1", complaintDate: new Date("2026-01-05T00:00:00.000Z") },
       { ...base, externalId: "pdf-2", complaintDate: new Date("2026-01-15T00:00:00.000Z") },
       { ...base, externalId: "pdf-3", complaintDate: new Date("2026-02-05T00:00:00.000Z") },
+      // A person who appears at TWO facilities (spec §18's multi-facility PDF section).
+      { ...base, externalId: "pdf-m1", facility: FACILITY, facilityNormalizedName: key, complainantIdentifier: MULTI_FACILITY_IDENTIFIER, complainantName: "منيرة سعد", complaintDate: new Date("2026-01-06T00:00:00.000Z") },
+      { ...base, externalId: "pdf-m2", facility: SECOND_FACILITY, facilityNormalizedName: secondKey, complainantIdentifier: MULTI_FACILITY_IDENTIFIER, complainantName: "منيرة سعد", complaintDate: new Date("2026-02-06T00:00:00.000Z") },
     ],
   });
 }
@@ -187,5 +194,52 @@ describe("repeat-complainant person PDF — real db (temp sqlite)", () => {
     const rendered = collectTextCalls(textSpy);
     expect(rendered.some((t) => t.includes("pdf-1"))).toBe(true);
     expect(rendered.some((t) => t.includes("التغذية"))).toBe(true);
+  });
+
+  it("draws a per-facility breakdown section (spec §18) for a person who appears at more than one facility, when fetched org-wide", async () => {
+    const token = encodeComplainantToken(MULTI_FACILITY_IDENTIFIER);
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    const buffer = await renderRepeatComplainantPersonPdf(token, null, params("from=2026-01-01&to=2026-03-01"), {
+      includeFullIdentifier: false,
+      periodLabel: "test",
+    });
+    expect(buffer).not.toBeNull();
+    const rendered = collectTextCalls(textSpy);
+    // `preparePdfText` reverses multi-word Arabic TOKEN order for correct RTL
+    // rendering (see arabic-pdf-text.ts) — matching a single distinctive word
+    // ("السجون") is the same convention the PII-warning check below uses,
+    // rather than the full (reordered) phrase.
+    expect(rendered.some((t) => t.includes("السجون"))).toBe(true);
+    // Facility names are multi-token (Arabic + a Latin/digit token), so — same
+    // RTL word-reordering caveat as the heading above — check the tokens
+    // rather than the whole name string: "اختبار" is common to both rows
+    // (confirms the facility column rendered at all), and "2" is unique to
+    // SECOND_FACILITY's own name, confirming BOTH rows were drawn.
+    expect(rendered.filter((t) => t.includes("اختبار")).length).toBeGreaterThanOrEqual(2);
+    expect(rendered.some((t) => /(?:^|\s)2(?:\s|$)/.test(t))).toBe(true);
+  });
+
+  it("does NOT draw the multi-facility section for a single-facility person", async () => {
+    const token = encodeComplainantToken(RAW_IDENTIFIER);
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    await renderRepeatComplainantPersonPdf(token, FACILITY, params("from=2026-01-01&to=2026-03-01"), {
+      includeFullIdentifier: false,
+      periodLabel: "test",
+    });
+    const rendered = collectTextCalls(textSpy);
+    expect(rendered.some((t) => t.includes("ظهرت فيها الشكاوى"))).toBe(false);
+  });
+
+  it("scoping to ONE facility for a multi-facility person renders only that facility's complaints", async () => {
+    const token = encodeComplainantToken(MULTI_FACILITY_IDENTIFIER);
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    const buffer = await renderRepeatComplainantPersonPdf(token, FACILITY, params("from=2026-01-01&to=2026-03-01"), {
+      includeFullIdentifier: false,
+      periodLabel: "test",
+    });
+    expect(buffer).not.toBeNull();
+    const rendered = collectTextCalls(textSpy);
+    expect(rendered.some((t) => t.includes("pdf-m1"))).toBe(true);
+    expect(rendered.some((t) => t.includes("pdf-m2"))).toBe(false);
   });
 });

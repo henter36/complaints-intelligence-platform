@@ -179,6 +179,21 @@ export function drawFootersAndPageNumbers(doc: PDFKit.PDFDocument): void {
   doc.fillColor(COLORS.primary).strokeColor(COLORS.primary);
 }
 
+/**
+ * Formats one table cell's raw value for display when accessed through a
+ * generic `Record<string, unknown>` index (every actual column is typed
+ * string/number on its own row type, but `drawPaginatedTable`'s `formatCell`
+ * callback signature erases that). Makes the string/number/nullish cases
+ * explicit instead of a blind `String(value ?? "—")`, which would silently
+ * render `[object Object]` for anything that isn't actually one of those.
+ */
+export function formatScalarCell(value: unknown): string {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "number") return formatReportNumber(value);
+  if (typeof value === "string") return value;
+  return "—";
+}
+
 export const REPEAT_PDF_PAGE_SIZE = PAGE_SIZE;
 export const REPEAT_PDF_MARGIN = MARGIN;
 export const REPEAT_PDF_CONTENT_WIDTH = PAGE_SIZE[0] - MARGIN * 2;

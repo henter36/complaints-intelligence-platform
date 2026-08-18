@@ -43,7 +43,6 @@ import {
   type RepeatComplainantSummaryData,
   type RepeatComplainantPeopleData,
 } from "@/lib/analytics/repeat-complainant-api-contract";
-import { UNCLASSIFIED_CLASSIFICATION_KEY } from "@/lib/reports/classification-keys";
 import type { RepeatFacilitySummaryRow } from "@/lib/analytics/repeat-complainant-directory";
 // Types only — erased at compile time, no server runtime reaches the client bundle.
 import type { RepeatPersonRowForClient } from "@/server/analytics/repeat-complainants/repeat-complainant-analytics-service";
@@ -111,7 +110,8 @@ function patternDescription(person: RepeatPersonRowForClient): string {
 }
 
 type PeopleCacheEntry = { loading: boolean; error: string | null; data: RepeatComplainantPeopleData | null };
-type SelectedPerson = { token: string; facility: string };
+/** `facility: null` means "org-wide" (spec §12) — every complaint of this person across every facility they appear at, not just the one their row was opened from. */
+type SelectedPerson = { token: string; facility: string | null };
 type PersonDetailState = { loading: boolean; error: string | null; data: RepeatComplainantPersonDetail | null };
 
 function DrillButton({ onClick, label = "عرض الشكاوى" }: Readonly<{ onClick: () => void; label?: string }>) {
@@ -182,6 +182,11 @@ function IdentityCell({ person }: Readonly<{ person: RepeatPersonRowForClient }>
   const [value, setValue] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
+  // Cancels an in-flight reveal fetch on unmount (e.g. the person's Sheet
+  // closes, or their row scrolls out of a re-rendered list) so a late
+  // response never calls setState on an unmounted cell.
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => abortRef.current?.abort(), []);
 
   const toggle = useCallback(async () => {
     if (revealed) {
@@ -192,20 +197,27 @@ function IdentityCell({ person }: Readonly<{ person: RepeatPersonRowForClient }>
       setRevealed(true);
       return;
     }
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
     setLoading(true);
     setError(false);
     try {
-      const res = await fetch(`/api/analytics/repeat-complainants/reveal?token=${encodeURIComponent(person.complainantToken)}`);
+      const res = await fetch(`/api/analytics/repeat-complainants/reveal?token=${encodeURIComponent(person.complainantToken)}`, {
+        signal: controller.signal,
+      });
       const payload = await readJsonResponse(res);
       if (!res.ok || !isRecord(payload) || typeof payload.identifier !== "string") {
         throw new Error("failed");
       }
+      if (controller.signal.aborted) return;
       setValue(payload.identifier);
       setRevealed(true);
-    } catch {
+    } catch (e) {
+      if (isAbortError(e) || controller.signal.aborted) return;
       setError(true);
     } finally {
-      setLoading(false);
+      if (!controller.signal.aborted) setLoading(false);
     }
   }, [revealed, value, person.complainantToken]);
 
@@ -247,10 +259,12 @@ function PersonPatternBadges({ person }: Readonly<{ person: RepeatPersonRowForCl
 
 /** One row of the spec's main person table: الاسم|الهوية|المنطقة|السجن|عدد الشكاوى|أنواع الشكاوى|الأكثر تكراراً|آخر شكوى|التفاصيل */
 function PersonTableRow({
-  person, onOpenDetail,
+  person, onOpenDetail, scopeToFacility,
 }: Readonly<{
   person: RepeatPersonRowForClient;
   onOpenDetail: (selection: SelectedPerson) => void;
+  /** true inside a facility-expanded list (every row genuinely belongs to just that facility); false for org-wide search results, where opening org-wide detail (not just this person's primary facility) is the honest scope. */
+  scopeToFacility: boolean;
 }>) {
   const topType = person.topComplaintTypes[0];
   return (
@@ -258,7 +272,9 @@ function PersonTableRow({
       <TableCell className="font-medium">{person.complainantName ?? "غير متوفر"}</TableCell>
       <TableCell><IdentityCell person={person} /></TableCell>
       <TableCell className="text-muted-foreground">{person.region}</TableCell>
-      <TableCell className="max-w-[160px] truncate">{person.facility}</TableCell>
+      <TableCell className="max-w-[160px] truncate">
+        {person.facilitiesCount > 1 ? `${person.facility} (+${formatNumber(person.facilitiesCount - 1)})` : person.facility}
+      </TableCell>
       <TableCell>{formatNumber(person.totalComplaints)}</TableCell>
       <TableCell>{formatNumber(person.distinctComplaintTypesCount)}</TableCell>
       <TableCell className="max-w-[140px] truncate">{topType ? `${topType.label} (${formatNumber(topType.count)})` : "—"}</TableCell>
@@ -268,7 +284,7 @@ function PersonTableRow({
           variant="outline"
           size="sm"
           className="h-7 gap-1 px-2 text-xs"
-          onClick={() => onOpenDetail({ token: person.complainantToken, facility: person.facility })}
+          onClick={() => onOpenDetail({ token: person.complainantToken, facility: scopeToFacility ? person.facility : null })}
         >
           عرض التكرارات
         </Button>
@@ -278,11 +294,12 @@ function PersonTableRow({
 }
 
 function PeopleTable({
-  people, onOpenDetail, emptyMessage,
+  people, onOpenDetail, emptyMessage, scopeToFacility,
 }: Readonly<{
   people: RepeatPersonRowForClient[];
   onOpenDetail: (selection: SelectedPerson) => void;
   emptyMessage: string;
+  scopeToFacility: boolean;
 }>) {
   return (
     <Table>
@@ -308,7 +325,7 @@ function PeopleTable({
           </TableRow>
         )}
         {people.map((person) => (
-          <PersonTableRow key={person.complainantToken} person={person} onOpenDetail={onOpenDetail} />
+          <PersonTableRow key={person.complainantToken} person={person} onOpenDetail={onOpenDetail} scopeToFacility={scopeToFacility} />
         ))}
       </TableBody>
     </Table>
@@ -316,10 +333,12 @@ function PeopleTable({
 }
 
 function PersonDetailContent({
-  detail, sortOrder, onSortOrderChange, includeFullIdentifier, onIncludeFullIdentifierChange,
+  detail, selectedFacility, sortOrder, onSortOrderChange, includeFullIdentifier, onIncludeFullIdentifierChange,
   onExport, exporting, onNavigateToExplorer, from, to,
 }: Readonly<{
   detail: RepeatComplainantPersonDetail;
+  /** The facility this detail view was opened FROM (or null when opened org-wide) — drives the optional "شكاواه في هذا السجن" second drill button, independent of how many facilities the person actually appears at. */
+  selectedFacility: string | null;
   sortOrder: PersonDetailSortOrder;
   onSortOrderChange: (order: PersonDetailSortOrder) => void;
   includeFullIdentifier: boolean;
@@ -331,6 +350,7 @@ function PersonDetailContent({
   to: string;
 }>) {
   const { person } = detail;
+  const isMultiFacility = person.facilitiesCount > 1;
   const chartData = useMemo(
     () => detail.timeline.map((point) => ({ label: point.monthLabel, عدد_الشكاوى: point.count })),
     [detail.timeline]
@@ -344,26 +364,70 @@ function PersonDetailContent({
           <IdentityCell person={person} />
         </div>
         <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-          <span>المنطقة: <strong className="text-foreground">{person.region}</strong></span>
-          <span>السجن: <strong className="text-foreground">{person.facility}</strong></span>
+          <span>المنطقة: <strong className="text-foreground">{isMultiFacility ? "عدة مناطق" : person.region}</strong></span>
+          <span>
+            السجن:{" "}
+            <strong className="text-foreground">
+              {isMultiFacility ? `ظهر في ${formatNumber(person.facilitiesCount)} سجون` : person.facility}
+            </strong>
+          </span>
           <span>إجمالي الشكاوى: <strong className="text-foreground">{formatNumber(person.totalComplaints)}</strong></span>
           <span>عدد الأنواع: <strong className="text-foreground">{formatNumber(person.distinctComplaintTypesCount)}</strong></span>
         </div>
         <PersonPatternBadges person={person} />
         {onNavigateToExplorer && (
-          <DrillButton
-            label="عرض كل شكاوى هذا الشخص"
-            onClick={() =>
-              onNavigateToExplorer(
-                buildRepeatComplainantDrilldownQuery(
-                  { ...person.drilldownFilters, complainantToken: person.complainantToken },
-                  { from, to }
+          <div className="flex flex-wrap gap-2">
+            <DrillButton
+              label="عرض كل شكاوى هذا الشخص"
+              onClick={() =>
+                onNavigateToExplorer(
+                  buildRepeatComplainantDrilldownQuery({ complainantToken: person.complainantToken }, { from, to })
                 )
-              )
-            }
-          />
+              }
+            />
+            {/* Only meaningful (and only shown) when it would actually narrow the
+                result vs. the org-wide button above — i.e. the person appears at
+                more than one facility AND this sheet was opened from a specific one. */}
+            {isMultiFacility && selectedFacility && (
+              <DrillButton
+                label={`عرض شكاواه في ${selectedFacility}`}
+                onClick={() =>
+                  onNavigateToExplorer(
+                    buildRepeatComplainantDrilldownQuery(
+                      { complainantToken: person.complainantToken, facility: selectedFacility },
+                      { from, to }
+                    )
+                  )
+                }
+              />
+            )}
+          </div>
         )}
       </div>
+
+      {isMultiFacility && (
+        <div className="space-y-1.5">
+          <h4 className="text-sm font-semibold">توزيع الشكاوى حسب السجن</h4>
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>السجن</TableHead>
+                <TableHead>المنطقة</TableHead>
+                <TableHead>عدد الشكاوى</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {person.facilities.map((f) => (
+                <TableRow key={f.facility}>
+                  <TableCell>{f.facility}</TableCell>
+                  <TableCell className="text-muted-foreground">{f.region}</TableCell>
+                  <TableCell>{formatNumber(f.complaintsCount)}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
 
       <div className="space-y-1.5">
         <h4 className="text-sm font-semibold">ملخص التكرار</h4>
@@ -525,6 +589,11 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
 
   const requestRef = useRef(0);
   const searchRequestRef = useRef(0);
+  /** Cancels the in-flight per-facility people fetch — at most one at a time (only one facility can be expanded), reused across toggles/filter changes/unmount. */
+  const peopleAbortRef = useRef<AbortController | null>(null);
+  /** Generation counter for person-detail requests (open + sort-order reload share it) — the LAST request issued always wins, however its response and any earlier one's happen to resolve (spec §5/§6's A->B->response-B->response-A scenario). */
+  const personRequestRef = useRef(0);
+  const personAbortRef = useRef<AbortController | null>(null);
 
   const buildBaseParams = useCallback(() => {
     const params = new URLSearchParams();
@@ -567,15 +636,34 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
 
   useEffect(() => {
     const controller = new AbortController();
+    // A period/region/local-filter change invalidates any in-flight
+    // per-facility or per-person fetch issued under the OLD scope — without
+    // this, a late response could resurrect stale data into the
+    // just-cleared caches/sheet below (spec §5/§9's "period/region/filter
+    // change" trigger list).
+    peopleAbortRef.current?.abort();
+    personAbortRef.current?.abort();
     setExpandedRegions(new Set());
     setExpandedFacility(null);
     setPeopleCache({});
+    setSelectedPerson(null);
+    setPersonDetail({ loading: false, error: null, data: null });
     setSearchInput("");
     setSearchQuery("");
     setSearchResults(null);
     void loadSummary(controller.signal);
     return () => controller.abort();
   }, [loadSummary]);
+
+  // Unmount-only cleanup — cancels whatever facility/person fetch happens to
+  // be in flight when the whole panel goes away (spec §5's "unmount" trigger).
+  useEffect(
+    () => () => {
+      peopleAbortRef.current?.abort();
+      personAbortRef.current?.abort();
+    },
+    []
+  );
 
   // Debounced org-wide search — POST only (spec: a typed name/ID must never
   // land in the URL/browser history).
@@ -627,6 +715,10 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
 
   const toggleFacility = useCallback(
     (facility: string) => {
+      // Only one facility is ever expanded at a time, so at most one
+      // people-fetch should ever be in flight — closing one, or opening a
+      // different one, always cancels whatever was still pending.
+      peopleAbortRef.current?.abort();
       if (expandedFacility === facility) {
         setExpandedFacility(null);
         return;
@@ -635,20 +727,23 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
       const existing = peopleCache[facility];
       if (existing?.data || existing?.loading) return;
 
+      const controller = new AbortController();
+      peopleAbortRef.current = controller;
       setPeopleCache((prev) => ({ ...prev, [facility]: { loading: true, error: null, data: null } }));
       (async () => {
         try {
           const params = buildBaseParams();
           params.set("facility", facility);
-          params.set("pageSize", "25");
-          params.set("page", "1");
-          const res = await fetch(`/api/analytics/repeat-complainants/people?${params.toString()}`);
+          params.set("peoplePageSize", "25");
+          params.set("peoplePage", "1");
+          const res = await fetch(`/api/analytics/repeat-complainants/people?${params.toString()}`, { signal: controller.signal });
           const payload = await readJsonResponse(res);
           if (!res.ok) throw new Error(apiErrorMessage(payload, "تعذر تحميل قائمة الأشخاص."));
           if (!isRepeatComplainantPeopleData(payload)) throw new Error("استجابة قائمة الأشخاص غير مكتملة.");
+          if (controller.signal.aborted) return;
           setPeopleCache((prev) => ({ ...prev, [facility]: { loading: false, error: null, data: payload } }));
         } catch (e) {
-          if (isAbortError(e)) return;
+          if (isAbortError(e) || controller.signal.aborted) return;
           setPeopleCache((prev) => ({
             ...prev,
             [facility]: { loading: false, error: e instanceof Error ? e.message : "تعذر تحميل قائمة الأشخاص.", data: null },
@@ -668,25 +763,42 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
     });
   }, []);
 
-  const openPersonDetail = useCallback(
-    (selection: SelectedPerson) => {
-      setSelectedPerson(selection);
-      setPersonSortOrder("desc");
-      setPersonExportFull(false);
-      setPersonDetail({ loading: true, error: null, data: null });
+  /**
+   * Shared by `openPersonDetail` and `changePersonSortOrder` — issues a
+   * person-detail fetch under a NEW request generation + AbortController,
+   * cancelling whatever was previously in flight. Because every caller bumps
+   * `personRequestRef` before awaiting, and every response is only applied
+   * when its own id STILL matches the ref, the most-recently-ISSUED request
+   * always wins the render — regardless of which one's network response
+   * actually arrives first (spec §5/§6: open A, then B before A resolves;
+   * B's data must be what's shown even if A's response arrives last).
+   */
+  const fetchPersonDetail = useCallback(
+    (token: string, facility: string | null, sortOrder: PersonDetailSortOrder) => {
+      personAbortRef.current?.abort();
+      const requestId = personRequestRef.current + 1;
+      personRequestRef.current = requestId;
+      const controller = new AbortController();
+      personAbortRef.current = controller;
       (async () => {
         try {
           const params = buildBaseParams();
-          params.set("token", selection.token);
-          params.set("facility", selection.facility);
-          params.set("sortOrder", "desc");
-          const res = await fetch(`/api/analytics/repeat-complainants/person?${params.toString()}`);
+          params.set("token", token);
+          if (facility) params.set("facility", facility);
+          params.set("sortOrder", sortOrder);
+          const res = await fetch(`/api/analytics/repeat-complainants/person?${params.toString()}`, { signal: controller.signal });
           const payload = await readJsonResponse(res);
           if (!res.ok) throw new Error(apiErrorMessage(payload, "تعذر تحميل تفاصيل الشخص."));
           if (!isRepeatComplainantPersonDetail(payload)) throw new Error("استجابة تفاصيل الشخص غير مكتملة.");
+          // Either a newer person/sort-order request was issued meanwhile (id
+          // mismatch), or this exact request was cancelled without a
+          // replacement — e.g. the Sheet closed or the component unmounted
+          // (signal aborted, id unchanged). Either way, this response is
+          // stale and must never reach state.
+          if (personRequestRef.current !== requestId || controller.signal.aborted) return;
           setPersonDetail({ loading: false, error: null, data: payload });
         } catch (e) {
-          if (isAbortError(e)) return;
+          if (isAbortError(e) || personRequestRef.current !== requestId || controller.signal.aborted) return;
           setPersonDetail({ loading: false, error: e instanceof Error ? e.message : "تعذر تحميل تفاصيل الشخص.", data: null });
         }
       })();
@@ -694,29 +806,25 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
     [buildBaseParams]
   );
 
+  const openPersonDetail = useCallback(
+    (selection: SelectedPerson) => {
+      setSelectedPerson(selection);
+      setPersonSortOrder("desc");
+      setPersonExportFull(false);
+      setPersonDetail({ loading: true, error: null, data: null });
+      fetchPersonDetail(selection.token, selection.facility, "desc");
+    },
+    [fetchPersonDetail]
+  );
+
   const changePersonSortOrder = useCallback(
     (order: PersonDetailSortOrder) => {
       setPersonSortOrder(order);
       if (!selectedPerson) return;
       setPersonDetail((prev) => ({ ...prev, loading: true }));
-      (async () => {
-        try {
-          const params = buildBaseParams();
-          params.set("token", selectedPerson.token);
-          params.set("facility", selectedPerson.facility);
-          params.set("sortOrder", order);
-          const res = await fetch(`/api/analytics/repeat-complainants/person?${params.toString()}`);
-          const payload = await readJsonResponse(res);
-          if (!res.ok) throw new Error(apiErrorMessage(payload, "تعذر تحميل تفاصيل الشخص."));
-          if (!isRepeatComplainantPersonDetail(payload)) throw new Error("استجابة تفاصيل الشخص غير مكتملة.");
-          setPersonDetail({ loading: false, error: null, data: payload });
-        } catch (e) {
-          if (isAbortError(e)) return;
-          setPersonDetail({ loading: false, error: e instanceof Error ? e.message : "تعذر تحميل تفاصيل الشخص.", data: null });
-        }
-      })();
+      fetchPersonDetail(selectedPerson.token, selectedPerson.facility, order);
     },
-    [selectedPerson, buildBaseParams]
+    [selectedPerson, fetchPersonDetail]
   );
 
   const exportPersonPdf = useCallback(() => {
@@ -724,7 +832,7 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
     setPersonExporting(true);
     const params = buildBaseParams();
     params.set("token", selectedPerson.token);
-    params.set("facility", selectedPerson.facility);
+    if (selectedPerson.facility) params.set("facility", selectedPerson.facility);
     params.set("includeFullIdentifier", personExportFull ? "true" : "false");
     const url = `/api/analytics/repeat-complainants/person/export?${params.toString()}`;
     const link = document.createElement("a");
@@ -732,7 +840,7 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
     link.rel = "noopener";
     document.body.appendChild(link);
     link.click();
-    document.body.removeChild(link);
+    link.remove();
     setTimeout(() => setPersonExporting(false), 800);
   }, [selectedPerson, personExportFull, buildBaseParams]);
 
@@ -746,7 +854,7 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
     link.rel = "noopener";
     document.body.appendChild(link);
     link.click();
-    document.body.removeChild(link);
+    link.remove();
     setTimeout(() => setBulkExporting(false), 800);
   }, [bulkExportFull, buildBaseParams]);
 
@@ -936,6 +1044,7 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
                   people={sortedSearchResults}
                   onOpenDetail={openPersonDetail}
                   emptyMessage="لا توجد نتائج مطابقة."
+                  scopeToFacility={false}
                 />
               )}
             </div>
@@ -1117,6 +1226,7 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
                                       people={sortedPeople}
                                       onOpenDetail={openPersonDetail}
                                       emptyMessage="لا يوجد أشخاص مكررون ضمن الفلاتر الحالية."
+                                      scopeToFacility
                                     />
                                   )}
                                   {peopleEntry?.data && peopleEntry.data.total > peopleEntry.data.people.length && (
@@ -1140,7 +1250,14 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
       </Card>
 
       {/* Person detail drawer */}
-      <Sheet open={selectedPerson !== null} onOpenChange={(open) => { if (!open) setSelectedPerson(null); }}>
+      <Sheet
+        open={selectedPerson !== null}
+        onOpenChange={(open) => {
+          if (open) return;
+          personAbortRef.current?.abort();
+          setSelectedPerson(null);
+        }}
+      >
         <SheetContent side="left" className="w-full sm:max-w-lg md:max-w-xl lg:max-w-2xl p-0">
           <SheetHeader className="border-b bg-muted/30 px-5 pt-5 pb-3">
             <SheetTitle className="text-base">عرض التكرارات</SheetTitle>
@@ -1158,6 +1275,7 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
             {personDetail.data && (
               <PersonDetailContent
                 detail={personDetail.data}
+                selectedFacility={selectedPerson?.facility ?? null}
                 sortOrder={personSortOrder}
                 onSortOrderChange={changePersonSortOrder}
                 includeFullIdentifier={personExportFull}

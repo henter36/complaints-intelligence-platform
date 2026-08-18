@@ -332,6 +332,20 @@ describe("buildRepeatComplainantDirectory — feature-specific filters", () => {
   });
 });
 
+describe("buildRepeatComplainantDirectory — minComplaintsPerPerson floor", () => {
+  it("defaults the 'repeated person' bar to 2 when the caller doesn't specify one", () => {
+    const records = [record({ complaintId: "one", complainantIdentifier: "SOLO" })];
+    expect(buildRepeatComplainantDirectory(records, 5).people).toHaveLength(0);
+  });
+
+  it("honors an explicit minComplaintsPerPerson of 1 (used internally by the person-detail service to fetch one already-identified person's stats regardless of the repeat threshold)", () => {
+    const records = [record({ complaintId: "one", complainantIdentifier: "SOLO" })];
+    const directory = buildRepeatComplainantDirectory(records, 5, undefined, { minComplaintsPerPerson: 1 });
+    expect(directory.people).toHaveLength(1);
+    expect(directory.people[0]!.totalComplaints).toBe(1);
+  });
+});
+
 describe("enrichFacilitiesWithPatternSignals", () => {
   it("tags facilities from the reused pattern-engine findings without recomputing anything", () => {
     const records = [
@@ -354,6 +368,145 @@ describe("enrichFacilitiesWithPatternSignals", () => {
     expect(mass.linkedMassComplaint).toBe(true);
     expect(mass.linkedChronicIssue).toBe(false);
     expect(mass.linkedHighPriorityFacility).toBe(false);
+  });
+});
+
+describe("buildRepeatComplainantDirectory — person identity across facilities (spec §1/§2/§10)", () => {
+  it("treats the same identifier at two facilities as ONE org-level person, not two", () => {
+    const records = [
+      record({ complaintId: "t1", complainantIdentifier: "MOVER", facility: "سجن أ", region: "منطقة الرياض" }),
+      record({ complaintId: "t2", complainantIdentifier: "MOVER", facility: "سجن ب", region: "منطقة مكة المكرمة" }),
+    ];
+    const directory = buildRepeatComplainantDirectory(records, 10);
+    expect(directory.people).toHaveLength(1);
+    expect(directory.kpis.repeatedPeopleCount).toBe(1);
+    const person = directory.people[0]!;
+    expect(person.totalComplaints).toBe(2);
+    expect(person.facilitiesCount).toBe(2);
+    expect(person.facilities.map((f) => f.facility).sort()).toEqual(["سجن أ", "سجن ب"]);
+  });
+
+  it("counts a cross-facility repeater independently at EACH facility that itself meets the repeat threshold, without inflating the org-level count", () => {
+    const records = [
+      record({ complaintId: "u1", complainantIdentifier: "SPLIT", facility: "سجن أ" }),
+      record({ complaintId: "u2", complainantIdentifier: "SPLIT", facility: "سجن أ" }),
+      record({ complaintId: "u3", complainantIdentifier: "SPLIT", facility: "سجن ب" }),
+      record({ complaintId: "u4", complainantIdentifier: "SPLIT", facility: "سجن ب" }),
+    ];
+    const directory = buildRepeatComplainantDirectory(records, 10);
+    // Org level: still ONE person, not two.
+    expect(directory.people).toHaveLength(1);
+    expect(directory.kpis.repeatedPeopleCount).toBe(1);
+    expect(directory.people[0]!.totalComplaints).toBe(4);
+    // Facility level: repeated (>=2) independently at BOTH facilities.
+    const a = directory.facilities.find((f) => f.facility === "سجن أ")!;
+    const b = directory.facilities.find((f) => f.facility === "سجن ب")!;
+    expect(a.repeatedPeopleCount).toBe(1);
+    expect(a.repeatedComplaintsCount).toBe(2);
+    expect(b.repeatedPeopleCount).toBe(1);
+    expect(b.repeatedComplaintsCount).toBe(2);
+  });
+
+  it("org-level repeated person via 1+1 across two facilities is NOT facility-repeated at either (threshold=2)", () => {
+    const records = [
+      record({ complaintId: "v1", complainantIdentifier: "THIN", facility: "سجن أ" }),
+      record({ complaintId: "v2", complainantIdentifier: "THIN", facility: "سجن ب" }),
+    ];
+    const directory = buildRepeatComplainantDirectory(records, 10);
+    // Org-level: repeated (2 total complaints).
+    expect(directory.kpis.repeatedPeopleCount).toBe(1);
+    expect(directory.people[0]!.totalComplaints).toBe(2);
+    // Facility-level: repeated at NEITHER facility — no facility row is emitted for either.
+    expect(directory.facilities.find((f) => f.facility === "سجن أ")).toBeUndefined();
+    expect(directory.facilities.find((f) => f.facility === "سجن ب")).toBeUndefined();
+  });
+
+  it("never counts a cross-facility person twice toward the org-level repeatedComplaintsCount total", () => {
+    const records = [
+      record({ complaintId: "w1", complainantIdentifier: "MOVER2", facility: "سجن أ" }),
+      record({ complaintId: "w2", complainantIdentifier: "MOVER2", facility: "سجن ب" }),
+      record({ complaintId: "w3", complainantIdentifier: "MOVER2", facility: "سجن ج" }),
+    ];
+    const directory = buildRepeatComplainantDirectory(records, 10);
+    expect(directory.kpis.repeatedComplaintsCount).toBe(3); // not 3x-double-counted across facility rollups
+  });
+});
+
+describe("buildRepeatComplainantDirectory — full classification distribution (spec §3/§4)", () => {
+  it("a 6th+ classification type never disappears from distinctComplaintTypesCount even though topComplaintTypes caps at 5", () => {
+    const records = Array.from({ length: 6 }, (_, i) =>
+      record({
+        complaintId: `type${i}`,
+        complainantIdentifier: "MANY_TYPES",
+        classificationId: `cls-${i}`,
+        classificationLabel: `نوع ${i}`,
+      })
+    );
+    const directory = buildRepeatComplainantDirectory(records, 10);
+    const person = directory.people[0]!;
+    expect(person.topComplaintTypes).toHaveLength(5); // display cap
+    expect(person.distinctComplaintTypesCount).toBe(6); // full distribution, never truncated
+  });
+
+  it("org-wide topComplaintType is computed from the full distribution, not from any person's capped top-5", () => {
+    // MANY_TYPES has 6 distinct types (1 complaint each); ONE_TYPE has one type repeated 5x.
+    // If org topComplaintType were derived from capped top-5 lists only, this would still work
+    // by coincidence — the real regression is covered by the region-level test below, which
+    // this mirrors for the org aggregate.
+    const records = [
+      ...Array.from({ length: 6 }, (_, i) =>
+        record({ complaintId: `x${i}`, complainantIdentifier: "MANY_TYPES", classificationId: `cls-${i}`, classificationLabel: `نوع ${i}` })
+      ),
+      ...Array.from({ length: 5 }, (_, i) =>
+        record({ complaintId: `y${i}`, complainantIdentifier: "ONE_TYPE", classificationId: "cls-food", classificationLabel: "التغذية" })
+      ),
+    ];
+    const directory = buildRepeatComplainantDirectory(records, 20);
+    expect(directory.kpis.topComplaintType?.label).toBe("التغذية");
+    expect(directory.kpis.topComplaintType?.count).toBe(5);
+  });
+
+  it("regional topComplaintType sums the FULL per-facility distribution, so a type split across facilities' #2 slots can still win region-wide (spec §4 example)", () => {
+    const records = [
+      // سجن أ: الغذاء 10، الصحة 9 (two people to keep each facility's own top-1 as "الغذاء")
+      ...Array.from({ length: 6 }, (_, i) => record({ complaintId: `fa${i}`, complainantIdentifier: "FA1", facility: "سجن أ", classificationId: "cls-food", classificationLabel: "الغذاء" })),
+      ...Array.from({ length: 4 }, (_, i) => record({ complaintId: `fb${i}`, complainantIdentifier: "FA2", facility: "سجن أ", classificationId: "cls-food", classificationLabel: "الغذاء" })),
+      ...Array.from({ length: 9 }, (_, i) => record({ complaintId: `fc${i}`, complainantIdentifier: "FA3", facility: "سجن أ", classificationId: "cls-health", classificationLabel: "الصحة" })),
+      // سجن ب: الزيارة 10، الصحة 9
+      ...Array.from({ length: 6 }, (_, i) => record({ complaintId: `fd${i}`, complainantIdentifier: "FB1", facility: "سجن ب", classificationId: "cls-visit", classificationLabel: "الزيارة" })),
+      ...Array.from({ length: 4 }, (_, i) => record({ complaintId: `fe${i}`, complainantIdentifier: "FB2", facility: "سجن ب", classificationId: "cls-visit", classificationLabel: "الزيارة" })),
+      ...Array.from({ length: 9 }, (_, i) => record({ complaintId: `ff${i}`, complainantIdentifier: "FB3", facility: "سجن ب", classificationId: "cls-health", classificationLabel: "الصحة" })),
+    ];
+    const directory = buildRepeatComplainantDirectory(records, 100);
+    const facilityA = directory.facilities.find((f) => f.facility === "سجن أ")!;
+    const facilityB = directory.facilities.find((f) => f.facility === "سجن ب")!;
+    expect(facilityA.topComplaintType?.label).toBe("الغذاء");
+    expect(facilityB.topComplaintType?.label).toBe("الزيارة");
+    // الصحة = 9 + 9 = 18, higher than الغذاء (10) or الزيارة (10) individually — must win at region level.
+    const region = directory.regions[0]!;
+    expect(region.topComplaintType?.label).toBe("الصحة");
+    expect(region.topComplaintType?.count).toBe(18);
+  });
+});
+
+describe("buildRepeatComplainantDirectory — deterministic latest complainant name (spec §8)", () => {
+  it("picks the name from the LATEST effectiveDate, not the last row scanned, regardless of input order", () => {
+    const inOrder = [
+      record({ complaintId: "name-early", complainantIdentifier: "NAMED", complainantName: "محمد أ", effectiveDate: "2026-01-01" }),
+      record({ complaintId: "name-late", complainantIdentifier: "NAMED", complainantName: "محمد أحمد", effectiveDate: "2026-03-01" }),
+    ];
+    const reversed = [...inOrder].reverse();
+    expect(buildRepeatComplainantDirectory(inOrder, 10).people[0]!.complainantName).toBe("محمد أحمد");
+    expect(buildRepeatComplainantDirectory(reversed, 10).people[0]!.complainantName).toBe("محمد أحمد");
+  });
+
+  it("breaks a same-date name tie deterministically by complaintId, independent of scan order", () => {
+    const a = record({ complaintId: "aaa", complainantIdentifier: "TIE", complainantName: "اسم أول", effectiveDate: "2026-01-01" });
+    const b = record({ complaintId: "zzz", complainantIdentifier: "TIE", complainantName: "اسم ثاني", effectiveDate: "2026-01-01" });
+    const forward = buildRepeatComplainantDirectory([a, b], 10).people[0]!.complainantName;
+    const backward = buildRepeatComplainantDirectory([b, a], 10).people[0]!.complainantName;
+    expect(forward).toBe(backward); // deterministic regardless of scan order
+    expect(forward).toBe("اسم ثاني"); // higher complaintId ("zzz" > "aaa") wins the tie
   });
 });
 

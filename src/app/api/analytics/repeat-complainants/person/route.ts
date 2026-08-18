@@ -8,10 +8,13 @@ export async function GET(req: NextRequest) {
     await requireAdminApiSession(req);
     const url = new URL(req.url);
     const token = url.searchParams.get("token");
+    // `facility` is OPTIONAL (spec §12): present -> scope to that one
+    // facility; absent -> org-wide across every facility this person
+    // appears at ("عرض كل شكاوى هذا الشخص").
     const facility = url.searchParams.get("facility");
-    if (!token || !facility) {
+    if (!token) {
       return NextResponse.json(
-        { error: { code: "TOKEN_AND_FACILITY_REQUIRED", message: "المعاملات token وfacility مطلوبة" } },
+        { error: { code: "TOKEN_REQUIRED", message: "المعامل token مطلوب" } },
         { status: 400 }
       );
     }

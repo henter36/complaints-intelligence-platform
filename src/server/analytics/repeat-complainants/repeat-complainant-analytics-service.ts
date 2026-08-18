@@ -14,6 +14,7 @@ import {
 } from "@/server/facilities/facility-operational-scope-service";
 import { loadPatternAnalysisForFilters } from "@/server/analytics/pattern/pattern-report-integration-service";
 import { encodeComplainantToken } from "@/server/complaints/complainant-token";
+import { parsePositiveIntegerParam } from "./query-params";
 import {
   buildRepeatComplainantDirectory,
   buildRepeatComplainantConclusions,
@@ -58,6 +59,18 @@ const repeatSelect = {
 
 type RepeatComplaintRow = Prisma.ComplaintGetPayload<{ select: typeof repeatSelect }>;
 
+/**
+ * `complaintDate` is the ONLY nullable half here — `receivedAt` is
+ * `DateTime @default(now())` in `prisma/schema.prisma` (never null), so this
+ * always resolves to a real `Date`, never `undefined`; TypeScript's own
+ * inferred return type already proves it (no cast/assertion needed). A
+ * `now()` fallback here would be actively wrong — it would fabricate a
+ * complaint's date instead of reporting the value the import actually
+ * recorded — so this is deliberately NOT defended against a "both null"
+ * case that the schema doesn't allow. If `receivedAt` is ever made
+ * nullable, this function's return type stops compiling as `Date` and must
+ * be revisited then, not pre-emptively now.
+ */
 function effectiveDateOf(row: RepeatComplaintRow): Date {
   return row.complaintDate ?? row.receivedAt;
 }
@@ -111,13 +124,23 @@ export type RepeatComplainantSummary = {
   conclusions: string[];
 };
 
-function parseDirectoryOptions(params: URLSearchParams): RepeatComplainantDirectoryOptions {
-  const minComplaints = params.get("minComplaints");
-  const minDistinctTypes = params.get("minDistinctTypes");
+/**
+ * Shared by every repeat-complainant endpoint (summary, people, search,
+ * export) — the ONE place `minComplaints`/`minDistinctTypes` are parsed, so
+ * a malformed value (`minComplaints=abc`, `=NaN`, `=-1`, `=2.5`, ...) is
+ * handled identically everywhere instead of risking `NaN` silently
+ * poisoning `Math.max(2, NaN)` and dropping every repeated person (the
+ * bug a raw `Number(...)` would reintroduce — see `query-params.ts`).
+ */
+export function parseRepeatDirectoryOptions(params: URLSearchParams): RepeatComplainantDirectoryOptions {
   return {
-    minComplaintsPerPerson: minComplaints ? Number(minComplaints) : undefined,
+    // A "repeated" person is never < 2 complaints by definition (the UI's
+    // own minComplaints input is floored at 2 too) — a manually-crafted
+    // `minComplaints=1` in the URL must fall back to the engine's own
+    // default (2), not be honored as 1.
+    minComplaintsPerPerson: parsePositiveIntegerParam(params.get("minComplaints"), { min: 2, max: 1000 }),
     sameTypeOnly: params.get("sameTypeOnly") === "true",
-    minDistinctTypes: minDistinctTypes ? Number(minDistinctTypes) : undefined,
+    minDistinctTypes: parsePositiveIntegerParam(params.get("minDistinctTypes"), { min: 1, max: 100 }),
   };
 }
 
@@ -134,7 +157,7 @@ async function buildEnrichedDirectory(
   now: Date
 ): Promise<RepeatComplainantDirectory> {
   const query = parseComplaintQuery(params);
-  const options = parseDirectoryOptions(params);
+  const options = parseRepeatDirectoryOptions(params);
   const { records, totalComplaintsInScope } = await fetchScopedRecords(query, now);
   const directory = buildRepeatComplainantDirectory(records, totalComplaintsInScope, undefined, options);
 
@@ -160,8 +183,8 @@ async function buildEnrichedDirectory(
     }
   }
 
-  const topFacilities = params.get("topFacilities");
-  if (topFacilities) facilities = facilities.slice(0, Number(topFacilities));
+  const topFacilities = parsePositiveIntegerParam(params.get("topFacilities"), { min: 1, max: 500 });
+  if (topFacilities !== undefined) facilities = facilities.slice(0, topFacilities);
 
   return { ...directory, facilities };
 }
@@ -232,7 +255,7 @@ export async function searchRepeatComplainants(
   const needle = searchKey(trimmed);
 
   const query = parseComplaintQuery(params);
-  const options = parseDirectoryOptions(params);
+  const options = parseRepeatDirectoryOptions(params);
   const { records, totalComplaintsInScope } = await fetchScopedRecords(query, now);
   const directory = buildRepeatComplainantDirectory(records, totalComplaintsInScope, undefined, options);
 

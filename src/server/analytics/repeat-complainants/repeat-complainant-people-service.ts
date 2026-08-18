@@ -1,6 +1,7 @@
 import { parseComplaintQuery } from "@/server/complaints/complaint-query-service";
-import { buildRepeatComplainantDirectory, type RepeatComplainantDirectoryOptions, type RepeatPersonRow } from "@/lib/analytics/repeat-complainant-directory";
-import { fetchScopedRecords, toClientPersonRow, type RepeatPersonRowForClient } from "./repeat-complainant-analytics-service";
+import { buildRepeatComplainantDirectory, type RepeatPersonRow } from "@/lib/analytics/repeat-complainant-directory";
+import { fetchScopedRecords, parseRepeatDirectoryOptions, toClientPersonRow, type RepeatPersonRowForClient } from "./repeat-complainant-analytics-service";
+import { parsePositiveIntegerParam } from "./query-params";
 
 export type RepeatComplainantPeoplePage = {
   people: RepeatPersonRowForClient[];
@@ -25,16 +26,6 @@ const SORT_COMPARATORS: Record<PeopleSortKey, (a: RepeatPersonRow, b: RepeatPers
   sameTypeRepeatCount: (a, b) => b.sameTypeRepeatCount - a.sameTypeRepeatCount,
 };
 
-function parseDirectoryOptions(params: URLSearchParams): RepeatComplainantDirectoryOptions {
-  const minComplaints = params.get("minComplaints");
-  const minDistinctTypes = params.get("minDistinctTypes");
-  return {
-    minComplaintsPerPerson: minComplaints ? Number(minComplaints) : undefined,
-    sameTypeOnly: params.get("sameTypeOnly") === "true",
-    minDistinctTypes: minDistinctTypes ? Number(minDistinctTypes) : undefined,
-  };
-}
-
 /**
  * Lazy, paginated per-facility person list (spec: don't preload every
  * person up front — fetch on expansion/drillthrough only). `params` MUST
@@ -47,19 +38,25 @@ export async function getRepeatComplainantPeoplePage(
   now: Date = new Date()
 ): Promise<RepeatComplainantPeoplePage> {
   const query = parseComplaintQuery(params);
-  const options = parseDirectoryOptions(params);
+  const options = parseRepeatDirectoryOptions(params);
   const { records, totalComplaintsInScope } = await fetchScopedRecords(query, now);
   const directory = buildRepeatComplainantDirectory(records, totalComplaintsInScope, undefined, options);
 
-  // A dedicated param name — `sortBy` itself is already reserved by
-  // `parseComplaintQuery`'s own complaint-sort vocabulary (receivedDate,
-  // status, ...) and would otherwise throw a validation error here.
+  // Dedicated param names — `sortBy`/`page`/`pageSize` are already reserved
+  // by `parseComplaintQuery`'s own complaint-listing vocabulary (and, for
+  // page/pageSize, its own STRICT zod validation that throws a 400 on
+  // anything malformed — before this function would ever get a chance to
+  // apply its own lenient fallback-to-default parsing below). This
+  // feature's pagination is over the in-memory aggregated person list, a
+  // completely different concept from complaint-row pagination, so it gets
+  // its own param names rather than colliding with (and inheriting the
+  // strictness of) the shared complaint query schema.
   const sortKey = (params.get("peopleSortBy") as PeopleSortKey | null) ?? "totalComplaints";
   const comparator = SORT_COMPARATORS[sortKey] ?? SORT_COMPARATORS.totalComplaints;
   const sorted = [...directory.people].sort(comparator);
 
-  const page = Math.max(1, Number(params.get("page") ?? "1") || 1);
-  const pageSize = Math.min(MAX_PAGE_SIZE, Math.max(1, Number(params.get("pageSize") ?? String(DEFAULT_PAGE_SIZE)) || DEFAULT_PAGE_SIZE));
+  const page = parsePositiveIntegerParam(params.get("peoplePage"), { min: 1, max: 1_000_000, fallback: 1 })!;
+  const pageSize = parsePositiveIntegerParam(params.get("peoplePageSize"), { min: 1, max: MAX_PAGE_SIZE, fallback: DEFAULT_PAGE_SIZE })!;
   const start = (page - 1) * pageSize;
   const people = sorted.slice(start, start + pageSize).map(toClientPersonRow);
 

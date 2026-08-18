@@ -17,10 +17,11 @@ export async function GET(req: NextRequest) {
     await requireAdminApiSession(req);
     const url = new URL(req.url);
     const token = url.searchParams.get("token");
+    // `facility` is OPTIONAL (spec §12) — see the /person route's own comment.
     const facility = url.searchParams.get("facility");
-    if (!token || !facility) {
+    if (!token) {
       return NextResponse.json(
-        { error: { code: "TOKEN_AND_FACILITY_REQUIRED", message: "المعاملات token وfacility مطلوبة" } },
+        { error: { code: "TOKEN_REQUIRED", message: "المعامل token مطلوب" } },
         { status: 400 }
       );
     }

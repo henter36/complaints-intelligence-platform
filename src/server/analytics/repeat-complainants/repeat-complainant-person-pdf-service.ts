@@ -9,6 +9,7 @@ import {
   drawWarningBanner,
   drawPaginatedTable,
   drawFootersAndPageNumbers,
+  formatScalarCell,
   REPEAT_PDF_MARGIN,
   REPEAT_PDF_CONTENT_WIDTH,
   REPEAT_PDF_BOTTOM_LIMIT,
@@ -48,7 +49,7 @@ function timelineLine(timeline: { monthLabel: string; count: number }[]): string
  */
 export async function renderRepeatComplainantPersonPdf(
   token: string,
-  facility: string,
+  facility: string | null,
   baseParams: URLSearchParams,
   options: PersonPdfOptions
 ): Promise<Buffer | null> {
@@ -67,11 +68,12 @@ export async function renderRepeatComplainantPersonPdf(
     : detail.person.complainantIdentifierMasked;
 
   y = drawSectionHeading(doc, "بيانات الشخص", y);
+  const isMultiFacility = detail.person.facilitiesCount > 1;
   const headerLines = [
     `الاسم: ${detail.person.complainantName ?? "غير متوفر"}`,
     `الهوية: ${identifierDisplay}`,
-    `المنطقة: ${detail.person.region}`,
-    `السجن: ${detail.person.facility}`,
+    `المنطقة: ${isMultiFacility ? "عدة مناطق" : detail.person.region}`,
+    `السجن: ${isMultiFacility ? `عدة سجون (${formatReportNumber(detail.person.facilitiesCount)})` : detail.person.facility}`,
     `إجمالي الشكاوى: ${formatReportNumber(detail.person.totalComplaints)}`,
     `عدد الأنواع: ${formatReportNumber(detail.person.distinctComplaintTypesCount)}`,
   ];
@@ -81,6 +83,31 @@ export async function renderRepeatComplainantPersonPdf(
     y += 20;
   }
   y += 6;
+
+  // Multi-facility breakdown (spec §18) — only drawn when this person's
+  // complaints actually span more than one facility; a single-facility
+  // person keeps the pre-existing compact layout above unchanged.
+  if (isMultiFacility) {
+    y = drawSectionHeading(doc, "السجون التي ظهرت فيها الشكاوى", y);
+    const facilityColumns: PdfColDef[] = [
+      { key: "facility", label: "السجن", weight: 2 },
+      { key: "region", label: "المنطقة", weight: 1.2 },
+      { key: "complaintsCount", label: "عدد الشكاوى", weight: 1 },
+    ];
+    y = drawPaginatedTable({
+      doc,
+      rows: detail.person.facilities,
+      columns: facilityColumns,
+      x: REPEAT_PDF_MARGIN,
+      y,
+      width: REPEAT_PDF_CONTENT_WIDTH,
+      rowHeight: 20,
+      bottomLimit: REPEAT_PDF_BOTTOM_LIMIT,
+      newPage: () => { doc.addPage(); return REPEAT_PDF_MARGIN; },
+      formatCell: (row, key) => (key === "complaintsCount" ? formatReportNumber(row.complaintsCount) : String((row as Record<string, unknown>)[key])),
+    });
+    y += 10;
+  }
 
   y = drawSectionHeading(doc, "ملخص التكرار", y);
   const topType = detail.person.topComplaintTypes[0];
@@ -132,15 +159,24 @@ export async function renderRepeatComplainantPersonPdf(
   doc.addPage();
   y = REPEAT_PDF_MARGIN;
   y = drawSectionHeading(doc, "تفاصيل الشكاوى", y);
-  // No facility column — this whole report is already scoped to the ONE
-  // facility named in the header above, so repeating it per row would only
-  // crowd out space the classification/subject columns actually need.
-  const complaintColumns: PdfColDef[] = [
-    { key: "complaintNumber", label: "رقم الشكوى", weight: 0.9 },
-    { key: "date", label: "التاريخ", weight: 0.9 },
-    { key: "classificationLabel", label: "التصنيف", weight: 1.4 },
-    { key: "subject", label: "الموضوع", weight: 1.9 },
-  ];
+  // A facility column is only added when this person's complaints span more
+  // than one facility — a single-facility report keeps the compact layout
+  // (the ONE facility is already named in the header above, so repeating it
+  // per row would only crowd out space the classification/subject columns need).
+  const complaintColumns: PdfColDef[] = isMultiFacility
+    ? [
+        { key: "complaintNumber", label: "رقم الشكوى", weight: 0.8 },
+        { key: "date", label: "التاريخ", weight: 0.8 },
+        { key: "facility", label: "السجن", weight: 1.1 },
+        { key: "classificationLabel", label: "التصنيف", weight: 1.2 },
+        { key: "subject", label: "الموضوع", weight: 1.6 },
+      ]
+    : [
+        { key: "complaintNumber", label: "رقم الشكوى", weight: 0.9 },
+        { key: "date", label: "التاريخ", weight: 0.9 },
+        { key: "classificationLabel", label: "التصنيف", weight: 1.4 },
+        { key: "subject", label: "الموضوع", weight: 1.9 },
+      ];
   drawPaginatedTable<PersonComplaintRow>({
     doc,
     rows: detail.complaints,
@@ -151,7 +187,7 @@ export async function renderRepeatComplainantPersonPdf(
     rowHeight: 22,
     bottomLimit: REPEAT_PDF_BOTTOM_LIMIT,
     newPage: () => { doc.addPage(); return REPEAT_PDF_MARGIN; },
-    formatCell: (row, key) => String((row as unknown as Record<string, unknown>)[key] ?? "—"),
+    formatCell: (row, key) => formatScalarCell((row as unknown as Record<string, unknown>)[key]),
   });
 
   drawFootersAndPageNumbers(doc);

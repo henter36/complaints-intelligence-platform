@@ -151,7 +151,7 @@ describe("repeat-complainant analytics — realistic-scale performance (spec)", 
   it("paginates a large per-facility person list without loading everything into one page", async () => {
     const facility = facilityName(0);
     const page = await getRepeatComplainantPeoplePage(
-      params(`from=2026-01-01&to=2026-03-31&facility=${encodeURIComponent(facility)}&pageSize=10&page=1`)
+      params(`from=2026-01-01&to=2026-03-31&facility=${encodeURIComponent(facility)}&peoplePageSize=10&peoplePage=1`)
     );
     expect(page.people.length).toBeLessThanOrEqual(10);
     expect(page.total).toBeGreaterThan(page.people.length);

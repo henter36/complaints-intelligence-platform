@@ -7,6 +7,12 @@ function todayIsoDate(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+function buildScopeLabel(facility: string | null, regionId: string | null): string | null {
+  if (facility) return `السجن: ${facility}`;
+  if (regionId) return `المنطقة: ${regionId}`;
+  return null;
+}
+
 export async function GET(req: NextRequest) {
   try {
     await requireAdminApiSession(req);
@@ -17,7 +23,7 @@ export async function GET(req: NextRequest) {
     const periodLabel = from && to ? `الفترة من ${from} إلى ${to}` : "الفترة الحالية";
     const facility = url.searchParams.get("facility");
     const regionId = url.searchParams.get("regionId") ?? url.searchParams.get("region");
-    const scopeLabel = facility ? `السجن: ${facility}` : regionId ? `المنطقة: ${regionId}` : null;
+    const scopeLabel = buildScopeLabel(facility, regionId);
 
     const buffer = await renderRepeatComplainantBulkPdf(url.searchParams, {
       includeFullIdentifier,

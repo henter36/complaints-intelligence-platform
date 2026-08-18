@@ -72,6 +72,7 @@ export type RepeatComplainantPersonDetail = {
 
 const DESCRIPTION_SNIPPET_MAX = 160;
 
+/** Same invariant as `repeat-complainant-analytics-service.ts`'s own `effectiveDateOf` — `receivedAt` is non-nullable in `prisma/schema.prisma`, so this is always a real `Date`; see that function's docstring for the full reasoning. */
 function effectiveDateOf(row: DetailRow): Date {
   return row.complaintDate ?? row.receivedAt;
 }
@@ -110,10 +111,17 @@ export type PersonDetailSortOrder = "desc" | "asc"; // newest-first (default) or
  * detail). `token` is resolved server-side; a malformed/foreign token
  * resolves to zero complaints rather than throwing, so a tampered URL fails
  * closed instead of leaking data or crashing.
+ *
+ * `facility` is OPTIONAL (spec §12): pass it to scope the detail to ONE
+ * facility ("شكاواه في هذا السجن" drilldown — the pre-existing behavior);
+ * omit it (`null`) for the org-wide view across every facility this person
+ * appears at ("عرض كل شكاوى هذا الشخص"). Either way this reuses the SAME
+ * `buildRepeatComplainantDirectory` aggregation as the summary/people
+ * lists — never a second, hand-rolled definition of totals/pattern/streak.
  */
 export async function getRepeatComplainantPersonDetail(
   token: string,
-  facility: string,
+  facility: string | null,
   baseParams: URLSearchParams,
   now: Date = new Date(),
   sortOrder: PersonDetailSortOrder = "desc"
@@ -129,7 +137,7 @@ export async function getRepeatComplainantPersonDetail(
   const where: Prisma.ComplaintWhereInput = {
     ...combineComplaintWhere(buildComplaintWhere(query, now), facilityWhere),
     complainantIdentifier: identifier,
-    facility,
+    ...(facility ? { facility } : {}),
   };
   const rows = await db.complaint.findMany({ select: detailSelect, where });
 

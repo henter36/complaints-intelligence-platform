@@ -9,6 +9,7 @@ import {
   drawWarningBanner,
   drawPaginatedTable,
   drawFootersAndPageNumbers,
+  formatScalarCell,
   REPEAT_PDF_MARGIN,
   REPEAT_PDF_CONTENT_WIDTH,
   REPEAT_PDF_BOTTOM_LIMIT,
@@ -72,7 +73,6 @@ export async function renderRepeatComplainantBulkPdf(
     });
     y += 20;
   }
-  y += 10;
 
   doc.addPage();
   y = REPEAT_PDF_MARGIN;
@@ -85,7 +85,7 @@ export async function renderRepeatComplainantBulkPdf(
     { key: "repeatRatePercent", label: "النسبة", weight: 0.45 },
     { key: "topComplaintType", label: "أكثر نوع", weight: 0.7 },
   ];
-  y = drawPaginatedTable<RepeatFacilitySummaryRow>({
+  drawPaginatedTable<RepeatFacilitySummaryRow>({
     doc,
     rows: data.facilities,
     columns: facilityColumns,
@@ -98,8 +98,7 @@ export async function renderRepeatComplainantBulkPdf(
     formatCell: (row, key) => {
       if (key === "repeatRatePercent") return `${formatReportNumber(row.repeatRatePercent)}%`;
       if (key === "topComplaintType") return row.topComplaintType?.label ?? "—";
-      const value = (row as unknown as Record<string, unknown>)[key];
-      return typeof value === "number" ? formatReportNumber(value) : String(value ?? "—");
+      return formatScalarCell((row as unknown as Record<string, unknown>)[key]);
     },
   });
 
@@ -131,9 +130,11 @@ export async function renderRepeatComplainantBulkPdf(
         if (!options.includeFullIdentifier) return row.complainantIdentifierMasked;
         return decodeComplainantToken(row.complainantToken) ?? row.complainantIdentifierMasked;
       }
+      if (key === "facility") {
+        return row.facilitiesCount > 1 ? `${formatReportNumber(row.facilitiesCount)} سجون` : row.facility;
+      }
       if (key === "topType") return row.topComplaintTypes[0]?.label ?? "—";
-      const value = (row as unknown as Record<string, unknown>)[key];
-      return typeof value === "number" ? formatReportNumber(value) : String(value ?? "—");
+      return formatScalarCell((row as unknown as Record<string, unknown>)[key]);
     },
   });
 

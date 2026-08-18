@@ -52,6 +52,8 @@ const validPerson = {
   complainantName: "محمد أحمد",
   region: "الرياض",
   facility: "سجن أ",
+  facilitiesCount: 1,
+  facilities: [{ region: "الرياض", facility: "سجن أ", complaintsCount: 3 }],
   totalComplaints: 3,
   sameTypeRepeatCount: 3,
   distinctComplaintTypesCount: 1,
@@ -151,6 +153,29 @@ describe("isRepeatComplainantPeopleData", () => {
 
   it("rejects a payload with a non-finite total", () => {
     expect(isRepeatComplainantPeopleData({ ...validPeople, total: NaN })).toBe(false);
+  });
+
+  it("accepts a person who appears at multiple facilities, with a full facilities[] breakdown", () => {
+    const multiFacility = {
+      ...validPeople,
+      people: [
+        {
+          ...validPeople.people[0],
+          facilitiesCount: 2,
+          facilities: [
+            { region: "الرياض", facility: "سجن أ", complaintsCount: 2 },
+            { region: "مكة المكرمة", facility: "سجن ب", complaintsCount: 1 },
+          ],
+        },
+      ],
+    };
+    expect(isRepeatComplainantPeopleData(multiFacility)).toBe(true);
+  });
+
+  it("rejects a person row missing the facilities breakdown", () => {
+    const { facilities, ...withoutFacilities } = validPeople.people[0]!;
+    void facilities;
+    expect(isRepeatComplainantPeopleData({ ...validPeople, people: [withoutFacilities] })).toBe(false);
   });
 });
 
