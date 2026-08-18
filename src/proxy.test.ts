@@ -116,31 +116,15 @@ describe("proxy public path allowlist — /api/health/{live,ready} (spec: exact-
     vi.unstubAllEnvs();
   });
 
-  it("GET /api/health/live without a session cookie is NOT blocked (not a 401)", async () => {
+  it.each([
+    ["/api/health/live", "health liveness probe"],
+    ["/api/health/ready", "health readiness probe"],
+    ["/login", "pre-existing public login path"],
+    ["/api/internal/reports/run-due", "internal report scheduler exact path (unchanged contract)"],
+  ])("allows %s without a session cookie (%s)", async (pathname) => {
     vi.stubEnv("NODE_ENV", "production");
     const proxy = await loadProxy();
-    const response = proxy(new NextRequest("http://localhost/api/health/live"));
-    expect(response.status).not.toBe(401);
-  });
-
-  it("GET /api/health/ready without a session cookie is NOT blocked (not a 401)", async () => {
-    vi.stubEnv("NODE_ENV", "production");
-    const proxy = await loadProxy();
-    const response = proxy(new NextRequest("http://localhost/api/health/ready"));
-    expect(response.status).not.toBe(401);
-  });
-
-  it("GET /login without a session cookie is NOT blocked (unchanged, pre-existing public path)", async () => {
-    vi.stubEnv("NODE_ENV", "production");
-    const proxy = await loadProxy();
-    const response = proxy(new NextRequest("http://localhost/login"));
-    expect(response.status).not.toBe(401);
-  });
-
-  it("the internal report-scheduler contract is unchanged: still public by its own exact path", async () => {
-    vi.stubEnv("NODE_ENV", "production");
-    const proxy = await loadProxy();
-    const response = proxy(new NextRequest("http://localhost/api/internal/reports/run-due"));
+    const response = proxy(new NextRequest(`http://localhost${pathname}`));
     expect(response.status).not.toBe(401);
   });
 
