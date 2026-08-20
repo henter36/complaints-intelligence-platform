@@ -421,7 +421,7 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
   // "قائمة موحدة") lives in this hook — the pre-existing region→facility
   // browser's own state stays below, untouched.
   const {
-    flatExpanded, flatPeople, toggleFlatFacility, loadFlatPeople, unifiedState, loadUnified,
+    flatPeople, toggleFlatFacility, loadFlatPeople, unifiedState, loadUnified,
   } = useRepeatComplainantPeopleViews({ viewMode, buildBaseParams });
 
   const loadSummary = useCallback(

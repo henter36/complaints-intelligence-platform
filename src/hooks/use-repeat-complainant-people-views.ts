@@ -219,7 +219,6 @@ export function useRepeatComplainantPeopleViews({
   }, [buildBaseParams]);
 
   return {
-    flatExpanded,
     flatPeople,
     toggleFlatFacility,
     loadFlatPeople,
