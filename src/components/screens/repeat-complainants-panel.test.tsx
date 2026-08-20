@@ -1,10 +1,21 @@
 import { act } from "react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { RepeatComplainantsPanel } from "./repeat-complainants-panel";
 import type { RepeatComplainantSummaryData } from "@/lib/analytics/repeat-complainant-api-contract";
 import { formatNumber } from "@/lib/ar-utils";
+
+// jsdom has no PointerEvent capture API, which Radix's Select popover relies
+// on — without this, opening any of this file's new sort-key dropdowns
+// throws "target.hasPointerCapture is not a function". Scoped to this file
+// only (not the shared vitest.setup.ts) since it's needed only here.
+beforeAll(() => {
+  Element.prototype.hasPointerCapture ??= () => false;
+  Element.prototype.scrollIntoView ??= () => {};
+  Element.prototype.setPointerCapture ??= () => {};
+  Element.prototype.releasePointerCapture ??= () => {};
+});
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status });
@@ -34,6 +45,7 @@ function summaryFixture(overrides: Partial<RepeatComplainantSummaryData> = {}): 
         region: "منطقة الرياض",
         facility: "سجن الملز",
         repeatedPeopleCount: 2,
+        repeatedPeopleSharePercent: 50,
         repeatedComplaintsCount: 6,
         facilityTotalComplaints: 15,
         repeatRatePercent: 40,
@@ -52,7 +64,7 @@ function summaryFixture(overrides: Partial<RepeatComplainantSummaryData> = {}): 
   };
 }
 
-function personFixture(overrides: Partial<ReturnType<typeof basePersonFixture>> = {}) {
+function personFixture(overrides: Partial<ReturnType<typeof basePersonFixture>> & { orgFacilitiesCount?: number } = {}) {
   return { ...basePersonFixture(), ...overrides };
 }
 
@@ -559,6 +571,287 @@ describe("RepeatComplainantsPanel — cross-facility person (spec §1/§11/§12/
       expect(personCall).toBeDefined();
       expect(String(personCall![0])).not.toContain("facility=");
     });
+  });
+});
+
+function multiFetchStub(handlers: {
+  summary?: () => Response | Promise<Response>;
+  people?: (url: string) => Response | Promise<Response>;
+  person?: () => Response | Promise<Response>;
+}) {
+  const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/repeat-complainants/search")) return jsonResponse({ people: [] });
+    if (url.includes("/repeat-complainants/person")) return handlers.person ? handlers.person() : jsonResponse(personDetailFixture());
+    if (url.includes("/repeat-complainants/people")) return handlers.people ? handlers.people(url) : jsonResponse(peopleFixture());
+    if (url.includes("/api/analytics/repeat-complainants")) return handlers.summary ? handlers.summary() : jsonResponse(summaryFixture());
+    throw new Error(`Unexpected fetch: ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchSpy);
+  return fetchSpy;
+}
+
+async function switchViewMode(user: ReturnType<typeof userEvent.setup>, label: string) {
+  const group = await screen.findByRole("group", { name: "طريقة العرض" });
+  await user.click(within(group).getByRole("button", { name: label }));
+}
+
+describe("RepeatComplainantsPanel — view modes (spec §1)", () => {
+  it("defaults to the pre-existing region-hierarchy view, with the other two modes reachable via the view-mode switcher", async () => {
+    stubFetch({});
+    render(<RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" />);
+    const group = await screen.findByRole("group", { name: "طريقة العرض" });
+    expect(within(group).getByRole("button", { name: "حسب المنطقة ثم السجن" })).toHaveAttribute("aria-pressed", "true");
+    expect(within(group).getByRole("button", { name: "حسب السجن" })).toHaveAttribute("aria-pressed", "false");
+    expect(within(group).getByRole("button", { name: "قائمة موحدة" })).toHaveAttribute("aria-pressed", "false");
+    // The pre-existing view's own content is exactly as before.
+    await screen.findByRole("button", { name: /منطقة الرياض/ });
+  });
+
+  it("flat 'حسب السجن' view: shows each facility as an independent section with the spec's header stats, and lazily loads its people only on expand", async () => {
+    const peopleSpy = vi.fn((url: string) => jsonResponse(peopleFixture()));
+    const fetchSpy = multiFetchStub({ people: peopleSpy });
+    const user = userEvent.setup();
+    render(<RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" />);
+    await switchViewMode(user, "حسب السجن");
+
+    const trigger = await screen.findByRole("button", { name: /سجن الملز/ });
+    expect(within(trigger).getByText(/منطقة الرياض/)).toBeInTheDocument();
+    expect(within(trigger).getByText(/أشخاص مكررون:/)).toBeInTheDocument();
+    expect(within(trigger).getByText(formatNumber(2))).toBeInTheDocument(); // repeatedPeopleCount
+    expect(within(trigger).getByText(formatNumber(6))).toBeInTheDocument(); // repeatedComplaintsCount
+    expect(within(trigger).getByText(formatNumber(4))).toBeInTheDocument(); // highestRepeatByOnePerson
+    expect(within(trigger).getByText(/التغذية/)).toBeInTheDocument(); // most common classification
+
+    expect(peopleSpy).not.toHaveBeenCalled();
+    await user.click(trigger);
+    await waitFor(() => expect(peopleSpy).toHaveBeenCalledTimes(1));
+    const [calledUrl] = peopleSpy.mock.calls[0]!;
+    expect(calledUrl).toContain("facility=");
+    expect(calledUrl).toContain("peopleSortBy=totalComplaints");
+    void fetchSpy;
+  });
+
+  it("flat 'حسب السجن' view: person row shows repeatCount and highest-single-type-repeat columns, and the multi-facility badge only when orgFacilitiesCount > 1", async () => {
+    const soleFacilityPerson = personFixture({ complainantToken: "tok-solo", totalComplaints: 4, orgFacilitiesCount: 1 });
+    const multiFacilityPerson = personFixture({
+      complainantToken: "tok-multi",
+      complainantName: "سالم عبدالله",
+      totalComplaints: 6,
+      sameTypeRepeatCount: 2,
+      distinctComplaintTypesCount: 3,
+      orgFacilitiesCount: 3,
+    });
+    multiFetchStub({
+      people: () => jsonResponse({ people: [soleFacilityPerson, multiFacilityPerson], total: 2, page: 1, pageSize: 25 }),
+    });
+    const user = userEvent.setup();
+    render(<RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" />);
+    await switchViewMode(user, "حسب السجن");
+    await user.click(await screen.findByRole("button", { name: /سجن الملز/ }));
+
+    const soloRow = (await screen.findByText("محمد أحمد")).closest("tr")!;
+    expect(within(soloRow).getByText(formatNumber(3))).toBeInTheDocument(); // repeatCount = 4 - 1
+    expect(within(soloRow).queryByText(/ظهر في/)).not.toBeInTheDocument();
+
+    const multiRow = screen.getByText("سالم عبدالله").closest("tr")!;
+    expect(within(multiRow).getByText(formatNumber(5))).toBeInTheDocument(); // repeatCount = 6 - 1
+    expect(within(multiRow).getByText(`ظهر في ${formatNumber(3)} سجون`)).toBeInTheDocument();
+  });
+
+  it("flat 'حسب السجن' view: paginates a facility's people list, requesting the next page on 'التالي'", async () => {
+    const peopleSpy = vi.fn((url: string) =>
+      jsonResponse({ people: [personFixture()], total: 40, page: url.includes("peoplePage=2") ? 2 : 1, pageSize: 25 })
+    );
+    multiFetchStub({ people: peopleSpy });
+    const user = userEvent.setup();
+    render(<RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" />);
+    await switchViewMode(user, "حسب السجن");
+    await user.click(await screen.findByRole("button", { name: /سجن الملز/ }));
+    await waitFor(() => expect(peopleSpy).toHaveBeenCalledTimes(1));
+
+    await user.click(await screen.findByRole("button", { name: "التالي" }));
+    await waitFor(() => expect(peopleSpy).toHaveBeenCalledTimes(2));
+    expect(peopleSpy.mock.calls[1]![0]).toContain("peoplePage=2");
+  });
+
+  it("flat 'حسب السجن' view: toggles sort direction (peopleSortOrder) via the direction button", async () => {
+    const peopleSpy = vi.fn((_url: string) => jsonResponse(peopleFixture()));
+    multiFetchStub({ people: peopleSpy });
+    const user = userEvent.setup();
+    render(<RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" />);
+    await switchViewMode(user, "حسب السجن");
+    const trigger = await screen.findByRole("button", { name: /سجن الملز/ });
+    await user.click(trigger);
+    await waitFor(() => expect(peopleSpy).toHaveBeenCalledTimes(1));
+    expect(peopleSpy.mock.calls[0]![0]).toContain("peopleSortOrder=desc");
+
+    // The facility section has its OWN direction toggle ("تنازلي") distinct
+    // from the top-level facility-ordering one above it — scope to the
+    // accordion panel to click the right one.
+    const panel = trigger.closest('[data-slot="accordion-item"]') as HTMLElement;
+    await user.click(within(panel).getByRole("button", { name: "تنازلي" }));
+    await waitFor(() => expect(peopleSpy).toHaveBeenCalledTimes(2));
+    expect(peopleSpy.mock.calls[1]![0]).toContain("peopleSortOrder=asc");
+  });
+
+  it("flat 'حسب السجن' view: changing the people sort key refetches with the chosen peopleSortBy", async () => {
+    const peopleSpy = vi.fn((_url: string) => jsonResponse(peopleFixture()));
+    multiFetchStub({ people: peopleSpy });
+    const user = userEvent.setup();
+    render(<RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" />);
+    await switchViewMode(user, "حسب السجن");
+    await user.click(await screen.findByRole("button", { name: /سجن الملز/ }));
+    await waitFor(() => expect(peopleSpy).toHaveBeenCalledTimes(1));
+
+    const sortCombo = await screen.findByRole("combobox", { name: "ترتيب الأشخاص حسب" });
+    await user.click(sortCombo);
+    await user.click(await screen.findByRole("option", { name: "الاسم" }));
+    await waitFor(() => expect(peopleSpy).toHaveBeenCalledTimes(2));
+    expect(peopleSpy.mock.calls[1]![0]).toContain("peopleSortBy=name");
+  });
+
+  it("flat 'حسب السجن' view: shows a friendly empty state for a facility with no repeated people under the current filters", async () => {
+    multiFetchStub({ people: () => jsonResponse({ people: [], total: 0, page: 1, pageSize: 25 }) });
+    const user = userEvent.setup();
+    render(<RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" />);
+    await switchViewMode(user, "حسب السجن");
+    await user.click(await screen.findByRole("button", { name: /سجن الملز/ }));
+    await screen.findByText("لا يوجد أشخاص مكررون ضمن الفلاتر الحالية.");
+  });
+
+  it("'قائمة موحدة' view: requests the org-wide people list WITHOUT a facility param", async () => {
+    const peopleSpy = vi.fn((_url: string) => jsonResponse(peopleFixture()));
+    multiFetchStub({ people: peopleSpy });
+    const user = userEvent.setup();
+    render(<RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" />);
+    await switchViewMode(user, "قائمة موحدة");
+
+    await waitFor(() => expect(peopleSpy).toHaveBeenCalledTimes(1));
+    const [calledUrl] = peopleSpy.mock.calls[0]!;
+    expect(calledUrl).not.toContain("facility=");
+    await screen.findByText("محمد أحمد");
+  });
+
+  it("'قائمة موحدة' view: paginates, requesting the next page with peoplePage=2 on 'التالي'", async () => {
+    const peopleSpy = vi.fn((_url: string) => jsonResponse({ people: [personFixture()], total: 30, page: 1, pageSize: 25 }));
+    multiFetchStub({ people: peopleSpy });
+    const user = userEvent.setup();
+    render(<RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" />);
+    await switchViewMode(user, "قائمة موحدة");
+    await waitFor(() => expect(peopleSpy).toHaveBeenCalledTimes(1));
+
+    await user.click(await screen.findByRole("button", { name: "التالي" }));
+    await waitFor(() => expect(peopleSpy).toHaveBeenCalledTimes(2));
+    expect(peopleSpy.mock.calls[1]![0]).toContain("peoplePage=2");
+  });
+
+  it("'قائمة موحدة' view: cancels the in-flight fetch and reloads (a fresh AbortController) when the period scope changes", async () => {
+    const deferredFirst = deferredResponse();
+    let secondCallStarted = false;
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/repeat-complainants/people")) {
+        if (!secondCallStarted && fetchSpy.mock.calls.filter((c) => String(c[0]).includes("/people")).length === 0) {
+          return deferredFirst.promise;
+        }
+        secondCallStarted = true;
+        return jsonResponse({ people: [personFixture({ complainantName: "بعد التغيير" })], total: 1, page: 1, pageSize: 25 });
+      }
+      if (url.includes("/repeat-complainants/search")) return jsonResponse({ people: [] });
+      return jsonResponse(summaryFixture());
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    const user = userEvent.setup();
+    const { rerender } = render(<RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" />);
+    await switchViewMode(user, "قائمة موحدة");
+
+    rerender(<RepeatComplainantsPanel from="2026-04-01" to="2026-06-01" regionId="all" />);
+    await screen.findByText("بعد التغيير");
+
+    await act(async () => {
+      deferredFirst.resolve(jsonResponse(peopleFixture()));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    // The stale first-scope response ("محمد أحمد") must never overwrite the new scope's data.
+    expect(screen.queryByText("محمد أحمد")).not.toBeInTheDocument();
+    expect(screen.getByText("بعد التغيير")).toBeInTheDocument();
+  });
+
+  it("never renders the raw complainant identifier in the flat or unified views, only the masked form", async () => {
+    multiFetchStub({});
+    const user = userEvent.setup();
+    render(<RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" />);
+    await switchViewMode(user, "قائمة موحدة");
+    await screen.findByText("*******4821");
+    expect(document.body.innerHTML).not.toContain("1234567894821");
+
+    await switchViewMode(user, "حسب السجن");
+    await user.click(await screen.findByRole("button", { name: /سجن الملز/ }));
+    await waitFor(() => expect(screen.getAllByText("*******4821").length).toBeGreaterThan(0));
+    expect(document.body.innerHTML).not.toContain("1234567894821");
+  });
+});
+
+describe("RepeatComplainantsPanel — classification drill-through (spec §12)", () => {
+  it("drills through from a person's complaint-type row to Explorer scoped to complainantToken + classificationId + the opened facility", async () => {
+    stubFetch({});
+    const onNavigateToExplorer = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" onNavigateToExplorer={onNavigateToExplorer} />
+    );
+    const facilityRow = await expandRegion(user);
+    await user.click(facilityRow);
+    await screen.findByText("محمد أحمد");
+    await user.click(screen.getByRole("button", { name: "عرض التكرارات" }));
+    await screen.findByText("توزيع أنواع الشكاوى");
+
+    const sheet = screen.getByRole("dialog");
+    // "التغذية" also appears in the "الشكاوى مجمعة حسب النوع" accordion
+    // further down the sheet — scope to the "توزيع أنواع الشكاوى" table specifically.
+    const typeDistributionHeading = within(sheet).getByText("توزيع أنواع الشكاوى");
+    const typeTable = typeDistributionHeading.parentElement!.querySelector("table")!;
+    const typeRow = within(typeTable).getByText("التغذية").closest("tr")!;
+    await user.click(within(typeRow).getByRole("button", { name: /عرض/ }));
+
+    expect(onNavigateToExplorer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        complainantToken: "opaque-token-abc",
+        classificationId: "cls-food",
+        facility: "سجن الملز",
+      })
+    );
+  });
+
+  it("omits the facility filter on the classification drill-through when the sheet was opened org-wide (search results)", async () => {
+    const searchToken = { ...personFixture(), complainantToken: "search-token" };
+    stubFetch({
+      search: () => jsonResponse({ people: [searchToken] }),
+      person: () => jsonResponse({ ...personDetailFixture(), person: searchToken }),
+    });
+    const onNavigateToExplorer = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" onNavigateToExplorer={onNavigateToExplorer} />
+    );
+    await screen.findByRole("button", { name: /منطقة الرياض/ });
+    await user.type(screen.getByLabelText(/البحث بالاسم/), "محمد");
+    await user.click(await screen.findByRole("button", { name: "عرض التكرارات" }));
+    await screen.findByText("توزيع أنواع الشكاوى");
+
+    const sheet = screen.getByRole("dialog");
+    // "التغذية" also appears in the "الشكاوى مجمعة حسب النوع" accordion
+    // further down the sheet — scope to the "توزيع أنواع الشكاوى" table specifically.
+    const typeDistributionHeading = within(sheet).getByText("توزيع أنواع الشكاوى");
+    const typeTable = typeDistributionHeading.parentElement!.querySelector("table")!;
+    const typeRow = within(typeTable).getByText("التغذية").closest("tr")!;
+    await user.click(within(typeRow).getByRole("button", { name: /عرض/ }));
+
+    expect(onNavigateToExplorer).toHaveBeenCalledWith(
+      expect.objectContaining({ complainantToken: "search-token", classificationId: "cls-food" })
+    );
+    expect(onNavigateToExplorer.mock.calls.at(-1)![0]).not.toHaveProperty("facility");
   });
 });
 

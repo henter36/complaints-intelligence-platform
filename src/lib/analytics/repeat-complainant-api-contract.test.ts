@@ -30,6 +30,7 @@ const validSummary = {
       region: "الرياض",
       facility: "سجن أ",
       repeatedPeopleCount: 3,
+      repeatedPeopleSharePercent: 60,
       repeatedComplaintsCount: 8,
       facilityTotalComplaints: 20,
       repeatRatePercent: 40,
