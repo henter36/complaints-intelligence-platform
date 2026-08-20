@@ -146,6 +146,16 @@ export type RepeatFacilitySummaryRow = {
    * the module docstring and repeat-complainant-directory.test.ts.
    */
   repeatedPeopleCount: number;
+  /**
+   * repeatedPeopleCount / (every distinct person with >=1 eligible complaint
+   * at this facility, repeated or not) * 100 — "what share of the people who
+   * complained here are repeaters", a PEOPLE-based ratio. Deliberately
+   * distinct from `repeatRatePercent` below, which is a COMPLAINTS-based
+   * ratio (share of complaint volume, not headcount) — the two can and do
+   * diverge (e.g. a facility with few people each filing many complaints
+   * has a high repeatRatePercent but can have a low repeatedPeopleSharePercent).
+   */
+  repeatedPeopleSharePercent: number;
   repeatedComplaintsCount: number;
   facilityTotalComplaints: number;
   repeatRatePercent: number;
@@ -506,6 +516,22 @@ function computeFacilityTotalsAll(records: readonly RepeatDirectoryRecord[]): Ma
 }
 
 /**
+ * Every distinct person with >=1 eligible complaint at each facility,
+ * REGARDLESS of whether they clear the repeat threshold — the denominator
+ * for `repeatedPeopleSharePercent` (spec: "نسبة الأشخاص المكررين" is a
+ * share of everyone who complained, not just of other repeaters).
+ */
+function computeFacilityDistinctPeopleAll(allGroups: readonly PersonGroup[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const group of allGroups) {
+    for (const facility of group.facilities.keys()) {
+      counts.set(facility, (counts.get(facility) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
+/**
  * FACILITY-LEVEL rollups: independently re-evaluated per facility
  * membership (spec §2) — a person can be org-repeated without being
  * facility-repeated anywhere (e.g. 1 complaint at each of two facilities),
@@ -544,11 +570,13 @@ function buildFacilityAggregates(
 function buildFacilityRows(
   facilityAggregates: ReadonlyMap<string, FacilityAggregate>,
   facilityTotalsAll: ReadonlyMap<string, number>,
+  facilityDistinctPeopleAll: ReadonlyMap<string, number>,
   totalDistinctPeriodsInScope: number,
   config: PatternAnalysisConfig
 ): RepeatFacilitySummaryRow[] {
   const facilities: RepeatFacilitySummaryRow[] = [...facilityAggregates.values()].map((agg) => {
     const facilityTotalComplaints = facilityTotalsAll.get(agg.facility) ?? 0;
+    const facilityDistinctPeople = facilityDistinctPeopleAll.get(agg.facility) ?? 0;
     const priority = computeFacilityPriority(
       {
         repeatedComplaintsCount: agg.repeatedComplaintsCount,
@@ -566,6 +594,10 @@ function buildFacilityRows(
       region: agg.region,
       facility: agg.facility,
       repeatedPeopleCount: agg.repeatedPeopleCount,
+      repeatedPeopleSharePercent:
+        facilityDistinctPeople > 0
+          ? Math.round((agg.repeatedPeopleCount / facilityDistinctPeople) * 1000) / 10
+          : 0,
       repeatedComplaintsCount: agg.repeatedComplaintsCount,
       facilityTotalComplaints,
       repeatRatePercent:
@@ -660,8 +692,9 @@ export function buildRepeatComplainantDirectory(
   const topComplaintTypeOverall = computeOrgTopComplaintType(people, orgTypeCountsByIdentifier);
 
   const facilityTotalsAll = computeFacilityTotalsAll(records);
+  const facilityDistinctPeopleAll = computeFacilityDistinctPeopleAll(allGroups);
   const facilityAggregates = buildFacilityAggregates(allGroups, minComplaintsPerPerson, options);
-  const facilities = buildFacilityRows(facilityAggregates, facilityTotalsAll, totalDistinctPeriodsInScope.size, config);
+  const facilities = buildFacilityRows(facilityAggregates, facilityTotalsAll, facilityDistinctPeopleAll, totalDistinctPeriodsInScope.size, config);
   const regions = buildRegionRows(facilities, facilityAggregates);
 
   const repeatedPeopleCount = people.length;

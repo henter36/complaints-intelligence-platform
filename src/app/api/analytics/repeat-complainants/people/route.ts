@@ -3,16 +3,17 @@ import { mapAuthError, requireAdminApiSession } from "@/server/auth/auth-guard";
 import { isComplaintQueryValidationError } from "@/server/complaints/complaint-query-service";
 import { getRepeatComplainantPeoplePage } from "@/server/analytics/repeat-complainants/repeat-complainant-people-service";
 
+/**
+ * `facility` is OPTIONAL (spec: "قائمة موحدة" view) — present, this scopes
+ * the person list (and every number on each row) to that ONE facility;
+ * absent, it returns the org-wide repeated-people list instead (same
+ * underlying `buildRepeatComplainantDirectory` call either way — see
+ * repeat-complainant-people-service.ts).
+ */
 export async function GET(req: NextRequest) {
   try {
     await requireAdminApiSession(req);
     const url = new URL(req.url);
-    if (!url.searchParams.get("facility")) {
-      return NextResponse.json(
-        { error: { code: "FACILITY_REQUIRED", message: "معامل السجن (facility) مطلوب" } },
-        { status: 400 }
-      );
-    }
     const page = await getRepeatComplainantPeoplePage(url.searchParams);
     return NextResponse.json(page);
   } catch (error) {
