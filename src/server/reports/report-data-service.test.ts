@@ -302,6 +302,51 @@ describe("report data service — row limits", () => {
   });
 });
 
+describe("report data service — COMPLAINT_DETAIL row ordering (region -> facility -> date)", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    dbMocks.findMany.mockReset();
+    dbMocks.count.mockReset();
+  });
+
+  it("detail_table queries the DB with the region->facility->date-desc orderBy, applied before take/limit — not the general date-only default", async () => {
+    dbMocks.findMany.mockResolvedValue([complaint()]);
+    dbMocks.count.mockResolvedValue(1);
+
+    const { buildReportData } = await import("./report-data-service");
+    const { parseReportRequest } = await import("./report-definition-service");
+    const { buildReportComplaintOrderBy } = await import("@/server/complaints/complaint-query-service");
+
+    const request = parseReportRequest({ type: "COMPLAINT_DETAIL", filters: VALID_FILTERS });
+    await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+
+    // Among the findMany calls (one for the KPI aggregation, one for the
+    // detail table itself), at least one must carry the facility-grouped
+    // orderBy — proving Prisma/SQLite applies it DB-side, before `take`,
+    // rather than the caller re-sorting an already-limited page in JS.
+    const usedReportOrderBy = dbMocks.findMany.mock.calls.some(
+      ([args]) => JSON.stringify(args?.orderBy) === JSON.stringify(buildReportComplaintOrderBy())
+    );
+    expect(usedReportOrderBy).toBe(true);
+  });
+
+  it("does not leak the report orderBy into the general date-only default used elsewhere", async () => {
+    dbMocks.findMany.mockResolvedValue([complaint()]);
+    dbMocks.count.mockResolvedValue(1);
+
+    const { buildReportData } = await import("./report-data-service");
+    const { parseReportRequest } = await import("./report-definition-service");
+
+    const request = parseReportRequest({ type: "DEPARTMENT_PERFORMANCE", filters: VALID_FILTERS });
+    await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+
+    const usedFacilityOrderBy = dbMocks.findMany.mock.calls.some(([args]) =>
+      JSON.stringify(args?.orderBy ?? []).includes("facilityNormalizedName")
+    );
+    expect(usedFacilityOrderBy).toBe(false);
+  });
+});
+
 describe("report data service — OVERDUE_COMPLAINTS", () => {
   beforeEach(() => {
     vi.resetModules();
@@ -332,6 +377,28 @@ describe("report data service — OVERDUE_COMPLAINTS", () => {
       );
     });
     expect(isLateWhereApplied).toBe(true);
+  });
+
+  it("keeps its own dueDate-ascending ordering — untouched by the COMPLAINT_DETAIL facility-grouping fix", async () => {
+    dbMocks.findMany.mockResolvedValue([]);
+    dbMocks.count.mockResolvedValue(0);
+
+    const { buildReportData } = await import("./report-data-service");
+    const { parseReportRequest } = await import("./report-definition-service");
+
+    const request = parseReportRequest({ type: "OVERDUE_COMPLAINTS", filters: VALID_FILTERS });
+    await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+
+    // "الشكاوى المتأخرة" ranks by urgency (earliest due date first), not by
+    // facility — this must never be swept up in the detail_table fix.
+    const usedDueDateAsc = dbMocks.findMany.mock.calls.some(
+      ([args]) => JSON.stringify(args?.orderBy) === JSON.stringify([{ dueDate: "asc" }, { id: "asc" }])
+    );
+    expect(usedDueDateAsc).toBe(true);
+    const usedFacilityOrderBy = dbMocks.findMany.mock.calls.some(([args]) =>
+      JSON.stringify(args?.orderBy ?? []).includes("facilityNormalizedName")
+    );
+    expect(usedFacilityOrderBy).toBe(false);
   });
 });
 

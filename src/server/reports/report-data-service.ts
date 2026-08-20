@@ -5,7 +5,9 @@ import {
   type ComplaintGroupMetrics,
   type ComplaintKpiSummary,
 } from "@/server/complaints/complaint-kpi-service";
-import { listComplaints, type ComplaintListItem } from "@/server/complaints/complaint-query-service";
+import {
+  listComplaints, buildReportComplaintOrderBy, type ComplaintListItem,
+} from "@/server/complaints/complaint-query-service";
 import {
   buildComplaintQueryParams,
   getReportDefinition,
@@ -475,7 +477,11 @@ async function fetchDetailTable(
   const params = buildComplaintQueryParams(filters);
   params.set("operationalScope", "historical");
   const cap = mode === "preview" ? Math.min(limit, PREVIEW_TABLE_ROW_CAP) : limit;
-  const result = await listComplaints(params, { limit: cap });
+  // Grouped by region -> facility (spec: complaints from the same facility
+  // must render contiguously, never interleaved by the general date-only
+  // default) rather than `listComplaints`'s own default ordering — applied
+  // DB-side, before `take`, via buildReportComplaintOrderBy().
+  const result = await listComplaints(params, { limit: cap, orderBy: buildReportComplaintOrderBy() });
 
   if (mode === "run" && result.pagination.total > hardLimit) {
     throw new ReportRowLimitExceededError(result.pagination.total, hardLimit);

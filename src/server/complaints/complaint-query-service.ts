@@ -466,9 +466,40 @@ export function buildComplaintOrderBy(query: ComplaintQuery): Prisma.ComplaintOr
   return [{ [sortField]: query.sortOrder }, { id: query.sortOrder }];
 }
 
+/**
+ * Deterministic, facility-grouped ordering for report complaint-detail
+ * tables (region -> facility -> complaint date desc, tie-broken by
+ * externalId/id) — NOT part of `SORT_FIELDS`/the public `sortBy` query
+ * param, and never will be: widening the general complaints-explorer sort
+ * vocabulary isn't needed just to fix report output, and every general
+ * list/export caller keeps its existing date-based default untouched.
+ * Pass directly as `listComplaints()`'s own `orderBy` option (report-data-
+ * service.ts's `fetchDetailTable` is the only caller).
+ *
+ * `region`/`facilityNormalizedName` (not raw `facility`) are the sort
+ * keys — `facilityNormalizedName` is the canonical, Arabic-normalized key
+ * already used for facility matching/grouping elsewhere (facility-name.ts,
+ * facility-operational-scope-service.ts), so two spellings of the same
+ * facility never get split into separate groups. It's null exactly when a
+ * complaint has no (or an "غير محدد") facility; `nulls: "last"` on both
+ * region and facility keeps that group at the very end instead of
+ * interleaving with named regions/facilities (SQLite's default ASC
+ * ordering sorts NULLs FIRST, which would do the opposite).
+ */
+export function buildReportComplaintOrderBy(): Prisma.ComplaintOrderByWithRelationInput[] {
+  return [
+    { region: { sort: "asc", nulls: "last" } },
+    { facilityNormalizedName: { sort: "asc", nulls: "last" } },
+    { complaintDate: { sort: "desc", nulls: "last" } },
+    { receivedAt: "desc" },
+    { externalId: { sort: "asc", nulls: "last" } },
+    { id: "asc" },
+  ];
+}
+
 export async function listComplaints(
   params: URLSearchParams,
-  options: { now?: Date; limit?: number } = {}
+  options: { now?: Date; limit?: number; orderBy?: Prisma.ComplaintOrderByWithRelationInput[] } = {}
 ): Promise<ComplaintListResult> {
   const query = parseComplaintQuery(params);
   const now = options.now ?? new Date();
@@ -491,7 +522,11 @@ export async function listComplaints(
     db.complaint.findMany({
       where,
       select: complaintListSelect,
-      orderBy: buildComplaintOrderBy(query),
+      // The report-only orderBy override, when present, is applied here —
+      // still by Prisma/SQLite BEFORE `take`, so a facility-grouped ORDER
+      // BY always precedes the LIMIT at the SQL level (never a JS re-sort
+      // of an already-limited, date-ordered page).
+      orderBy: options.orderBy ?? buildComplaintOrderBy(query),
       skip: options.limit ? 0 : skip,
       take: pageSize,
     }),

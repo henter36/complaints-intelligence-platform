@@ -1,7 +1,9 @@
 import { ComplaintStatus } from "@prisma/client";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  buildComplaintOrderBy,
   buildComplaintWhere,
+  buildReportComplaintOrderBy,
   listComplaints,
   parseComplaintQuery,
 } from "./complaint-query-service";
@@ -196,5 +198,41 @@ describe("central complaint query service", () => {
         },
       },
     ]);
+  });
+
+  it("does not expose facility as a public sortBy value (report ordering stays off the general API)", () => {
+    expect(() => parseComplaintQuery(query("sortBy=facility"))).toThrow("sortBy is not supported");
+  });
+
+  it("default general-purpose ordering is unchanged: receivedDate desc, id desc as tie-breaker", () => {
+    const parsed = parseComplaintQuery(query());
+    expect(buildComplaintOrderBy(parsed)).toEqual([{ complaintDate: "desc" }, { id: "desc" }]);
+  });
+
+  it("buildReportComplaintOrderBy groups region -> facility -> date desc, with unspecified region/facility sorted last", () => {
+    expect(buildReportComplaintOrderBy()).toEqual([
+      { region: { sort: "asc", nulls: "last" } },
+      { facilityNormalizedName: { sort: "asc", nulls: "last" } },
+      { complaintDate: { sort: "desc", nulls: "last" } },
+      { receivedAt: "desc" },
+      { externalId: { sort: "asc", nulls: "last" } },
+      { id: "asc" },
+    ]);
+  });
+
+  it("listComplaints uses the report orderBy override (DB-side, via Prisma's orderBy) when passed, instead of the date-based default", async () => {
+    await listComplaints(query(), { orderBy: buildReportComplaintOrderBy() });
+
+    expect(dbMocks.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ orderBy: buildReportComplaintOrderBy() })
+    );
+  });
+
+  it("listComplaints still uses the date-based default orderBy when no override is passed (general API untouched)", async () => {
+    await listComplaints(query());
+
+    expect(dbMocks.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ orderBy: [{ complaintDate: "desc" }, { id: "desc" }] })
+    );
   });
 });
