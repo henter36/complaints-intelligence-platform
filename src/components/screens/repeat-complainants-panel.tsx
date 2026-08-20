@@ -27,9 +27,9 @@ import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
 } from "recharts";
 import {
-  Users, Repeat2, Building2, ExternalLink, ChevronDown, ChevronLeft,
-  AlertTriangle, ArrowUpDown, Flame, Radio, TrendingUp, Search, Eye, EyeOff,
-  FileDown, X, Sparkles,
+  Users, Repeat2, Building2, ChevronDown, ChevronLeft,
+  AlertTriangle, ArrowUpDown, Flame, Search,
+  FileDown, X,
 } from "lucide-react";
 import { formatNumber, formatPercent } from "@/lib/ar-utils";
 import { isAbortError } from "@/lib/abort";
@@ -50,6 +50,18 @@ import type {
   RepeatComplainantPersonDetail,
   PersonDetailSortOrder,
 } from "@/server/analytics/repeat-complainants/repeat-complainant-person-detail-service";
+import {
+  DrillButton, FacilityBadges, KpiCard, PersonPatternBadges, PRIORITY_BAND_CLASSES, PRIORITY_BAND_LABELS,
+  patternDescription, SortOrderToggle, PeoplePagination, type SortOrder,
+} from "@/components/screens/repeat-complainant-shared";
+import { IdentityCell, RepeatPeopleTable, type SelectedPerson } from "@/components/screens/repeat-people-table";
+import {
+  RepeatComplainantViewModeSelector, type ViewMode,
+} from "@/components/screens/repeat-complainant-view-mode-selector";
+import { FacilityRepeatSection } from "@/components/screens/facility-repeat-section";
+import {
+  useRepeatComplainantPeopleViews, PEOPLE_LIST_SORT_OPTIONS, type PeopleListSortKey,
+} from "@/hooks/use-repeat-complainant-people-views";
 
 export type { RepeatComplainantSummaryData };
 
@@ -85,23 +97,7 @@ const PEOPLE_SORT_COMPARATORS: Record<PeopleSortKey, (a: RepeatPersonRowForClien
   sameTypeRepeatCount: (a, b) => b.sameTypeRepeatCount - a.sameTypeRepeatCount,
 };
 
-/**
- * spec §1: three view modes for this section. "byFacility" is the spec's
- * "الرئيسي" (primary) addition; "byRegion" is the pre-existing hierarchical
- * browser, kept byte-for-byte (state, tests, behavior) — just one tab among
- * three now instead of the only view. Defaults to "byRegion" so this remains
- * a purely additive change: nothing that already renders on load changes.
- */
-type ViewMode = "unified" | "byFacility" | "byRegion";
-const VIEW_MODE_OPTIONS: { key: ViewMode; label: string }[] = [
-  { key: "byRegion", label: "حسب المنطقة ثم السجن" },
-  { key: "byFacility", label: "حسب السجن" },
-  { key: "unified", label: "قائمة موحدة" },
-];
-
-type SortOrder = "asc" | "desc";
-
-/** Facility sort keys for the new flat "حسب السجن" view (spec §5) — a superset of the pre-existing hierarchical view's own (untouched) FacilitySortKey. */
+/** Facility sort keys for the flat "حسب السجن" view — a superset of the pre-existing hierarchical view's own (untouched) FacilitySortKey. */
 type FacilityListSortKey = FacilitySortKey | "repeatedPeopleSharePercent" | "facility";
 const FACILITY_LIST_SORT_OPTIONS: { key: FacilityListSortKey; label: string }[] = [
   ...SORT_OPTIONS,
@@ -113,398 +109,8 @@ function compareFacilityListRows(a: RepeatFacilitySummaryRow, b: RepeatFacilityS
   return a[key] - b[key];
 }
 
-/** Person sort keys shared by the new flat "حسب السجن" and "قائمة موحدة" views (spec §4) — mirrors the server's own PeopleSortKey (repeat-complainant-people-service.ts) since sorting/pagination happen server-side for these two views. */
-type PeopleListSortKey = "totalComplaints" | "repeatCount" | "lastComplaintDate" | "distinctComplaintTypesCount" | "sameTypeRepeatCount" | "name";
-const PEOPLE_LIST_SORT_OPTIONS: { key: PeopleListSortKey; label: string }[] = [
-  { key: "totalComplaints", label: "عدد الشكاوى" },
-  { key: "repeatCount", label: "عدد التكرارات" },
-  { key: "distinctComplaintTypesCount", label: "عدد الأنواع" },
-  { key: "sameTypeRepeatCount", label: "أعلى تكرار لنفس النوع" },
-  { key: "lastComplaintDate", label: "آخر شكوى" },
-  { key: "name", label: "الاسم" },
-];
-const PEOPLE_LIST_PAGE_SIZE = 25;
-
-const PRIORITY_BAND_LABELS: Record<string, string> = { HIGH: "مرتفعة", MEDIUM: "متوسطة", LOW: "منخفضة" };
-const PRIORITY_BAND_CLASSES: Record<string, string> = {
-  HIGH: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300",
-  MEDIUM: "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300",
-  LOW: "bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300",
-};
-
-const PATTERN_LABELS: Record<string, string> = { CONCENTRATED: "تكرار مركز", DIVERSE: "تكرار متعدد الأنواع" };
-
-/**
- * Analytical descriptions of the DATA, never a judgment about the person
- * (spec). Duplicated (not imported) from the PDF service's own
- * `patternDescription` on purpose — that module pulls in `node:crypto` +
- * PDFKit at runtime, which must never reach the client bundle.
- */
-function patternDescription(person: RepeatPersonRowForClient): string {
-  const parts: string[] = [
-    person.pattern === "CONCENTRATED" ? "تكرار مركز في تصنيف واحد بشكل رئيسي" : "تكرار متعدد الأنواع عبر عدة تصنيفات",
-  ];
-  if (person.spansMultiplePeriods) parts.push("مستمر عبر أكثر من فترة قياس");
-  if (person.recentActivity) parts.push("نشاط حديث (معظم الشكاوى في آخر فترة)");
-  return parts.join(" — ");
-}
-
 type PeopleCacheEntry = { loading: boolean; error: string | null; data: RepeatComplainantPeopleData | null };
-/** `facility: null` means "org-wide" (spec §12) — every complaint of this person across every facility they appear at, not just the one their row was opened from. */
-type SelectedPerson = { token: string; facility: string | null };
 type PersonDetailState = { loading: boolean; error: string | null; data: RepeatComplainantPersonDetail | null };
-/** Per-facility cache entry for the flat "حسب السجن" view — carries its OWN page/sort so several facilities can each be paged/sorted independently. */
-type FlatPeopleState = {
-  loading: boolean;
-  error: string | null;
-  data: RepeatComplainantPeopleData | null;
-  page: number;
-  sortKey: PeopleListSortKey;
-  sortOrder: SortOrder;
-};
-type UnifiedPeopleState = {
-  loading: boolean;
-  error: string | null;
-  data: RepeatComplainantPeopleData | null;
-  page: number;
-  sortKey: PeopleListSortKey;
-  sortOrder: SortOrder;
-};
-
-function DrillButton({ onClick, label = "عرض الشكاوى" }: Readonly<{ onClick: () => void; label?: string }>) {
-  return (
-    <Button
-      variant="ghost"
-      size="sm"
-      className="h-7 gap-1 px-2 text-xs"
-      onClick={(event) => {
-        event.stopPropagation();
-        onClick();
-      }}
-    >
-      <ExternalLink className="h-3 w-3" />
-      {label}
-    </Button>
-  );
-}
-
-function KpiCard({
-  icon, label, value, sub,
-}: Readonly<{ icon: React.ReactNode; label: string; value: string; sub?: string }>) {
-  return (
-    <Card>
-      <CardContent className="flex items-center gap-3 py-4">
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-          {icon}
-        </div>
-        <div className="min-w-0">
-          <p className="text-xs text-muted-foreground truncate">{label}</p>
-          <p className="text-lg font-bold truncate">{value}</p>
-          {sub && <p className="text-[11px] text-muted-foreground truncate">{sub}</p>}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function FacilityBadges({ row }: Readonly<{ row: RepeatFacilitySummaryRow }>) {
-  return (
-    <div className="flex flex-wrap gap-1">
-      {row.linkedChronicIssue && (
-        <Badge variant="outline" className="gap-1 text-[10px] text-orange-700 dark:text-orange-300">
-          <Flame className="h-3 w-3" /> مشكلة مزمنة
-        </Badge>
-      )}
-      {row.linkedMassComplaint && (
-        <Badge variant="outline" className="gap-1 text-[10px] text-purple-700 dark:text-purple-300">
-          <Radio className="h-3 w-3" /> انتشار جماعي
-        </Badge>
-      )}
-      {row.linkedHighPriorityFacility && (
-        <Badge variant="outline" className="gap-1 text-[10px] text-red-700 dark:text-red-300">
-          <TrendingUp className="h-3 w-3" /> أولوية مرتفعة
-        </Badge>
-      )}
-    </div>
-  );
-}
-
-/**
- * Shows the masked identifier by default; the raw value is fetched ONLY on
- * an explicit click (never preloaded, never cached beyond this component's
- * own state, never written to the URL — spec's reveal-toggle requirement).
- */
-function IdentityCell({ person }: Readonly<{ person: RepeatPersonRowForClient }>) {
-  const [revealed, setRevealed] = useState(false);
-  const [value, setValue] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(false);
-  // Cancels an in-flight reveal fetch on unmount (e.g. the person's Sheet
-  // closes, or their row scrolls out of a re-rendered list) so a late
-  // response never calls setState on an unmounted cell.
-  const abortRef = useRef<AbortController | null>(null);
-  useEffect(() => () => abortRef.current?.abort(), []);
-
-  const toggle = useCallback(async () => {
-    if (revealed) {
-      setRevealed(false);
-      return;
-    }
-    if (value) {
-      setRevealed(true);
-      return;
-    }
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setLoading(true);
-    setError(false);
-    try {
-      const res = await fetch(`/api/analytics/repeat-complainants/reveal?token=${encodeURIComponent(person.complainantToken)}`, {
-        signal: controller.signal,
-      });
-      const payload = await readJsonResponse(res);
-      if (!res.ok || !isRecord(payload) || typeof payload.identifier !== "string") {
-        throw new Error("failed");
-      }
-      if (controller.signal.aborted) return;
-      setValue(payload.identifier);
-      setRevealed(true);
-    } catch (e) {
-      if (isAbortError(e) || controller.signal.aborted) return;
-      setError(true);
-    } finally {
-      if (!controller.signal.aborted) setLoading(false);
-    }
-  }, [revealed, value, person.complainantToken]);
-
-  return (
-    <div className="flex items-center gap-1.5">
-      <span className="font-mono text-xs">{revealed && value ? value : person.complainantIdentifierMasked}</span>
-      <Button
-        type="button"
-        variant="ghost"
-        size="icon"
-        className="h-6 w-6 shrink-0"
-        disabled={loading}
-        onClick={(e) => {
-          e.stopPropagation();
-          void toggle();
-        }}
-        title={revealed ? "إخفاء الهوية" : "إظهار الهوية"}
-      >
-        {revealed ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-      </Button>
-      {error && <span className="text-[10px] text-destructive">تعذر الإظهار</span>}
-    </div>
-  );
-}
-
-function PersonPatternBadges({ person }: Readonly<{ person: RepeatPersonRowForClient }>) {
-  return (
-    <div className="flex flex-wrap gap-1">
-      <Badge variant="outline" className="text-[10px]">{PATTERN_LABELS[person.pattern]}</Badge>
-      {person.spansMultiplePeriods && <Badge variant="outline" className="text-[10px]">مستمر عبر فترات</Badge>}
-      {person.recentActivity && (
-        <Badge variant="outline" className="gap-1 text-[10px] text-blue-700 dark:text-blue-300">
-          <Sparkles className="h-3 w-3" /> نشاط حديث
-        </Badge>
-      )}
-    </div>
-  );
-}
-
-/** One row of the spec's main person table: الاسم|الهوية|المنطقة|السجن|عدد الشكاوى|أنواع الشكاوى|الأكثر تكراراً|آخر شكوى|التفاصيل */
-function PersonTableRow({
-  person, onOpenDetail, scopeToFacility,
-}: Readonly<{
-  person: RepeatPersonRowForClient;
-  onOpenDetail: (selection: SelectedPerson) => void;
-  /** true inside a facility-expanded list (every row genuinely belongs to just that facility); false for org-wide search results, where opening org-wide detail (not just this person's primary facility) is the honest scope. */
-  scopeToFacility: boolean;
-}>) {
-  const topType = person.topComplaintTypes[0];
-  return (
-    <TableRow>
-      <TableCell className="font-medium">{person.complainantName ?? "غير متوفر"}</TableCell>
-      <TableCell><IdentityCell person={person} /></TableCell>
-      <TableCell className="text-muted-foreground">{person.region}</TableCell>
-      <TableCell className="max-w-[160px] truncate">
-        {person.facilitiesCount > 1 ? `${person.facility} (+${formatNumber(person.facilitiesCount - 1)})` : person.facility}
-      </TableCell>
-      <TableCell>{formatNumber(person.totalComplaints)}</TableCell>
-      <TableCell>{formatNumber(person.distinctComplaintTypesCount)}</TableCell>
-      <TableCell className="max-w-[140px] truncate">{topType ? `${topType.label} (${formatNumber(topType.count)})` : "—"}</TableCell>
-      <TableCell className="text-muted-foreground">{person.lastComplaintDate}</TableCell>
-      <TableCell>
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-7 gap-1 px-2 text-xs"
-          onClick={() => onOpenDetail({ token: person.complainantToken, facility: scopeToFacility ? person.facility : null })}
-        >
-          عرض التكرارات
-        </Button>
-      </TableCell>
-    </TableRow>
-  );
-}
-
-function PeopleTable({
-  people, onOpenDetail, emptyMessage, scopeToFacility,
-}: Readonly<{
-  people: RepeatPersonRowForClient[];
-  onOpenDetail: (selection: SelectedPerson) => void;
-  emptyMessage: string;
-  scopeToFacility: boolean;
-}>) {
-  return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>الاسم</TableHead>
-          <TableHead>الهوية</TableHead>
-          <TableHead>المنطقة</TableHead>
-          <TableHead>السجن</TableHead>
-          <TableHead>عدد الشكاوى</TableHead>
-          <TableHead>أنواع الشكاوى</TableHead>
-          <TableHead>الأكثر تكراراً</TableHead>
-          <TableHead>آخر شكوى</TableHead>
-          <TableHead>التفاصيل</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {people.length === 0 && (
-          <TableRow>
-            <TableCell colSpan={9} className="text-center text-sm text-muted-foreground py-8">
-              {emptyMessage}
-            </TableCell>
-          </TableRow>
-        )}
-        {people.map((person) => (
-          <PersonTableRow key={person.complainantToken} person={person} onOpenDetail={onOpenDetail} scopeToFacility={scopeToFacility} />
-        ))}
-      </TableBody>
-    </Table>
-  );
-}
-
-function SortOrderToggle({ order, onChange }: Readonly<{ order: SortOrder; onChange: (order: SortOrder) => void }>) {
-  return (
-    <Button
-      type="button"
-      variant="outline"
-      size="sm"
-      className="h-8 gap-1 px-2 text-xs"
-      onClick={() => onChange(order === "asc" ? "desc" : "asc")}
-      title={order === "asc" ? "تصاعدي" : "تنازلي"}
-    >
-      <ArrowUpDown className="h-3.5 w-3.5" />
-      {order === "asc" ? "تصاعدي" : "تنازلي"}
-    </Button>
-  );
-}
-
-function PeoplePagination({
-  page, pageSize, total, onPageChange,
-}: Readonly<{ page: number; pageSize: number; total: number; onPageChange: (page: number) => void }>) {
-  const pageCount = Math.max(1, Math.ceil(total / pageSize));
-  if (pageCount <= 1) return null;
-  return (
-    <div className="flex items-center justify-between gap-2 px-3 py-2 text-xs text-muted-foreground">
-      <span>صفحة {formatNumber(page)} من {formatNumber(pageCount)} · {formatNumber(total)} شخص</span>
-      <div className="flex gap-1">
-        <Button variant="outline" size="sm" className="h-7 px-2 text-xs" disabled={page <= 1} onClick={() => onPageChange(page - 1)}>
-          السابق
-        </Button>
-        <Button variant="outline" size="sm" className="h-7 px-2 text-xs" disabled={page >= pageCount} onClick={() => onPageChange(page + 1)}>
-          التالي
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-/**
- * Facility-scoped person row (spec §3): every number here is scoped to THIS
- * facility only (`totalComplaints`, `distinctComplaintTypesCount`,
- * `sameTypeRepeatCount`) — already true by construction since the server
- * only aggregated this facility's records (repeat-complainant-people-
- * service.ts). `repeatCount` is derived client-side (= totalComplaints - 1,
- * floored at 0) since the API only carries totalComplaints. When the person
- * also appears at other facilities (`orgFacilitiesCount` > 1, attached only
- * on facility-scoped pages), a badge says so — WITHOUT pulling in or
- * aggregating their other facilities' numbers into this row (spec §7).
- */
-function FacilityPersonRow({
-  person, onOpenDetail,
-}: Readonly<{ person: RepeatPersonRowForClient; onOpenDetail: (selection: SelectedPerson) => void }>) {
-  const topType = person.topComplaintTypes[0];
-  const repeatCount = Math.max(0, person.totalComplaints - 1);
-  return (
-    <TableRow>
-      <TableCell className="font-medium">
-        <div className="flex flex-wrap items-center gap-1.5">
-          {person.complainantName ?? "غير متوفر"}
-          {person.orgFacilitiesCount !== undefined && person.orgFacilitiesCount > 1 && (
-            <Badge variant="outline" className="text-[10px]">ظهر في {formatNumber(person.orgFacilitiesCount)} سجون</Badge>
-          )}
-        </div>
-      </TableCell>
-      <TableCell><IdentityCell person={person} /></TableCell>
-      <TableCell>{formatNumber(person.totalComplaints)}</TableCell>
-      <TableCell>{formatNumber(repeatCount)}</TableCell>
-      <TableCell>{formatNumber(person.distinctComplaintTypesCount)}</TableCell>
-      <TableCell className="max-w-[140px] truncate">{topType ? `${topType.label} (${formatNumber(topType.count)})` : "—"}</TableCell>
-      <TableCell>{formatNumber(person.sameTypeRepeatCount)}</TableCell>
-      <TableCell className="text-muted-foreground">{person.lastComplaintDate}</TableCell>
-      <TableCell>
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-7 gap-1 px-2 text-xs"
-          onClick={() => onOpenDetail({ token: person.complainantToken, facility: person.facility })}
-        >
-          عرض التكرارات
-        </Button>
-      </TableCell>
-    </TableRow>
-  );
-}
-
-function FacilityPeopleTable({
-  people, onOpenDetail, emptyMessage,
-}: Readonly<{ people: RepeatPersonRowForClient[]; onOpenDetail: (selection: SelectedPerson) => void; emptyMessage: string }>) {
-  return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>الاسم</TableHead>
-          <TableHead>الهوية</TableHead>
-          <TableHead>عدد الشكاوى</TableHead>
-          <TableHead>عدد التكرارات</TableHead>
-          <TableHead>عدد الأنواع</TableHead>
-          <TableHead>الأكثر تكراراً</TableHead>
-          <TableHead>أعلى تكرار لنفس النوع</TableHead>
-          <TableHead>آخر شكوى</TableHead>
-          <TableHead>التفاصيل</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {people.length === 0 && (
-          <TableRow>
-            <TableCell colSpan={9} className="text-center text-sm text-muted-foreground py-8">
-              {emptyMessage}
-            </TableCell>
-          </TableRow>
-        )}
-        {people.map((person) => (
-          <FacilityPersonRow key={person.complainantToken} person={person} onOpenDetail={onOpenDetail} />
-        ))}
-      </TableBody>
-    </Table>
-  );
-}
 
 function PersonDetailContent({
   detail, selectedFacility, sortOrder, onSortOrderChange, includeFullIdentifier, onIncludeFullIdentifierChange,
@@ -787,24 +393,10 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
 
   const [viewMode, setViewMode] = useState<ViewMode>("byRegion");
 
-  // "حسب السجن" flat view (spec §1/§2/§9) — facilities render as independent
-  // top-level accordion sections (unlike the region-hierarchy view, MORE
-  // THAN ONE can be expanded at once), each lazily loading its own people
-  // page on first expand.
+  // "حسب السجن" flat view's own facility ordering (not fetch-related, so it
+  // stays local rather than in useRepeatComplainantPeopleViews).
   const [flatSortKey, setFlatSortKey] = useState<FacilityListSortKey>("repeatedPeopleCount");
   const [flatSortOrder, setFlatSortOrder] = useState<SortOrder>("desc");
-  const [flatExpanded, setFlatExpanded] = useState<Set<string>>(new Set());
-  const [flatPeople, setFlatPeople] = useState<Record<string, FlatPeopleState>>({});
-  /** One AbortController per expanded facility — unlike the single-facility region view, several can legitimately be in flight at once here. */
-  const flatAbortRefs = useRef<Map<string, AbortController>>(new Map());
-
-  // "قائمة موحدة" unified org-wide view (spec §1) — its own paginated,
-  // server-sorted fetch, independent of any facility scope.
-  const [unifiedState, setUnifiedState] = useState<UnifiedPeopleState>({
-    loading: false, error: null, data: null, page: 1, sortKey: "totalComplaints", sortOrder: "desc",
-  });
-  const unifiedRequestRef = useRef(0);
-  const unifiedAbortRef = useRef<AbortController | null>(null);
 
   const requestRef = useRef(0);
   const searchRequestRef = useRef(0);
@@ -824,6 +416,13 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
     if (topFacilities) params.set("topFacilities", topFacilities);
     return params;
   }, [from, to, regionId, minComplaints, sameTypeOnly, topFacilities]);
+
+  // Fetch/state orchestration for the two NEW views ("حسب السجن" flat +
+  // "قائمة موحدة") lives in this hook — the pre-existing region→facility
+  // browser's own state stays below, untouched.
+  const {
+    flatExpanded, flatPeople, toggleFlatFacility, loadFlatPeople, unifiedState, loadUnified,
+  } = useRepeatComplainantPeopleViews({ viewMode, buildBaseParams });
 
   const loadSummary = useCallback(
     async (signal?: AbortSignal) => {
@@ -859,7 +458,8 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
     // per-facility or per-person fetch issued under the OLD scope — without
     // this, a late response could resurrect stale data into the
     // just-cleared caches/sheet below (spec §5/§9's "period/region/filter
-    // change" trigger list).
+    // change" trigger list). The flat/unified views' own caches are reset
+    // by useRepeatComplainantPeopleViews itself (keyed on buildBaseParams).
     peopleAbortRef.current?.abort();
     personAbortRef.current?.abort();
     setExpandedRegions(new Set());
@@ -870,14 +470,6 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
     setSearchInput("");
     setSearchQuery("");
     setSearchResults(null);
-    // Same "old scope becomes stale" rule (spec §9) applies to the two new
-    // views' own caches/in-flight fetches.
-    for (const pending of flatAbortRefs.current.values()) pending.abort();
-    flatAbortRefs.current.clear();
-    setFlatExpanded(new Set());
-    setFlatPeople({});
-    unifiedAbortRef.current?.abort();
-    setUnifiedState((prev) => ({ ...prev, data: null, page: 1 }));
     void loadSummary(controller.signal);
     return () => controller.abort();
   }, [loadSummary]);
@@ -888,8 +480,6 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
     () => () => {
       peopleAbortRef.current?.abort();
       personAbortRef.current?.abort();
-      for (const pending of flatAbortRefs.current.values()) pending.abort();
-      unifiedAbortRef.current?.abort();
     },
     []
   );
@@ -941,107 +531,6 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
     })();
     return () => controller.abort();
   }, [searchQuery, buildBaseParams]);
-
-  /**
-   * Shared by the flat "حسب السجن" and "قائمة موحدة" views — both paginate
-   * and sort SERVER-side (spec §9: never load every person for every
-   * facility up front), reusing the same `getRepeatComplainantPeoplePage`
-   * endpoint as the pre-existing region-hierarchy view. `facility` present
-   * scopes everything to that one facility; absent, it's the org-wide
-   * unified list (repeat-complainant-people-service.ts's two modes).
-   */
-  const fetchPeoplePageFor = useCallback(
-    async (
-      opts: { facility?: string; page: number; sortKey: PeopleListSortKey; sortOrder: SortOrder },
-      signal: AbortSignal
-    ): Promise<RepeatComplainantPeopleData> => {
-      const params = buildBaseParams();
-      if (opts.facility) params.set("facility", opts.facility);
-      params.set("peoplePage", String(opts.page));
-      params.set("peoplePageSize", String(PEOPLE_LIST_PAGE_SIZE));
-      params.set("peopleSortBy", opts.sortKey);
-      params.set("peopleSortOrder", opts.sortOrder);
-      const res = await fetch(`/api/analytics/repeat-complainants/people?${params.toString()}`, { signal });
-      const payload = await readJsonResponse(res);
-      if (!res.ok) throw new Error(apiErrorMessage(payload, "تعذر تحميل قائمة الأشخاص."));
-      if (!isRepeatComplainantPeopleData(payload)) throw new Error("استجابة قائمة الأشخاص غير مكتملة.");
-      return payload;
-    },
-    [buildBaseParams]
-  );
-
-  const loadFlatPeople = useCallback(
-    (facility: string, page: number, sortKey: PeopleListSortKey, sortOrder: SortOrder) => {
-      flatAbortRefs.current.get(facility)?.abort();
-      const controller = new AbortController();
-      flatAbortRefs.current.set(facility, controller);
-      setFlatPeople((prev) => ({
-        ...prev,
-        [facility]: { loading: true, error: null, data: prev[facility]?.data ?? null, page, sortKey, sortOrder },
-      }));
-      fetchPeoplePageFor({ facility, page, sortKey, sortOrder }, controller.signal)
-        .then((payload) => {
-          if (controller.signal.aborted) return;
-          setFlatPeople((prev) => ({ ...prev, [facility]: { loading: false, error: null, data: payload, page, sortKey, sortOrder } }));
-        })
-        .catch((e) => {
-          if (isAbortError(e) || controller.signal.aborted) return;
-          setFlatPeople((prev) => ({
-            ...prev,
-            [facility]: { loading: false, error: e instanceof Error ? e.message : "تعذر تحميل قائمة الأشخاص.", data: null, page, sortKey, sortOrder },
-          }));
-        });
-    },
-    [fetchPeoplePageFor]
-  );
-
-  const toggleFlatFacility = useCallback(
-    (facility: string) => {
-      const willOpen = !flatExpanded.has(facility);
-      setFlatExpanded((prev) => {
-        const next = new Set(prev);
-        if (next.has(facility)) next.delete(facility);
-        else next.add(facility);
-        return next;
-      });
-      if (willOpen) {
-        if (!flatPeople[facility]) loadFlatPeople(facility, 1, "totalComplaints", "desc");
-      } else {
-        flatAbortRefs.current.get(facility)?.abort();
-      }
-    },
-    [flatExpanded, flatPeople, loadFlatPeople]
-  );
-
-  const loadUnified = useCallback(
-    (page: number, sortKey: PeopleListSortKey, sortOrder: SortOrder) => {
-      unifiedAbortRef.current?.abort();
-      const requestId = unifiedRequestRef.current + 1;
-      unifiedRequestRef.current = requestId;
-      const controller = new AbortController();
-      unifiedAbortRef.current = controller;
-      setUnifiedState((prev) => ({ ...prev, loading: true, error: null, page, sortKey, sortOrder }));
-      fetchPeoplePageFor({ page, sortKey, sortOrder }, controller.signal)
-        .then((payload) => {
-          if (unifiedRequestRef.current !== requestId || controller.signal.aborted) return;
-          setUnifiedState({ loading: false, error: null, data: payload, page, sortKey, sortOrder });
-        })
-        .catch((e) => {
-          if (isAbortError(e) || unifiedRequestRef.current !== requestId || controller.signal.aborted) return;
-          setUnifiedState({ loading: false, error: e instanceof Error ? e.message : "تعذر تحميل القائمة الموحدة.", data: null, page, sortKey, sortOrder });
-        });
-    },
-    [fetchPeoplePageFor]
-  );
-
-  // Loads (or reloads, with an AbortController cancelling whatever was
-  // in-flight) the unified list whenever the tab becomes active, or the
-  // scope changes while it already is — spec §9's "AbortController on
-  // facility/filter change" trigger, applied to this view specifically.
-  useEffect(() => {
-    if (viewMode !== "unified") return;
-    loadUnified(1, unifiedState.sortKey, unifiedState.sortOrder);
-  }, [viewMode, from, to, regionId, minComplaints, sameTypeOnly, topFacilities]);
 
   const toggleFacility = useCallback(
     (facility: string) => {
@@ -1380,11 +869,11 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
               {searchLoading && <div className="p-4"><Skeleton className="h-20 w-full" /></div>}
               {searchError && <p className="p-4 text-sm text-destructive">{searchError}</p>}
               {sortedSearchResults && (
-                <PeopleTable
+                <RepeatPeopleTable
                   people={sortedSearchResults}
+                  scope="organization"
                   onOpenDetail={openPersonDetail}
                   emptyMessage="لا توجد نتائج مطابقة."
-                  scopeToFacility={false}
                 />
               )}
             </div>
@@ -1392,27 +881,10 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
         </CardContent>
       </Card>
 
-      {/* View mode selector (spec §1) — a segmented button group rather than a
-          dropdown: only three, always-visible, mutually exclusive options,
-          so every mode stays one click away instead of hidden behind a menu. */}
+      {/* View mode selector (spec §1) */}
       <Card>
-        <CardContent className="flex flex-wrap items-center gap-3 py-3">
-          <span className="text-xs text-muted-foreground">طريقة العرض</span>
-          <div role="group" aria-label="طريقة العرض" className="flex flex-wrap gap-1.5">
-            {VIEW_MODE_OPTIONS.map((opt) => (
-              <Button
-                key={opt.key}
-                type="button"
-                size="sm"
-                variant={viewMode === opt.key ? "default" : "outline"}
-                className="h-8 text-xs"
-                aria-pressed={viewMode === opt.key}
-                onClick={() => setViewMode(opt.key)}
-              >
-                {opt.label}
-              </Button>
-            ))}
-          </div>
+        <CardContent className="py-3">
+          <RepeatComplainantViewModeSelector value={viewMode} onChange={setViewMode} />
         </CardContent>
       </Card>
 
@@ -1531,11 +1003,11 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
               {unifiedState.error && <p className="p-4 text-sm text-destructive">{unifiedState.error}</p>}
               {!unifiedState.loading && unifiedState.data && (
                 <>
-                  <PeopleTable
+                  <RepeatPeopleTable
                     people={unifiedState.data.people}
+                    scope="organization"
                     onOpenDetail={openPersonDetail}
                     emptyMessage="لا يوجد أشخاص مكررون ضمن الفلاتر الحالية."
-                    scopeToFacility={false}
                   />
                   <PeoplePagination
                     page={unifiedState.page}
@@ -1580,81 +1052,26 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
               {sortedFlatFacilities.map((row, facilityIndex) => {
                 const peopleEntry = flatPeople[row.facility];
                 return (
-                  <AccordionItem key={row.facility} value={row.facility} className="rounded-lg border px-3">
-                    <AccordionTrigger onClick={() => toggleFlatFacility(row.facility)} className="py-2.5 text-sm hover:no-underline">
-                      <div className="flex w-full flex-wrap items-center justify-between gap-2 pl-2 text-right">
-                        <div className="space-y-1">
-                          <div className="flex flex-wrap items-center gap-1.5 font-medium">
-                            {row.facility}
-                            <span className="text-xs font-normal text-muted-foreground">({row.region})</span>
-                            <Badge className={PRIORITY_BAND_CLASSES[row.priorityBand]}>
-                              {PRIORITY_BAND_LABELS[row.priorityBand] ?? row.priorityBand}
-                            </Badge>
-                          </div>
-                          <FacilityBadges row={row} />
-                        </div>
-                        <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                          <span>أشخاص مكررون: <strong className="text-foreground">{formatNumber(row.repeatedPeopleCount)}</strong></span>
-                          <span>إجمالي شكاواهم: <strong className="text-foreground">{formatNumber(row.repeatedComplaintsCount)}</strong></span>
-                          <span>أعلى تكرار لشخص: <strong className="text-foreground">{formatNumber(row.highestRepeatByOnePerson)}</strong></span>
-                          <span>
-                            أكثر نوع متكرر:{" "}
-                            <strong className="text-foreground">
-                              {row.topComplaintType ? `${row.topComplaintType.label} (${formatNumber(row.topComplaintType.count)})` : "—"}
-                            </strong>
-                          </span>
-                          {onNavigateToExplorer && (
-                            <DrillButton
-                              onClick={() =>
-                                onNavigateToExplorer(buildRepeatComplainantDrilldownQuery(row.drilldownFilters, { from, to }))
-                              }
-                            />
-                          )}
-                        </div>
-                      </div>
-                    </AccordionTrigger>
-                    <AccordionContent>
-                      {peopleEntry?.loading && <div className="p-4"><Skeleton className="h-20 w-full" /></div>}
-                      {peopleEntry?.error && <p className="p-4 text-sm text-destructive">{peopleEntry.error}</p>}
-                      {peopleEntry?.data && !peopleEntry.loading && (
-                        <div className="space-y-2">
-                          <div className="flex flex-wrap items-end gap-2">
-                            <div className="space-y-1">
-                              <Label id={`rc-flat-people-sort-label-${facilityIndex}`} className="text-xs">ترتيب الأشخاص حسب</Label>
-                              <Select
-                                value={peopleEntry.sortKey}
-                                onValueChange={(v) => loadFlatPeople(row.facility, 1, v as PeopleListSortKey, peopleEntry.sortOrder)}
-                              >
-                                <SelectTrigger aria-labelledby={`rc-flat-people-sort-label-${facilityIndex}`} className="h-8 w-44">
-                                  <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  {PEOPLE_LIST_SORT_OPTIONS.map((opt) => (
-                                    <SelectItem key={opt.key} value={opt.key}>{opt.label}</SelectItem>
-                                  ))}
-                                </SelectContent>
-                              </Select>
-                            </div>
-                            <SortOrderToggle
-                              order={peopleEntry.sortOrder}
-                              onChange={(order) => loadFlatPeople(row.facility, 1, peopleEntry.sortKey, order)}
-                            />
-                          </div>
-                          <FacilityPeopleTable
-                            people={peopleEntry.data.people}
-                            onOpenDetail={openPersonDetail}
-                            emptyMessage="لا يوجد أشخاص مكررون ضمن الفلاتر الحالية."
-                          />
-                          <PeoplePagination
-                            page={peopleEntry.page}
-                            pageSize={peopleEntry.data.pageSize}
-                            total={peopleEntry.data.total}
-                            onPageChange={(page) => loadFlatPeople(row.facility, page, peopleEntry.sortKey, peopleEntry.sortOrder)}
-                          />
-                        </div>
-                      )}
-                    </AccordionContent>
-                  </AccordionItem>
+                  <FacilityRepeatSection
+                    key={row.facility}
+                    row={row}
+                    facilityIndex={facilityIndex}
+                    peopleEntry={peopleEntry}
+                    onToggle={() => toggleFlatFacility(row.facility)}
+                    onPeopleSortKeyChange={(key) =>
+                      loadFlatPeople(row.facility, 1, key, peopleEntry?.sortOrder ?? "desc")
+                    }
+                    onPeopleSortOrderChange={(order) =>
+                      loadFlatPeople(row.facility, 1, peopleEntry?.sortKey ?? "totalComplaints", order)
+                    }
+                    onPeoplePageChange={(page) =>
+                      loadFlatPeople(row.facility, page, peopleEntry?.sortKey ?? "totalComplaints", peopleEntry?.sortOrder ?? "desc")
+                    }
+                    onOpenDetail={openPersonDetail}
+                    onNavigateToExplorer={onNavigateToExplorer}
+                    from={from}
+                    to={to}
+                  />
                 );
               })}
             </Accordion>
@@ -1753,11 +1170,12 @@ export function RepeatComplainantsPanel({ from, to, regionId, onNavigateToExplor
                                   {peopleEntry?.loading && <div className="p-4"><Skeleton className="h-20 w-full" /></div>}
                                   {peopleEntry?.error && <p className="p-4 text-sm text-destructive">{peopleEntry.error}</p>}
                                   {sortedPeople && (
-                                    <PeopleTable
+                                    <RepeatPeopleTable
                                       people={sortedPeople}
+                                      scope="organization"
+                                      scopeDetailToFacility
                                       onOpenDetail={openPersonDetail}
                                       emptyMessage="لا يوجد أشخاص مكررون ضمن الفلاتر الحالية."
-                                      scopeToFacility
                                     />
                                   )}
                                   {peopleEntry?.data && peopleEntry.data.total > peopleEntry.data.people.length && (

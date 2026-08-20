@@ -599,13 +599,23 @@ async function switchViewMode(user: ReturnType<typeof userEvent.setup>, label: s
 describe("RepeatComplainantsPanel — view modes (spec §1)", () => {
   it("defaults to the pre-existing region-hierarchy view, with the other two modes reachable via the view-mode switcher", async () => {
     stubFetch({});
+    const user = userEvent.setup();
     render(<RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" />);
     const group = await screen.findByRole("group", { name: "طريقة العرض" });
+    // A native <fieldset> (its own implicit "group" role + <legend> accessible
+    // name) rather than a hand-rolled role="group" div — SonarCloud a11y fix.
+    expect(group.tagName).toBe("FIELDSET");
     expect(within(group).getByRole("button", { name: "حسب المنطقة ثم السجن" })).toHaveAttribute("aria-pressed", "true");
     expect(within(group).getByRole("button", { name: "حسب السجن" })).toHaveAttribute("aria-pressed", "false");
     expect(within(group).getByRole("button", { name: "قائمة موحدة" })).toHaveAttribute("aria-pressed", "false");
     // The pre-existing view's own content is exactly as before.
     await screen.findByRole("button", { name: /منطقة الرياض/ });
+
+    // Pressing a different option flips aria-pressed on exactly that option.
+    await user.click(within(group).getByRole("button", { name: "قائمة موحدة" }));
+    expect(within(group).getByRole("button", { name: "قائمة موحدة" })).toHaveAttribute("aria-pressed", "true");
+    expect(within(group).getByRole("button", { name: "حسب المنطقة ثم السجن" })).toHaveAttribute("aria-pressed", "false");
+    expect(within(group).getByRole("button", { name: "حسب السجن" })).toHaveAttribute("aria-pressed", "false");
   });
 
   it("flat 'حسب السجن' view: shows each facility as an independent section with the spec's header stats, and lazily loads its people only on expand", async () => {
@@ -717,7 +727,73 @@ describe("RepeatComplainantsPanel — view modes (spec §1)", () => {
     render(<RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" />);
     await switchViewMode(user, "حسب السجن");
     await user.click(await screen.findByRole("button", { name: /سجن الملز/ }));
-    await screen.findByText("لا يوجد أشخاص مكررون ضمن الفلاتر الحالية.");
+    expect(await screen.findByText("لا يوجد أشخاص مكررون ضمن الفلاتر الحالية.")).toBeInTheDocument();
+  });
+
+  it("flat 'حسب السجن' view: the shared people table renders facility-scope columns only — no المنطقة/السجن columns leaking in from the organization scope", async () => {
+    multiFetchStub({});
+    const user = userEvent.setup();
+    render(<RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" />);
+    await switchViewMode(user, "حسب السجن");
+    await user.click(await screen.findByRole("button", { name: /سجن الملز/ }));
+    const personName = await screen.findByText("محمد أحمد");
+    const table = personName.closest("table")!;
+    const headerRow = within(table).getAllByRole("row")[0]!;
+    for (const label of ["الاسم", "الهوية", "عدد الشكاوى", "عدد التكرارات", "عدد الأنواع", "الأكثر تكراراً", "أعلى تكرار لنفس النوع", "آخر شكوى", "التفاصيل"]) {
+      expect(within(headerRow).getByText(label)).toBeInTheDocument();
+    }
+    expect(within(headerRow).queryByText("المنطقة")).not.toBeInTheDocument();
+    expect(within(headerRow).queryByText("السجن")).not.toBeInTheDocument();
+  });
+
+  it("'قائمة موحدة' view: the shared people table renders organization-scope columns only — no facility-scoped repeatCount/sameTypeRepeat columns", async () => {
+    multiFetchStub({});
+    const user = userEvent.setup();
+    render(<RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" />);
+    await switchViewMode(user, "قائمة موحدة");
+    const personName = await screen.findByText("محمد أحمد");
+    const table = personName.closest("table")!;
+    const headerRow = within(table).getAllByRole("row")[0]!;
+    for (const label of ["الاسم", "الهوية", "المنطقة", "السجن", "عدد الشكاوى", "أنواع الشكاوى", "الأكثر تكراراً", "آخر شكوى", "التفاصيل"]) {
+      expect(within(headerRow).getByText(label)).toBeInTheDocument();
+    }
+    expect(within(headerRow).queryByText("عدد التكرارات")).not.toBeInTheDocument();
+    expect(within(headerRow).queryByText("أعلى تكرار لنفس النوع")).not.toBeInTheDocument();
+  });
+
+  it("'قائمة موحدة' view: opening a person's detail keeps facility=null (org-wide), even though the row came through the now-shared table", async () => {
+    multiFetchStub({});
+    const user = userEvent.setup();
+    render(<RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" />);
+    await switchViewMode(user, "قائمة موحدة");
+    await screen.findByText("محمد أحمد");
+    await user.click(screen.getByRole("button", { name: "عرض التكرارات" }));
+
+    await waitFor(() => {
+      const personCall = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.find((call: unknown[]) =>
+        String(call[0]).includes("/repeat-complainants/person?")
+      );
+      expect(personCall).toBeDefined();
+      expect(String(personCall![0])).not.toContain("facility=");
+    });
+  });
+
+  it("flat 'حسب السجن' view: opening a person's detail restricts to the facility this row belongs to, even though the row came through the now-shared table", async () => {
+    multiFetchStub({});
+    const user = userEvent.setup();
+    render(<RepeatComplainantsPanel from="2026-01-01" to="2026-03-01" regionId="all" />);
+    await switchViewMode(user, "حسب السجن");
+    await user.click(await screen.findByRole("button", { name: /سجن الملز/ }));
+    await screen.findByText("محمد أحمد");
+    await user.click(screen.getByRole("button", { name: "عرض التكرارات" }));
+
+    await waitFor(() => {
+      const personCall = (fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.find((call: unknown[]) =>
+        String(call[0]).includes("/repeat-complainants/person?")
+      );
+      expect(personCall).toBeDefined();
+      expect(String(personCall![0])).toContain("facility=");
+    });
   });
 
   it("'قائمة موحدة' view: requests the org-wide people list WITHOUT a facility param", async () => {
