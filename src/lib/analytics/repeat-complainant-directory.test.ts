@@ -162,6 +162,33 @@ describe("buildRepeatComplainantDirectory", () => {
     expect(row.facilityTotalComplaints).toBe(4);
     expect(row.repeatedComplaintsCount).toBe(2);
     expect(row.repeatRatePercent).toBe(50);
+    // 3 distinct people at this facility (PD, solo, solo2), only 1 (PD) repeated -> 33.3%.
+    // Deliberately different from repeatRatePercent (a complaint-volume share) —
+    // this is a headcount share.
+    expect(row.repeatedPeopleSharePercent).toBeCloseTo(33.3, 1);
+  });
+
+  it("repeatedPeopleSharePercent is a headcount ratio, independent of repeatRatePercent (a complaint-volume ratio) — the two can diverge", () => {
+    const records = [
+      // 4 distinct people at the facility; only 2 repeat (>=2 complaints each).
+      record({ complaintId: "h1", complainantIdentifier: "R1", facility: "سجن هـ" }),
+      record({ complaintId: "h2", complainantIdentifier: "R1", facility: "سجن هـ" }),
+      record({ complaintId: "h3", complainantIdentifier: "R2", facility: "سجن هـ" }),
+      record({ complaintId: "h4", complainantIdentifier: "R2", facility: "سجن هـ" }),
+      record({ complaintId: "h5", complainantIdentifier: "solo1", facility: "سجن هـ" }),
+      record({ complaintId: "h6", complainantIdentifier: "solo2", facility: "سجن هـ" }),
+    ];
+    const directory = buildRepeatComplainantDirectory(records, 20);
+    const row = directory.facilities.find((f) => f.facility === "سجن هـ")!;
+    // Headcount share: 2 repeaters / 4 distinct people = 50%.
+    expect(row.repeatedPeopleSharePercent).toBe(50);
+    // Complaint-volume share: 4 repeated complaints / 6 total complaints = 66.7%.
+    expect(row.repeatRatePercent).toBeCloseTo(66.7, 1);
+  });
+
+  it("produces no NaN/Infinity for repeatedPeopleSharePercent when a facility has zero eligible people", () => {
+    const directory = buildRepeatComplainantDirectory([], 0);
+    expect(directory.facilities).toEqual([]);
   });
 
   it("excludes technical-duplicate-import records from repeat evidence", () => {

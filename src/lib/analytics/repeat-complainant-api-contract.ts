@@ -81,6 +81,7 @@ function isFacilityRow(value: unknown): value is RepeatFacilitySummaryRow {
     && typeof value.region === "string"
     && typeof value.facility === "string"
     && isFiniteNumber(value.repeatedPeopleCount)
+    && isFiniteNumber(value.repeatedPeopleSharePercent)
     && isFiniteNumber(value.repeatedComplaintsCount)
     && isFiniteNumber(value.facilityTotalComplaints)
     && isFiniteNumber(value.repeatRatePercent)
@@ -153,6 +154,9 @@ function isPersonRow(value: unknown): value is RepeatPersonRowForClient {
     && (value.pattern === "CONCENTRATED" || value.pattern === "DIVERSE")
     && Array.isArray(value.complaintIds)
     && isRecord(value.drilldownFilters)
+    // Only ever present on a facility-scoped people-list row — see
+    // RepeatPersonRowForClient's own docstring.
+    && (value.orgFacilitiesCount === undefined || isFiniteNumber(value.orgFacilitiesCount))
   );
 }
 

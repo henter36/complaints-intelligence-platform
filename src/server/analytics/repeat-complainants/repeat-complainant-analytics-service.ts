@@ -29,6 +29,16 @@ import {
 /** The only shape a person row is ever sent to the client in — the raw identifier stays server-side, replaced by an opaque drillthrough token. */
 export type RepeatPersonRowForClient = Omit<RepeatPersonRow, "complainantIdentifierRaw"> & {
   complainantToken: string;
+  /**
+   * Only ever set on a FACILITY-SCOPED people-list row (see
+   * repeat-complainant-people-service.ts) — the person's TRUE org-wide
+   * facility count, distinct from `facilitiesCount` (which, on a
+   * facility-scoped row, only ever reflects the ONE facility this
+   * particular query was scoped to). Absent on org-wide rows (search,
+   * the unified list, a person-detail fetch), where `facilitiesCount`
+   * itself already IS the org-wide truth.
+   */
+  orgFacilitiesCount?: number;
 };
 
 export function toClientPersonRow(person: RepeatPersonRow): RepeatPersonRowForClient {
@@ -115,6 +125,59 @@ export async function fetchScopedRecords(
   // itself already applies internally to facility-level totals.
   const totalComplaintsInScope = records.filter((r) => !isTechnicalDuplicate(r)).length;
   return { records, totalComplaintsInScope };
+}
+
+const presenceSelect = {
+  complainantIdentifier: true,
+  facility: true,
+  complaintDate: true,
+  receivedAt: true,
+  isPotentialDuplicate: true,
+  duplicateOfId: true,
+} satisfies Prisma.ComplaintSelect;
+
+/**
+ * How many DISTINCT facilities does each of these people appear at,
+ * ORG-WIDE, under the same filters (region/date/classification/...) minus
+ * any facility restriction? Used ONLY to attach `orgFacilitiesCount` to an
+ * already facility-scoped people page (spec §7 — the "ظهر في N سجون"
+ * badge) — a single bounded batch query keyed by the page's own
+ * identifiers, never one query per person (no N+1), and never returned to
+ * the client itself (raw identifiers stay server-side, same as everywhere
+ * else in this feature).
+ */
+export async function fetchOrgFacilityPresenceCounts(
+  identifiers: readonly string[],
+  query: ComplaintQuery,
+  now: Date
+): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  if (identifiers.length === 0) return counts;
+
+  const orgQuery: ComplaintQuery = { ...query, facility: undefined, facilityId: undefined };
+  const [facilityWhere, facilityRegistry] = await Promise.all([
+    buildCurrentOperationalFacilityWhere(),
+    loadFacilityOperationalRegistry(),
+  ]);
+  const where: Prisma.ComplaintWhereInput = {
+    ...combineComplaintWhere(buildComplaintWhere(orgQuery, now), facilityWhere),
+    complainantIdentifier: { in: [...identifiers] },
+  };
+  const rows = await db.complaint.findMany({ where, select: presenceSelect });
+
+  const facilitiesByIdentifier = new Map<string, Set<string>>();
+  for (const row of rows) {
+    if (!row.complainantIdentifier) continue;
+    if (row.isPotentialDuplicate || row.duplicateOfId) continue;
+    const effectiveDate = row.complaintDate ?? row.receivedAt;
+    if (!isFacilityEventEligible(facilityRegistry, row.facility, effectiveDate)) continue;
+    const facility = row.facility?.trim() || "غير محدد";
+    const set = facilitiesByIdentifier.get(row.complainantIdentifier) ?? new Set<string>();
+    set.add(facility);
+    facilitiesByIdentifier.set(row.complainantIdentifier, set);
+  }
+  for (const [identifier, set] of facilitiesByIdentifier) counts.set(identifier, set.size);
+  return counts;
 }
 
 export type RepeatComplainantSummary = {

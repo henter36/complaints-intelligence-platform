@@ -124,6 +124,14 @@ async function seedDataset(prisma: PrismaClient) {
       // EITHER facility individually (threshold 2) — spec §1/§2/§10.
       { ...base, externalId: "rc-h1", region: "الرياض", facility: RIYADH_FACILITY, facilityNormalizedName: riyadhKey, classificationId: food.id, complainantIdentifier: "7000000007", complainantName: "سالم ناصر", complaintDate: new Date("2026-01-12T00:00:00.000Z") },
       { ...base, externalId: "rc-h2", region: "مكة", facility: MAKKAH_FACILITY, facilityNormalizedName: makkahKey, classificationId: health.id, complainantIdentifier: "7000000007", complainantName: "سالم ناصر الحربي", complaintDate: new Date("2026-02-01T00:00:00.000Z") },
+      // Person I: facility-repeated AT Riyadh (2 same-type complaints there)
+      // AND also has a (below-threshold) complaint at Makkah — for
+      // orgFacilitiesCount ("ظهر في N سجون") tests: appears in the Riyadh
+      // people list with facility-scoped totals (2, not 3), but
+      // orgFacilitiesCount reflects both facilities.
+      { ...base, externalId: "rc-i1", region: "الرياض", facility: RIYADH_FACILITY, facilityNormalizedName: riyadhKey, classificationId: food.id, complainantIdentifier: "8000000008", complainantName: "منصور فهد", complaintDate: new Date("2026-01-13T00:00:00.000Z") },
+      { ...base, externalId: "rc-i2", region: "الرياض", facility: RIYADH_FACILITY, facilityNormalizedName: riyadhKey, classificationId: food.id, complainantIdentifier: "8000000008", complainantName: "منصور فهد", complaintDate: new Date("2026-01-20T00:00:00.000Z") },
+      { ...base, externalId: "rc-i3", region: "مكة", facility: MAKKAH_FACILITY, facilityNormalizedName: makkahKey, classificationId: health.id, complainantIdentifier: "8000000008", complainantName: "منصور فهد", complaintDate: new Date("2026-01-05T00:00:00.000Z") },
     ],
   });
 }
@@ -136,41 +144,42 @@ describe("getRepeatComplainantSummary — real db (temp sqlite)", () => {
   it("flags repeated people, excludes duplicates/empty identifiers, and rolls up by facility and region", async () => {
     const summary = await getRepeatComplainantSummary(params("from=2026-01-01&to=2026-03-01"));
     // A, B, G, D(1 real complaint each after dup exclusion -> D not repeated), F, H (org-repeated
-    // via 1 complaint at each of 2 facilities) => repeated: A, B, G, F, H = 5 people
-    expect(summary.kpis.repeatedPeopleCount).toBe(5);
+    // via 1 complaint at each of 2 facilities), I (2 at Riyadh + 1 at Makkah)
+    // => repeated: A, B, G, F, H, I = 6 people
+    expect(summary.kpis.repeatedPeopleCount).toBe(6);
 
     const riyadh = summary.facilities.find((f) => f.facility === RIYADH_FACILITY)!;
     // H's single Riyadh complaint does NOT push it over the facility-level
-    // threshold (2) there — riyadh's own repeated-people set is unchanged.
-    expect(riyadh.repeatedPeopleCount).toBe(3); // A, B, G
-    expect(riyadh.repeatedComplaintsCount).toBe(7); // 3 + 2 + 2
+    // threshold (2) there — but I's 2 Riyadh complaints do.
+    expect(riyadh.repeatedPeopleCount).toBe(4); // A, B, G, I
+    expect(riyadh.repeatedComplaintsCount).toBe(9); // 3 + 2 + 2 + 2
     // facilityTotalComplaints counts ALL eligible-scope complaints at the facility,
     // including non-repeated C and D's surviving real complaint (dup excluded upstream of totals too? see below).
     expect(riyadh.facilityTotalComplaints).toBeGreaterThanOrEqual(8);
 
     const makkah = summary.facilities.find((f) => f.facility === MAKKAH_FACILITY)!;
-    // H's single Makkah complaint likewise does not push Makkah's own count.
+    // H's and I's single Makkah complaint likewise do not push Makkah's own count.
     expect(makkah.repeatedPeopleCount).toBe(1); // F only
     expect(makkah.repeatedComplaintsCount).toBe(2);
 
     const riyadhRegion = summary.regions.find((r) => r.region.includes("الرياض"))!;
-    expect(riyadhRegion.repeatedPeopleCount).toBe(3);
+    expect(riyadhRegion.repeatedPeopleCount).toBe(4);
     expect(riyadhRegion.facilitiesAffectedCount).toBe(1);
 
     expect(summary.conclusions.length).toBeGreaterThan(0);
     for (const line of summary.conclusions) {
-      expect(line).not.toMatch(/1000000001|2000000002|5000000005|6000000006|7000000007|خالد سعيد|سالم ناصر/);
+      expect(line).not.toMatch(/1000000001|2000000002|5000000005|6000000006|7000000007|8000000008|خالد سعيد|سالم ناصر|منصور فهد/);
     }
   });
 
   it("counts a person transferred between facilities ONCE org-wide, never once per facility (spec §1/§10)", async () => {
     const summary = await getRepeatComplainantSummary(params("from=2026-01-01&to=2026-03-01"));
     const facilityCounts = summary.facilities.reduce((sum, f) => sum + f.repeatedPeopleCount, 0);
-    // Sum of facility-level repeated-people counts = 3 (Riyadh: A,B,G) + 1 (Makkah: F) = 4,
-    // strictly LESS than the org-level 5 — the difference is exactly person H,
+    // Sum of facility-level repeated-people counts = 4 (Riyadh: A,B,G,I) + 1 (Makkah: F) = 5,
+    // strictly LESS than the org-level 6 — the difference is exactly person H,
     // who is org-repeated but facility-repeated at neither facility.
-    expect(facilityCounts).toBe(4);
-    expect(summary.kpis.repeatedPeopleCount).toBe(5);
+    expect(facilityCounts).toBe(5);
+    expect(summary.kpis.repeatedPeopleCount).toBe(6);
   });
 
   it("issues a fixed, small number of complaint queries regardless of dataset size — never one per facility/person (no N+1)", async () => {
@@ -229,11 +238,11 @@ describe("getRepeatComplainantSummary — malformed numeric params fail safe (sp
 });
 
 describe("getRepeatComplainantPeoplePage — real db (temp sqlite)", () => {
-  it("requires a facility scope and paginates the sorted person list", async () => {
+  it("scopes to one facility when given, and paginates the sorted person list", async () => {
     const page1 = await getRepeatComplainantPeoplePage(
       params(`from=2026-01-01&to=2026-03-01&facility=${encodeURIComponent(RIYADH_FACILITY)}&peoplePageSize=1&peoplePage=1&peopleSortBy=totalComplaints`)
     );
-    expect(page1.total).toBe(3); // A, B, and G at Riyadh
+    expect(page1.total).toBe(4); // A, B, G, and I at Riyadh
     expect(page1.people).toHaveLength(1);
     expect(page1.people[0]!.totalComplaints).toBe(3); // Person A ranks first by total complaints
 
@@ -270,6 +279,76 @@ describe("getRepeatComplainantPeoplePage — real db (temp sqlite)", () => {
       params(`from=2026-01-01&to=2026-03-01&facility=${encodeURIComponent(RIYADH_FACILITY)}&peoplePageSize=999999999`)
     );
     expect(page.pageSize).toBeLessThanOrEqual(100);
+  });
+
+  it("with no facility param, returns the org-wide unified list instead (spec: 'قائمة موحدة' view) — same identity/threshold rules as the summary", async () => {
+    const page = await getRepeatComplainantPeoplePage(
+      params("from=2026-01-01&to=2026-03-01&peoplePageSize=100&peopleSortBy=totalComplaints")
+    );
+    // Org-wide repeated people: A, B, G, F, H, I = 6 (matches the summary's kpis.repeatedPeopleCount).
+    expect(page.total).toBe(6);
+    const personI = page.people.find((p) => p.complainantName === "منصور فهد")!;
+    expect(personI.totalComplaints).toBe(3); // org-wide: 2 (Riyadh) + 1 (Makkah), not facility-truncated
+    expect(personI.facilitiesCount).toBe(2);
+    // orgFacilitiesCount is a facility-scoped-only concept — absent org-wide (facilitiesCount already IS the truth).
+    for (const person of page.people) {
+      expect(person.orgFacilitiesCount).toBeUndefined();
+    }
+  });
+
+  it("attaches orgFacilitiesCount on a facility-scoped page — the true org-wide facility count, distinct from the facility-scoped totalComplaints (spec §7)", async () => {
+    const page = await getRepeatComplainantPeoplePage(
+      params(`from=2026-01-01&to=2026-03-01&facility=${encodeURIComponent(RIYADH_FACILITY)}&peoplePageSize=100`)
+    );
+    const personI = page.people.find((p) => p.complainantName === "منصور فهد")!;
+    // Facility-scoped: only the 2 Riyadh complaints count here, never the Makkah one.
+    expect(personI.totalComplaints).toBe(2);
+    expect(personI.facilitiesCount).toBe(1); // facility-scoped view of facilities[] — only Riyadh is visible in THIS call
+    expect(personI.orgFacilitiesCount).toBe(2); // but the org-wide truth (2 facilities) is still surfaced
+
+    const personA = page.people.find((p) => p.totalComplaints === 3)!; // Person A: Riyadh-only
+    expect(personA.orgFacilitiesCount).toBe(1);
+  });
+
+  it("sorts by name (Arabic-aware, deterministic, ascending by default) and supports explicit descending order", async () => {
+    const asc = await getRepeatComplainantPeoplePage(
+      params(`from=2026-01-01&to=2026-03-01&facility=${encodeURIComponent(RIYADH_FACILITY)}&peoplePageSize=100&peopleSortBy=name`)
+    );
+    const namesAsc = asc.people.map((p) => p.complainantName).filter((n): n is string => n !== null);
+    const sortedAsc = [...namesAsc].sort((a, b) => a.localeCompare(b, "ar"));
+    expect(namesAsc).toEqual(sortedAsc);
+
+    const desc = await getRepeatComplainantPeoplePage(
+      params(`from=2026-01-01&to=2026-03-01&facility=${encodeURIComponent(RIYADH_FACILITY)}&peoplePageSize=100&peopleSortBy=name&peopleSortOrder=desc`)
+    );
+    const namesDesc = desc.people.map((p) => p.complainantName).filter((n): n is string => n !== null);
+    expect(namesDesc).toEqual([...namesAsc].reverse());
+  });
+
+  it("repeatCount sorts in the same order as totalComplaints (a strictly monotonic transform: repeatCount = totalComplaints - 1)", async () => {
+    const byTotal = await getRepeatComplainantPeoplePage(
+      params(`from=2026-01-01&to=2026-03-01&facility=${encodeURIComponent(RIYADH_FACILITY)}&peoplePageSize=100&peopleSortBy=totalComplaints`)
+    );
+    const byRepeatCount = await getRepeatComplainantPeoplePage(
+      params(`from=2026-01-01&to=2026-03-01&facility=${encodeURIComponent(RIYADH_FACILITY)}&peoplePageSize=100&peopleSortBy=repeatCount`)
+    );
+    expect(byRepeatCount.people.map((p) => p.complainantIdentifierMasked)).toEqual(byTotal.people.map((p) => p.complainantIdentifierMasked));
+  });
+
+  it("peopleSortOrder=asc/desc controls direction (checked by monotonicity, not exact-reversal, since tied totals exist in this fixture)", async () => {
+    const desc = await getRepeatComplainantPeoplePage(
+      params(`from=2026-01-01&to=2026-03-01&facility=${encodeURIComponent(RIYADH_FACILITY)}&peoplePageSize=100&peopleSortBy=totalComplaints`)
+    );
+    const descTotals = desc.people.map((p) => p.totalComplaints);
+    for (let i = 1; i < descTotals.length; i++) expect(descTotals[i - 1]).toBeGreaterThanOrEqual(descTotals[i]!);
+
+    const asc = await getRepeatComplainantPeoplePage(
+      params(`from=2026-01-01&to=2026-03-01&facility=${encodeURIComponent(RIYADH_FACILITY)}&peoplePageSize=100&peopleSortBy=totalComplaints&peopleSortOrder=asc`)
+    );
+    const ascTotals = asc.people.map((p) => p.totalComplaints);
+    for (let i = 1; i < ascTotals.length; i++) expect(ascTotals[i - 1]).toBeLessThanOrEqual(ascTotals[i]!);
+    // Same people either way, just reordered.
+    expect(new Set(asc.people.map((p) => p.complainantIdentifierMasked))).toEqual(new Set(desc.people.map((p) => p.complainantIdentifierMasked)));
   });
 });
 
