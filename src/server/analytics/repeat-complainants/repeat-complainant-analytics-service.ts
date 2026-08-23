@@ -18,6 +18,8 @@ import { parsePositiveIntegerParam } from "./query-params";
 import {
   buildRepeatComplainantDirectory,
   buildRepeatComplainantConclusions,
+  buildFacilityScopedPeople,
+  resolveMinComplaintsPerPerson,
   enrichFacilitiesWithPatternSignals,
   isTechnicalDuplicate,
   type RepeatComplainantDirectory,
@@ -215,10 +217,17 @@ export function parseRepeatDirectoryOptions(params: URLSearchParams): RepeatComp
  * filters), so "ما يظهر في PDF = نفس نطاق البيانات الظاهر في التحليل" holds
  * by construction — one code path, not two.
  */
+type EnrichedDirectoryResult = {
+  directory: RepeatComplainantDirectory;
+  /** The SAME single-fetch records the directory itself was built from — kept around so a caller (the bulk PDF export) can ALSO derive facility-scoped people from them via `buildFacilityScopedPeople`, without a second DB query (spec: no N+1). */
+  records: RepeatDirectoryRecord[];
+  options: RepeatComplainantDirectoryOptions;
+};
+
 async function buildEnrichedDirectory(
   params: URLSearchParams,
   now: Date
-): Promise<RepeatComplainantDirectory> {
+): Promise<EnrichedDirectoryResult> {
   const query = parseComplaintQuery(params);
   const options = parseRepeatDirectoryOptions(params);
   const { records, totalComplaintsInScope } = await fetchScopedRecords(query, now);
@@ -249,7 +258,7 @@ async function buildEnrichedDirectory(
   const topFacilities = parsePositiveIntegerParam(params.get("topFacilities"), { min: 1, max: 500 });
   if (topFacilities !== undefined) facilities = facilities.slice(0, topFacilities);
 
-  return { ...directory, facilities };
+  return { directory: { ...directory, facilities }, records, options };
 }
 
 /**
@@ -262,7 +271,7 @@ export async function getRepeatComplainantSummary(
   params: URLSearchParams,
   now: Date = new Date()
 ): Promise<RepeatComplainantSummary> {
-  const directory = await buildEnrichedDirectory(params, now);
+  const { directory } = await buildEnrichedDirectory(params, now);
   return {
     kpis: directory.kpis,
     regions: directory.regions,
@@ -271,27 +280,69 @@ export async function getRepeatComplainantSummary(
   };
 }
 
+/** A facility-scoped client person row, alongside the ONE facility summary row it belongs to — the unit the bulk PDF renders one people-table per. */
+export type RepeatComplainantExportFacilitySection = {
+  facility: RepeatComplainantDirectory["facilities"][number];
+  people: RepeatPersonRowForClient[];
+};
+
 export type RepeatComplainantExportData = {
   kpis: RepeatComplainantDirectory["kpis"];
   regions: RepeatComplainantDirectory["regions"];
   facilities: RepeatComplainantDirectory["facilities"];
   conclusions: string[];
-  /** The FULL org-wide (filter-scoped) person list — PDF export only, never sent to the summary/tab UI. */
-  people: RepeatPersonRowForClient[];
+  /**
+   * Every facility that has at least one repeated person, each carrying
+   * ONLY that facility's own people with FACILITY-SCOPED numbers (spec §8)
+   * — never the org-wide `people` list a single flat table would need.
+   * Ordered region ASC, then facility `repeatedPeopleCount` DESC (facility
+   * name ASC as a tie-breaker) — see `sortExportFacilitySections`.
+   */
+  facilitySections: RepeatComplainantExportFacilitySection[];
 };
 
-/** Only ever called from the PDF export route — loads the full person list, unlike the summary endpoint. */
+function sortExportFacilitySections(
+  sections: readonly RepeatComplainantExportFacilitySection[]
+): RepeatComplainantExportFacilitySection[] {
+  return [...sections].sort((a, b) =>
+    a.facility.region.localeCompare(b.facility.region, "ar")
+    || b.facility.repeatedPeopleCount - a.facility.repeatedPeopleCount
+    || a.facility.facility.localeCompare(b.facility.facility, "ar")
+  );
+}
+
+/**
+ * Only ever called from the bulk PDF export route. Builds every facility's
+ * own people section from the SAME single `records` fetch the summary
+ * directory itself is built from (`buildFacilityScopedPeople` — spec: no
+ * N+1, one query total regardless of how many facilities are in scope).
+ */
 export async function getRepeatComplainantExportData(
   params: URLSearchParams,
   now: Date = new Date()
 ): Promise<RepeatComplainantExportData> {
-  const directory = await buildEnrichedDirectory(params, now);
+  const { directory, records, options } = await buildEnrichedDirectory(params, now);
+  const peopleByFacility = buildFacilityScopedPeople(records, resolveMinComplaintsPerPerson(options), options);
+
+  const facilitySections: RepeatComplainantExportFacilitySection[] = [];
+  for (const facilityRow of directory.facilities) {
+    const people = peopleByFacility.get(facilityRow.facility);
+    if (!people || people.length === 0) continue;
+    facilitySections.push({
+      facility: facilityRow,
+      people: people.map((person): RepeatPersonRowForClient => {
+        const { orgFacilitiesCount, ...personRow } = person;
+        return { ...toClientPersonRow(personRow), orgFacilitiesCount };
+      }),
+    });
+  }
+
   return {
     kpis: directory.kpis,
     regions: directory.regions,
     facilities: directory.facilities,
     conclusions: buildRepeatComplainantConclusions(directory),
-    people: directory.people.map(toClientPersonRow),
+    facilitySections: sortExportFacilitySections(facilitySections),
   };
 }
 

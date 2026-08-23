@@ -42,7 +42,7 @@ vi.mock("@/lib/db", () => ({
   },
 }));
 
-const { getRepeatComplainantSummary } = await import("./repeat-complainant-analytics-service");
+const { getRepeatComplainantSummary, getRepeatComplainantExportData } = await import("./repeat-complainant-analytics-service");
 const { getRepeatComplainantPeoplePage } = await import("./repeat-complainant-people-service");
 
 const ORIGINAL_DATABASE_URL = process.env.DATABASE_URL;
@@ -146,6 +146,30 @@ describe("repeat-complainant analytics — realistic-scale performance (spec)", 
       expect(Number.isNaN(row.repeatRatePercent)).toBe(false);
     }
     expect(Number.isFinite(summary.kpis.repeatedShareOfPeriodPercent)).toBe(true);
+  }, 20_000);
+
+  it("bulk PDF export data (facility-scoped people for EVERY facility) uses the SAME fixed query count as the summary — no per-facility query loop", async () => {
+    findManySpy.calls = 0;
+    const start = performance.now();
+    const exportData = await getRepeatComplainantExportData(params("from=2026-01-01&to=2026-03-31"));
+    const elapsedMs = performance.now() - start;
+
+    expect(exportData.facilitySections.length).toBeGreaterThan(1);
+    expect(exportData.facilitySections.length).toBeLessThanOrEqual(FACILITY_COUNT);
+    // buildFacilityScopedPeople derives EVERY facility's people from the
+    // records already fetched for the directory itself — same 2 calls as
+    // getRepeatComplainantSummary above, regardless of FACILITY_COUNT.
+    expect(findManySpy.calls).toBe(2);
+    expect(elapsedMs).toBeLessThan(8000);
+
+    // Every section's people are genuinely facility-scoped, not the org-wide
+    // total silently reused — a person present at more than one facility
+    // (if any) would otherwise inflate every one of their sections identically.
+    for (const section of exportData.facilitySections) {
+      for (const person of section.people) {
+        expect(person.totalComplaints).toBeGreaterThan(0);
+      }
+    }
   }, 20_000);
 
   it("paginates a large per-facility person list without loading everything into one page", async () => {
