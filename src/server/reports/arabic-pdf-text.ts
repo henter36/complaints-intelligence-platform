@@ -170,10 +170,18 @@ export function preparePdfTextLines(value: string): string {
 export type PreparedPdfLine = {
   /** Original logical token order (preserves semantics for debugging). */
   logicalText: string;
-  /** Token-reversed visual text ready to pass to doc.text() with lineBreak: false. */
+  /** Visual text ready to pass to doc.text() with lineBreak: false — token-reversed for an RTL line, unchanged for an LTR line. */
   visualText: string;
   /** Width constraint used when this line was laid out. */
   width: number;
+  /**
+   * True only when this line is a single token whose own width already
+   * exceeds `width` — the one case wrapping-by-token-boundary cannot fix.
+   * Callers must render such a line with `ellipsis: true` (even mid-
+   * paragraph, not just the last line) so it never paints past the column
+   * into a neighboring cell.
+   */
+  overflowsWidth: boolean;
 };
 
 export type PreparedPdfTextLayout = {
@@ -190,26 +198,26 @@ function resolveMaxWidth(options: PDFKit.Mixins.TextOptions): number {
   return options.width !== undefined ? options.width : Infinity;
 }
 
-/** Returns true when the paragraph must be wrapped using RTL token reversal. */
-function shouldWrapRtlParagraph(paragraph: string, maxWidth: number): boolean {
-  return (
-    containsArabic(paragraph) &&
-    paragraphDirection(paragraph) === "rtl" &&
-    Number.isFinite(maxWidth)
-  );
-}
+/**
+ * A token-width record kept alongside each wrapped line so callers can tell
+ * whether the line is a single unbreakable token wider than `maxWidth` (the
+ * one case token-boundary wrapping cannot fix — see `overflowsWidth`).
+ */
+type WrappedLineTokens = { tokens: string[]; singleTokenWidth: number | null };
 
 /**
- * Wraps a single RTL paragraph into visual lines by measuring logical token
- * widths. The LOGICAL token order is preserved per line; callers reverse each
- * line independently.
+ * Wraps a paragraph into visual lines by measuring LOGICAL token widths —
+ * direction-agnostic; the caller decides whether to reverse token order per
+ * line based on the paragraph's own direction. Works for RTL Arabic, LTR
+ * English/numeric, and mixed-direction text alike, since word-wrap-by-width
+ * is the same algorithm regardless of script.
  */
-function wrapLogicalRtlParagraph(
+function wrapParagraphIntoLines(
   doc: PDFKit.PDFDocument,
   paragraph: string,
   maxWidth: number,
   wordSpacing: number
-): string[][] {
+): WrappedLineTokens[] {
   const tokens = paragraph.split(" ").filter((t) => t.length > 0);
   const spaceWidth = doc.widthOfString(" ") + wordSpacing;
   const wrappedLines: string[][] = [];
@@ -229,12 +237,21 @@ function wrapLogicalRtlParagraph(
   }
   if (lineTokens.length > 0) wrappedLines.push(lineTokens);
 
-  return wrappedLines;
+  // A line is only ever a single unbreakable token when that token's own
+  // width already exceeds maxWidth (otherwise it would have absorbed the
+  // next token too) — so re-measuring just single-token lines is enough to
+  // flag the "cannot be fixed by wrapping" case without re-measuring every line.
+  return wrappedLines.map((lineTok) => ({
+    tokens: lineTok,
+    singleTokenWidth: lineTok.length === 1 ? doc.widthOfString(lineTok[0]) : null,
+  }));
 }
 
 /**
  * Processes one \n-delimited paragraph and appends the resulting
- * PreparedPdfLine entries to `target`.
+ * PreparedPdfLine entries to `target`. Wraps ANY paragraph (RTL Arabic, LTR,
+ * or mixed) once `maxWidth` is finite; an infinite width never wraps,
+ * matching the pre-existing single-line contract for unconstrained text.
  */
 function appendPreparedParagraph(
   target: PreparedPdfLine[],
@@ -244,21 +261,30 @@ function appendPreparedParagraph(
   wordSpacing: number
 ): void {
   if (!paragraph) {
-    target.push({ logicalText: "", visualText: "", width: maxWidth });
+    target.push({ logicalText: "", visualText: "", width: maxWidth, overflowsWidth: false });
     return;
   }
 
-  if (!shouldWrapRtlParagraph(paragraph, maxWidth)) {
-    target.push({ logicalText: paragraph, visualText: paragraph, width: maxWidth });
+  if (!Number.isFinite(maxWidth)) {
+    target.push({ logicalText: paragraph, visualText: paragraph, width: maxWidth, overflowsWidth: false });
     return;
   }
 
-  const wrappedLines = wrapLogicalRtlParagraph(doc, paragraph, maxWidth, wordSpacing);
-  for (const wTokens of wrappedLines) {
+  // First-strong-character heuristic — the SAME one prepareLine() uses for
+  // single-line text, so a paragraph never reverses in the wrapped path but
+  // not the single-line path (or vice versa). RTL reverses token order per
+  // line (fontkit already reverses Arabic glyphs within a token); LTR keeps
+  // logical order as visual order.
+  const isRtl = containsArabic(paragraph) && paragraphDirection(paragraph) === "rtl";
+  const wrappedLines = wrapParagraphIntoLines(doc, paragraph, maxWidth, wordSpacing);
+
+  for (const { tokens: wTokens, singleTokenWidth } of wrappedLines) {
+    const logicalText = wTokens.join(" ");
     target.push({
-      logicalText: wTokens.join(" "),
-      visualText: wTokens.toReversed().join(" "),
+      logicalText,
+      visualText: isRtl ? wTokens.toReversed().join(" ") : logicalText,
       width: maxWidth,
+      overflowsWidth: singleTokenWidth !== null && singleTokenWidth > maxWidth,
     });
   }
 }

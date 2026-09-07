@@ -668,22 +668,31 @@ function buildRegionRows(
  * -> facility rollups -> region rollups) is its own small helper above, kept
  * that way deliberately so this orchestrator stays a flat sequence.
  */
+/**
+ * Defaults to 2 (a "repeated" person is never < 2 complaints by definition)
+ * but — unlike the public `minComplaints` query param, which is floored at 2
+ * in `parseRepeatDirectoryOptions` — this general-purpose engine itself only
+ * floors at 1: `repeat-complainant-person-detail-service.ts` deliberately
+ * passes `minComplaintsPerPerson: 1` to fetch one ALREADY-IDENTIFIED (by
+ * token) person's stats regardless of whether they clear the "repeated"
+ * threshold at the facility/scope being viewed — that is not "who counts as
+ * repeated" filtering, so the >=2 business rule does not apply to it.
+ * Exported so callers that need to invoke `buildFacilityScopedPeople`
+ * alongside `buildRepeatComplainantDirectory` resolve the SAME floored value
+ * both engine entry points use internally, rather than duplicating the
+ * `Math.max(1, ...)` literal and risking the two drifting apart.
+ */
+export function resolveMinComplaintsPerPerson(options: RepeatComplainantDirectoryOptions = {}): number {
+  return Math.max(1, options.minComplaintsPerPerson ?? 2);
+}
+
 export function buildRepeatComplainantDirectory(
   records: readonly RepeatDirectoryRecord[],
   totalComplaintsInScope: number,
   config: PatternAnalysisConfig = PATTERN_ANALYSIS_CONFIG,
   options: RepeatComplainantDirectoryOptions = {}
 ): RepeatComplainantDirectory {
-  // Defaults to 2 (a "repeated" person is never < 2 complaints by
-  // definition) but — unlike the public `minComplaints` query param, which
-  // is floored at 2 in `parseRepeatDirectoryOptions` — this general-purpose
-  // engine itself only floors at 1: `repeat-complainant-person-detail-service.ts`
-  // deliberately passes `minComplaintsPerPerson: 1` to fetch one ALREADY-
-  // IDENTIFIED (by token) person's stats regardless of whether they clear
-  // the "repeated" threshold at the facility/scope being viewed — that is
-  // not "who counts as repeated" filtering, so the >=2 business rule does
-  // not apply to it.
-  const minComplaintsPerPerson = Math.max(1, options.minComplaintsPerPerson ?? 2);
+  const minComplaintsPerPerson = resolveMinComplaintsPerPerson(options);
 
   const { personGroups, totalDistinctPeriodsInScope } = groupRecordsByPerson(records);
   const allGroups = [...personGroups.values()];
@@ -718,6 +727,74 @@ export function buildRepeatComplainantDirectory(
     facilities,
     people,
   };
+}
+
+/** A `RepeatPersonRow` scoped to ONE facility, plus that person's TRUE org-wide facility count for badges like "ظهر في N سجون" — see `buildFacilityScopedPeople`. */
+export type FacilityScopedPersonRow = RepeatPersonRow & { orgFacilitiesCount: number };
+
+/**
+ * For every facility, the people who clear the repeat threshold AT THAT
+ * FACILITY specifically (the exact same `facilityMembershipMeetsThreshold`
+ * eligibility test `buildFacilityAggregates`/`buildFacilityRows` already use
+ * for the facility summary rows — never a second definition), each
+ * represented as a `RepeatPersonRow` whose `totalComplaints`,
+ * `distinctComplaintTypesCount`, `topComplaintTypes`, `sameTypeRepeatCount`,
+ * `firstComplaintDate`/`lastComplaintDate` and `pattern` are computed from
+ * ONLY that one facility's membership — never the person's org-wide total
+ * (spec: a transferred person's numbers must never leak another facility's
+ * complaints into this facility's section).
+ *
+ * Reuses `buildPersonRow`'s exact math by feeding it a SYNTHETIC
+ * single-facility `PersonGroup` (a copy of the real one with `facilities`
+ * narrowed to just this one membership) — a facility-scoped row is computed
+ * by the IDENTICAL code path as an org-scoped row, just given a narrower
+ * view, so the two can never silently disagree about what a field means.
+ *
+ * Built from the SAME single `records` array the rest of the directory is
+ * built from (spec: no N+1 — one dataset in, every facility's people out),
+ * making this the batch-oriented counterpart to the UI's own per-facility
+ * `getRepeatComplainantPeoplePage` (which re-queries the DB once per
+ * facility — fine for one lazily-expanded facility at a time in the UI, but
+ * not for a bulk export covering every facility at once).
+ */
+export function buildFacilityScopedPeople(
+  records: readonly RepeatDirectoryRecord[],
+  minComplaintsPerPerson: number,
+  options: RepeatComplainantDirectoryOptions = {}
+): Map<string, FacilityScopedPersonRow[]> {
+  const { personGroups } = groupRecordsByPerson(records);
+  const byFacility = new Map<string, FacilityScopedPersonRow[]>();
+
+  for (const group of personGroups.values()) {
+    const orgFacilitiesCount = group.facilities.size;
+    for (const [facility, membership] of group.facilities) {
+      if (!facilityMembershipMeetsThreshold(membership, minComplaintsPerPerson, options)) continue;
+      const singleFacilityGroup: PersonGroup = {
+        complainantIdentifier: group.complainantIdentifier,
+        nameCandidates: group.nameCandidates,
+        facilities: new Map([[facility, membership]]),
+      };
+      const row: FacilityScopedPersonRow = {
+        ...buildPersonRow(singleFacilityGroup, membership.typeCountsFull),
+        orgFacilitiesCount,
+      };
+      const list = byFacility.get(facility) ?? [];
+      list.push(row);
+      byFacility.set(facility, list);
+    }
+  }
+
+  // Within each facility: highest complaint count first, then name
+  // alphabetically (Arabic-aware), then the masked identifier as a final
+  // deterministic tie-breaker — never the raw identifier.
+  for (const list of byFacility.values()) {
+    list.sort((a, b) =>
+      b.totalComplaints - a.totalComplaints
+      || (a.complainantName ?? "").localeCompare(b.complainantName ?? "", "ar")
+      || a.complainantIdentifierMasked.localeCompare(b.complainantIdentifierMasked)
+    );
+  }
+  return byFacility;
 }
 
 /**
