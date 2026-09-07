@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { HalfOpenDateRange } from "@/lib/reports/period-range";
 import { computePatternFindings, computePeriodChangeDigest } from "./pattern-findings-service";
 import type { PatternSeries, PatternSeriesRecord } from "./pattern-period-series-service";
+import { evaluateBestPracticeCandidacy } from "@/lib/analytics/best-practice-candidate";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -194,5 +195,67 @@ describe("computePatternFindings — SUSTAINED_IMPROVEMENT previousValue (regres
     expect(improvement!.difference).toBe(4 - 20);
     expect(improvement!.currentValue).toBeLessThan(improvement!.previousValue!);
     expect(improvement!.explanation).toContain("من 20 إلى 4");
+  });
+
+  it("100, 25, 23, 21, 20: reports the decline as 25→20 (the verified streak's own start), never 100→20", () => {
+    // 5 periods fetched; period[0]=100 is the pre-window value the classifier
+    // never evaluates (classifyTrend only sees periods[1..4] = [25,23,21,20],
+    // a genuine 4-period monotonic decline). Attributing the drop to 100→20
+    // would fabricate a decrease of 80 instead of the real 5.
+    const series: PatternSeries = {
+      periods: buildPeriods(5),
+      records: genCountRecords("سجن ز", "cls-old-peak", "الوصول إلى الطبيب", [100, 25, 23, 21, 20], "oldpeak"),
+    };
+    const findings = computePatternFindings(series);
+    const improvement = findings.find((f) => f.type === "SUSTAINED_IMPROVEMENT");
+    expect(improvement).toBeDefined();
+    expect(improvement!.previousValue).toBe(25);
+    expect(improvement!.currentValue).toBe(20);
+    expect(improvement!.difference).toBe(-5);
+    expect(improvement!.supportingMetrics.streakPeriods).toBe(4);
+
+    // End-to-end: the best-practice-candidate layer must trust this exact
+    // baseline too — a candidate here is a marginal, borderline case (decrease
+    // exactly meets the minimum), never a dramatic "73→32-style" win.
+    const candidacy = evaluateBestPracticeCandidacy(improvement!, "سجن ز");
+    expect(candidacy?.startValue).toBe(25);
+    expect(candidacy?.decrease).toBe(5);
+    expect(candidacy?.status).toBe("BEST_PRACTICE_CANDIDATE");
+    expect(candidacy?.reasonLabel).not.toBe("تحسن قوي ومستدام");
+  });
+
+  it("an older, higher peak further back (before an intervening relapse) is excluded — the streak's own start (the relapse peak) is used instead", () => {
+    // Full window: [999(pre-window), 30(old peak), 10(dip), 25(relapse peak),
+    // 18, 12]. The classified window is [30,10,25,18,12]. The verified
+    // decline is only 25→18→12 (3 periods) — 30 came before an intervening
+    // rise back up to 25, so it is NOT part of the current streak and must
+    // never be used as the baseline.
+    const series: PatternSeries = {
+      periods: buildPeriods(6),
+      records: genCountRecords("سجن ح", "cls-relapse-then-decline", "الطرود", [999, 30, 10, 25, 18, 12], "relapsepeak"),
+    };
+    const findings = computePatternFindings(series);
+    const improvement = findings.find((f) => f.type === "SUSTAINED_IMPROVEMENT");
+    expect(improvement).toBeDefined();
+    expect(improvement!.previousValue).toBe(25);
+    expect(improvement!.currentValue).toBe(12);
+    expect(improvement!.supportingMetrics.streakPeriods).toBe(3);
+
+    const candidacy = evaluateBestPracticeCandidacy(improvement!, "سجن ح");
+    expect(candidacy?.startValue).toBe(25);
+    expect(candidacy?.decrease).toBe(13);
+  });
+
+  it("a sharp drop followed by a plateau is never reported as SUSTAINED_IMPROVEMENT (no continuing decline to attribute a baseline to)", () => {
+    // Classified window [50,20,20,20,20]: a real drop happened once, then the
+    // last 4 periods are flat — no trailing monotonic decline, so the engine
+    // correctly classifies this as NO_MEANINGFUL_IMPROVEMENT (a still-elevated,
+    // unresolved problem), not an improvement worth candidacy at all.
+    const series: PatternSeries = {
+      periods: buildPeriods(6),
+      records: genCountRecords("سجن ط", "cls-plateau", "الوكالات", [5, 50, 20, 20, 20, 20], "plateau"),
+    };
+    const findings = computePatternFindings(series);
+    expect(findings.some((f) => f.type === "SUSTAINED_IMPROVEMENT" && f.entityName.includes("الوكالات"))).toBe(false);
   });
 });

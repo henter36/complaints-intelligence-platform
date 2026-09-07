@@ -27,6 +27,13 @@ import { buildPatternAnalysisBriefConclusions } from "@/lib/analytics/finding-br
 import { rankFindingsForExecutiveBrief } from "@/lib/analytics/finding-ranking";
 import { PATTERN_ANALYSIS_CONFIG } from "@/lib/analytics/pattern-analysis-config";
 import type { AnalyticalFinding } from "@/lib/analytics/analytical-finding";
+import { classificationLabelFromEntityName } from "@/lib/analytics/finding-labels";
+import {
+  evaluateBestPracticeCandidacy,
+  buildBestPracticeSectionSummary,
+  buildBestPracticeComparisonConclusion,
+  type BestPracticeCandidateEvaluation,
+} from "@/lib/analytics/best-practice-candidate";
 import type {
   ExecutiveBriefData,
   ExecutiveBriefV2Data,
@@ -51,7 +58,7 @@ import type {
   ClassificationSnapshotAtEndRow,
   ClassificationTrendRow,
   FacilityFollowUpRow,
-  FacilityImprovementRow,
+  BestPracticeCandidateRow,
 } from "@/lib/reports/report-contract";
 import {
   buildClassificationPath,
@@ -429,12 +436,6 @@ function classificationTrendPatternLabel(pattern: unknown): ClassificationTrendR
   return "نمط ملحوظ";
 }
 
-/** `finding.entityName` is always "facility — classification" for CLASSIFICATION-scoped findings; this recovers just the classification half. */
-function classificationLabelFromEntityName(entityName: string): string {
-  const separatorIndex = entityName.indexOf(" — ");
-  return separatorIndex === -1 ? entityName : entityName.slice(separatorIndex + 3);
-}
-
 function facilityOfFinding(finding: AnalyticalFinding): string | null {
   const value = finding.drilldownFilters.facility;
   return typeof value === "string" && !isUnspecifiedOrEmptyFacilityName(value) ? value : null;
@@ -628,38 +629,56 @@ export function buildFacilitiesNeedingFollowUp(
   return rows.sort(compareFacilityFollowUpRows).slice(0, limit);
 }
 
+function toBestPracticeCandidateRow(evaluation: BestPracticeCandidateEvaluation): BestPracticeCandidateRow {
+  return {
+    facility: evaluation.facility,
+    classificationLabel: evaluation.classificationLabel,
+    startValue: evaluation.startValue,
+    currentValue: evaluation.currentValue,
+    decrease: evaluation.decrease,
+    streakPeriods: evaluation.streakPeriods,
+    reasonLabel: evaluation.reasonLabel ?? "",
+  };
+}
+
 /**
- * "أفضل السجون تحسناً" (spec §4): facilities with a real SUSTAINED_IMPROVEMENT
- * finding (the engine already requires a multi-period decline, never a
- * single-period drop) — ranked by the size of the actual decrease, so the
- * facility with the lowest current count is never assumed to be "best".
+ * "الجهات المتميزة والمرشحة لدراسة الممارسات الناجحة": facilities with a
+ * SUSTAINED_IMPROVEMENT finding that ALSO clears the best-practice-candidate
+ * gates (see best-practice-candidate.ts / PATTERN_ANALYSIS_CONFIG.bestPracticeCandidate) —
+ * a real multi-period decline is necessary but not sufficient; it must also
+ * be large enough, off a high-enough base, and held long enough that a
+ * trivial 2→1 blip can never outrank a genuine 73→32 decline. Ranked by
+ * merit score (decrease magnitude + streak + change rate + base volume), not
+ * raw decrease alone, and never a general facility ranking — only per
+ * classification (spec item 9).
  */
-export function buildFacilitiesWithSustainedImprovement(
-  findings: readonly AnalyticalFinding[],
-  limit: number = FACILITY_ROWS_LIMIT
-): FacilityImprovementRow[] {
-  const bestPerFacility = new Map<string, AnalyticalFinding>();
+export function rankBestPracticeCandidateEvaluations(
+  findings: readonly AnalyticalFinding[]
+): BestPracticeCandidateEvaluation[] {
+  const bestPerFacility = new Map<string, BestPracticeCandidateEvaluation>();
   for (const finding of findings) {
     if (finding.type !== "SUSTAINED_IMPROVEMENT") continue;
     const facility = facilityOfFinding(finding);
     if (!facility) continue;
-    const candidateDecrease = (finding.previousValue ?? 0) - finding.currentValue;
+    const evaluation = evaluateBestPracticeCandidacy(finding, facility);
+    if (evaluation?.status !== "BEST_PRACTICE_CANDIDATE") continue;
     const existing = bestPerFacility.get(facility);
-    const existingDecrease = existing ? (existing.previousValue ?? 0) - existing.currentValue : -Infinity;
-    if (candidateDecrease > existingDecrease) bestPerFacility.set(facility, finding);
+    if (!existing || evaluation.meritScore > existing.meritScore) bestPerFacility.set(facility, evaluation);
   }
 
-  return [...bestPerFacility.entries()]
-    .map(([facility, finding]) => ({
-      facility,
-      startValue: finding.previousValue ?? 0,
-      currentValue: finding.currentValue,
-      decrease: (finding.previousValue ?? 0) - finding.currentValue,
-      streakPeriods: typeof finding.supportingMetrics.streakPeriods === "number" ? finding.supportingMetrics.streakPeriods : 0,
-      classificationLabel: classificationLabelFromEntityName(finding.entityName),
-    }))
-    .sort((a, b) => b.decrease - a.decrease)
-    .slice(0, limit);
+  return [...bestPerFacility.values()].sort(
+    (a, b) =>
+      b.meritScore - a.meritScore
+      || b.decrease - a.decrease
+      || a.facility.localeCompare(b.facility, "ar")
+  );
+}
+
+export function buildBestPracticeCandidateRows(
+  findings: readonly AnalyticalFinding[],
+  limit: number = PATTERN_ANALYSIS_CONFIG.bestPracticeCandidate.maxCandidates
+): BestPracticeCandidateRow[] {
+  return rankBestPracticeCandidateEvaluations(findings).slice(0, limit).map(toBestPracticeCandidateRow);
 }
 
 // ---------------------------------------------------------------------------
@@ -2032,9 +2051,20 @@ export async function buildExecutiveBriefV2Data(
   const facilitiesNeedingFollowUp = allFacilityFollowUpRows.slice(0, FACILITY_ROWS_LIMIT);
   const highPriorityFacilityCount = allFacilityFollowUpRows.filter((r) => r.priorityBand === "مرتفعة").length;
   const continuedProblemFindingCount = computeContinuedProblemFindingCount(patternFindings);
-  const facilitiesWithSustainedImprovement = buildFacilitiesWithSustainedImprovement(patternFindings);
+  const bestPracticeCandidateEvaluations = rankBestPracticeCandidateEvaluations(patternFindings).slice(
+    0,
+    PATTERN_ANALYSIS_CONFIG.bestPracticeCandidate.maxCandidates
+  );
+  const bestPracticeCandidates = bestPracticeCandidateEvaluations.map(toBestPracticeCandidateRow);
   const classificationTrends = buildClassificationTrendRows(patternFindings);
   const classificationAffectedFacilityCounts = computeClassificationAffectedFacilityCounts(patternFindings);
+
+  // Best-practice sentences (spec items 5, 10) are inserted right after the
+  // pattern-analysis conclusions (whose own cap is trimmed from 3 to 2 here
+  // to keep room) so they always survive the renderer's top-5 slice, ahead
+  // of the region-only filler.
+  const bestPracticeSummary = buildBestPracticeSectionSummary(bestPracticeCandidateEvaluations);
+  const bestPracticeComparison = buildBestPracticeComparisonConclusion(bestPracticeCandidateEvaluations, patternFindings);
 
   return {
     ...briefData,
@@ -2045,13 +2075,16 @@ export async function buildExecutiveBriefV2Data(
     highPriorityFacilityCount,
     continuedProblemFindingCount,
     facilitiesNeedingFollowUp,
-    facilitiesWithSustainedImprovement,
+    bestPracticeCandidates,
     classificationTrends,
-    // V2-only: region-only conclusions stay the base, led by up to 3
-    // high-priority pattern-analysis sentences (spec §10) — the engine's own
-    // explanation text, never re-derived here.
+    // V2-only: region-only conclusions stay the base, led by up to 2
+    // high-priority pattern-analysis sentences (spec §10), then the
+    // best-practice-candidate summary/comparison sentences — the engine's
+    // own explanation text, never re-derived here.
     conclusions: [
-      ...buildPatternAnalysisBriefConclusions(briefData.patternAnalysis, 3),
+      ...buildPatternAnalysisBriefConclusions(briefData.patternAnalysis, 2),
+      ...(bestPracticeSummary ? [bestPracticeSummary] : []),
+      ...(bestPracticeComparison ? [bestPracticeComparison] : []),
       ...buildRegionOnlyConclusions(comparison),
     ],
   };

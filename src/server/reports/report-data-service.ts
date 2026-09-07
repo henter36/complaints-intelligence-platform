@@ -47,7 +47,7 @@ import type {
   ClassificationSnapshotAtEndRow,
   ClassificationTrendRow,
   FacilityFollowUpRow,
-  FacilityImprovementRow,
+  BestPracticeCandidateRow,
 } from "@/lib/reports/report-contract";
 // Types that are only re-exported (not used locally) — direct re-export avoids a redundant import.
 export type { KpiAssessment, ComparativeTimelinePoint, ComparativeTimelineSeries } from "@/lib/reports/report-contract";
@@ -219,8 +219,8 @@ export type ExecutiveBriefV2Data = ExecutiveBriefData & {
   continuedProblemFindingCount: number;
   /** V2-only: facilities ranked by follow-up priority, from the pattern-analysis engine (page 4 "السجون الأكثر حاجة للمتابعة"). Not used by other report modes. */
   facilitiesNeedingFollowUp?: FacilityFollowUpRow[];
-  /** V2-only: facilities with a real, sustained, multi-period decline (page 4 "أفضل السجون تحسناً"). Never overlaps facilitiesNeedingFollowUp. */
-  facilitiesWithSustainedImprovement?: FacilityImprovementRow[];
+  /** V2-only: facility×classification best-practice candidates (page 4 "الجهات المتميزة والمرشحة لدراسة الممارسات الناجحة"). Never overlaps facilitiesNeedingFollowUp. */
+  bestPracticeCandidates?: BestPracticeCandidateRow[];
   /** V2-only: classification×facility multi-period trends from the pattern-analysis engine (page 4 "أبرز اتجاهات التصنيفات عبر الفترات"). */
   classificationTrends?: ClassificationTrendRow[];
 };

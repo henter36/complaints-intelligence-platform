@@ -257,14 +257,25 @@ export type FacilityFollowUpRow = {
   distinctComplainantsForRanking: number;
 };
 
-/** A facility with a real, multi-period, sustained decline (spec §4) — replaces the old lowest-volume "أقل السجون". */
-export type FacilityImprovementRow = {
+/**
+ * A facility×classification proposed as a "best-practice candidate" — a
+ * real, multi-period, sustained decline (see multi-period-trend.ts) that
+ * ALSO clears the additional strength/base-volume gates in
+ * PATTERN_ANALYSIS_CONFIG.bestPracticeCandidate (see best-practice-candidate.ts),
+ * so a trivial low-volume blip like 2→1 can never rank here. `reasonLabel`
+ * is generated entirely from the row's own numbers — never a claimed
+ * operational cause (no "increased rounds", "more staff", etc. unless a
+ * human has actually documented it as a BestPracticeRecordDraft).
+ */
+export type BestPracticeCandidateRow = {
   facility: string;
+  /** The classification this facility improved on ("مجال التميز") — never a general facility ranking (spec item 9). */
+  classificationLabel: string;
   startValue: number;
   currentValue: number;
   decrease: number;
   streakPeriods: number;
-  classificationLabel: string;
+  reasonLabel: string;
 };
 
 // ---------------------------------------------------------------------------

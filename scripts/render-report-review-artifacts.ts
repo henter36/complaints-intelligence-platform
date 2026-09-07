@@ -220,8 +220,8 @@ const v2BriefData: ExecutiveBriefV2Data = {
       priorityBand: "مرتفعة", priorityScore: 78, isChronic: true, distinctComplainantsForRanking: 8,
     },
   ],
-  facilitiesWithSustainedImprovement: [
-    { facility: "سجن نشط برصيد سابق", startValue: 40, currentValue: 12, decrease: 28, streakPeriods: 4, classificationLabel: "التغذية" },
+  bestPracticeCandidates: [
+    { facility: "سجن نشط برصيد سابق", startValue: 40, currentValue: 12, decrease: 28, streakPeriods: 4, classificationLabel: "التغذية", reasonLabel: "تحسن قوي ومستدام" },
   ],
   classificationOpenLate: {
     c1: { openAtEnd: 41, lateAtEnd: 11 },

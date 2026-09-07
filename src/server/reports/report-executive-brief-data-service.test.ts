@@ -19,7 +19,7 @@ import {
   buildMonthlyTrendPrimaryWhere,
   buildTopClassifications,
   buildFacilitiesNeedingFollowUp,
-  buildFacilitiesWithSustainedImprovement,
+  buildBestPracticeCandidateRows,
   buildClassificationTrendRows,
   buildRegionOnlyConclusions,
   MONTHLY_WINDOW_SIZE,
@@ -2726,23 +2726,107 @@ describe("buildFacilitiesNeedingFollowUp — V2 only, spec §1/§3/§10/§11 (pr
   });
 });
 
-describe("buildFacilitiesWithSustainedImprovement — V2 only, spec section 4 (real multi-period decline only)", () => {
+/** A realistic SUSTAINED_IMPROVEMENT fixture: changeRate is derived from previous/current like the real engine does, unless overridden. */
+function makeImprovementFinding(
+  overrides: Partial<AnalyticalFinding> & { facility?: string; streakPeriods?: number }
+): AnalyticalFinding {
+  const { streakPeriods, ...rest } = overrides;
+  const previousValue = rest.previousValue ?? 40;
+  const currentValue = rest.currentValue ?? 5;
+  const changeRate = "changeRate" in rest
+    ? rest.changeRate
+    : Math.round(((currentValue - previousValue) / previousValue) * 1000) / 10;
+  return makeFinding({
+    type: "SUSTAINED_IMPROVEMENT",
+    previousValue,
+    currentValue,
+    changeRate,
+    supportingMetrics: { streakPeriods: streakPeriods ?? 3 },
+    ...rest,
+  });
+}
+
+describe("buildBestPracticeCandidateRows — الجهات المتميزة والمرشحة لدراسة الممارسات الناجحة (real, strong, sustained decline only)", () => {
   it("requires an actual SUSTAINED_IMPROVEMENT finding — a low current value alone is never 'best'", () => {
-    const rows = buildFacilitiesWithSustainedImprovement([
+    const rows = buildBestPracticeCandidateRows([
       makeFinding({ id: "chronic-but-small", facility: "سجن أ", type: "CHRONIC_ISSUE", currentValue: 2, previousValue: 2 }),
     ]);
     expect(rows).toEqual([]);
   });
 
-  it("picks the classification with the largest decrease when a facility has more than one improving classification", () => {
-    const rows = buildFacilitiesWithSustainedImprovement([
-      makeFinding({
-        id: "small-drop", facility: "سجن أ", entityName: "سجن أ — الاتصال", type: "SUSTAINED_IMPROVEMENT",
-        currentValue: 8, previousValue: 10, supportingMetrics: { streakPeriods: 3 },
+  it("a large, sustained decline off a real base is a candidate", () => {
+    const rows = buildBestPracticeCandidateRows([
+      makeImprovementFinding({
+        id: "melez", facility: "سجن الملز", entityName: "سجن الملز — الوصول إلى الطبيب",
+        currentValue: 32, previousValue: 73, streakPeriods: 4,
       }),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].facility).toBe("سجن الملز");
+    expect(rows[0].decrease).toBe(41);
+  });
+
+  it("a single-period improvement (streak below the minimum) is never a candidate", () => {
+    const rows = buildBestPracticeCandidateRows([
+      makeImprovementFinding({ id: "one-period", facility: "سجن أ", currentValue: 5, previousValue: 40, streakPeriods: 1 }),
+    ]);
+    expect(rows).toEqual([]);
+  });
+
+  it("a tiny 2→1 change over 3 periods never outranks (or even displaces) a materially larger decline", () => {
+    const rows = buildBestPracticeCandidateRows([
+      makeImprovementFinding({
+        id: "tiny", facility: "سجن صغير", entityName: "سجن صغير — الاتصال",
+        currentValue: 1, previousValue: 2, streakPeriods: 3,
+      }),
+      makeImprovementFinding({
+        id: "big", facility: "سجن كبير", entityName: "سجن كبير — التغذية",
+        currentValue: 32, previousValue: 73, streakPeriods: 4,
+      }),
+    ]);
+    expect(rows.map((r) => r.facility)).toEqual(["سجن كبير"]);
+  });
+
+  it("a relapse-after-improvement finding is never surfaced as a best-practice candidate", () => {
+    const rows = buildBestPracticeCandidateRows([
       makeFinding({
-        id: "big-drop", facility: "سجن أ", entityName: "سجن أ — التغذية", type: "SUSTAINED_IMPROVEMENT",
-        currentValue: 5, previousValue: 40, supportingMetrics: { streakPeriods: 4 },
+        id: "relapse", facility: "سجن أ", type: "TREND_PATTERN",
+        supportingMetrics: { pattern: "RELAPSE_AFTER_IMPROVEMENT", streakPeriods: 1 },
+      }),
+    ]);
+    expect(rows).toEqual([]);
+  });
+
+  it("a large but non-sustained drop (streak below the minimum) is never auto-classified as a candidate", () => {
+    const rows = buildBestPracticeCandidateRows([
+      makeImprovementFinding({ id: "unsustained", facility: "سجن أ", currentValue: 5, previousValue: 60, streakPeriods: 2 }),
+    ]);
+    expect(rows).toEqual([]);
+  });
+
+  it("a stable, low-volume classification (below the base-volume gate) is never a best practice", () => {
+    const rows = buildBestPracticeCandidateRows([
+      makeImprovementFinding({ id: "low-volume", facility: "سجن أ", currentValue: 1, previousValue: 4, streakPeriods: 3 }),
+    ]);
+    expect(rows).toEqual([]);
+  });
+
+  it("missing changeRate (insufficient data to confirm the drop) is never a candidate", () => {
+    const rows = buildBestPracticeCandidateRows([
+      makeImprovementFinding({ id: "no-rate", facility: "سجن أ", currentValue: 5, previousValue: 40, changeRate: null }),
+    ]);
+    expect(rows).toEqual([]);
+  });
+
+  it("picks the strongest candidate classification when a facility has more than one improving classification", () => {
+    const rows = buildBestPracticeCandidateRows([
+      makeImprovementFinding({
+        id: "small-drop", facility: "سجن أ", entityName: "سجن أ — الاتصال",
+        currentValue: 8, previousValue: 10, streakPeriods: 3,
+      }),
+      makeImprovementFinding({
+        id: "big-drop", facility: "سجن أ", entityName: "سجن أ — التغذية",
+        currentValue: 5, previousValue: 40, streakPeriods: 4,
       }),
     ]);
     expect(rows).toHaveLength(1);
@@ -2750,26 +2834,55 @@ describe("buildFacilitiesWithSustainedImprovement — V2 only, spec section 4 (r
     expect(rows[0].decrease).toBe(35);
   });
 
-  it("ranks facilities by decrease magnitude, descending", () => {
-    const rows = buildFacilitiesWithSustainedImprovement([
-      makeFinding({ id: "a", facility: "سجن صغير", type: "SUSTAINED_IMPROVEMENT", currentValue: 8, previousValue: 12 }),
-      makeFinding({ id: "b", facility: "سجن كبير", type: "SUSTAINED_IMPROVEMENT", currentValue: 5, previousValue: 40 }),
-    ]);
-    expect(rows.map((r) => r.facility)).toEqual(["سجن كبير", "سجن صغير"]);
+  it("ranking is deterministic and stable across repeated calls on the same data", () => {
+    const findings = [
+      makeImprovementFinding({ id: "a", facility: "سجن صغير", entityName: "سجن صغير — الزيارات", currentValue: 6, previousValue: 20, streakPeriods: 3 }),
+      makeImprovementFinding({ id: "b", facility: "سجن كبير", entityName: "سجن كبير — التغذية", currentValue: 5, previousValue: 40, streakPeriods: 4 }),
+    ];
+    const first = buildBestPracticeCandidateRows(findings);
+    const second = buildBestPracticeCandidateRows(findings);
+    expect(first).toEqual(second);
+    expect(first.map((r) => r.facility)).toEqual(["سجن كبير", "سجن صغير"]);
   });
 
   it("excludes the unspecified (غير محدد) facility bucket", () => {
-    const rows = buildFacilitiesWithSustainedImprovement([
-      makeFinding({ id: "a", facility: "غير محدد", type: "SUSTAINED_IMPROVEMENT", currentValue: 5, previousValue: 40 }),
+    const rows = buildBestPracticeCandidateRows([
+      makeImprovementFinding({ id: "a", facility: "غير محدد", currentValue: 5, previousValue: 40 }),
     ]);
     expect(rows).toEqual([]);
   });
 
   it("caps at the requested limit", () => {
     const findings = Array.from({ length: 7 }, (_, i) =>
-      makeFinding({ id: `f${i}`, facility: `سجن ${i}`, type: "SUSTAINED_IMPROVEMENT", currentValue: 5, previousValue: 40 - i })
+      makeImprovementFinding({ id: `f${i}`, facility: `سجن ${i}`, currentValue: 5, previousValue: 40 - i, streakPeriods: 3 })
     );
-    expect(buildFacilitiesWithSustainedImprovement(findings, 5)).toHaveLength(5);
+    expect(buildBestPracticeCandidateRows(findings, 5)).toHaveLength(5);
+  });
+
+  it("the streak duration and reason text are correct Arabic and never name an unverified operational cause", () => {
+    const rows = buildBestPracticeCandidateRows([
+      makeImprovementFinding({ id: "a", facility: "سجن الملز", currentValue: 32, previousValue: 73, streakPeriods: 4 }),
+    ]);
+    expect(rows[0].streakPeriods).toBe(4);
+    expect(rows[0].reasonLabel).toBe("تحسن قوي ومستدام");
+    const forbiddenOperationalClaims = ["الجولات", "الحجز", "الكادر", "التنسيق", "الموظفين"];
+    for (const claim of forbiddenOperationalClaims) {
+      expect(rows[0].reasonLabel).not.toContain(claim);
+    }
+  });
+
+  it("a 100%-drop 5→0 case never ranks ahead of a 73→32 case merely for its percentage", () => {
+    const rows = buildBestPracticeCandidateRows([
+      makeImprovementFinding({
+        id: "hundred-percent", facility: "سجن صغير", entityName: "سجن صغير — الاتصال",
+        currentValue: 0, previousValue: 5, changeRate: -100, streakPeriods: 3,
+      }),
+      makeImprovementFinding({
+        id: "melez", facility: "سجن الملز", entityName: "سجن الملز — الوصول إلى الطبيب",
+        currentValue: 32, previousValue: 73, streakPeriods: 4,
+      }),
+    ]);
+    expect(rows.map((r) => r.facility)).toEqual(["سجن الملز", "سجن صغير"]);
   });
 });
 

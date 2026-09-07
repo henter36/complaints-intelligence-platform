@@ -256,7 +256,7 @@ describe.skipIf(!DEV_DB_AVAILABLE)(
       expect(totals).toEqual(recomputed);
     });
 
-    it("data contract: facilitiesNeedingFollowUp/facilitiesWithSustainedImprovement are well-formed and never expose the unspecified facility bucket", () => {
+    it("data contract: facilitiesNeedingFollowUp/bestPracticeCandidates are well-formed and never expose the unspecified facility bucket", () => {
       const brief = requireV2Brief();
       for (const row of brief.facilitiesNeedingFollowUp ?? []) {
         expect(row.facility).not.toBe("غير محدد");
@@ -264,7 +264,7 @@ describe.skipIf(!DEV_DB_AVAILABLE)(
         expect(row.totalComplaints).toBeGreaterThanOrEqual(0);
         expect(Number.isFinite(row.priorityScore)).toBe(true);
       }
-      for (const row of brief.facilitiesWithSustainedImprovement ?? []) {
+      for (const row of brief.bestPracticeCandidates ?? []) {
         expect(row.facility).not.toBe("غير محدد");
         expect(row.facility.trim().length).toBeGreaterThan(0);
         // A real, sustained decline: the engine only emits SUSTAINED_IMPROVEMENT
@@ -279,7 +279,7 @@ describe.skipIf(!DEV_DB_AVAILABLE)(
       const departmentNames = (brief.departmentPeriodMetrics ?? []).map((d) => d.departmentName);
       const facilityNames = [
         ...(brief.facilitiesNeedingFollowUp ?? []).map((f) => f.facility),
-        ...(brief.facilitiesWithSustainedImprovement ?? []).map((f) => f.facility),
+        ...(brief.bestPracticeCandidates ?? []).map((f) => f.facility),
       ];
       const classificationNames = (brief.topClassifications ?? []).flatMap((c) => [
         c.classificationPath,

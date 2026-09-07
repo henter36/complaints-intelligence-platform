@@ -27,3 +27,15 @@ export const FINDING_TYPE_LABELS: Record<string, string> = {
 export function findingTypeLabel(type: string): string {
   return FINDING_TYPE_LABELS[type] ?? type;
 }
+
+/**
+ * `finding.entityName` for a CLASSIFICATION-scoped finding is always
+ * "facility — classification" (see pattern-findings-service.ts); this
+ * recovers just the classification half. Shared by the report data service
+ * and the brief-conclusions/best-practice-candidate modules so the split
+ * logic lives in exactly one place.
+ */
+export function classificationLabelFromEntityName(entityName: string): string {
+  const separatorIndex = entityName.indexOf(" — ");
+  return separatorIndex === -1 ? entityName : entityName.slice(separatorIndex + 3);
+}

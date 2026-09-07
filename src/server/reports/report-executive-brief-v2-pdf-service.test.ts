@@ -89,9 +89,9 @@ function makeV2Brief(overrides: Partial<ExecutiveBriefV2Data> = {}): ExecutiveBr
         priorityBand: "متوسطة", priorityScore: 55, isChronic: false, distinctComplainantsForRanking: 0,
       },
     ],
-    facilitiesWithSustainedImprovement: [
-      { facility: "سجن الدمام", startValue: 30, currentValue: 2, decrease: 28, streakPeriods: 4, classificationLabel: "الاتصال" },
-      { facility: "سجن أبها", startValue: 20, currentValue: 3, decrease: 17, streakPeriods: 3, classificationLabel: "الزيارات" },
+    bestPracticeCandidates: [
+      { facility: "سجن الدمام", startValue: 30, currentValue: 2, decrease: 28, streakPeriods: 4, classificationLabel: "الاتصال", reasonLabel: "تحسن قوي ومستدام" },
+      { facility: "سجن أبها", startValue: 20, currentValue: 3, decrease: 17, streakPeriods: 3, classificationLabel: "الزيارات", reasonLabel: "تحسن مستدام مع انخفاض جوهري في حجم الشكاوى" },
     ],
     classificationTrends: [
       { facility: "سجن الملز", classification: "نقل", currentCount: 60, difference: 40, trail: "20، 35، 48، 60", streakPeriods: 4, patternLabel: "استمرار مرتفع", priorityScore: 80 },
@@ -445,21 +445,21 @@ describe("V2 page 4 — facilities replace departments (spec sections 5-9, 14-16
     }
   });
 
-  it("still renders a valid 4-page PDF when facilitiesNeedingFollowUp/facilitiesWithSustainedImprovement are both empty", async () => {
+  it("still renders a valid 4-page PDF when facilitiesNeedingFollowUp/bestPracticeCandidates are both empty", async () => {
     const result = await renderExecutiveBriefV2Pdf(
       makeV2Report({
-        briefData: makeV2Brief({ facilitiesNeedingFollowUp: [], facilitiesWithSustainedImprovement: [] }),
+        briefData: makeV2Brief({ facilitiesNeedingFollowUp: [], bestPracticeCandidates: [] }),
       })
     );
     expect(result.buffer.slice(0, 4).toString()).toBe("%PDF");
     expect(countPageObjects(result.buffer)).toBe(4);
   });
 
-  it("still renders a valid 4-page PDF when facilitiesNeedingFollowUp/facilitiesWithSustainedImprovement are undefined (older/fallback brief shape)", async () => {
+  it("still renders a valid 4-page PDF when facilitiesNeedingFollowUp/bestPracticeCandidates are undefined (older/fallback brief shape)", async () => {
     const brief = makeV2Brief();
     const withoutFacilities = { ...brief } as Partial<ExecutiveBriefV2Data>;
     delete withoutFacilities.facilitiesNeedingFollowUp;
-    delete withoutFacilities.facilitiesWithSustainedImprovement;
+    delete withoutFacilities.bestPracticeCandidates;
     const result = await renderExecutiveBriefV2Pdf(
       makeV2Report({ briefData: withoutFacilities as ExecutiveBriefV2Data })
     );

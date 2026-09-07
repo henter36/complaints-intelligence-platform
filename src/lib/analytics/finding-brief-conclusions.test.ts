@@ -65,4 +65,48 @@ describe("buildPatternAnalysisBriefConclusions", () => {
     const lines = buildPatternAnalysisBriefConclusions({ findings: [], periodChangeDigest: EMPTY_DIGEST });
     expect(lines).toEqual([]);
   });
+
+  it("appends a best-practice-candidate count when a newly-improved facility also clears the candidacy bar", () => {
+    const digest: PeriodChangeDigest = {
+      ...EMPTY_DIGEST,
+      improvedFacilities: [
+        { key: "k", facility: "سجن الملز", classificationLabel: "الوصول إلى الطبيب", pattern: "SUSTAINED_IMPROVEMENT", priorityBand: "LOW" },
+      ],
+    };
+    const strongImprovement = finding({
+      id: "imp",
+      type: "SUSTAINED_IMPROVEMENT",
+      entityName: "سجن الملز — الوصول إلى الطبيب",
+      currentValue: 32,
+      previousValue: 73,
+      changeRate: -56.2,
+      supportingMetrics: { streakPeriods: 4 },
+      drilldownFilters: { facility: "سجن الملز" },
+    });
+    const lines = buildPatternAnalysisBriefConclusions({ findings: [strongImprovement], periodChangeDigest: digest });
+    expect(lines[lines.length - 1]).toBe(
+      "ما تغير منذ الفترة السابقة: 1 موقع حقق تحسناً مستداماً، منها 1 موقع مرشح لدراسة ممارسة ناجحة."
+    );
+  });
+
+  it("does not append the candidate clause when the improved facility doesn't clear the candidacy bar", () => {
+    const digest: PeriodChangeDigest = {
+      ...EMPTY_DIGEST,
+      improvedFacilities: [
+        { key: "k", facility: "سجن أ", classificationLabel: "الاتصال", pattern: "SUSTAINED_IMPROVEMENT", priorityBand: "LOW" },
+      ],
+    };
+    const trivialImprovement = finding({
+      id: "imp",
+      type: "SUSTAINED_IMPROVEMENT",
+      entityName: "سجن أ — الاتصال",
+      currentValue: 1,
+      previousValue: 2,
+      changeRate: -50,
+      supportingMetrics: { streakPeriods: 3 },
+      drilldownFilters: { facility: "سجن أ" },
+    });
+    const lines = buildPatternAnalysisBriefConclusions({ findings: [trivialImprovement], periodChangeDigest: digest });
+    expect(lines[lines.length - 1]).toBe("ما تغير منذ الفترة السابقة: 1 موقع حقق تحسناً مستداماً.");
+  });
 });

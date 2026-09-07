@@ -1,12 +1,13 @@
 import type { AnalyticalFinding } from "./analytical-finding";
-import type { PeriodChangeDigest } from "./period-change-digest";
+import type { PatternSnapshot, PeriodChangeDigest } from "./period-change-digest";
 import { rankFindingsForExecutiveBrief } from "./finding-ranking";
 import { consolidateFindingsForBrief, type ConsolidatedFindingCard } from "./finding-consolidation";
+import { classificationLabelFromEntityName } from "./finding-labels";
+import { evaluateBestPracticeCandidacy } from "./best-practice-candidate";
 
 function classificationLabelOf(finding: AnalyticalFinding): string | null {
   if (finding.entityType !== "CLASSIFICATION") return null;
-  const separatorIndex = finding.entityName.indexOf(" — ");
-  return separatorIndex === -1 ? finding.entityName : finding.entityName.slice(separatorIndex + 3);
+  return classificationLabelFromEntityName(finding.entityName);
 }
 
 /**
@@ -68,9 +69,48 @@ export function buildPatternAnalysisBriefConclusions(
       : card.primary.explanation
   );
 
-  const digestLine = patternAnalysis.periodChangeDigest ? buildDigestSummarySentence(patternAnalysis.periodChangeDigest) : null;
+  const bestPracticeCandidateCount = patternAnalysis.periodChangeDigest
+    ? countBestPracticeCandidatesAmongImproved(patternAnalysis.periodChangeDigest.improvedFacilities, patternAnalysis.findings)
+    : 0;
+  const digestLine = patternAnalysis.periodChangeDigest
+    ? buildDigestSummarySentence(patternAnalysis.periodChangeDigest, bestPracticeCandidateCount)
+    : null;
 
   return digestLine ? [...topFindingLines, digestLine] : topFindingLines;
+}
+
+/**
+ * Of the facilities the digest already flags as newly-SUSTAINED_IMPROVEMENT
+ * this period, how many ALSO clear the best-practice-candidate bar (spec
+ * item 8's "...منها 3 مواقع مرشحة لدراسة ممارسات ناجحة" — never worded as
+ * "ممارسات قابلة للتعميم"; generalizability is never claimed by the report
+ * itself). Matches each PatternSnapshot back to its own SUSTAINED_IMPROVEMENT
+ * finding by facility + classification label rather than re-deriving
+ * candidacy some other way, so this can never disagree with the report table
+ * itself.
+ */
+function countBestPracticeCandidatesAmongImproved(
+  improvedFacilities: readonly PatternSnapshot[],
+  findings: readonly AnalyticalFinding[]
+): number {
+  if (improvedFacilities.length === 0) return 0;
+
+  const findingByKey = new Map<string, AnalyticalFinding>();
+  for (const finding of findings) {
+    if (finding.type !== "SUSTAINED_IMPROVEMENT") continue;
+    const facility = typeof finding.drilldownFilters.facility === "string" ? finding.drilldownFilters.facility : null;
+    if (!facility) continue;
+    findingByKey.set(`${facility}::${classificationLabelOf(finding) ?? finding.entityName}`, finding);
+  }
+
+  let count = 0;
+  for (const snapshot of improvedFacilities) {
+    const finding = findingByKey.get(`${snapshot.facility}::${snapshot.classificationLabel}`);
+    if (!finding) continue;
+    const evaluation = evaluateBestPracticeCandidacy(finding, snapshot.facility);
+    if (evaluation?.status === "BEST_PRACTICE_CANDIDATE") count += 1;
+  }
+  return count;
 }
 
 type CountedNounForms = { singular: string; dual: string; plural: string };
@@ -91,7 +131,7 @@ function formatArabicCountPhrase(count: number, forms: CountedNounForms): string
  * "مشكلة" — so newProblems is worded as an emerging signal, never asserted
  * as a settled problem.
  */
-function buildDigestSummarySentence(digest: PeriodChangeDigest): string | null {
+function buildDigestSummarySentence(digest: PeriodChangeDigest, bestPracticeCandidateCount: number): string | null {
   const parts: string[] = [];
   if (digest.newProblems.length > 0) {
     parts.push(
@@ -130,5 +170,14 @@ function buildDigestSummarySentence(digest: PeriodChangeDigest): string | null {
     );
   }
   if (parts.length === 0) return null;
-  return `ما تغير منذ الفترة السابقة: ${parts.join("، ")}.`;
+
+  let sentence = `ما تغير منذ الفترة السابقة: ${parts.join("، ")}`;
+  if (digest.improvedFacilities.length > 0 && bestPracticeCandidateCount > 0) {
+    sentence += `، منها ${formatArabicCountPhrase(bestPracticeCandidateCount, {
+      singular: "موقع مرشح لدراسة ممارسة ناجحة",
+      dual: "موقعان مرشحان لدراسة ممارسات ناجحة",
+      plural: "مواقع مرشحة لدراسة ممارسات ناجحة",
+    })}`;
+  }
+  return `${sentence}.`;
 }
