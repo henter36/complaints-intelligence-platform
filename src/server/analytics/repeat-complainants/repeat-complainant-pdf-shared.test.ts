@@ -288,7 +288,7 @@ describe("drawPaginatedTable — dynamic row height + overflow policy", () => {
     const calls = collectTextCalls(textSpy);
     const subjectCalls = calls.filter((c) => veryLong.split(" ").some((word) => c.text.includes(word)));
     // Exactly maxLines (2) draw calls for this cell — never more.
-    expect(subjectCalls.length).toBe(2);
+    expect(subjectCalls).toHaveLength(2);
     expect(subjectCalls[0]!.options.ellipsis).toBeFalsy();
     expect(subjectCalls[1]!.options.ellipsis).toBe(true);
     ctx.doc.end();
