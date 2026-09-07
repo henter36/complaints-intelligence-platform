@@ -1,5 +1,5 @@
 import type { AnalyticalFinding } from "./analytical-finding";
-import type { PatternSnapshot, PeriodChangeDigest } from "./period-change-digest";
+import { buildPatternSnapshotKey, type PatternSnapshot, type PeriodChangeDigest } from "./period-change-digest";
 import { rankFindingsForExecutiveBrief } from "./finding-ranking";
 import { consolidateFindingsForBrief, type ConsolidatedFindingCard } from "./finding-consolidation";
 import { classificationLabelFromEntityName } from "./finding-labels";
@@ -81,13 +81,17 @@ export function buildPatternAnalysisBriefConclusions(
 
 /**
  * Of the facilities the digest already flags as newly-SUSTAINED_IMPROVEMENT
- * this period, how many ALSO clear the best-practice-candidate bar (spec
- * item 8's "...منها 3 مواقع مرشحة لدراسة ممارسات ناجحة" — never worded as
- * "ممارسات قابلة للتعميم"; generalizability is never claimed by the report
- * itself). Matches each PatternSnapshot back to its own SUSTAINED_IMPROVEMENT
- * finding by facility + classification label rather than re-deriving
- * candidacy some other way, so this can never disagree with the report table
- * itself.
+ * this period, how many DISTINCT SITES ALSO clear the best-practice-candidate
+ * bar (spec item 8's "...منها 3 مواقع مرشحة لدراسة ممارسات ناجحة" — never
+ * worded as "ممارسات قابلة للتعميم"; generalizability is never claimed by
+ * the report itself). Matches each PatternSnapshot back to its own
+ * SUSTAINED_IMPROVEMENT finding via `buildPatternSnapshotKey` — the SAME
+ * canonical facility×classificationId identity pattern-findings-service.ts
+ * used to build `snapshot.key` in the first place — never facility+display-
+ * label, which two differently-labeled classifications (or a relabeled one)
+ * could make disagree with the report table. Counts unique FACILITIES, not
+ * facility×classification rows: one site qualifying in two classifications
+ * is still one site.
  */
 function countBestPracticeCandidatesAmongImproved(
   improvedFacilities: readonly PatternSnapshot[],
@@ -100,17 +104,17 @@ function countBestPracticeCandidatesAmongImproved(
     if (finding.type !== "SUSTAINED_IMPROVEMENT") continue;
     const facility = typeof finding.drilldownFilters.facility === "string" ? finding.drilldownFilters.facility : null;
     if (!facility) continue;
-    findingByKey.set(`${facility}::${classificationLabelOf(finding) ?? finding.entityName}`, finding);
+    findingByKey.set(buildPatternSnapshotKey(facility, finding.entityId), finding);
   }
 
-  let count = 0;
+  const candidateFacilities = new Set<string>();
   for (const snapshot of improvedFacilities) {
-    const finding = findingByKey.get(`${snapshot.facility}::${snapshot.classificationLabel}`);
+    const finding = findingByKey.get(snapshot.key);
     if (!finding) continue;
     const evaluation = evaluateBestPracticeCandidacy(finding, snapshot.facility);
-    if (evaluation?.status === "BEST_PRACTICE_CANDIDATE") count += 1;
+    if (evaluation?.status === "BEST_PRACTICE_CANDIDATE") candidateFacilities.add(snapshot.facility);
   }
-  return count;
+  return candidateFacilities.size;
 }
 
 type CountedNounForms = { singular: string; dual: string; plural: string };

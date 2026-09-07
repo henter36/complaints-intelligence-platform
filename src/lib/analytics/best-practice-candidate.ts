@@ -114,7 +114,17 @@ export function evaluateBestPracticeCandidacy(
   const currentValue = finding.currentValue;
   const decrease = startValue - currentValue;
   const streakPeriods = streakPeriodsOf(finding);
-  const changeRatePercent = finding.changeRate;
+  // Deliberately NOT finding.changeRate: that field is first→last over the
+  // WHOLE analysis window (see multi-period-trend.ts), which can differ
+  // materially from the verified decline streak startValue/currentValue
+  // actually shown in this row — e.g. an older, higher pre-streak value can
+  // make the whole-window rate look far stronger (or weaker) than what the
+  // streak itself achieved. Recomputing directly from startValue/currentValue
+  // keeps the gate, the reason wording, and the merit score all describing
+  // the EXACT same decline the row displays. This does not change
+  // multi-period-trend.ts's own semantics — finding.changeRate is untouched
+  // and still used everywhere else (ranking tables, digest text, etc.).
+  const changeRatePercent = startValue > 0 ? ((currentValue - startValue) / startValue) * 100 : null;
   const classificationId = finding.entityId;
   const classificationLabel = classificationLabelFromEntityName(finding.entityName);
 
@@ -122,8 +132,10 @@ export function evaluateBestPracticeCandidacy(
   // A real multi-period decline is already guaranteed by SUSTAINED_IMPROVEMENT
   // classification — this is the ADDITIONAL "is it big/deep/long enough"
   // bar so a 2→1 or 1→0 blip can never outrank a genuine 73→32 decline.
-  // THE ONLY change-rate gate is config.improvementDropPercent (reused from
-  // the trend engine itself) — bestPracticeCandidate.strongReasonChangeRatePercent
+  // THE ONLY change-rate gate is config.improvementDropPercent (the same
+  // threshold value multi-period-trend.ts uses for its own whole-window
+  // check) — but applied here to the candidate-specific streak rate above,
+  // not the finding's whole-window rate. bestPracticeCandidate.strongReasonChangeRatePercent
   // is a separate, stricter, TEXT-ONLY threshold used solely by
   // buildReasonLabel below; it never excludes a candidate.
   const passesGates =
@@ -214,9 +226,25 @@ export function buildBestPracticeSectionSummary(
   if (candidates.length === 0) return null;
   if (candidates.length === 1) {
     const c = candidates[0];
-    return `أظهرت بيانات ${c.facility} تحسناً مستداماً في ${c.classificationLabel}، من ${c.startValue} إلى ${c.currentValue} شكوى خلال ${formatPeriodCount(c.streakPeriods)}، وهي مرشحة لدراسة الإجراءات التي أسهمت في هذا التحسن والتحقق من إمكانية تعميمها.`;
+    return `أظهرت بيانات ${c.facility} تحسناً مستداماً في ${c.classificationLabel}، من ${c.startValue} إلى ${c.currentValue} شكوى خلال ${formatPeriodCount(c.streakPeriods)}، ويوصى بدراسة الإجراءات التي أسهمت في هذا التحسن والتحقق من إمكانية تعميمها.`;
   }
-  return `أظهرت بيانات ${formatArabicSiteCount(candidates.length)} تحسناً مستداماً في مشكلات متكررة، ويوصى بالتحقق من الإجراءات التشغيلية التي أسهمت في هذا التحسن ودراسة إمكانية تعميمها على المواقع التي لا تزال تواجه المشكلة نفسها.`;
+
+  // `candidates` is a list of facility×classification ROWS — the SAME
+  // facility can legitimately appear more than once (once per qualifying
+  // classification), so "N مواقع" must count DISTINCT facilities, never
+  // candidate rows, or a single facility qualifying in 2 classifications
+  // would be misreported as "2 مواقع".
+  const uniqueFacilityCount = new Set(candidates.map((c) => c.facility)).size;
+  if (uniqueFacilityCount === 1) {
+    const facility = candidates[0].facility;
+    return `أظهرت بيانات ${facility} تحسناً مستداماً في عدة تصنيفات، ويوصى بدراسة الإجراءات التي أسهمت في هذا التحسن والتحقق من إمكانية تعميمها.`;
+  }
+  // "سجّلت" (not "أظهرت بيانات") specifically so the site-count noun is a
+  // grammatical SUBJECT (nominative) — e.g. "سجّلت موقعان..." — never an
+  // object of an إضافة construct ("بيانات موقعان"), which would need the
+  // dual/plural noun in a different case ("موقعين") and previously produced
+  // the ungrammatical "أظهرت بيانات موقعان".
+  return `سجّلت ${formatArabicSiteCount(uniqueFacilityCount)} تحسناً مستداماً في مشكلات متكررة، ويوصى بالتحقق من الإجراءات التشغيلية التي أسهمت في هذا التحسن ودراسة إمكانية تعميمها على المواقع التي لا تزال تواجه المشكلة نفسها.`;
 }
 
 /**
@@ -236,8 +264,14 @@ export function buildBestPracticeComparisonConclusion(
   if (!top) return null;
   const struggling = findStrugglingFacilitiesForClassification(top.facility, top.classificationId, findings);
   if (struggling.length === 0) return null;
+  // Never "لا يزال يسجل استمراراً مرتفعاً" here — findStrugglingFacilitiesForClassification
+  // matches on ANY negative pattern (CHRONIC_ISSUE or isNegativeTrend: also
+  // EMERGING, VOLATILE, RELAPSE_AFTER_IMPROVEMENT, ...), not only a sustained
+  // high level, so a pattern-specific claim like "استمرار مرتفع" would be
+  // false for e.g. an EMERGING site. This neutral phrasing is correct for
+  // every pattern findStrugglingFacilitiesForClassification can return.
   const comparisonClause = struggling.length === 1
-    ? `${struggling[0]}، الذي لا يزال يسجل استمراراً مرتفعاً في التصنيف نفسه`
-    : `المواقع التالية التي لا تزال تسجل استمراراً مرتفعاً في التصنيف نفسه: ${struggling.join("، ")}`;
+    ? `${struggling[0]}، الذي لا تزال تظهر لديه مؤشرات سلبية في التصنيف نفسه`
+    : `المواقع التالية التي لا تزال تظهر لديها مؤشرات سلبية في التصنيف نفسه: ${struggling.join("، ")}`;
   return `يوصى بدراسة تجربة ${top.facility} في ${top.classificationLabel} ومقارنتها بـ${comparisonClause}.`;
 }

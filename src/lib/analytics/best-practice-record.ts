@@ -64,7 +64,7 @@ export function draftBestPracticeRecordFromCandidate(
   return {
     facilityId: null,
     facilityName: candidate.facility,
-    classificationId: null,
+    classificationId: candidate.classificationId,
     classificationLabel: candidate.classificationLabel,
     title: null,
     actionDescription: null,

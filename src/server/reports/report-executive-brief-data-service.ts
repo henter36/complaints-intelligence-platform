@@ -28,6 +28,7 @@ import { rankFindingsForExecutiveBrief } from "@/lib/analytics/finding-ranking";
 import { PATTERN_ANALYSIS_CONFIG } from "@/lib/analytics/pattern-analysis-config";
 import type { AnalyticalFinding } from "@/lib/analytics/analytical-finding";
 import { classificationLabelFromEntityName } from "@/lib/analytics/finding-labels";
+import { buildPatternSnapshotKey } from "@/lib/analytics/period-change-digest";
 import {
   evaluateBestPracticeCandidacy,
   buildBestPracticeSectionSummary,
@@ -642,35 +643,53 @@ function toBestPracticeCandidateRow(evaluation: BestPracticeCandidateEvaluation)
 }
 
 /**
- * "الجهات المتميزة والمرشحة لدراسة الممارسات الناجحة": facilities with a
- * SUSTAINED_IMPROVEMENT finding that ALSO clears the best-practice-candidate
- * gates (see best-practice-candidate.ts / PATTERN_ANALYSIS_CONFIG.bestPracticeCandidate) —
- * a real multi-period decline is necessary but not sufficient; it must also
- * be large enough, off a high-enough base, and held long enough that a
- * trivial 2→1 blip can never outrank a genuine 73→32 decline. Ranked by
- * merit score (decrease magnitude + streak + change rate + base volume), not
- * raw decrease alone, and never a general facility ranking — only per
- * classification (spec item 9).
+ * "الجهات المتميزة والمرشحة لدراسة الممارسات الناجحة": every facility×
+ * classification pair with a SUSTAINED_IMPROVEMENT finding that ALSO clears
+ * the best-practice-candidate gates (see best-practice-candidate.ts /
+ * PATTERN_ANALYSIS_CONFIG.bestPracticeCandidate) — a real multi-period
+ * decline is necessary but not sufficient; it must also be large enough,
+ * off a high-enough base, and held long enough that a trivial 2→1 blip can
+ * never outrank a genuine 73→32 decline.
+ *
+ * The unit here is facility × classificationId, NOT facility alone — the
+ * SAME facility legitimately keeps a row for EVERY classification it
+ * qualifies in (spec item 9: distinction is per classification/problem,
+ * never a general "best facility" ranking, so collapsing to one row per
+ * facility would silently drop real qualifying improvements). Dedup only
+ * collapses a genuine duplicate — the exact same facility AND the exact
+ * same canonical classification — keeping the higher-merit evaluation.
+ *
+ * Ranked by merit score (decrease magnitude + streak + change rate + base
+ * volume) for DISPLAY ORDER of these rows, not raw decrease alone — this is
+ * never a general ranking of facilities against each other.
  */
 export function rankBestPracticeCandidateEvaluations(
   findings: readonly AnalyticalFinding[]
 ): BestPracticeCandidateEvaluation[] {
-  const bestPerFacility = new Map<string, BestPracticeCandidateEvaluation>();
+  const bestPerFacilityClassification = new Map<string, BestPracticeCandidateEvaluation>();
   for (const finding of findings) {
     if (finding.type !== "SUSTAINED_IMPROVEMENT") continue;
     const facility = facilityOfFinding(finding);
     if (!facility) continue;
     const evaluation = evaluateBestPracticeCandidacy(finding, facility);
     if (evaluation?.status !== "BEST_PRACTICE_CANDIDATE") continue;
-    const existing = bestPerFacility.get(facility);
-    if (!existing || evaluation.meritScore > existing.meritScore) bestPerFacility.set(facility, evaluation);
+    // Canonical facility×classification identity — the SAME key format
+    // pattern-findings-service.ts/finding-brief-conclusions.ts use for
+    // PatternSnapshot matching, reused here rather than inventing a second
+    // key scheme. Never facility alone: that would silently collapse a
+    // facility's OTHER qualifying classifications away.
+    const dedupKey = buildPatternSnapshotKey(facility, evaluation.classificationId);
+    const existing = bestPerFacilityClassification.get(dedupKey);
+    if (!existing || evaluation.meritScore > existing.meritScore) bestPerFacilityClassification.set(dedupKey, evaluation);
   }
 
-  return [...bestPerFacility.values()].sort(
+  return [...bestPerFacilityClassification.values()].sort(
     (a, b) =>
       b.meritScore - a.meritScore
       || b.decrease - a.decrease
       || a.facility.localeCompare(b.facility, "ar")
+      || (a.classificationId ?? "").localeCompare(b.classificationId ?? "")
+      || a.classificationLabel.localeCompare(b.classificationLabel, "ar")
   );
 }
 
@@ -2060,11 +2079,17 @@ export async function buildExecutiveBriefV2Data(
   const classificationAffectedFacilityCounts = computeClassificationAffectedFacilityCounts(patternFindings);
 
   // Best-practice sentences (spec items 5, 10) are inserted right after the
-  // pattern-analysis conclusions (whose own cap is trimmed from 3 to 2 here
-  // to keep room) so they always survive the renderer's top-5 slice, ahead
-  // of the region-only filler.
+  // pattern-analysis conclusions. Room for them is reserved DYNAMICALLY —
+  // the pattern-analysis cap only shrinks from its original 3 by exactly
+  // how many best-practice sentences actually exist this period, so a
+  // period with no qualifying candidate never loses a pattern-analysis
+  // conclusion it would otherwise have shown (an empty feature must never
+  // reduce unrelated information).
   const bestPracticeSummary = buildBestPracticeSectionSummary(bestPracticeCandidateEvaluations);
   const bestPracticeComparison = buildBestPracticeComparisonConclusion(bestPracticeCandidateEvaluations, patternFindings);
+  const PATTERN_CONCLUSIONS_DEFAULT_CAP = 3;
+  const bestPracticeSentenceCount = (bestPracticeSummary ? 1 : 0) + (bestPracticeComparison ? 1 : 0);
+  const patternConclusionsCap = PATTERN_CONCLUSIONS_DEFAULT_CAP - bestPracticeSentenceCount;
 
   return {
     ...briefData,
@@ -2077,12 +2102,13 @@ export async function buildExecutiveBriefV2Data(
     facilitiesNeedingFollowUp,
     bestPracticeCandidates,
     classificationTrends,
-    // V2-only: region-only conclusions stay the base, led by up to 2
-    // high-priority pattern-analysis sentences (spec §10), then the
-    // best-practice-candidate summary/comparison sentences — the engine's
-    // own explanation text, never re-derived here.
+    // V2-only: region-only conclusions stay the base, led by up to
+    // `patternConclusionsCap` high-priority pattern-analysis sentences
+    // (spec §10, dynamically sized — see above), then the best-practice-
+    // candidate summary/comparison sentences — the engine's own
+    // explanation text, never re-derived here.
     conclusions: [
-      ...buildPatternAnalysisBriefConclusions(briefData.patternAnalysis, 2),
+      ...buildPatternAnalysisBriefConclusions(briefData.patternAnalysis, patternConclusionsCap),
       ...(bestPracticeSummary ? [bestPracticeSummary] : []),
       ...(bestPracticeComparison ? [bestPracticeComparison] : []),
       ...buildRegionOnlyConclusions(comparison),

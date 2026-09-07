@@ -2811,9 +2811,19 @@ describe("buildBestPracticeCandidateRows — الجهات المتميزة وا�
     expect(rows).toEqual([]);
   });
 
-  it("missing changeRate (insufficient data to confirm the drop) is never a candidate", () => {
+  it("finding.changeRate is ignored — a wildly wrong whole-window rate never lets a real qualifying decline through incorrectly, nor blocks one", () => {
     const rows = buildBestPracticeCandidateRows([
-      makeImprovementFinding({ id: "no-rate", facility: "سجن أ", currentValue: 5, previousValue: 40, changeRate: null }),
+      // changeRate claims almost no movement; startValue/currentValue show a
+      // real, strong, sustained decline that must drive candidacy on its own.
+      makeImprovementFinding({ id: "ignored-rate", facility: "سجن أ", currentValue: 5, previousValue: 40, changeRate: -1, streakPeriods: 4 }),
+    ]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.reasonLabel).toBe("تحسن قوي ومستدام");
+  });
+
+  it("no real baseline (previousValue 0, insufficient data to confirm the drop) is never a candidate", () => {
+    const rows = buildBestPracticeCandidateRows([
+      makeImprovementFinding({ id: "no-baseline", facility: "سجن أ", currentValue: 0, previousValue: 0, changeRate: -100 }),
     ]);
     expect(rows).toEqual([]);
   });
@@ -2857,6 +2867,68 @@ describe("buildBestPracticeCandidateRows — الجهات المتميزة وا�
       makeImprovementFinding({ id: `f${i}`, facility: `سجن ${i}`, currentValue: 5, previousValue: 40 - i, streakPeriods: 3 })
     );
     expect(buildBestPracticeCandidateRows(findings, 5)).toHaveLength(5);
+  });
+
+  describe("governance review item 2: preserve every facility×classification candidate", () => {
+    it("the SAME facility qualifying in TWO different classifications keeps BOTH rows, never collapsed to just the strongest", () => {
+      const rows = buildBestPracticeCandidateRows([
+        makeImprovementFinding({
+          id: "x", facility: "سجن أ", entityId: "cls-x", entityName: "سجن أ — الاتصال",
+          currentValue: 6, previousValue: 20, streakPeriods: 3,
+        }),
+        makeImprovementFinding({
+          id: "y", facility: "سجن أ", entityId: "cls-y", entityName: "سجن أ — التغذية",
+          currentValue: 5, previousValue: 40, streakPeriods: 4,
+        }),
+      ]);
+      expect(rows).toHaveLength(2);
+      expect(rows.map((r) => r.classificationLabel).sort()).toEqual(["الاتصال", "التغذية"]);
+      expect(rows.every((r) => r.facility === "سجن أ")).toBe(true);
+    });
+
+    it("an exact facility+classificationId duplicate pair is deduplicated to the higher-merit evaluation only", () => {
+      const rows = buildBestPracticeCandidateRows([
+        makeImprovementFinding({
+          id: "dup-weak", facility: "سجن أ", entityId: "cls-x", entityName: "سجن أ — الاتصال",
+          currentValue: 15, previousValue: 20, streakPeriods: 3,
+        }),
+        makeImprovementFinding({
+          id: "dup-strong", facility: "سجن أ", entityId: "cls-x", entityName: "سجن أ — الاتصال",
+          currentValue: 5, previousValue: 40, streakPeriods: 4,
+        }),
+      ]);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.decrease).toBe(35);
+    });
+
+    it("candidates across multiple facilities AND multiple classifications each survive and sort deterministically", () => {
+      const findings = [
+        makeImprovementFinding({ id: "a", facility: "سجن ب", entityId: "cls-2", entityName: "سجن ب — الزيارات", currentValue: 5, previousValue: 40, streakPeriods: 4 }),
+        makeImprovementFinding({ id: "b", facility: "سجن أ", entityId: "cls-1", entityName: "سجن أ — الاتصال", currentValue: 6, previousValue: 20, streakPeriods: 3 }),
+        makeImprovementFinding({ id: "c", facility: "سجن أ", entityId: "cls-2", entityName: "سجن أ — التغذية", currentValue: 6, previousValue: 20, streakPeriods: 3 }),
+      ];
+      const first = buildBestPracticeCandidateRows(findings);
+      const second = buildBestPracticeCandidateRows(findings);
+      expect(first).toEqual(second);
+      expect(first).toHaveLength(3);
+    });
+
+    it("maxCandidates is applied to the FULL globally-ranked list, not per-facility before ranking — one facility can legitimately supply more than one of the top N rows", () => {
+      const findings = [
+        // سجن أ qualifies in THREE classifications, all with very high merit.
+        makeImprovementFinding({ id: "a1", facility: "سجن أ", entityId: "cls-1", entityName: "سجن أ — ت1", currentValue: 5, previousValue: 40, streakPeriods: 4 }),
+        makeImprovementFinding({ id: "a2", facility: "سجن أ", entityId: "cls-2", entityName: "سجن أ — ت2", currentValue: 6, previousValue: 41, streakPeriods: 4 }),
+        makeImprovementFinding({ id: "a3", facility: "سجن أ", entityId: "cls-3", entityName: "سجن أ — ت3", currentValue: 7, previousValue: 42, streakPeriods: 4 }),
+        // A different, weaker-merit facility that must be pushed OUT by the cap.
+        makeImprovementFinding({ id: "b1", facility: "سجن ب", entityId: "cls-4", entityName: "سجن ب — ت4", currentValue: 19, previousValue: 25, streakPeriods: 3 }),
+      ];
+      const rows = buildBestPracticeCandidateRows(findings, 2);
+      expect(rows).toHaveLength(2);
+      // Both survivors are سجن أ's two strongest classifications — if the cap
+      // had been applied per-facility BEFORE ranking (the old bug), سجن ب's
+      // weaker row would have wrongly displaced one of سجن أ's stronger ones.
+      expect(rows.every((r) => r.facility === "سجن أ")).toBe(true);
+    });
   });
 
   it("the streak duration and reason text are correct Arabic and never name an unverified operational cause", () => {

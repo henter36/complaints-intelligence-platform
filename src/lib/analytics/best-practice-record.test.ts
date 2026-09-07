@@ -46,4 +46,14 @@ describe("draftBestPracticeRecordFromCandidate", () => {
     const draft = draftBestPracticeRecordFromCandidate(candidate());
     expect(draft.verificationStatus).toBe("CANDIDATE");
   });
+
+  it("a classified candidate retains its canonical classificationId in the draft", () => {
+    const draft = draftBestPracticeRecordFromCandidate(candidate({ classificationId: "cls-doctor-access" }));
+    expect(draft.classificationId).toBe("cls-doctor-access");
+  });
+
+  it("an UNCLASSIFIED candidate (classificationId null) stays null in the draft — never a fabricated id", () => {
+    const draft = draftBestPracticeRecordFromCandidate(candidate({ classificationId: null, classificationLabel: "غير مصنف" }));
+    expect(draft.classificationId).toBeNull();
+  });
 });

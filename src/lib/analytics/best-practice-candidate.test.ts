@@ -77,9 +77,25 @@ describe("evaluateBestPracticeCandidacy", () => {
     expect(result?.status).toBe("OBSERVED_IMPROVEMENT");
   });
 
-  it("missing changeRate (insufficient data) is never a candidate", () => {
-    const result = evaluateBestPracticeCandidacy(finding({ changeRate: null }), "سجن الملز");
+  it("finding.changeRate is IGNORED entirely — even a wildly different whole-window rate never affects candidacy, reason, or merit", () => {
+    // startValue=73, currentValue=32 (candidate rate ≈ -56%), but
+    // finding.changeRate claims a barely-there whole-window rate. The
+    // candidate-specific rate (derived from startValue/currentValue only)
+    // must still drive everything.
+    const result = evaluateBestPracticeCandidacy(finding({ changeRate: -1 }), "سجن الملز");
+    expect(result?.status).toBe("BEST_PRACTICE_CANDIDATE");
+    expect(result?.changeRatePercent).toBeCloseTo(-56.164, 2);
+    expect(result?.reasonLabel).toBe("تحسن قوي ومستدام");
+  });
+
+  it("startValue of 0 (no real baseline) is never a candidate — the candidate-specific rate is null, not borrowed from finding.changeRate", () => {
+    const result = evaluateBestPracticeCandidacy(
+      finding({ previousValue: 0, currentValue: 0, changeRate: -100, supportingMetrics: { streakPeriods: 4 } }),
+      "سجن الملز"
+    );
+    expect(result?.changeRatePercent).toBeNull();
     expect(result?.status).toBe("OBSERVED_IMPROVEMENT");
+    expect(result?.reasonLabel).toBeNull();
   });
 
   it("the same finding evaluated twice produces the exact same result (deterministic)", () => {
@@ -196,7 +212,66 @@ describe("evaluateBestPracticeCandidacy", () => {
       expect(result.status).toBe("OBSERVED_IMPROVEMENT");
     });
   });
+
+  describe("candidate change-rate window mismatch (governance review item 1)", () => {
+    it("25→21 over 3 periods: candidate rate ≈ -16%, NOT finding.changeRate's -79% — stays OBSERVED_IMPROVEMENT, no strong reason, merit never sees -79", () => {
+      const result = evaluateBestPracticeCandidacy(
+        finding({
+          previousValue: 25,
+          currentValue: 21,
+          changeRate: -79,
+          supportingMetrics: { streakPeriods: 3 },
+        }),
+        "سجن أ"
+      ) as BestPracticeCandidateEvaluation;
+
+      expect(result.changeRatePercent).toBeCloseTo(-16, 1);
+      expect(result.status).toBe("OBSERVED_IMPROVEMENT");
+      expect(result.reasonLabel).toBeNull();
+
+      // If merit had used -79% instead of the real -16%, its changeRate
+      // factor would be clamp01(79/100)*20 ≈ 15.8 instead of clamp01(16/100)*20 ≈ 3.2 —
+      // a ~12-point difference easily distinguishable in the total score.
+      const meritIfWrongRateWereUsed = computeExpectedMeritWithGivenRate({
+        decrease: 4, startValue: 25, streakPeriods: 3, changeRatePercent: -79,
+      });
+      expect(result.meritScore).toBeLessThan(meritIfWrongRateWereUsed);
+    });
+
+    it("25→20 over 3 periods: candidate rate is EXACTLY -20%, the candidacy boundary — qualifies", () => {
+      const result = evaluateBestPracticeCandidacy(
+        finding({
+          previousValue: 25,
+          currentValue: 20,
+          changeRate: -1, // deliberately wrong/irrelevant whole-window rate — must be ignored
+          supportingMetrics: { streakPeriods: 3 },
+        }),
+        "سجن أ"
+      ) as BestPracticeCandidateEvaluation;
+
+      expect(result.changeRatePercent).toBeCloseTo(-20, 5);
+      expect(result.status).toBe("BEST_PRACTICE_CANDIDATE");
+    });
+  });
 });
+
+/**
+ * Mirrors computeMeritScore's own formula (best-practice-candidate.ts) so
+ * the "merit never uses the wrong rate" test above has an independent
+ * expected value to compare against, using the SAME default config weights
+ * (config is not exported per-field, so the scales/weights are inlined —
+ * kept in sync manually; a drift here would only make this ONE test overly
+ * strict/lenient, never mask the actual bug the test targets).
+ */
+function computeExpectedMeritWithGivenRate(input: { decrease: number; startValue: number; streakPeriods: number; changeRatePercent: number }): number {
+  const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+  const score =
+    clamp01(input.decrease / 40) * 40
+    + clamp01(input.streakPeriods / 6) * 25
+    + clamp01(Math.abs(input.changeRatePercent) / 100) * 20
+    + clamp01(input.startValue / 50) * 15;
+  return Math.round(Math.min(100, Math.max(0, score)));
+}
 
 describe("findStrugglingFacilitiesForClassification", () => {
   it("finds other facilities still chronic or trending negative in the same classification (matched by classificationId)", () => {
@@ -277,7 +352,7 @@ describe("buildBestPracticeSectionSummary", () => {
     const c = evaluateBestPracticeCandidacy(finding(), "سجن الملز") as BestPracticeCandidateEvaluation;
     const summary = buildBestPracticeSectionSummary([c]);
     expect(summary).toBe(
-      "أظهرت بيانات سجن الملز تحسناً مستداماً في الوصول إلى الطبيب، من 73 إلى 32 شكوى خلال 4 فترات، وهي مرشحة لدراسة الإجراءات التي أسهمت في هذا التحسن والتحقق من إمكانية تعميمها."
+      "أظهرت بيانات سجن الملز تحسناً مستداماً في الوصول إلى الطبيب، من 73 إلى 32 شكوى خلال 4 فترات، ويوصى بدراسة الإجراءات التي أسهمت في هذا التحسن والتحقق من إمكانية تعميمها."
     );
     expect(summary).not.toMatch(/^سجلت/);
   });
@@ -289,7 +364,7 @@ describe("buildBestPracticeSectionSummary", () => {
     expect(summary).not.toContain("ممارسة مثبتة");
   });
 
-  it("uses a generic, count-based sentence for multiple candidates", () => {
+  it("uses a generic, count-based sentence for multiple DIFFERENT-facility candidates", () => {
     const a = evaluateBestPracticeCandidacy(finding(), "سجن الملز") as BestPracticeCandidateEvaluation;
     const b = evaluateBestPracticeCandidacy(
       finding({ currentValue: 6, previousValue: 20, changeRate: -70, entityName: "سجن الحائر — الطرود", drilldownFilters: { facility: "سجن الحائر" } }),
@@ -298,6 +373,17 @@ describe("buildBestPracticeSectionSummary", () => {
     const summary = buildBestPracticeSectionSummary([a, b]);
     expect(summary).toContain("موقعان");
     expect(summary).not.toContain("سجن الملز");
+  });
+
+  it("governance review item 4: the SAME facility qualifying in two classifications is reported as ONE site, never 'موقعان'", () => {
+    const a = evaluateBestPracticeCandidacy(finding(), "سجن الملز") as BestPracticeCandidateEvaluation;
+    const b = evaluateBestPracticeCandidacy(
+      finding({ currentValue: 6, previousValue: 20, changeRate: -70, entityId: "cls-other", entityName: "سجن الملز — الطرود" }),
+      "سجن الملز"
+    ) as BestPracticeCandidateEvaluation;
+    const summary = buildBestPracticeSectionSummary([a, b]) ?? "";
+    expect(summary).not.toContain("موقعان");
+    expect(summary).toContain("سجن الملز");
   });
 });
 

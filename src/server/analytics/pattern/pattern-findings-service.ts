@@ -29,11 +29,17 @@ import {
   detectRepeatComplainants,
   type ComplainantRecord,
 } from "@/lib/analytics/repeat-complainant";
-import { buildPeriodChangeDigest, type PatternSnapshot, type PeriodChangeDigest } from "@/lib/analytics/period-change-digest";
+import {
+  buildPeriodChangeDigest,
+  buildPatternSnapshotKey,
+  UNCLASSIFIED_PATTERN_SNAPSHOT_KEY,
+  type PatternSnapshot,
+  type PeriodChangeDigest,
+} from "@/lib/analytics/period-change-digest";
 import type { PatternSeries, PatternSeriesRecord } from "./pattern-period-series-service";
 
 const DETECTOR_VERSION = "pattern-v1";
-const UNCLASSIFIED_KEY = "UNCLASSIFIED";
+const UNCLASSIFIED_KEY = UNCLASSIFIED_PATTERN_SNAPSHOT_KEY;
 const UNCLASSIFIED_LABEL = "غير مصنف";
 const MAX_FINDINGS_PER_TYPE = 10;
 const MAX_EVIDENCE_IDS = 20;
@@ -56,8 +62,9 @@ function bandToSeverity(band: PriorityBand): AnalyticalSeverity {
   return "LOW";
 }
 
+/** Delegates to the shared buildPatternSnapshotKey so this module's PatternSnapshot.key can never drift from what finding-brief-conclusions.ts (or any other lookup) expects. */
 function cellKey(facility: string, classificationKey: string): string {
-  return `${facility} ${classificationKey}`;
+  return buildPatternSnapshotKey(facility, classificationKey === UNCLASSIFIED_KEY ? null : classificationKey);
 }
 
 function isTechnicalDuplicate(record: PatternSeriesRecord): boolean {
