@@ -469,12 +469,102 @@ describe("preparePdfTextLayout — long paragraph wrapping", () => {
     doc.end();
   });
 
-  it("LTR paragraph is passed through as a single line without reversal", () => {
+  it("short LTR paragraph that already fits stays a single, unreversed line", () => {
     const doc = makeTestDoc(12);
-    const ltrText = "SLA performance report 2026";
-    const layout = preparePdfTextLayout(doc, ltrText, { width: 50 });
+    const ltrText = "SLA report";
+    const layout = preparePdfTextLayout(doc, ltrText, { width: 500 });
     expect(layout.lines).toHaveLength(1);
     expect(layout.lines[0]!.visualText).toBe(ltrText);
+    doc.end();
+  });
+
+  it("LTR paragraph with no width constraint (Infinity) is never wrapped, matching the single-line contract", () => {
+    const doc = makeTestDoc(12);
+    const ltrText = "SLA performance report covering all regions and departments during the specified period";
+    const layout = preparePdfTextLayout(doc, ltrText, {});
+    expect(layout.lines).toHaveLength(1);
+    expect(layout.lines[0]!.visualText).toBe(ltrText);
+    doc.end();
+  });
+
+  it("long English/LTR paragraph WRAPS into multiple lines at a narrow width, without token reversal (regression: previously returned as one unwrapped line)", () => {
+    const doc = makeTestDoc(12);
+    const longText = "SLA performance report covering all regions and departments during the specified period";
+    const layout = preparePdfTextLayout(doc, longText, { width: 100 });
+    expect(layout.lines.length).toBeGreaterThan(1);
+
+    // Visual order equals logical order for LTR — never reversed.
+    for (const line of layout.lines) {
+      expect(line.visualText).toBe(line.logicalText);
+    }
+    // Every word from the source text appears, in original order, once.
+    const allWords = layout.lines.flatMap((l) => l.visualText.split(" ").filter(Boolean));
+    expect(allWords).toEqual(longText.split(" ").filter(Boolean));
+    doc.end();
+  });
+
+  it("mixed text with a Latin first-strong character wraps WITHOUT reversal, even though it contains Arabic words", () => {
+    const doc = makeTestDoc(12);
+    // First strong character is Latin ("S") — LTR paragraph direction.
+    const mixedText = "SLA report التقرير الشهري خلال الفترة المحددة لعموم المناطق والإدارات";
+    const layout = preparePdfTextLayout(doc, mixedText, { width: 100 });
+    expect(layout.lines.length).toBeGreaterThan(1);
+    for (const line of layout.lines) {
+      expect(line.visualText).toBe(line.logicalText);
+    }
+    const allWords = layout.lines.flatMap((l) => l.visualText.split(" ").filter(Boolean));
+    expect(allWords).toEqual(mixedText.split(" ").filter(Boolean));
+    doc.end();
+  });
+
+  it("mixed text with an Arabic first-strong character wraps WITH reversal, exactly like pure Arabic", () => {
+    const doc = makeTestDoc(12);
+    // First strong character is Arabic — RTL paragraph direction.
+    const mixedText = "التقرير الشهري SLA Report خلال الفترة المحددة لعموم المناطق والإدارات";
+    const layout = preparePdfTextLayout(doc, mixedText, { width: 100 });
+    expect(layout.lines.length).toBeGreaterThan(1);
+    for (const line of layout.lines) {
+      const logTokens = line.logicalText.split(" ").filter(Boolean);
+      const visTokens = line.visualText.split(" ").filter(Boolean);
+      expect(visTokens).toEqual(logTokens.toReversed());
+    }
+    const allLogicalWords = layout.lines.flatMap((l) => l.logicalText.split(" ").filter(Boolean));
+    expect(allLogicalWords).toEqual(mixedText.split(" ").filter(Boolean));
+    doc.end();
+  });
+
+  it("a single token wider than the given width still gets its own line, flagged overflowsWidth (never split mid-word)", () => {
+    const doc = makeTestDoc(12);
+    const longToken = "SUPERCALIFRAGILISTICEXPIALIDOCIOUS1234567890IDENTIFIER";
+    const layout = preparePdfTextLayout(doc, `short ${longToken} words after`, { width: 40 });
+
+    const overflowing = layout.lines.find((l) => l.logicalText === longToken);
+    expect(overflowing).toBeDefined();
+    expect(overflowing!.overflowsWidth).toBe(true);
+
+    // Every other (genuinely fitting) line must NOT be flagged.
+    const others = layout.lines.filter((l) => l.logicalText !== longToken);
+    expect(others.length).toBeGreaterThan(0);
+    for (const line of others) expect(line.overflowsWidth).toBe(false);
+    doc.end();
+  });
+
+  it("a normal wrapped multi-token line is never flagged overflowsWidth", () => {
+    const doc = makeTestDoc(12);
+    const longText = "التقرير التنفيذي المقارن لتحليل اتجاهات الشكاوى في المناطق والإدارات خلال الفترة المحددة";
+    const layout = preparePdfTextLayout(doc, longText, { width: 100 });
+    for (const line of layout.lines) expect(line.overflowsWidth).toBe(false);
+    doc.end();
+  });
+
+  it("\\n separates paragraphs and each is wrapped/reversed independently per its OWN direction (RTL paragraph then LTR paragraph)", () => {
+    const doc = makeTestDoc(12);
+    const text = "التقرير التنفيذي\nSLA Report 2026";
+    const layout = preparePdfTextLayout(doc, text, { width: 500 });
+    expect(layout.lines).toHaveLength(2);
+    expect(layout.lines[0]!.logicalText).toBe("التقرير التنفيذي");
+    expect(layout.lines[1]!.logicalText).toBe("SLA Report 2026");
+    expect(layout.lines[1]!.visualText).toBe("SLA Report 2026");
     doc.end();
   });
 

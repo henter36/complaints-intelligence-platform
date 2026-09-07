@@ -6,6 +6,8 @@ import {
   drawPaginatedTable,
   type PdfColDef,
 } from "./repeat-complainant-pdf-shared";
+import { preparePdfTextLayout } from "@/server/reports/arabic-pdf-text";
+import { REPORT_DESIGN_TOKENS } from "@/lib/reports/design-tokens";
 
 function collectTextCalls(spy: ReturnType<typeof vi.spyOn>) {
   return spy.mock.calls.map((call) => ({
@@ -193,5 +195,252 @@ describe("drawPaginatedTable — dynamic row height + overflow policy", () => {
 
     expect(newPageCalls).toBeGreaterThan(0);
     ctx.doc.end();
+  });
+
+  it("a 'wrap' column also wraps long English/LTR text (not just Arabic) — the long-text row is taller than a short-text row", () => {
+    const ctx = createRepeatPdfDocument("test", { orientation: "landscape" });
+    const columns: PdfColDef[] = [{ key: "subject", label: "Subject", weight: 1, overflow: "wrap", maxLines: 3 }];
+    const narrowWidth = 140;
+    const SHORT_ENGLISH = "Delayed";
+    const LONG_ENGLISH = "Complaint about delayed medical appointment scheduling process";
+
+    const yAfterShort = drawPaginatedTable({
+      doc: ctx.doc, rows: [{ subject: SHORT_ENGLISH }], columns,
+      x: ctx.margin, y: ctx.margin, width: narrowWidth, bottomLimit: ctx.bottomLimit,
+      formatCell: (row: { subject: string }) => row.subject, newPage: () => ctx.margin,
+    });
+    const shortRowHeight = yAfterShort - ctx.margin - 24;
+
+    const yAfterLong = drawPaginatedTable({
+      doc: ctx.doc, rows: [{ subject: LONG_ENGLISH }], columns,
+      x: ctx.margin, y: ctx.margin, width: narrowWidth, bottomLimit: ctx.bottomLimit,
+      formatCell: (row: { subject: string }) => row.subject, newPage: () => ctx.margin,
+    });
+    const longRowHeight = yAfterLong - ctx.margin - 24;
+
+    expect(longRowHeight).toBeGreaterThan(shortRowHeight);
+    ctx.doc.end();
+  });
+
+  it("a 'wrap' column with mixed Arabic/English text also wraps correctly", () => {
+    const ctx = createRepeatPdfDocument("test", { orientation: "landscape" });
+    const columns: PdfColDef[] = [{ key: "subject", label: "الموضوع", weight: 1, overflow: "wrap", maxLines: 3 }];
+    const narrowWidth = 140;
+    const mixed = "شكوى بخصوص Medical Appointment Scheduling في العيادة المركزية";
+
+    const yAfter = drawPaginatedTable({
+      doc: ctx.doc, rows: [{ subject: mixed }], columns,
+      x: ctx.margin, y: ctx.margin, width: narrowWidth, bottomLimit: ctx.bottomLimit,
+      formatCell: (row: { subject: string }) => row.subject, newPage: () => ctx.margin,
+    });
+    const rowHeight = yAfter - ctx.margin - 24;
+    expect(rowHeight).toBeGreaterThan(24);
+    ctx.doc.end();
+  });
+
+  it("rowHeight for a 'wrap' column tracks the ACTUAL line count preparePdfTextLayout computes for English text (1, 2, 3 lines are each strictly taller)", () => {
+    const ctx = createRepeatPdfDocument("test", { orientation: "landscape" });
+    const columns: PdfColDef[] = [{ key: "subject", label: "Subject", weight: 1, overflow: "wrap", maxLines: 5 }];
+    const narrowWidth = 140;
+    const cellPaddingH = 8;
+    const texts = [
+      "Short",
+      "This text needs a couple of lines to wrap across the narrow column width",
+      "This considerably longer piece of English text will very likely need three or more separate wrapped lines to fit inside such a narrow column",
+    ];
+
+    const rowHeights = texts.map((text) => {
+      const yAfter = drawPaginatedTable({
+        doc: ctx.doc, rows: [{ subject: text }], columns,
+        x: ctx.margin, y: ctx.margin, width: narrowWidth, bottomLimit: ctx.bottomLimit,
+        formatCell: (row: { subject: string }) => row.subject, newPage: () => ctx.margin,
+      });
+      return yAfter - ctx.margin - 24;
+    });
+
+    // Cross-check against preparePdfTextLayout's own line count at the exact
+    // same width the column used — drawPaginatedTable leaves the doc at its
+    // own Body/table-fontSize afterward, so this measures with the SAME
+    // metrics the table itself used.
+    const expectedLineCounts = texts.map(
+      (text) => Math.min(5, preparePdfTextLayout(ctx.doc, text, { width: narrowWidth - cellPaddingH }).lines.length)
+    );
+    expect(expectedLineCounts[1]!).toBeGreaterThan(expectedLineCounts[0]!);
+    expect(expectedLineCounts[2]!).toBeGreaterThan(expectedLineCounts[1]!);
+    expect(rowHeights[1]!).toBeGreaterThan(rowHeights[0]!);
+    expect(rowHeights[2]!).toBeGreaterThan(rowHeights[1]!);
+    ctx.doc.end();
+  });
+
+  it("a 'wrap' column beyond its maxLines cap truncates with a genuine ellipsis on exactly the final rendered line", () => {
+    const ctx = createRepeatPdfDocument("test", { orientation: "landscape" });
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    const columns: PdfColDef[] = [{ key: "subject", label: "Subject", weight: 1, overflow: "wrap", maxLines: 2 }];
+    const narrowWidth = 140;
+    const veryLong = "This considerably longer piece of English text will need many more than two separate wrapped lines to fit inside such a narrow column width";
+
+    drawPaginatedTable({
+      doc: ctx.doc, rows: [{ subject: veryLong }], columns,
+      x: ctx.margin, y: ctx.margin, width: narrowWidth, bottomLimit: ctx.bottomLimit,
+      formatCell: (row: { subject: string }) => row.subject, newPage: () => ctx.margin,
+    });
+
+    const calls = collectTextCalls(textSpy);
+    const subjectCalls = calls.filter((c) => veryLong.split(" ").some((word) => c.text.includes(word)));
+    // Exactly maxLines (2) draw calls for this cell — never more.
+    expect(subjectCalls.length).toBe(2);
+    expect(subjectCalls[0]!.options.ellipsis).toBeFalsy();
+    expect(subjectCalls[1]!.options.ellipsis).toBe(true);
+    ctx.doc.end();
+  });
+
+  it("a single token wider than the cell (mid-paragraph, not the last visible line) still gets ellipsis so it never paints outside the cell", () => {
+    const ctx = createRepeatPdfDocument("test", { orientation: "landscape" });
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    const columns: PdfColDef[] = [{ key: "subject", label: "Subject", weight: 1, overflow: "wrap", maxLines: 5 }];
+    const narrowWidth = 90;
+    const longToken = "SUPERCALIFRAGILISTICEXPIALIDOCIOUSIDENTIFIER1234567890";
+    const text = `short ${longToken} more words after it`;
+
+    drawPaginatedTable({
+      doc: ctx.doc, rows: [{ subject: text }], columns,
+      x: ctx.margin, y: ctx.margin, width: narrowWidth, bottomLimit: ctx.bottomLimit,
+      formatCell: (row: { subject: string }) => row.subject, newPage: () => ctx.margin,
+    });
+
+    const calls = collectTextCalls(textSpy);
+    const tokenCall = calls.find((c) => c.text.includes(longToken));
+    expect(tokenCall).toBeDefined();
+    expect(tokenCall!.options.ellipsis).toBe(true);
+    ctx.doc.end();
+  });
+
+  it("a full, normal-length identifier in a 'none' column fits within its allocated cell width", () => {
+    const ctx = createRepeatPdfDocument("test", { orientation: "landscape" });
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    const columns: PdfColDef[] = [
+      { key: "identity", label: "الهوية", weight: 1.3, overflow: "none" },
+      { key: "name", label: "الاسم", weight: 2.2, overflow: "wrap" },
+      { key: "count", label: "العدد", weight: 0.9 },
+    ];
+    const normalIdentifier = "1234567890";
+
+    drawPaginatedTable({
+      doc: ctx.doc,
+      rows: [{ identity: normalIdentifier, name: "محمد علي", count: "3" }],
+      columns,
+      x: ctx.margin, y: ctx.margin, width: 500, bottomLimit: ctx.bottomLimit,
+      formatCell: (row: Record<string, string>, key: string) => row[key]!,
+      newPage: () => ctx.margin,
+    });
+
+    const calls = collectTextCalls(textSpy);
+    const identityCall = calls.find((c) => c.text.includes(normalIdentifier));
+    expect(identityCall).toBeDefined();
+    ctx.doc.font("Body").fontSize(REPORT_DESIGN_TOKENS.fontSize.table);
+    const measuredWidth = ctx.doc.widthOfString(normalIdentifier, { wordSpacing: REPORT_DESIGN_TOKENS.typography.wordSpacing });
+    // Strictly greater, not just >= : PDFKit itself silently drops the
+    // trailing character of a lineBreak:false string when width equals the
+    // string's own measured width EXACTLY (verified empirically — see
+    // NONE_COLUMN_WIDTH_SAFETY_MARGIN in repeat-complainant-pdf-shared.ts).
+    // A bare ">=" here would pass even if that safety margin regressed to 0.
+    expect(identityCall!.options.width as number).toBeGreaterThan(measuredWidth);
+    ctx.doc.end();
+  });
+
+  it("an unusually wide identifier in a 'none' column gets a column widened enough for its full text (never truncated, never overlapping)", () => {
+    const ctx = createRepeatPdfDocument("test", { orientation: "landscape" });
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    const columns: PdfColDef[] = [
+      { key: "identity", label: "الهوية", weight: 1.3, overflow: "none" },
+      { key: "name", label: "الاسم", weight: 2.2, overflow: "wrap" },
+      { key: "count", label: "العدد", weight: 0.9 },
+    ];
+    // Deliberately far wider than its 1.3/(1.3+2.2+0.9) weight share would allow.
+    const wideIdentifier = "1234567890-ABCDEFGHIJ-1234567890-EXTRA-WIDE-IDENTIFIER-VALUE";
+
+    drawPaginatedTable({
+      doc: ctx.doc,
+      rows: [{ identity: wideIdentifier, name: "محمد علي القحطاني", count: "3" }],
+      columns,
+      x: ctx.margin, y: ctx.margin, width: 300, bottomLimit: ctx.bottomLimit,
+      formatCell: (row: Record<string, string>, key: string) => row[key]!,
+      newPage: () => ctx.margin,
+    });
+
+    const calls = collectTextCalls(textSpy);
+    const identityCall = calls.find((c) => c.text.includes(wideIdentifier));
+    expect(identityCall).toBeDefined();
+    expect(identityCall!.options.ellipsis).toBeFalsy();
+
+    ctx.doc.font("Body").fontSize(REPORT_DESIGN_TOKENS.fontSize.table);
+    const measuredWidth = ctx.doc.widthOfString(wideIdentifier, { wordSpacing: REPORT_DESIGN_TOKENS.typography.wordSpacing });
+    // Regression guard for a real, empirically-confirmed PDFKit bug: for a
+    // ~60-character string, a flat few-point margin over widthOfString()
+    // was NOT enough — PDFKit still dropped trailing characters — while a
+    // ~5%-of-measured-width margin was. A bare ">= measuredWidth" check
+    // would NOT have caught the earlier (too-small, fixed) margin, since
+    // that also technically cleared "no less than the raw measurement".
+    const cellWidth = identityCall!.options.width as number;
+    expect(cellWidth).toBeGreaterThanOrEqual(measuredWidth + measuredWidth * 0.04);
+    ctx.doc.end();
+  });
+
+  it("the identity column's rendered extent never reaches the adjacent column's own cell (no visual overlap)", () => {
+    const ctx = createRepeatPdfDocument("test", { orientation: "landscape" });
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    const columns: PdfColDef[] = [
+      { key: "identity", label: "الهوية", weight: 1.3, overflow: "none" },
+      { key: "name", label: "الاسم", weight: 2.2, overflow: "wrap" },
+    ];
+    // Wide enough to need noticeably more than its 1.3/3.5 weight share of a
+    // realistic (landscape-table-sized) width, but not wider than the whole
+    // table — a table THAT narrow for a decoded identifier never happens in
+    // the real bulk PDF (contentWidth there is ~750pt); this keeps the
+    // scenario realistic while still exercising the reservation logic.
+    const wideIdentifier = "1234567890-WIDE-IDENTIFIER-VALUE";
+
+    drawPaginatedTable({
+      doc: ctx.doc,
+      rows: [{ identity: wideIdentifier, name: "محمد" }],
+      columns,
+      x: ctx.margin, y: ctx.margin, width: 700, bottomLimit: ctx.bottomLimit,
+      formatCell: (row: Record<string, string>, key: string) => row[key]!,
+      newPage: () => ctx.margin,
+    });
+
+    const calls = textSpy.mock.calls.map((call) => ({
+      text: String(call[0]),
+      x: call[1] as number,
+      options: (call[3] ?? {}) as Record<string, unknown>,
+    }));
+    // identity is the first column (rightmost in this RTL layout, so the
+    // larger x); name is the second (further left, smaller x).
+    const identityCall = calls.find((c) => c.text.includes(wideIdentifier));
+    const nameCall = calls.find((c) => c.text.includes("محمد"));
+    expect(identityCall).toBeDefined();
+    expect(nameCall).toBeDefined();
+    expect(identityCall!.x).toBeGreaterThan(nameCall!.x);
+    ctx.doc.end();
+  });
+
+  it("bulk (landscape) tables and single-person (portrait) tables both still render 'none'/'wrap' columns correctly side by side", () => {
+    const columns: PdfColDef[] = [
+      { key: "identity", label: "الهوية", weight: 1.3, overflow: "none" },
+      { key: "name", label: "الاسم", weight: 2.2, overflow: "wrap", maxLines: 2 },
+    ];
+    for (const orientation of ["landscape", "portrait"] as const) {
+      const ctx = createRepeatPdfDocument("test", { orientation });
+      const yAfter = drawPaginatedTable({
+        doc: ctx.doc,
+        rows: [{ identity: "1234567890", name: "عبدالرحمن محمد عبدالله بن أحمد القحطاني" }],
+        columns,
+        x: ctx.margin, y: ctx.margin, width: ctx.contentWidth, bottomLimit: ctx.bottomLimit,
+        formatCell: (row: Record<string, string>, key: string) => row[key]!,
+        newPage: () => ctx.margin,
+      });
+      expect(yAfter).toBeGreaterThan(ctx.margin);
+      ctx.doc.end();
+    }
   });
 });

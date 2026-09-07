@@ -235,14 +235,75 @@ export function drawPaginatedTable<Row extends object>(options: {
   const { doc, rows, columns, x, width, formatCell, bottomLimit, newPage } = options;
   let y = options.y;
 
+  const headerFontSize = REPORT_DESIGN_TOKENS.fontSize.tableHeader;
+  const bodyFontSize = REPORT_DESIGN_TOKENS.fontSize.table;
+  const cellPaddingV = 6; // top+bottom, matches the existing y+5 draw offset below
+  const cellPaddingH = 8; // left+right (4 each side)
+
+  // "none"-overflow columns (e.g. the identity column) never wrap or
+  // ellipsis their real content, so — unlike every other column — they MUST
+  // get at least enough width to fit their widest actual value, or PDFKit
+  // paints straight into the neighboring cell (Sourcery bug_risk). Measured
+  // at the SAME body font/size cells are actually drawn with, so this can
+  // never disagree with the real render.
+  //
+  // widthOfString() UNDER-measures what PDFKit itself actually needs to draw
+  // a `lineBreak:false` string without dropping trailing character(s) — even
+  // with `ellipsis: false` — and the gap grows with the string's own
+  // rendered width (verified empirically against the real Amiri font: a
+  // 19-character id needed ~5% extra, a 60-character id needed ~5% too; a
+  // handful of fixed points was NOT enough for the longer one). A
+  // proportional margin (with a small floor for short strings) is what
+  // actually guarantees "never truncated" here, not the raw measurement.
+  doc.font("Body").fontSize(bodyFontSize);
+  const NONE_COLUMN_WIDTH_SAFETY_FLOOR = 4;
+  const NONE_COLUMN_WIDTH_SAFETY_RATIO = 0.05;
+  const noneColumnWidthSafetyMargin = (measuredWidth: number): number =>
+    Math.max(NONE_COLUMN_WIDTH_SAFETY_FLOOR, Math.ceil(measuredWidth * NONE_COLUMN_WIDTH_SAFETY_RATIO));
+  const noneColumnRequiredWidths = new Map<number, number>();
+  columns.forEach((col, i) => {
+    if ((col.overflow ?? "ellipsis") !== "none") return;
+    let maxContentWidth = 0;
+    for (const row of rows) {
+      const contentWidth = doc.widthOfString(preparePdfText(formatCell(row, col.key)), { wordSpacing: WORD_SPACING });
+      if (contentWidth > maxContentWidth) maxContentWidth = contentWidth;
+    }
+    noneColumnRequiredWidths.set(i, maxContentWidth + cellPaddingH + noneColumnWidthSafetyMargin(maxContentWidth));
+  });
+
+  // Reserve each "none" column's required width FIRST (never less than its
+  // normal weight-proportional share, so a column with no wide content
+  // keeps its designed size) — then split whatever space remains among the
+  // other columns using their own weights. A "none" column's width is never
+  // shrunk to make room; if reserved widths alone exceed the table's total
+  // width, the remaining columns degrade gracefully toward zero rather than
+  // stealing space from an identity column that must never truncate.
   const totalWeight = columns.reduce((s, c) => s + c.weight, 0);
-  const widths = columns.map((c) => (width * c.weight) / totalWeight);
+  const weightWidths = columns.map((c) => (width * c.weight) / totalWeight);
+  const reservedWidths = columns.map((_, i) => {
+    const required = noneColumnRequiredWidths.get(i);
+    return required === undefined ? null : Math.max(weightWidths[i], required);
+  });
+  const reservedTotal = reservedWidths.reduce((s: number, w) => s + (w ?? 0), 0);
+  const remainingWidth = Math.max(0, width - reservedTotal);
+  const remainingWeight = columns.reduce(
+    (s, c, i) => (reservedWidths[i] === null ? s + c.weight : s),
+    0
+  );
+  const widths = columns.map((c, i) => {
+    const reserved = reservedWidths[i];
+    if (reserved !== null) return reserved;
+    return remainingWeight > 0 ? (remainingWidth * c.weight) / remainingWeight : 0;
+  });
   const offsets: number[] = [];
   let cur = x + width;
   widths.forEach((w) => { cur -= w; offsets.push(cur); });
+  // A column can be squeezed to (or, only in a pathologically over-reserved
+  // table, toward) zero width by the "none"-column reservation above — never
+  // let the padding subtraction below push a drawable width to zero or
+  // negative, which PDFKit's own text-fitting can hang on indefinitely.
+  const drawableWidths = widths.map((w) => Math.max(1, w - cellPaddingH));
 
-  const headerFontSize = REPORT_DESIGN_TOKENS.fontSize.tableHeader;
-  const bodyFontSize = REPORT_DESIGN_TOKENS.fontSize.table;
   // The REAL line height PDFKit itself uses for this font/size — never a
   // hand-picked multiplier (e.g. `fontSize * 1.25`), which measured
   // meaningfully SHORTER than Amiri's actual metrics and made a wrapped
@@ -251,10 +312,7 @@ export function drawPaginatedTable<Row extends object>(options: {
   // second line — the same `doc.currentLineHeight(true)` this file's own
   // `preparePdfTextLayout` calls (via arabic-pdf-text.ts) use internally,
   // so the height budgeted here and the height actually drawn always agree.
-  doc.font("Body").fontSize(bodyFontSize);
   const lineHeight = doc.currentLineHeight(true);
-  const cellPaddingV = 6; // top+bottom, matches the existing y+5 draw offset below
-  const cellPaddingH = 8; // left+right (4 each side)
   const hdrH = Math.max(MIN_ROW_HEIGHT, Math.ceil(lineHeight) + cellPaddingV);
 
   function drawHeader(atY: number): number {
@@ -262,7 +320,7 @@ export function drawPaginatedTable<Row extends object>(options: {
     doc.font("Bold").fontSize(headerFontSize).fillColor(COLORS.white);
     columns.forEach((col, i) => {
       doc.text(preparePdfText(col.label), offsets[i] + 4, atY + 6, {
-        width: widths[i] - cellPaddingH, height: hdrH - 7, align: "right", ellipsis: true, wordSpacing: WORD_SPACING, lineBreak: false,
+        width: drawableWidths[i], height: hdrH - 7, align: "right", ellipsis: true, wordSpacing: WORD_SPACING, lineBreak: false,
       });
     });
     doc.fillColor(COLORS.primary);
@@ -289,7 +347,7 @@ export function drawPaginatedTable<Row extends object>(options: {
     columns.forEach((col, i) => {
       if ((col.overflow ?? "ellipsis") !== "wrap") return;
       wrapLayouts.set(i, preparePdfTextLayout(doc, rawTexts[i], {
-        width: widths[i] - cellPaddingH, align: "right", wordSpacing: WORD_SPACING,
+        width: drawableWidths[i], align: "right", wordSpacing: WORD_SPACING,
       }));
     });
 
@@ -311,7 +369,7 @@ export function drawPaginatedTable<Row extends object>(options: {
     columns.forEach((col, i) => {
       const overflow = col.overflow ?? "ellipsis";
       const cellX = offsets[i] + 4;
-      const cellWidth = widths[i] - cellPaddingH;
+      const cellWidth = drawableWidths[i];
 
       if (overflow === "wrap") {
         const layout = wrapLayouts.get(i)!;
@@ -332,8 +390,13 @@ export function drawPaginatedTable<Row extends object>(options: {
               width: cellWidth, align: "right", wordSpacing: WORD_SPACING, lineBreak: false, ellipsis: true,
             });
           } else {
+            // `overflowsWidth` is true only for a single unbreakable token
+            // wider than the cell itself — wrapping-by-word-boundary cannot
+            // fix that, so this line (even though it isn't the last one)
+            // still needs its own ellipsis truncation to avoid painting
+            // into the next column.
             doc.text(line.visualText, cellX, lineY, {
-              width: cellWidth, align: "right", wordSpacing: WORD_SPACING, lineBreak: false,
+              width: cellWidth, align: "right", wordSpacing: WORD_SPACING, lineBreak: false, ellipsis: line.overflowsWidth,
             });
           }
         });

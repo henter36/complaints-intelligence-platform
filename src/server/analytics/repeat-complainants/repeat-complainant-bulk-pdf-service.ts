@@ -4,6 +4,7 @@ import { decodeComplainantToken } from "@/server/complaints/complainant-token";
 import {
   getRepeatComplainantExportData,
   type RepeatComplainantExportFacilitySection,
+  type RepeatPersonRowForClient,
 } from "./repeat-complainant-analytics-service";
 import {
   createRepeatPdfDocument,
@@ -20,7 +21,6 @@ import {
   type RepeatPdfContext,
 } from "./repeat-complainant-pdf-shared";
 import type { RepeatFacilitySummaryRow } from "@/lib/analytics/repeat-complainant-directory";
-import type { RepeatPersonRowForClient } from "./repeat-complainant-analytics-service";
 
 export type BulkPdfOptions = {
   includeFullIdentifier: boolean;
