@@ -228,7 +228,7 @@ describe("COMPLAINT_DETAIL report — region -> facility -> date ordering (real 
     const table = await fetchDetailRows({ from: "2026-01-01", to: "2026-06-30" });
     // 130 seeded rows, all matched by this window; preview caps at 100.
     expect(table.totalMatched).toBe(130);
-    expect(table.rows.length).toBe(100);
+    expect(table.rows).toHaveLength(100);
     expect(table.truncated).toBe(true);
 
     const regions = table.rows.map((r) => String(r.region));

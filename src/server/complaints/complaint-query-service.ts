@@ -468,13 +468,14 @@ export function buildComplaintOrderBy(query: ComplaintQuery): Prisma.ComplaintOr
 
 /**
  * Deterministic, facility-grouped ordering for report complaint-detail
- * tables (region -> facility -> complaint date desc, tie-broken by
- * externalId/id) — NOT part of `SORT_FIELDS`/the public `sortBy` query
- * param, and never will be: widening the general complaints-explorer sort
- * vocabulary isn't needed just to fix report output, and every general
- * list/export caller keeps its existing date-based default untouched.
- * Pass directly as `listComplaints()`'s own `orderBy` option (report-data-
- * service.ts's `fetchDetailTable` is the only caller).
+ * tables (region -> facility -> complaint date desc -> receivedAt desc,
+ * tie-broken by externalId/id) — NOT part of `SORT_FIELDS`/the public
+ * `sortBy` query param, and never will be: widening the general
+ * complaints-explorer sort vocabulary isn't needed just to fix report
+ * output, and every general list/export caller keeps its existing
+ * date-based default untouched. Pass directly as `listComplaints()`'s own
+ * `orderBy` option (report-data-service.ts's `fetchDetailTable` is the only
+ * caller).
  *
  * `region`/`facilityNormalizedName` (not raw `facility`) are the sort
  * keys — `facilityNormalizedName` is the canonical, Arabic-normalized key
