@@ -63,6 +63,52 @@ export const PATTERN_ANALYSIS_CONFIG = {
     high: 70,
     medium: 40,
   },
+
+  /**
+   * Gates a SUSTAINED_IMPROVEMENT finding must ALSO clear to be named a
+   * "best-practice candidate" worth studying — a real multi-period decline
+   * (already guaranteed by the trend engine) is necessary but not
+   * sufficient. Without these, a trivial low-volume change like 2→1 or 1→0
+   * held for 3 periods would rank as "best" purely for having a 100% drop,
+   * outranking a much larger, more meaningful decline like 73→32.
+   *
+   * There is exactly ONE gate on change-rate strength, and it is the
+   * top-level `improvementDropPercent` above (reused, not duplicated) — the
+   * same bar SUSTAINED_IMPROVEMENT itself already had to clear. The two
+   * `strongReason*` constants below are NEVER gates: they only pick which
+   * Arabic sentence describes an already-qualified candidate (see
+   * best-practice-candidate.ts's buildReasonLabel). Do not read
+   * `strongReasonChangeRatePercent` as a second, stricter candidacy
+   * threshold — a candidate can qualify at exactly -improvementDropPercent
+   * and simply get the more modest reason wording.
+   */
+  bestPracticeCandidate: {
+    /** Minimum trailing decline streak (periods) to be candidate-eligible. */
+    minStreakPeriods: 3,
+    /** Minimum absolute decrease (start - current); blocks tiny changes from ever outranking a materially larger one. */
+    minAbsoluteDecrease: 5,
+    /** Minimum starting/base volume (the peak just before the decline); blocks a low-volume fluctuation from reading as a meaningful improvement. */
+    minBaseVolume: 5,
+    /** REASON-TEXT ONLY (never a gate): changeRate at/below this (more negative), combined with strongReasonStreakPeriods, earns the "قوي ومستدام" wording instead of the more modest one. */
+    strongReasonChangeRatePercent: 30,
+    /** REASON-TEXT ONLY (never a gate): streak length at/above this counts as "long" for reason-text wording. */
+    strongReasonStreakPeriods: 4,
+    /** Best-practice candidates shown in the report table (top N by merit score). */
+    maxCandidates: 5,
+    /** Weights for the merit score used to rank candidates against each other. Must sum to 100. */
+    meritWeights: {
+      decreaseMagnitude: 40,
+      streak: 25,
+      changeRate: 20,
+      baseVolume: 15,
+    },
+    /** Divisors that normalize each raw merit input to 0..1 before weighting. */
+    meritScales: {
+      decreaseScale: 40,
+      streakScale: 6,
+      baseVolumeScale: 50,
+    },
+  },
 } as const;
 
 export type PatternAnalysisConfig = typeof PATTERN_ANALYSIS_CONFIG;

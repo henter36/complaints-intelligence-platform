@@ -26,7 +26,7 @@ import type {
   PeriodSnapshotMetrics,
   ClassificationTrendRow,
   FacilityFollowUpRow,
-  FacilityImprovementRow,
+  BestPracticeCandidateRow,
 } from "@/lib/reports/report-contract";
 import type { ExecutiveBriefV2Data, ReportData } from "./report-data-service";
 import { isExecutiveBriefV2Data } from "./report-data-service";
@@ -1139,7 +1139,9 @@ function formatFacilityFollowUpCell(row: FacilityFollowUpRow, key: string): stri
   return formatTableValue((row as Record<string, unknown>)[key]);
 }
 
-function formatFacilityImprovementCell(row: FacilityImprovementRow, key: string): string {
+/** "مقدار التحسن" is shown as a negative amount (e.g. "−41") — the decrease itself is stored positive so other math (merit score, sorting) never has to fight a sign. */
+function formatBestPracticeCandidateCell(row: BestPracticeCandidateRow, key: string): string {
+  if (key === "improvementAmount") return formatReportNumber(-row.decrease);
   return formatTableValue((row as Record<string, unknown>)[key]);
 }
 
@@ -1300,7 +1302,7 @@ function renderPage4(ctx: V2Context): void {
   const { margin, contentWidth } = layout;
   const classRows = brief.topClassifications.slice(0, TOP_CLASSIFICATIONS_V2_LIMIT);
   const followUpRows = brief.facilitiesNeedingFollowUp ?? [];
-  const improvementRows = brief.facilitiesWithSustainedImprovement ?? [];
+  const bestPracticeRows = brief.bestPracticeCandidates ?? [];
   const conclusions = (brief.conclusions ?? []).slice(0, 5);
   const trendRows = brief.classificationTrends;
   const hasClassComparison = classRows.some((r) => r.previousCount > 0);
@@ -1385,7 +1387,7 @@ function renderPage4(ctx: V2Context): void {
     y,
     gap,
     topAvailableRows: followUpRows.length,
-    bottomAvailableRows: improvementRows.length,
+    bottomAvailableRows: bestPracticeRows.length,
     requiredConclusionsHeight: computeV2ConclusionsBoxHeight(conclusions.length),
   });
   const followUpCols: ColDef[] = [
@@ -1397,13 +1399,14 @@ function renderPage4(ctx: V2Context): void {
     { key: "repeatOrSpread", label: "التكرار/الانتشار", weight: 1.5 },
     { key: "priorityBand", label: "الأولوية", weight: 0.65 },
   ];
-  const improvementCols: ColDef[] = [
-    { key: "facility", label: "السجن", weight: 1.5 },
-    { key: "classificationLabel", label: "التصنيف المتحسن", weight: 1.5 },
-    { key: "startValue", label: "البداية", weight: 0.75 },
-    { key: "currentValue", label: "الحالية", weight: 0.75 },
-    { key: "decrease", label: "الانخفاض", weight: 0.75 },
-    { key: "streakPeriods", label: "مدة التحسن", weight: 0.85 },
+  const bestPracticeCols: ColDef[] = [
+    { key: "facility", label: "السجن", weight: 1.3 },
+    { key: "classificationLabel", label: "مجال التميز", weight: 1.3 },
+    { key: "startValue", label: "البداية", weight: 0.55 },
+    { key: "currentValue", label: "الحالية", weight: 0.55 },
+    { key: "improvementAmount", label: "مقدار التحسن", weight: 0.75 },
+    { key: "streakPeriods", label: "مدة التحسن", weight: 0.75 },
+    { key: "reasonLabel", label: "سبب الاختيار", weight: 1.35 },
   ];
 
   y = drawSectionTitle(doc, "السجون الأكثر حاجة للمتابعة", margin, y, contentWidth);
@@ -1419,16 +1422,16 @@ function renderPage4(ctx: V2Context): void {
   });
   y += gap;
 
-  y = drawSectionTitle(doc, "أفضل التحسنات المستدامة", margin, y, contentWidth);
+  y = drawSectionTitle(doc, "الجهات المتميزة والمرشحة لدراسة الممارسات الناجحة", margin, y, contentWidth);
   y = drawTable({
     doc,
-    rows: improvementRows.slice(0, facilityRowCounts.bottomRows),
-    columns: improvementCols,
+    rows: bestPracticeRows.slice(0, facilityRowCounts.bottomRows),
+    columns: bestPracticeCols,
     x: margin,
     y,
     width: contentWidth,
     rowHeight: rowH,
-    formatCell: formatFacilityImprovementCell,
+    formatCell: formatBestPracticeCandidateCell,
   });
   y += gap;
 
@@ -1509,7 +1512,7 @@ const EMPTY_V2: ExecutiveBriefV2Data = {
   highPriorityFacilityCount: 0,
   continuedProblemFindingCount: 0,
   facilitiesNeedingFollowUp: [],
-  facilitiesWithSustainedImprovement: [],
+  bestPracticeCandidates: [],
   classificationTrends: [],
   periodMetrics: { current: EMPTY_PERIOD_SNAPSHOT_METRICS, previous: null },
   regionSnapshotAtEnd: [],

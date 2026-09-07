@@ -16,6 +16,22 @@ export type PatternSnapshot = {
   priorityBand: PriorityBand;
 };
 
+/** Sentinel for the "no classification" bucket in a PatternSnapshot key — a facility×classification pair with a null classificationId always maps to this single shared bucket, never a per-caller-invented string. */
+export const UNCLASSIFIED_PATTERN_SNAPSHOT_KEY = "UNCLASSIFIED";
+
+/**
+ * Canonical facility×classification identity for a PatternSnapshot.
+ * pattern-findings-service.ts uses this when CREATING a snapshot;
+ * finding-brief-conclusions.ts (or any other caller) must use the SAME
+ * function when LOOKING one up — never facility+classificationLabel (a
+ * display string, not an identity: two differently-labeled classifications
+ * could collide, or the same classification could fail to match after a
+ * rename) — so the two can never silently drift apart.
+ */
+export function buildPatternSnapshotKey(facility: string, classificationId: string | null): string {
+  return `${facility} ${classificationId ?? UNCLASSIFIED_PATTERN_SNAPSHOT_KEY}`;
+}
+
 export type WorsenedProblem = {
   key: string;
   facility: string;
