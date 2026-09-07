@@ -117,6 +117,49 @@ describe("XLSX report rendering", () => {
     expect(typeof firstDataRow.getCell(3).value).toBe("number"); // complianceRate
   });
 
+  it("writes table.rows to the sheet in the exact given order — never re-sorted (report-data-service.ts owns ordering, e.g. the region->facility grouping for detail_table)", async () => {
+    const report = baseReport({
+      sections: [
+        {
+          id: "detail_table",
+          kind: "table",
+          title: "تفاصيل الشكاوى",
+          table: {
+            id: "detail_table",
+            title: "تفاصيل الشكاوى",
+            columns: [
+              { key: "complaintNumber", label: "رقم الشكوى", format: "text" },
+              { key: "region", label: "المنطقة", format: "text" },
+              { key: "facility", label: "الموقع", format: "text" },
+            ],
+            // Deliberately NOT date-sorted or alphabetically-sorted — a
+            // pre-grouped region->facility order, as report-data-service.ts
+            // now produces for detail_table. The renderer must preserve it verbatim.
+            rows: [
+              { complaintNumber: "ord-3", region: "الرياض", facility: "سجن أ" },
+              { complaintNumber: "ord-5", region: "الرياض", facility: "سجن أ" },
+              { complaintNumber: "ord-1", region: "الرياض", facility: "سجن ب" },
+              { complaintNumber: "ord-2", region: "مكة", facility: "سجن ج" },
+            ],
+            truncated: false,
+            totalMatched: 4,
+          },
+        },
+      ],
+    });
+
+    const { buffer } = await renderReportXlsx(report);
+    const workbook = await readBack(buffer);
+    const dataSheet = workbook.getWorksheet("تفاصيل الشكاوى")!;
+    const values: string[] = [];
+    dataSheet.eachRow((row, rowNumber) => {
+      if (rowNumber === 1) return; // header
+      values.push(String(row.getCell(1).value));
+    });
+
+    expect(values).toEqual(["ord-3", "ord-5", "ord-1", "ord-2"]);
+  });
+
   it("stores dates as real Date cells with a date number format", async () => {
     const { buffer } = await renderReportXlsx(baseReport());
     const workbook = await readBack(buffer);
