@@ -46,23 +46,39 @@ function prisma(): PrismaClient {
   return dbHolder.client;
 }
 
-beforeAll(async () => {
-  tempDir = mkdtempSync(join(tmpdir(), "cip-report-complaint-order-"));
-  const dbPath = join(tempDir, "test.db");
+/** Points DATABASE_URL at a fresh, migrated, on-disk SQLite file and returns a client for it. */
+function provisionIsolatedSqliteClient(dirPrefix: string): { client: PrismaClient; dir: string } {
+  const dir = mkdtempSync(join(tmpdir(), dirPrefix));
+  const dbPath = join(dir, "test.db");
   process.env.DATABASE_URL = `file:${dbPath}`;
   runPrismaMigrateDeploy(`file:${dbPath}`);
-  dbHolder.client = new PrismaClient();
+  return { client: new PrismaClient(), dir };
+}
+
+/** Disconnects, removes the temp DB directory, and puts DATABASE_URL back the way it was — errors from any step still let the later steps run. */
+async function releaseIsolatedSqliteClient(input: {
+  client: PrismaClient | null;
+  dir: string | null;
+  originalDatabaseUrl: string | undefined;
+}): Promise<void> {
+  try {
+    await input.client?.$disconnect();
+    if (input.dir) rmSync(input.dir, { recursive: true, force: true });
+  } finally {
+    if (input.originalDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = input.originalDatabaseUrl;
+  }
+}
+
+beforeAll(async () => {
+  const provisioned = provisionIsolatedSqliteClient("cip-report-complaint-order-");
+  tempDir = provisioned.dir;
+  dbHolder.client = provisioned.client;
   await seedDataset(dbHolder.client);
 }, 60_000);
 
 afterAll(async () => {
-  try {
-    await dbHolder.client?.$disconnect();
-    if (tempDir) rmSync(tempDir, { recursive: true, force: true });
-  } finally {
-    if (ORIGINAL_DATABASE_URL === undefined) delete process.env.DATABASE_URL;
-    else process.env.DATABASE_URL = ORIGINAL_DATABASE_URL;
-  }
+  await releaseIsolatedSqliteClient({ client: dbHolder.client, dir: tempDir, originalDatabaseUrl: ORIGINAL_DATABASE_URL });
 });
 
 const BASE = {

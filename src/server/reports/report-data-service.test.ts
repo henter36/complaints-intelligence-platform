@@ -77,12 +77,48 @@ function comparisonResultWithReference(hasReference: boolean) {
   };
 }
 
+/** Shared by every describe block below — resets modules and the two DB-layer mocks. */
+function resetReportDataMocks(): void {
+  vi.resetModules();
+  dbMocks.findMany.mockReset();
+  dbMocks.count.mockReset();
+}
+
+/**
+ * The dbMocks seed + two dynamic imports + parseReportRequest + a "preview"
+ * buildReportData call, repeated by most tests in this file. Defaults to the
+ * common "one open complaint" seed; pass `rows`/`count` to override (e.g. the
+ * OVERDUE_COMPLAINTS empty-result tests or the row-limit tests). Tests that
+ * need `request` or extra spies/imports before calling buildReportData keep
+ * doing that inline — only the identical tail is shared here.
+ */
+async function buildReportForRequest(
+  input: Record<string, unknown>,
+  seed: { rows?: unknown[]; count?: number } = {}
+) {
+  dbMocks.findMany.mockResolvedValue(seed.rows ?? [complaint()]);
+  dbMocks.count.mockResolvedValue(seed.count ?? 1);
+  const { buildReportData } = await import("./report-data-service");
+  const { parseReportRequest } = await import("./report-definition-service");
+  const request = parseReportRequest(input);
+  const report = await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+  return { request, report };
+}
+
+/** The kpiService/comparisonService/briefService spy setup shared by the "reference-period KPI" tests below. */
+async function mockKpiReferencePeriodServices() {
+  const kpiService = await import("@/server/complaints/complaint-kpi-service");
+  const comparisonService = await import("./report-comparison");
+  const briefService = await import("./report-executive-brief-data-service");
+  const kpiSpy = vi.spyOn(kpiService, "getComplaintKpis");
+  vi.spyOn(comparisonService, "buildComparisonResult").mockResolvedValue(comparisonResultWithReference(true));
+  vi.spyOn(briefService, "buildExecutiveBriefData").mockResolvedValue({} as never);
+  vi.spyOn(briefService, "buildFullAnalyticalData").mockResolvedValue({} as never);
+  return { kpiSpy };
+}
+
 describe("report data service — parity with the central KPI service", () => {
-  beforeEach(async () => {
-    vi.resetModules();
-    dbMocks.findMany.mockReset();
-    dbMocks.count.mockReset();
-  });
+  beforeEach(resetReportDataMocks);
 
   it("EXECUTIVE_SUMMARY reuses getComplaintKpis verbatim (no independent formulas)", async () => {
     const complaints = [
@@ -112,14 +148,7 @@ describe("report data service — parity with the central KPI service", () => {
   });
 
   it("EXECUTIVE_SUMMARY no longer emits a channel_distribution section", async () => {
-    dbMocks.findMany.mockResolvedValue([complaint()]);
-    dbMocks.count.mockResolvedValue(1);
-
-    const { buildReportData } = await import("./report-data-service");
-    const { parseReportRequest } = await import("./report-definition-service");
-
-    const request = parseReportRequest({ type: "EXECUTIVE_SUMMARY", filters: VALID_FILTERS });
-    const report = await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+    const { report } = await buildReportForRequest({ type: "EXECUTIVE_SUMMARY", filters: VALID_FILTERS });
 
     const ids = report.sections.map((section) => section.id);
     expect(ids).not.toContain("channel_distribution");
@@ -137,25 +166,13 @@ describe("report data service — parity with the central KPI service", () => {
   });
 
   it("STANDARD skips the unused reference-period KPI query", async () => {
-    dbMocks.findMany.mockResolvedValue([complaint()]);
-    dbMocks.count.mockResolvedValue(1);
-    const kpiService = await import("@/server/complaints/complaint-kpi-service");
-    const comparisonService = await import("./report-comparison");
-    const briefService = await import("./report-executive-brief-data-service");
-    const kpiSpy = vi.spyOn(kpiService, "getComplaintKpis");
-    vi.spyOn(comparisonService, "buildComparisonResult")
-      .mockResolvedValue(comparisonResultWithReference(true));
-    vi.spyOn(briefService, "buildExecutiveBriefData").mockResolvedValue({} as never);
-    vi.spyOn(briefService, "buildFullAnalyticalData").mockResolvedValue({} as never);
-    const { buildReportData } = await import("./report-data-service");
-    const { parseReportRequest } = await import("./report-definition-service");
-    const request = parseReportRequest({
+    const { kpiSpy } = await mockKpiReferencePeriodServices();
+
+    await buildReportForRequest({
       type: "EXECUTIVE_SUMMARY",
       filters: VALID_FILTERS,
       options: { reportMode: "STANDARD" },
     });
-
-    await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
 
     expect(kpiSpy).toHaveBeenCalledTimes(1);
   });
@@ -165,25 +182,13 @@ describe("report data service — parity with the central KPI service", () => {
     "PRINT_EXECUTIVE_BRIEF",
     "FULL_ANALYTICAL",
   ])("%s loads reference-period KPI data when a reference exists", async (reportMode) => {
-    dbMocks.findMany.mockResolvedValue([complaint()]);
-    dbMocks.count.mockResolvedValue(1);
-    const kpiService = await import("@/server/complaints/complaint-kpi-service");
-    const comparisonService = await import("./report-comparison");
-    const briefService = await import("./report-executive-brief-data-service");
-    const kpiSpy = vi.spyOn(kpiService, "getComplaintKpis");
-    vi.spyOn(comparisonService, "buildComparisonResult")
-      .mockResolvedValue(comparisonResultWithReference(true));
-    vi.spyOn(briefService, "buildExecutiveBriefData").mockResolvedValue({} as never);
-    vi.spyOn(briefService, "buildFullAnalyticalData").mockResolvedValue({} as never);
-    const { buildReportData } = await import("./report-data-service");
-    const { parseReportRequest } = await import("./report-definition-service");
-    const request = parseReportRequest({
+    const { kpiSpy } = await mockKpiReferencePeriodServices();
+
+    await buildReportForRequest({
       type: "EXECUTIVE_SUMMARY",
       filters: VALID_FILTERS,
       options: { reportMode },
     });
-
-    await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
 
     expect(kpiSpy).toHaveBeenCalledTimes(2);
   });
@@ -239,11 +244,7 @@ describe("report data service — parity with the central KPI service", () => {
 });
 
 describe("report data service — row limits", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    dbMocks.findMany.mockReset();
-    dbMocks.count.mockReset();
-  });
+  beforeEach(resetReportDataMocks);
 
   it("rejects COMPLAINT_DETAIL run when matched rows exceed the report's hard limit", async () => {
     dbMocks.findMany.mockResolvedValue([complaint()]);
@@ -265,27 +266,16 @@ describe("report data service — row limits", () => {
   });
 
   it("truncates (does not reject) in preview mode and reports a warning instead", async () => {
-    dbMocks.findMany.mockResolvedValue([complaint()]);
-    dbMocks.count.mockResolvedValue(10_001);
-
-    const { buildReportData } = await import("./report-data-service");
-    const { parseReportRequest } = await import("./report-definition-service");
-
-    const request = parseReportRequest({ type: "COMPLAINT_DETAIL", filters: VALID_FILTERS });
-    const report = await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+    const { report } = await buildReportForRequest(
+      { type: "COMPLAINT_DETAIL", filters: VALID_FILTERS },
+      { count: 10_001 }
+    );
 
     expect(report.warnings.length).toBeGreaterThan(0);
   });
 
   it("does not include complainant PII fields in COMPLAINT_DETAIL rows", async () => {
-    dbMocks.findMany.mockResolvedValue([complaint()]);
-    dbMocks.count.mockResolvedValue(1);
-
-    const { buildReportData } = await import("./report-data-service");
-    const { parseReportRequest } = await import("./report-definition-service");
-
-    const request = parseReportRequest({ type: "COMPLAINT_DETAIL", filters: VALID_FILTERS });
-    const report = await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+    const { report } = await buildReportForRequest({ type: "COMPLAINT_DETAIL", filters: VALID_FILTERS });
 
     const detailTable = report.sections.find((s) => s.id === "detail_table");
     expect(detailTable?.kind).toBe("table");
@@ -303,22 +293,11 @@ describe("report data service — row limits", () => {
 });
 
 describe("report data service — COMPLAINT_DETAIL row ordering (region -> facility -> date)", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    dbMocks.findMany.mockReset();
-    dbMocks.count.mockReset();
-  });
+  beforeEach(resetReportDataMocks);
 
   it("detail_table queries the DB with the region->facility->date-desc orderBy, applied before take/limit — not the general date-only default", async () => {
-    dbMocks.findMany.mockResolvedValue([complaint()]);
-    dbMocks.count.mockResolvedValue(1);
-
-    const { buildReportData } = await import("./report-data-service");
-    const { parseReportRequest } = await import("./report-definition-service");
     const { buildReportComplaintOrderBy } = await import("@/server/complaints/complaint-query-service");
-
-    const request = parseReportRequest({ type: "COMPLAINT_DETAIL", filters: VALID_FILTERS });
-    await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+    await buildReportForRequest({ type: "COMPLAINT_DETAIL", filters: VALID_FILTERS });
 
     // Among the findMany calls (one for the KPI aggregation, one for the
     // detail table itself), at least one must carry the facility-grouped
@@ -331,14 +310,7 @@ describe("report data service — COMPLAINT_DETAIL row ordering (region -> facil
   });
 
   it("does not leak the report orderBy into the general date-only default used elsewhere", async () => {
-    dbMocks.findMany.mockResolvedValue([complaint()]);
-    dbMocks.count.mockResolvedValue(1);
-
-    const { buildReportData } = await import("./report-data-service");
-    const { parseReportRequest } = await import("./report-definition-service");
-
-    const request = parseReportRequest({ type: "DEPARTMENT_PERFORMANCE", filters: VALID_FILTERS });
-    await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+    await buildReportForRequest({ type: "DEPARTMENT_PERFORMANCE", filters: VALID_FILTERS });
 
     const usedFacilityOrderBy = dbMocks.findMany.mock.calls.some(([args]) =>
       JSON.stringify(args?.orderBy ?? []).includes("facilityNormalizedName")
@@ -348,21 +320,10 @@ describe("report data service — COMPLAINT_DETAIL row ordering (region -> facil
 });
 
 describe("report data service — OVERDUE_COMPLAINTS", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    dbMocks.findMany.mockReset();
-    dbMocks.count.mockReset();
-  });
+  beforeEach(resetReportDataMocks);
 
   it("forces isLate=true regardless of caller filters", async () => {
-    dbMocks.findMany.mockResolvedValue([]);
-    dbMocks.count.mockResolvedValue(0);
-
-    const { buildReportData } = await import("./report-data-service");
-    const { parseReportRequest } = await import("./report-definition-service");
-
-    const request = parseReportRequest({ type: "OVERDUE_COMPLAINTS", filters: VALID_FILTERS });
-    await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+    await buildReportForRequest({ type: "OVERDUE_COMPLAINTS", filters: VALID_FILTERS }, { rows: [], count: 0 });
 
     // Among the findMany calls (one for the KPI aggregation, one for the
     // overdue detail table), at least one must carry the isLate=true where
@@ -380,14 +341,7 @@ describe("report data service — OVERDUE_COMPLAINTS", () => {
   });
 
   it("keeps its own dueDate-ascending ordering — untouched by the COMPLAINT_DETAIL facility-grouping fix", async () => {
-    dbMocks.findMany.mockResolvedValue([]);
-    dbMocks.count.mockResolvedValue(0);
-
-    const { buildReportData } = await import("./report-data-service");
-    const { parseReportRequest } = await import("./report-definition-service");
-
-    const request = parseReportRequest({ type: "OVERDUE_COMPLAINTS", filters: VALID_FILTERS });
-    await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+    await buildReportForRequest({ type: "OVERDUE_COMPLAINTS", filters: VALID_FILTERS }, { rows: [], count: 0 });
 
     // "الشكاوى المتأخرة" ranks by urgency (earliest due date first), not by
     // facility — this must never be swept up in the detail_table fix.
@@ -403,21 +357,10 @@ describe("report data service — OVERDUE_COMPLAINTS", () => {
 });
 
 describe("report data service — signed-number format and deptClassRisesTotal", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    dbMocks.findMany.mockReset();
-    dbMocks.count.mockReset();
-  });
+  beforeEach(resetReportDataMocks);
 
   it("difference column in regionChangesTable uses signed-number format (not text)", async () => {
-    dbMocks.findMany.mockResolvedValue([complaint()]);
-    dbMocks.count.mockResolvedValue(1);
-
-    const { buildReportData } = await import("./report-data-service");
-    const { parseReportRequest } = await import("./report-definition-service");
-
-    const request = parseReportRequest({ type: "EXECUTIVE_SUMMARY", filters: VALID_FILTERS });
-    const report = await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+    const { report } = await buildReportForRequest({ type: "EXECUTIVE_SUMMARY", filters: VALID_FILTERS });
 
     const regionChangesSection = report.sections.find((s) => s.id === "region_changes");
     expect(regionChangesSection?.kind).toBe("table");
@@ -428,14 +371,7 @@ describe("report data service — signed-number format and deptClassRisesTotal",
   });
 
   it("difference values in regionChangesTable rows are numbers, not strings", async () => {
-    dbMocks.findMany.mockResolvedValue([complaint()]);
-    dbMocks.count.mockResolvedValue(1);
-
-    const { buildReportData } = await import("./report-data-service");
-    const { parseReportRequest } = await import("./report-definition-service");
-
-    const request = parseReportRequest({ type: "EXECUTIVE_SUMMARY", filters: VALID_FILTERS });
-    const report = await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+    const { report } = await buildReportForRequest({ type: "EXECUTIVE_SUMMARY", filters: VALID_FILTERS });
 
     const regionChangesSection = report.sections.find((s) => s.id === "region_changes");
     if (regionChangesSection?.kind === "table") {
@@ -446,14 +382,7 @@ describe("report data service — signed-number format and deptClassRisesTotal",
   });
 
   it("difference column in deptClassRisesTable uses signed-number format (not text)", async () => {
-    dbMocks.findMany.mockResolvedValue([complaint()]);
-    dbMocks.count.mockResolvedValue(1);
-
-    const { buildReportData } = await import("./report-data-service");
-    const { parseReportRequest } = await import("./report-definition-service");
-
-    const request = parseReportRequest({ type: "EXECUTIVE_SUMMARY", filters: VALID_FILTERS });
-    const report = await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+    const { report } = await buildReportForRequest({ type: "EXECUTIVE_SUMMARY", filters: VALID_FILTERS });
 
     const risesSection = report.sections.find((s) => s.id === "dept_class_rises");
     expect(risesSection?.kind).toBe("table");
@@ -464,14 +393,7 @@ describe("report data service — signed-number format and deptClassRisesTotal",
   });
 
   it("deptClassRisesTotal in comparisonData matches total before slicing", async () => {
-    dbMocks.findMany.mockResolvedValue([complaint()]);
-    dbMocks.count.mockResolvedValue(1);
-
-    const { buildReportData } = await import("./report-data-service");
-    const { parseReportRequest } = await import("./report-definition-service");
-
-    const request = parseReportRequest({ type: "EXECUTIVE_SUMMARY", filters: VALID_FILTERS });
-    const report = await buildReportData(request, "preview", new Date("2026-07-31T00:00:00Z"));
+    const { report } = await buildReportForRequest({ type: "EXECUTIVE_SUMMARY", filters: VALID_FILTERS });
 
     expect(report.comparisonData).toBeDefined();
     if (report.comparisonData) {
