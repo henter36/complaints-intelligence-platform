@@ -1392,7 +1392,12 @@ async function buildExecutiveBriefDataWithSnapshot(
   comparison: ComparisonResult,
   previousResult: ComplaintKpiResult | undefined,
   now: Date
-): Promise<{ briefData: ExecutiveBriefData; snapshotData: ExecutiveReportSnapshotData }> {
+): Promise<{
+  briefData: ExecutiveBriefData;
+  snapshotData: ExecutiveReportSnapshotData;
+  /** Uncapped classification findings for the operational-practices selector only — deliberately kept OFF `briefData.patternAnalysis` so it can never leak into a preview/run API response that serializes `briefData` wholesale. */
+  operationalPracticeFindings: AnalyticalFinding[];
+}> {
   const hasPrevious = comparison.previousPeriod !== null;
 
   const [allTimeRegions, comparativeTimeline] = await Promise.all([
@@ -1417,6 +1422,13 @@ async function buildExecutiveBriefDataWithSnapshot(
       classificationId: filters.classificationId ?? null,
     }),
   ]);
+  // Split immediately: `patternAnalysisForDisplay` is what ends up on
+  // `briefData.patternAnalysis` (spread wholesale into ExecutiveBriefData/
+  // ExecutiveBriefV2Data, which a preview/run API response can serialize
+  // directly) — `operationalPracticeFindings` stays a sibling value the
+  // caller can use for topic selection without it ever being exposed.
+  const { operationalPracticeFindings: rawOperationalPracticeFindings, ...patternAnalysisForDisplay } = patternAnalysis;
+  const operationalPracticeFindings = rawOperationalPracticeFindings ?? [];
 
   const periodMetrics = toExecutivePeriodMetrics(snapshotData);
   const briefKpis = buildBriefKpis(result, previousResult, hasPrevious, periodMetrics);
@@ -1477,10 +1489,14 @@ async function buildExecutiveBriefDataWithSnapshot(
     regionSnapshotAtEnd: toRegionSnapshotRows(snapshotData.byRegion),
     departmentPeriodMetrics: toDepartmentPeriodMetricsRows(snapshotData.byDepartment),
     classificationSnapshotAtEnd: toClassificationSnapshotRows(snapshotData.byClassification),
-    patternAnalysis,
+    // patternAnalysisForDisplay deliberately omits operationalPracticeFindings
+    // — this object is spread wholesale into ExecutiveBriefData/
+    // ExecutiveBriefV2Data, which a preview/run API response can serialize
+    // directly to the client.
+    patternAnalysis: patternAnalysisForDisplay,
   };
 
-  return { briefData, snapshotData };
+  return { briefData, snapshotData, operationalPracticeFindings };
 }
 
 export async function buildExecutiveBriefData(
@@ -2057,9 +2073,16 @@ export async function buildExecutiveBriefV2Data(
   result: ComplaintKpiResult,
   comparison: ComparisonResult,
   previousResult?: ComplaintKpiResult,
-  now: Date = new Date()
+  now: Date = new Date(),
+  /**
+   * Operational-practice ids shown in the last 3 COMPLETED runs of this
+   * same report template (see report-export-service.ts's runReport) — []
+   * for an ad-hoc/preview report with no template, which relies solely on
+   * the selector's own deterministic report-period rotation.
+   */
+  recentPracticeIds: readonly string[] = []
 ): Promise<ExecutiveBriefV2Data> {
-  const [{ briefData }, allTimeTotal, monthlyStockFlow] = await Promise.all([
+  const [{ briefData, operationalPracticeFindings }, allTimeTotal, monthlyStockFlow] = await Promise.all([
     buildExecutiveBriefDataWithSnapshot(filters, result, comparison, previousResult, now),
     fetchAllTimeTotal(filters, now),
     buildMonthlyStockFlow(filters, comparison, now),
@@ -2067,6 +2090,12 @@ export async function buildExecutiveBriefV2Data(
 
   const classificationOpenLate = toClassificationOpenLate(briefData.classificationSnapshotAtEnd ?? []);
   const patternFindings = briefData.patternAnalysis?.findings ?? [];
+  // operationalPracticeFindings comes from the Promise.all destructure above
+  // (a sibling of briefData, never a property ON it) — uncapped
+  // CLASSIFICATION-scoped findings, already filtered to this report's own
+  // scope, used ONLY for operational-practice topic selection below so a
+  // real chronic classification ranked just outside the display cap
+  // (MAX_FINDINGS_PER_TYPE) can still be considered for a recommendation.
   const facilityCurrentPeriodTotals = briefData.patternAnalysis?.facilityCurrentPeriodTotals ?? {};
 
   // Unlimited pass first so the cover-page count (spec §6) reflects every
@@ -2088,23 +2117,18 @@ export async function buildExecutiveBriefV2Data(
   const classificationAffectedFacilityCounts = computeClassificationAffectedFacilityCounts(patternFindings);
 
   // "ممارسات تشغيلية مقترحة" (spec-governed operational-practices section):
-  // the topic-ranking selector needs the FULL facility×classification trend
-  // set, not the page-4 table's top-CLASSIFICATION_TRENDS_LIMIT slice, so a
-  // real chronic/high-priority topic can never lose its selection weight
-  // just because it missed that unrelated display cut.
-  //
-  // Known limitation: recentPracticeIds is always [] for now — avoiding the
-  // last 3 comparable reports' practices requires threading reportTemplateId
-  // through this (currently template-agnostic) function and querying
-  // ReportRun.resultSummary (an existing Json column — no migration needed)
-  // for prior runs of that template. That plumbing is out of scope here;
-  // until it exists, the deterministic report-period rotation below is the
-  // only anti-repetition mechanism. See operational-practices.ts.
+  // the topic-ranking selector needs the FULL, uncapped facility×
+  // classification trend set (operationalPracticeFindings), not the
+  // display-capped `patternFindings` the page-4 table uses — otherwise a
+  // real chronic classification ranked just outside MAX_FINDINGS_PER_TYPE
+  // could never be considered for a recommendation at all, regardless of
+  // Number.POSITIVE_INFINITY here (that only removed THIS function's own
+  // limit, not the cap already applied upstream).
   const operationalPractices = selectOperationalPractices({
-    classificationTrends: buildClassificationTrendRows(patternFindings, Number.POSITIVE_INFINITY),
+    classificationTrends: buildClassificationTrendRows(operationalPracticeFindings, Number.POSITIVE_INFINITY),
     facilitiesNeedingFollowUp: allFacilityFollowUpRows,
-    patternFindings,
-    recentPracticeIds: [],
+    patternFindings: operationalPracticeFindings,
+    recentPracticeIds,
     reportPeriod: { from: filters.from, to: filters.to },
   });
 

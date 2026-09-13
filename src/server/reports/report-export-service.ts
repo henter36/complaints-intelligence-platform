@@ -3,10 +3,16 @@ import { db } from "@/lib/db";
 import { writeAuditLog } from "@/server/audit/audit-log-service";
 import { env } from "@/lib/env";
 import { getReportDefinition, type ReportRequest } from "./report-definition-service";
-import { buildReportData, isReportRowLimitExceededError, type ReportData } from "./report-data-service";
+import {
+  buildReportData,
+  isExecutiveBriefV2Data,
+  isReportRowLimitExceededError,
+  type ReportData,
+} from "./report-data-service";
 import { renderReportPdf } from "./report-pdf-service";
 import { renderReportXlsx } from "./report-xlsx-service";
 import { deleteReportArtifact, storeReportArtifact } from "./report-storage";
+import { getOperationalPracticeById } from "@/lib/reports/operational-practices";
 
 export class ReportRunError extends Error {
   readonly code: string;
@@ -97,6 +103,55 @@ async function renderFormat(format: ReportFormat, data: ReportData): Promise<{ b
   return renderReportXlsx(data);
 }
 
+const RECENT_OPERATIONAL_PRACTICE_RUN_LOOKBACK = 3;
+
+/**
+ * Operational-practice ids shown in the last 3 COMPLETED runs of this same
+ * report template — the operational-practices selector's own anti-
+ * repetition history (see operational-practices.ts's `recentPracticeIds`).
+ * Uses the existing `ReportRun.resultSummary` Json column — no migration.
+ * A template-less (ad-hoc/preview) run has no comparable history to check
+ * against, so it always gets []; the selector's own deterministic
+ * report-period rotation is its sole anti-repetition mechanism in that case.
+ * Defensive against every way a persisted summary can fail to match
+ * expectations: missing field, wrong shape, an id no longer in the approved
+ * library, duplicates across runs — none of these should ever throw.
+ */
+async function loadRecentOperationalPracticeIds(reportTemplateId: string | null): Promise<string[]> {
+  if (!reportTemplateId) return [];
+
+  const recentRuns = await db.reportRun.findMany({
+    where: { reportTemplateId, status: ReportRunStatus.COMPLETED },
+    orderBy: { completedAt: "desc" },
+    take: RECENT_OPERATIONAL_PRACTICE_RUN_LOOKBACK,
+    select: { resultSummary: true },
+  });
+
+  const ids = new Set<string>();
+  for (const run of recentRuns) {
+    const summary = run.resultSummary;
+    if (!summary || typeof summary !== "object" || Array.isArray(summary)) continue;
+    const raw = (summary as Record<string, unknown>).operationalPracticeIds;
+    if (!Array.isArray(raw)) continue;
+    for (const value of raw) {
+      if (typeof value !== "string") continue;
+      if (!getOperationalPracticeById(value)) continue; // unknown/stale id — ignore rather than throw
+      ids.add(value);
+    }
+  }
+  return [...ids];
+}
+
+/**
+ * Reads the practice ids straight off the ALREADY-BUILT report data (never
+ * re-runs selectOperationalPractices) so what gets persisted always matches
+ * exactly what this run's own report showed.
+ */
+function extractOperationalPracticeIds(data: ReportData): string[] {
+  if (!data.briefData || !isExecutiveBriefV2Data(data.briefData)) return [];
+  return (data.briefData.operationalPractices ?? []).map((practice) => practice.id);
+}
+
 export async function runReport(input: RunReportInput, now: Date = new Date()): Promise<RunReportResult> {
   const { request, formats, requestedBy, reportTemplateId = null, scheduledFor = null, idempotencyKey = null } = input;
   validateFormats(request, formats);
@@ -136,7 +191,10 @@ export async function runReport(input: RunReportInput, now: Date = new Date()): 
   const createdArtifacts: CreatedArtifactReference[] = [];
 
   try {
-    const data = await buildReportData(request, "run", now);
+    // Read BEFORE this run's own COMPLETED write below — a run currently
+    // RUNNING is never COMPLETED yet, so it can never see its own history.
+    const recentOperationalPracticeIds = await loadRecentOperationalPracticeIds(reportTemplateId);
+    const data = await buildReportData(request, "run", now, { recentOperationalPracticeIds });
     // Stamp the run id so the PDF cover/footer can show a short traceable id.
     data.reportRunId = run.id;
     const warnings = [...data.warnings];
@@ -177,6 +235,7 @@ export async function runReport(input: RunReportInput, now: Date = new Date()): 
           rowCount: data.rowCount,
           warnings,
           formats,
+          operationalPracticeIds: extractOperationalPracticeIds(data),
         } as Prisma.InputJsonValue,
       },
     });

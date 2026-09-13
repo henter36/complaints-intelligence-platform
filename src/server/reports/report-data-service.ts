@@ -671,7 +671,8 @@ async function buildExecutiveSummaryWithMode(
   request: ReportRequest,
   mode: "preview" | "run",
   now: Date,
-  reportMode: ReportMode
+  reportMode: ReportMode,
+  context: ReportBuildContext = {}
 ): Promise<ReportData> {
   const { data: base, kpiResult: result, comparison } = await buildExecutiveSummaryCore(request, mode, now);
 
@@ -722,7 +723,8 @@ async function buildExecutiveSummaryWithMode(
       result,
       comparison,
       previousResult,
-      now
+      now,
+      context.recentOperationalPracticeIds ?? []
     );
     return { ...base, title, reportMode, briefData };
   }
@@ -966,15 +968,26 @@ async function buildOverdueComplaintsReport(
   };
 }
 
+/**
+ * Explicit, per-call context that does not fit `ReportRequest` itself —
+ * never module-global mutable state. Every field is optional so existing
+ * callers (preview routes, tests) keep working unchanged at [].
+ */
+export type ReportBuildContext = {
+  /** Operational-practice ids shown in the last 3 comparable COMPLETED runs of this report's own template — see report-export-service.ts. */
+  recentOperationalPracticeIds?: readonly string[];
+};
+
 export async function buildReportData(
   request: ReportRequest,
   mode: "preview" | "run",
-  now: Date = new Date()
+  now: Date = new Date(),
+  context: ReportBuildContext = {}
 ): Promise<ReportData> {
   switch (request.type) {
     case ReportType.EXECUTIVE_SUMMARY: {
       if (isReportMode(request.options.reportMode)) {
-        return buildExecutiveSummaryWithMode(request, mode, now, request.options.reportMode);
+        return buildExecutiveSummaryWithMode(request, mode, now, request.options.reportMode, context);
       }
       return buildExecutiveSummary(request, mode, now);
     }

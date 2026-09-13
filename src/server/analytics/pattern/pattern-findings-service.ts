@@ -234,15 +234,32 @@ type CellWork = {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-export function computePatternFindings(
+export type PatternFindingsComputation = {
+  /** Display-facing findings — capped at MAX_FINDINGS_PER_TYPE per type, exactly what computePatternFindings has always returned. Never widen this for any report/API consumer. */
+  findings: AnalyticalFinding[];
+  /**
+   * Every CLASSIFICATION-scoped CHRONIC_ISSUE / TREND_PATTERN /
+   * SUSTAINED_IMPROVEMENT finding this run produced, BEFORE the
+   * MAX_FINDINGS_PER_TYPE display cap. Exists solely to feed the
+   * operational-practices topic selector (see operational-practices.ts) so
+   * a real topic ranked just outside the top 10 chronic issues can still be
+   * considered for a practice recommendation — it is never itself shown in
+   * a report or exposed through an API response.
+   */
+  operationalPracticeFindings: AnalyticalFinding[];
+};
+
+function computePatternFindingsCore(
   series: PatternSeries,
-  config: PatternAnalysisConfig = PATTERN_ANALYSIS_CONFIG,
-  periodUnit: PeriodUnit = "فترة"
-): AnalyticalFinding[] {
+  config: PatternAnalysisConfig,
+  periodUnit: PeriodUnit
+): PatternFindingsComputation {
   const totalPeriods = series.periods.length;
   // Need minPeriodsForContinuity current periods + 1 extra for the
   // "as of previous period" snapshot used by the change digest.
-  if (totalPeriods < config.minPeriodsForContinuity + 1) return [];
+  if (totalPeriods < config.minPeriodsForContinuity + 1) {
+    return { findings: [], operationalPracticeFindings: [] };
+  }
 
   const detectedAt = nowIso();
   const filters = periodFilters(series);
@@ -536,6 +553,15 @@ export function computePatternFindings(
     }
   }
 
+  // Snapshot BEFORE the display cap below — this is the operational-practices
+  // selector's own source, never returned to a report/API consumer (see
+  // PatternFindingsComputation).
+  const operationalPracticeFindings: AnalyticalFinding[] = [
+    ...chronicFindings,
+    ...trendFindings,
+    ...improvementFindings,
+  ].sort((a, b) => b.priorityScore - a.priorityScore);
+
   const findings: AnalyticalFinding[] = [
     ...chronicFindings.sort((a, b) => b.priorityScore - a.priorityScore).slice(0, MAX_FINDINGS_PER_TYPE),
     ...trendFindings.sort((a, b) => b.priorityScore - a.priorityScore).slice(0, MAX_FINDINGS_PER_TYPE),
@@ -775,7 +801,32 @@ export function computePatternFindings(
     );
   }
 
-  return findings.sort((a, b) => b.priorityScore - a.priorityScore);
+  return {
+    findings: findings.sort((a, b) => b.priorityScore - a.priorityScore),
+    operationalPracticeFindings,
+  };
+}
+
+/** Display-facing findings only — capped at MAX_FINDINGS_PER_TYPE per type. Unchanged public behavior; every existing consumer keeps working exactly as before. */
+export function computePatternFindings(
+  series: PatternSeries,
+  config: PatternAnalysisConfig = PATTERN_ANALYSIS_CONFIG,
+  periodUnit: PeriodUnit = "فترة"
+): AnalyticalFinding[] {
+  return computePatternFindingsCore(series, config, periodUnit).findings;
+}
+
+/**
+ * Same single engine run as computePatternFindings (never executed twice),
+ * but also returns the uncapped CLASSIFICATION-scoped findings the
+ * operational-practices selector needs — see PatternFindingsComputation.
+ */
+export function computePatternFindingsWithOperationalPracticeSource(
+  series: PatternSeries,
+  config: PatternAnalysisConfig = PATTERN_ANALYSIS_CONFIG,
+  periodUnit: PeriodUnit = "فترة"
+): PatternFindingsComputation {
+  return computePatternFindingsCore(series, config, periodUnit);
 }
 
 /**
