@@ -49,6 +49,8 @@ import type {
   FacilityFollowUpRow,
   BestPracticeCandidateRow,
 } from "@/lib/reports/report-contract";
+import type { OperationalPracticeRow } from "@/lib/reports/operational-practices";
+export type { OperationalPracticeRow } from "@/lib/reports/operational-practices";
 // Types that are only re-exported (not used locally) — direct re-export avoids a redundant import.
 export type { KpiAssessment, ComparativeTimelinePoint, ComparativeTimelineSeries } from "@/lib/reports/report-contract";
 import type { PatternAnalysisReportData } from "@/server/analytics/pattern/pattern-report-integration-service";
@@ -219,10 +221,18 @@ export type ExecutiveBriefV2Data = ExecutiveBriefData & {
   continuedProblemFindingCount: number;
   /** V2-only: facilities ranked by follow-up priority, from the pattern-analysis engine (page 4 "السجون الأكثر حاجة للمتابعة"). Not used by other report modes. */
   facilitiesNeedingFollowUp?: FacilityFollowUpRow[];
-  /** V2-only: facility×classification best-practice candidates (page 4 "الجهات المتميزة والمرشحة لدراسة الممارسات الناجحة"). Never overlaps facilitiesNeedingFollowUp. */
+  /** V2-only: facility×classification best-practice candidates (page 4 "حالات التحسن المستدام المرشحة للدراسة"). Never overlaps facilitiesNeedingFollowUp. */
   bestPracticeCandidates?: BestPracticeCandidateRow[];
   /** V2-only: classification×facility multi-period trends from the pattern-analysis engine (page 4 "أبرز اتجاهات التصنيفات عبر الفترات"). */
   classificationTrends?: ClassificationTrendRow[];
+  /**
+   * V2-only: the periodic "ممارسات تشغيلية مقترحة" section (page 4) — up to
+   * 4 pre-approved, generic operational-practice recommendations selected by
+   * selectOperationalPractices(). These are suggestions, never a claim that
+   * any of them caused a real improvement, and are intentionally unrelated
+   * to bestPracticeCandidates (see operational-practices.ts header).
+   */
+  operationalPractices?: OperationalPracticeRow[];
 };
 
 /** Extended payload for FULL_ANALYTICAL mode (super-set of ExecutiveBriefData). */

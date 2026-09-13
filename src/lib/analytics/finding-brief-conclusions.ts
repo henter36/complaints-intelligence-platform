@@ -3,7 +3,7 @@ import { buildPatternSnapshotKey, type PatternSnapshot, type PeriodChangeDigest 
 import { rankFindingsForExecutiveBrief } from "./finding-ranking";
 import { consolidateFindingsForBrief, type ConsolidatedFindingCard } from "./finding-consolidation";
 import { classificationLabelFromEntityName } from "./finding-labels";
-import { evaluateBestPracticeCandidacy } from "./best-practice-candidate";
+import type { BestPracticeCandidateEvaluation } from "./best-practice-candidate";
 
 function classificationLabelOf(finding: AnalyticalFinding): string | null {
   if (finding.entityType !== "CLASSIFICATION") return null;
@@ -57,7 +57,15 @@ function selectDiversifiedCards(
  */
 export function buildPatternAnalysisBriefConclusions(
   patternAnalysis: { findings: readonly AnalyticalFinding[]; periodChangeDigest: PeriodChangeDigest | null } | undefined,
-  maxFindings = 2
+  maxFindings = 2,
+  /**
+   * The report's own authoritative candidate list — the SAME one the best-
+   * practice-candidate table and summary sentence are built from (see
+   * report-executive-brief-data-service.ts). Passed in rather than
+   * re-derived so the digest sentence below can never disagree with the
+   * table about which facility×classification pairs are candidates.
+   */
+  bestPracticeCandidateEvaluations: readonly BestPracticeCandidateEvaluation[] = []
 ): string[] {
   if (!patternAnalysis) return [];
 
@@ -70,7 +78,7 @@ export function buildPatternAnalysisBriefConclusions(
   );
 
   const bestPracticeCandidateCount = patternAnalysis.periodChangeDigest
-    ? countBestPracticeCandidatesAmongImproved(patternAnalysis.periodChangeDigest.improvedFacilities, patternAnalysis.findings)
+    ? countBestPracticeCandidatesAmongImproved(patternAnalysis.periodChangeDigest.improvedFacilities, bestPracticeCandidateEvaluations)
     : 0;
   const digestLine = patternAnalysis.periodChangeDigest
     ? buildDigestSummarySentence(patternAnalysis.periodChangeDigest, bestPracticeCandidateCount)
@@ -80,39 +88,32 @@ export function buildPatternAnalysisBriefConclusions(
 }
 
 /**
- * Of the facilities the digest already flags as newly-SUSTAINED_IMPROVEMENT
- * this period, how many DISTINCT SITES ALSO clear the best-practice-candidate
- * bar (spec item 8's "...منها 3 مواقع مرشحة لدراسة ممارسات ناجحة" — never
- * worded as "ممارسات قابلة للتعميم"; generalizability is never claimed by
- * the report itself). Matches each PatternSnapshot back to its own
- * SUSTAINED_IMPROVEMENT finding via `buildPatternSnapshotKey` — the SAME
- * canonical facility×classificationId identity pattern-findings-service.ts
- * used to build `snapshot.key` in the first place — never facility+display-
- * label, which two differently-labeled classifications (or a relabeled one)
- * could make disagree with the report table. Counts unique FACILITIES, not
- * facility×classification rows: one site qualifying in two classifications
- * is still one site.
+ * Of the facility×classification pairs the digest already flags as newly-
+ * SUSTAINED_IMPROVEMENT this period, how many DISTINCT SITES are ALSO
+ * present in `bestPracticeCandidateEvaluations` — the report's own single
+ * source of truth for candidacy (spec item 8's "...منها 3 مواقع مرشحة
+ * لدراسة ممارسات ناجحة" — never worded as "ممارسات قابلة للتعميم";
+ * generalizability is never claimed by the report itself). Matches on the
+ * SAME canonical facility×classificationId key
+ * (`buildPatternSnapshotKey(evaluation.facility, evaluation.classificationId)`)
+ * the candidate table itself is deduplicated by — never re-runs
+ * evaluateBestPracticeCandidacy independently, so this sentence can never
+ * name a different count than the table it is describing. Counts unique
+ * FACILITIES, not facility×classification rows: one site qualifying in two
+ * classifications is still one site.
  */
 function countBestPracticeCandidatesAmongImproved(
   improvedFacilities: readonly PatternSnapshot[],
-  findings: readonly AnalyticalFinding[]
+  bestPracticeCandidateEvaluations: readonly BestPracticeCandidateEvaluation[]
 ): number {
-  if (improvedFacilities.length === 0) return 0;
+  if (improvedFacilities.length === 0 || bestPracticeCandidateEvaluations.length === 0) return 0;
 
-  const findingByKey = new Map<string, AnalyticalFinding>();
-  for (const finding of findings) {
-    if (finding.type !== "SUSTAINED_IMPROVEMENT") continue;
-    const facility = typeof finding.drilldownFilters.facility === "string" ? finding.drilldownFilters.facility : null;
-    if (!facility) continue;
-    findingByKey.set(buildPatternSnapshotKey(facility, finding.entityId), finding);
-  }
-
+  const candidateKeys = new Set(
+    bestPracticeCandidateEvaluations.map((e) => buildPatternSnapshotKey(e.facility, e.classificationId))
+  );
   const candidateFacilities = new Set<string>();
   for (const snapshot of improvedFacilities) {
-    const finding = findingByKey.get(snapshot.key);
-    if (!finding) continue;
-    const evaluation = evaluateBestPracticeCandidacy(finding, snapshot.facility);
-    if (evaluation?.status === "BEST_PRACTICE_CANDIDATE") candidateFacilities.add(snapshot.facility);
+    if (candidateKeys.has(snapshot.key)) candidateFacilities.add(snapshot.facility);
   }
   return candidateFacilities.size;
 }
@@ -164,9 +165,13 @@ function buildDigestSummarySentence(digest: PeriodChangeDigest, bestPracticeCand
       })
     );
   }
-  if (digest.improvedFacilities.length > 0) {
+  // Unique FACILITIES, not facility×classification snapshot rows — the same
+  // site improving in two classifications must count once here too (spec:
+  // "لا تستخدم عدد rows عندما تكون العبارة تقول مواقع").
+  const uniqueImprovedFacilityCount = new Set(digest.improvedFacilities.map((s) => s.facility)).size;
+  if (uniqueImprovedFacilityCount > 0) {
     parts.push(
-      formatArabicCountPhrase(digest.improvedFacilities.length, {
+      formatArabicCountPhrase(uniqueImprovedFacilityCount, {
         singular: "موقع حقق تحسناً مستداماً",
         dual: "موقعان حققا تحسناً مستداماً",
         plural: "مواقع حققت تحسناً مستداماً",
@@ -176,7 +181,7 @@ function buildDigestSummarySentence(digest: PeriodChangeDigest, bestPracticeCand
   if (parts.length === 0) return null;
 
   let sentence = `ما تغير منذ الفترة السابقة: ${parts.join("، ")}`;
-  if (digest.improvedFacilities.length > 0 && bestPracticeCandidateCount > 0) {
+  if (uniqueImprovedFacilityCount > 0 && bestPracticeCandidateCount > 0) {
     sentence += `، منها ${formatArabicCountPhrase(bestPracticeCandidateCount, {
       singular: "موقع مرشح لدراسة ممارسة ناجحة",
       dual: "موقعان مرشحان لدراسة ممارسات ناجحة",

@@ -98,6 +98,12 @@ function makeV2Brief(overrides: Partial<ExecutiveBriefV2Data> = {}): ExecutiveBr
       { facility: "سجن الشميسي", classification: "استفسار", currentCount: 12, difference: 12, trail: "0، 0، 1، 12", streakPeriods: 1, patternLabel: "مشكلة ناشئة", priorityScore: 55 },
       { facility: "سجن الدمام", classification: "صيانة", currentCount: 5, difference: -25, trail: "30، 22، 12، 5", streakPeriods: 4, patternLabel: "تحسن مستدام", priorityScore: 0 },
     ],
+    operationalPractices: [
+      { id: "request-tracking-number", title: "رقم متابعة لكل طلب", description: "منح كل طلب رقماً مرجعياً يتيح معرفة حالته والإجراء المتخذ عليه حتى الإقفال.", topic: "REQUEST_MANAGEMENT", selectionReason: "REPORT_VOLUME" },
+      { id: "medication-continuity", title: "استمرارية صرف الأدوية", description: "متابعة الوصفات والأدوية قبل نفادها ومعالجة أي تعثر في الصرف قبل أن يؤدي إلى انقطاع العلاج.", topic: "MEDICATION", selectionReason: "REPORT_PRIORITY" },
+      { id: "belongings-custody-control", title: "ضبط الأمانات والمقتنيات", description: "توثيق استلام وتسليم وحركة الأمانات والمقتنيات بما يتيح الرجوع إلى سجل واضح عند وجود مطالبة أو شكوى.", topic: "BELONGINGS", selectionReason: "REPORT_PRIORITY" },
+      { id: "root-cause-remediation", title: "معالجة السبب الجذري", description: "عند تكرار المشكلة يتم تحديد السبب التشغيلي ووضع إجراء يمنع تكرارها بدلاً من معالجة الحالات بصورة منفردة.", topic: "ROOT_CAUSE", selectionReason: "GENERAL_ROTATION" },
+    ],
     conclusions: ["استنتاج تجريبي."],
     notes: ["ملاحظة جودة بيانات تجريبية."],
     allTimeTotal: 18560,
@@ -626,6 +632,96 @@ describe("V2 page 4 — classification trends replace classification changes (sp
   });
 });
 
+describe("V2 page 4 — operational practices grid (\"ممارسات تشغيلية مقترحة\")", () => {
+  it("renders exactly the 4 fixture cards' titles and descriptions verbatim, the section title, and never an internal field", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(makeV2Report());
+      const rendered = textSpy.mock.calls.map((call) => String(call[0]));
+      expect(rendered).toContain(preparePdfText("ممارسات تشغيلية مقترحة"));
+      for (const practice of makeV2Brief().operationalPractices!) {
+        expect(rendered).toContain(preparePdfText(practice.title));
+        expect(rendered).toContain(preparePdfText(practice.description));
+        // Internal-only fields must never be drawn.
+        expect(rendered.join("\n")).not.toContain(practice.topic);
+        expect(rendered.join("\n")).not.toContain(practice.selectionReason);
+      }
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("is visually and semantically separate from the best-practice-candidate section (both titles render, neither text is dropped)", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(makeV2Report());
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(joined).toContain(preparePdfText("ممارسات تشغيلية مقترحة"));
+      expect(joined).toContain(preparePdfText("حالات التحسن المستدام المرشحة للدراسة"));
+      // Never the disallowed "أفضل الممارسات" title (spec §7 — not proven from this facility's data).
+      expect(joined).not.toContain(preparePdfText("أفضل الممارسات"));
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("never claims a practice is proven or already the cause of an improvement", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(makeV2Report());
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      for (const forbidden of ["هذه الممارسات ستعالج المشكلات", "ثبت نجاحها", "هي سبب انخفاض الشكاوى"]) {
+        expect(joined).not.toContain(preparePdfText(forbidden));
+      }
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("stays exactly 4 pages with the practices grid populated, and with it empty", async () => {
+    const withPractices = await renderExecutiveBriefV2Pdf(makeV2Report());
+    expect(countPageObjects(withPractices.buffer)).toBe(4);
+    expect(withPractices.warnings.every((w) => !w.includes("بدلًا من"))).toBe(true);
+
+    const withoutPractices = await renderExecutiveBriefV2Pdf(
+      makeV2Report({ briefData: makeV2Brief({ operationalPractices: [] }) })
+    );
+    expect(countPageObjects(withoutPractices.buffer)).toBe(4);
+    expect(withoutPractices.buffer.slice(0, 4).toString()).toBe("%PDF");
+  });
+
+  it("shows a graceful fallback message (not a crash) when there are no practices", async () => {
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(
+        makeV2Report({ briefData: makeV2Brief({ operationalPractices: [] }) })
+      );
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(joined).toContain(preparePdfText("لا تتوفر ممارسات تشغيلية مقترحة لهذه الفترة."));
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+
+  it("does not shrink or drop conclusions just to make room for the practices grid — facility rows flex first", async () => {
+    const manyConclusions = Array.from({ length: 5 }, (_, i) => `استنتاج رقم ${i + 1}.`);
+    const result = await renderExecutiveBriefV2Pdf(
+      makeV2Report({ briefData: makeV2Brief({ conclusions: manyConclusions }) })
+    );
+    expect(countPageObjects(result.buffer)).toBe(4);
+    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+    try {
+      await renderExecutiveBriefV2Pdf(makeV2Report({ briefData: makeV2Brief({ conclusions: manyConclusions }) }));
+      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
+      for (const c of manyConclusions) {
+        expect(joined).toContain(preparePdfText(c));
+      }
+    } finally {
+      textSpy.mockRestore();
+    }
+  });
+});
+
 describe("V2 cover cards — decision-focused KPIs (spec §6)", () => {
   it("cover cards show period-volume comparison, continued-problem count, and high-priority facility count; open/late move to the secondary footer line", async () => {
     const textSpy = vi.spyOn(PDFDocument.prototype, "text");
@@ -971,6 +1067,36 @@ describe("V2 monthly chart contract + KPI packing", () => {
     });
     expect(topRows).toBe(5);
     expect(bottomRows).toBe(5);
+  });
+
+  it("resolveV2FacilityRowCounts reserves additionalReservedHeight (e.g. the operational-practices grid) before granting facility rows", () => {
+    const shared = {
+      pageHeight: 1200,
+      margin: 42,
+      y: 300,
+      gap: 14,
+      topAvailableRows: 5,
+      bottomAvailableRows: 5,
+      requiredConclusionsHeight: computeV2ConclusionsBoxHeight(3),
+    };
+    const withoutReserve = resolveV2FacilityRowCounts(shared);
+    const withReserve = resolveV2FacilityRowCounts({ ...shared, additionalReservedHeight: 400 });
+    expect(withoutReserve.topRows).toBe(5);
+    expect(withReserve.topRows).toBeLessThan(withoutReserve.topRows);
+    expect(withReserve.bottomRows).toBeLessThan(withoutReserve.bottomRows);
+  });
+
+  it("resolveV2FacilityRowCounts treats a missing additionalReservedHeight as 0 (backward compatible)", () => {
+    const shared = {
+      pageHeight: 1200,
+      margin: 42,
+      y: 300,
+      gap: 14,
+      topAvailableRows: 5,
+      bottomAvailableRows: 5,
+      requiredConclusionsHeight: computeV2ConclusionsBoxHeight(3),
+    };
+    expect(resolveV2FacilityRowCounts(shared)).toEqual(resolveV2FacilityRowCounts({ ...shared, additionalReservedHeight: 0 }));
   });
 
   // These mirror the resolver's own internal layout constants (row height 26,

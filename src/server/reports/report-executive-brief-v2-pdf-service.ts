@@ -28,6 +28,7 @@ import type {
   FacilityFollowUpRow,
   BestPracticeCandidateRow,
 } from "@/lib/reports/report-contract";
+import { OPERATIONAL_PRACTICE_CARD_COUNT, type OperationalPracticeRow } from "@/lib/reports/operational-practices";
 import type { ExecutiveBriefV2Data, ReportData } from "./report-data-service";
 import { isExecutiveBriefV2Data } from "./report-data-service";
 import { renderLineChartPng, MIN_CHART_HEIGHT } from "./report-chart-service";
@@ -87,12 +88,19 @@ type V2Layout = {
   contentWidth: number;
 };
 
-function createV2Layout(regionCount: number): V2Layout {
+/**
+ * `operationalPracticesCount` grows page 4's height by the fixed
+ * "ممارسات تشغيلية مقترحة" grid reserve (see OPERATIONAL_PRACTICES_SECTION_HEIGHT)
+ * on top of whatever the region-count term already produces — the same
+ * "expand height, not page count" pattern the region-card term already uses.
+ */
+function createV2Layout(regionCount: number, operationalPracticesCount: number): V2Layout {
   const margin = 42;
   const [pw, ph] = PRINT_EXECUTIVE_PAGE_SIZE;
   const safeCount = Math.min(regionCount, MAX_REGION_ROWS);
   const cardRows = Math.ceil(safeCount / 4);
-  const pageH = Math.max(ph, 880 + cardRows * 118 + safeCount * 28);
+  const practicesReserve = operationalPracticesCount > 0 ? OPERATIONAL_PRACTICES_SECTION_HEIGHT : 0;
+  const pageH = Math.max(ph, 880 + cardRows * 118 + safeCount * 28) + practicesReserve;
   return { pageSize: [pw, pageH] as const, margin, contentWidth: pw - margin * 2 };
 }
 
@@ -192,9 +200,11 @@ export function resolveV2FacilityRowCounts(input: {
   bottomAvailableRows: number;
   /** Height drawBulletBox needs to show every actual conclusion — see {@link computeV2ConclusionsBoxHeight}. */
   requiredConclusionsHeight: number;
+  /** Height of any other fixed section drawn between the facility tables and conclusions (e.g. the operational-practices grid) — reserved before facility rows, just like requiredConclusionsHeight. */
+  additionalReservedHeight?: number;
 }): { topRows: number; bottomRows: number } {
   const fixedChrome = FACILITY_SECTION_TITLE_H * 2 + input.gap * 2;
-  const budget = input.pageHeight - input.margin - 26 - input.y - fixedChrome;
+  const budget = input.pageHeight - input.margin - 26 - input.y - fixedChrome - (input.additionalReservedHeight ?? 0);
 
   for (let rows = FACILITY_MAX_ROWS; rows >= 0; rows--) {
     const topRows = Math.min(rows, input.topAvailableRows);
@@ -1139,9 +1149,25 @@ function formatFacilityFollowUpCell(row: FacilityFollowUpRow, key: string): stri
   return formatTableValue((row as Record<string, unknown>)[key]);
 }
 
+/**
+ * PDF-display-only shortening of the candidate table's "سبب الاختيار"
+ * column — the full-length reasonLabel produced by best-practice-candidate.ts
+ * (see its buildReasonLabel) stays unchanged everywhere else (conclusions
+ * text, any future documentation workflow); only this narrow table column
+ * gets a short version so a long sentence never renders truncated inside
+ * the cell. Candidacy gates, merit score, and ranking are untouched — this
+ * is a wording map only, keyed on the exact known reasonLabel values.
+ */
+function shortenBestPracticeReasonForDisplay(reasonLabel: string): string {
+  if (reasonLabel.startsWith("انخفاض مستدام عبر")) return "تحسن مستدام";
+  if (reasonLabel === "تحسن مستدام مع انخفاض جوهري في حجم الشكاوى") return "انخفاض جوهري ومستدام";
+  return reasonLabel; // "تحسن قوي ومستدام" is already short; defensive fallback for any other value.
+}
+
 /** "مقدار التحسن" is shown as a negative amount (e.g. "−41") — the decrease itself is stored positive so other math (merit score, sorting) never has to fight a sign. */
 function formatBestPracticeCandidateCell(row: BestPracticeCandidateRow, key: string): string {
   if (key === "improvementAmount") return formatReportNumber(-row.decrease);
+  if (key === "reasonLabel") return shortenBestPracticeReasonForDisplay(row.reasonLabel);
   return formatTableValue((row as Record<string, unknown>)[key]);
 }
 
@@ -1295,6 +1321,95 @@ async function renderPage3(ctx: V2Context): Promise<void> {
   );
 }
 
+// ── Operational practices grid ("ممارسات تشغيلية مقترحة") ──────────────────────
+
+const PRACTICE_SUBTITLE_H = 16;
+const PRACTICE_CARD_GAP = 10;
+const PRACTICE_CARD_H = 92;
+const PRACTICE_GRID_COLS = 2;
+const PRACTICE_GRID_ROWS = 2;
+const PRACTICE_SECTION_TRAILING_GAP = 14;
+
+/** Fixed vertical reserve createV2Layout grows page 4 by when practices exist — kept as a single source of truth with the draw function below. */
+const OPERATIONAL_PRACTICES_SECTION_HEIGHT =
+  FACILITY_SECTION_TITLE_H
+  + PRACTICE_SUBTITLE_H
+  + PRACTICE_GRID_ROWS * PRACTICE_CARD_H
+  + (PRACTICE_GRID_ROWS - 1) * PRACTICE_CARD_GAP
+  + PRACTICE_SECTION_TRAILING_GAP;
+
+/**
+ * "ممارسات تشغيلية مقترحة" (spec): up to 4 pre-approved, generic
+ * operational-practice recommendations — see operational-practices.ts.
+ * Deliberately separate from "حالات التحسن المستدام المرشحة للدراسة"
+ * above: only title/description are ever rendered, never topic,
+ * selectionReason, or any other internal field, and the wording never
+ * claims these practices are proven or already the cause of any facility's
+ * improvement.
+ */
+function drawOperationalPracticesSection(
+  doc: PDFKit.PDFDocument,
+  practices: readonly OperationalPracticeRow[],
+  x: number,
+  y: number,
+  width: number
+): number {
+  const cursorY = drawSectionTitle(doc, "ممارسات تشغيلية مقترحة", x, y, width);
+
+  doc.font("Body").fontSize(9.5).fillColor(COLORS.neutral).text(
+    preparePdfText("ممارسات مختارة بما يتناسب مع أبرز موضوعات الشكاوى خلال الفترة — توصيات تشغيلية عامة وليست ممارسات مثبتة من بيانات موقع بعينه."),
+    x,
+    cursorY,
+    { width, align: "right", wordSpacing: WORD_SPACING, lineBreak: false, ellipsis: true }
+  );
+  const gridY = cursorY + PRACTICE_SUBTITLE_H;
+
+  if (practices.length === 0) {
+    const boxBottom = drawInfoBox(doc, "لا تتوفر ممارسات تشغيلية مقترحة لهذه الفترة.", x, gridY, width);
+    resetInk(doc);
+    return boxBottom + PRACTICE_SECTION_TRAILING_GAP;
+  }
+
+  const shown = practices.slice(0, OPERATIONAL_PRACTICE_CARD_COUNT);
+  const cardW = (width - PRACTICE_CARD_GAP * (PRACTICE_GRID_COLS - 1)) / PRACTICE_GRID_COLS;
+  const r = REPORT_DESIGN_TOKENS.card.radius;
+  const padX = 10;
+  const innerW = cardW - padX * 2;
+
+  shown.forEach((practice, idx) => {
+    const row = Math.floor(idx / PRACTICE_GRID_COLS);
+    const col = idx % PRACTICE_GRID_COLS;
+    // RTL reading order: card 1 sits top-right, matching region-card layout elsewhere on this page.
+    const cx = x + (PRACTICE_GRID_COLS - 1 - col) * (cardW + PRACTICE_CARD_GAP);
+    const cy = gridY + row * (PRACTICE_CARD_H + PRACTICE_CARD_GAP);
+
+    doc.roundedRect(cx, cy, cardW, PRACTICE_CARD_H, r).fillAndStroke(COLORS.background, COLORS.border);
+
+    doc.font("Bold").fontSize(9).fillColor(COLORS.gold).text(
+      String(idx + 1).padStart(2, "0"),
+      cx + padX,
+      cy + 8,
+      { width: innerW, align: "right" }
+    );
+    doc.font("Bold").fontSize(10.5).fillColor(COLORS.primary).text(
+      preparePdfText(practice.title),
+      cx + padX,
+      cy + 21,
+      { width: innerW, height: 27, align: "right", wordSpacing: WORD_SPACING, ellipsis: true }
+    );
+    doc.font("Body").fontSize(8.5).fillColor(COLORS.text).text(
+      preparePdfText(practice.description),
+      cx + padX,
+      cy + 50,
+      { width: innerW, height: 34, align: "right", wordSpacing: WORD_SPACING, ellipsis: true, lineGap: 1 }
+    );
+  });
+  resetInk(doc);
+
+  const gridRows = Math.ceil(shown.length / PRACTICE_GRID_COLS);
+  return gridY + gridRows * PRACTICE_CARD_H + Math.max(0, gridRows - 1) * PRACTICE_CARD_GAP + PRACTICE_SECTION_TRAILING_GAP;
+}
+
 // ── Page 4: Classifications + Facilities + Conclusions ─────────────────────────
 
 function renderPage4(ctx: V2Context): void {
@@ -1303,6 +1418,7 @@ function renderPage4(ctx: V2Context): void {
   const classRows = brief.topClassifications.slice(0, TOP_CLASSIFICATIONS_V2_LIMIT);
   const followUpRows = brief.facilitiesNeedingFollowUp ?? [];
   const bestPracticeRows = brief.bestPracticeCandidates ?? [];
+  const operationalPractices = brief.operationalPractices ?? [];
   const conclusions = (brief.conclusions ?? []).slice(0, 5);
   const trendRows = brief.classificationTrends;
   const hasClassComparison = classRows.some((r) => r.previousCount > 0);
@@ -1389,6 +1505,7 @@ function renderPage4(ctx: V2Context): void {
     topAvailableRows: followUpRows.length,
     bottomAvailableRows: bestPracticeRows.length,
     requiredConclusionsHeight: computeV2ConclusionsBoxHeight(conclusions.length),
+    additionalReservedHeight: operationalPractices.length > 0 ? OPERATIONAL_PRACTICES_SECTION_HEIGHT : 0,
   });
   const followUpCols: ColDef[] = [
     { key: "facility", label: "السجن", weight: 1.3 },
@@ -1422,7 +1539,7 @@ function renderPage4(ctx: V2Context): void {
   });
   y += gap;
 
-  y = drawSectionTitle(doc, "الجهات المتميزة والمرشحة لدراسة الممارسات الناجحة", margin, y, contentWidth);
+  y = drawSectionTitle(doc, "حالات التحسن المستدام المرشحة للدراسة", margin, y, contentWidth);
   y = drawTable({
     doc,
     rows: bestPracticeRows.slice(0, facilityRowCounts.bottomRows),
@@ -1434,6 +1551,11 @@ function renderPage4(ctx: V2Context): void {
     formatCell: formatBestPracticeCandidateCell,
   });
   y += gap;
+
+  // ── Operational practices grid — visually and semantically separate from
+  // the best-practice-candidate table above (spec): a fixed, pre-approved
+  // set of generic suggestions, never a claim tied to this period's data. ──
+  y = drawOperationalPracticesSection(doc, operationalPractices, margin, y, contentWidth);
 
   // ── Conclusions (full-width) — data-quality notes are intentionally not rendered in V2 ──
   const availableH = resolveV2ConclusionsAvailableHeight(
@@ -1514,6 +1636,7 @@ const EMPTY_V2: ExecutiveBriefV2Data = {
   facilitiesNeedingFollowUp: [],
   bestPracticeCandidates: [],
   classificationTrends: [],
+  operationalPractices: [],
   periodMetrics: { current: EMPTY_PERIOD_SNAPSHOT_METRICS, previous: null },
   regionSnapshotAtEnd: [],
   departmentPeriodMetrics: [],
@@ -1539,7 +1662,7 @@ export async function renderExecutiveBriefV2Pdf(data: ReportData): Promise<Execu
     ? rawBrief
     : buildFallbackBrief(rawBrief);
 
-  const layout = createV2Layout(brief.allRegions.length);
+  const layout = createV2Layout(brief.allRegions.length, (brief.operationalPractices ?? []).length);
   const [PW, PH] = layout.pageSize;
 
   const doc = new PDFDocument({

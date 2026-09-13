@@ -51,6 +51,7 @@ import { isExecutiveBriefV2Data } from "./report-data-service";
 import type { ExecutiveBriefV2Data } from "./report-data-service";
 import { renderExecutiveBriefV2Pdf } from "./report-executive-brief-v2-pdf-service";
 import { buildRegionOnlyConclusions } from "./report-executive-brief-data-service";
+import { OPERATIONAL_PRACTICES } from "@/lib/reports/operational-practices";
 import { monthKeyFromReportEndDate } from "./report-monthly-trend-sanitize";
 import { calculateMonthlyTrendTotals } from "./report-monthly-trend-presentation";
 
@@ -274,6 +275,17 @@ describe.skipIf(!DEV_DB_AVAILABLE)(
       }
     });
 
+    it("source-of-truth item 4: any 'منها N مواقع مرشحة' conclusion sentence never names more sites than bestPracticeCandidates actually has unique facilities for (real DB — no row-vs-site mismatch)", () => {
+      const brief = requireV2Brief();
+      const uniqueCandidateFacilities = new Set((brief.bestPracticeCandidates ?? []).map((c) => c.facility)).size;
+      const digestSentence = (brief.conclusions ?? []).find((c) => c.includes("مرشح") && c.includes("ما تغير"));
+      if (!digestSentence) return; // no period-change digest sentence this period — nothing to check
+      const match = digestSentence.match(/منها\s+(\d+)/);
+      if (!match) return;
+      const claimedCount = Number(match[1]);
+      expect(claimedCount).toBeLessThanOrEqual(uniqueCandidateFacilities);
+    });
+
     it("data contract: buildRegionOnlyConclusions itself never mentions departments, facilities, or classifications — only regions", () => {
       const brief = requireV2Brief();
       const departmentNames = (brief.departmentPeriodMetrics ?? []).map((d) => d.departmentName);
@@ -316,6 +328,23 @@ describe.skipIf(!DEV_DB_AVAILABLE)(
       for (let i = 1; i < rows.length; i++) {
         expect(rows[i - 1]!.priorityScore).toBeGreaterThanOrEqual(rows[i]!.priorityScore);
       }
+    });
+
+    it("data contract: operationalPractices (\"ممارسات تشغيلية مقترحة\") is well-formed, sourced only from the approved library, and never overlaps bestPracticeCandidates", () => {
+      const brief = requireV2Brief();
+      const practices = brief.operationalPractices ?? [];
+
+      expect(practices.length).toBeLessThanOrEqual(4);
+      expect(new Set(practices.map((p) => p.id)).size).toBe(practices.length);
+      for (const practice of practices) {
+        const libraryEntry = OPERATIONAL_PRACTICES.find((p) => p.id === practice.id);
+        expect(libraryEntry).toBeDefined();
+        expect(practice.title).toBe(libraryEntry!.title);
+        expect(practice.description).toBe(libraryEntry!.description);
+        expect(practice.topic).toBe(libraryEntry!.topic);
+      }
+      // Never the practice that narrates the BestPracticeCandidate workflow itself (spec §10).
+      expect(practices.some((p) => p.id === "cross-facility-knowledge-transfer")).toBe(false);
     });
 
     it("PDF smoke test: renders exactly four pages without throwing", () => {
