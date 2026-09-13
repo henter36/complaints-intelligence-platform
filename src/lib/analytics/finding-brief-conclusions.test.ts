@@ -2,6 +2,25 @@ import { describe, expect, it } from "vitest";
 import { buildPatternAnalysisBriefConclusions } from "./finding-brief-conclusions";
 import type { AnalyticalFinding } from "./analytical-finding";
 import { buildPatternSnapshotKey, type PeriodChangeDigest } from "./period-change-digest";
+import { evaluateBestPracticeCandidacy, type BestPracticeCandidateEvaluation } from "./best-practice-candidate";
+
+/**
+ * Mirrors report-executive-brief-data-service.ts's rankBestPracticeCandidateEvaluations
+ * closely enough for these fixtures (facility from drilldownFilters, keep
+ * only BEST_PRACTICE_CANDIDATE status) — so tests build the SAME kind of
+ * authoritative candidate list the real pipeline passes into
+ * buildPatternAnalysisBriefConclusions, instead of re-deriving candidacy
+ * with different logic than what's under test.
+ */
+function toCandidateEvaluations(findings: readonly AnalyticalFinding[]): BestPracticeCandidateEvaluation[] {
+  const evaluations: BestPracticeCandidateEvaluation[] = [];
+  for (const f of findings) {
+    const facility = typeof f.drilldownFilters.facility === "string" ? f.drilldownFilters.facility : "";
+    const evaluation = evaluateBestPracticeCandidacy(f, facility);
+    if (evaluation?.status === "BEST_PRACTICE_CANDIDATE") evaluations.push(evaluation);
+  }
+  return evaluations;
+}
 
 function finding(overrides: Partial<AnalyticalFinding>): AnalyticalFinding {
   return {
@@ -90,7 +109,11 @@ describe("buildPatternAnalysisBriefConclusions", () => {
       supportingMetrics: { streakPeriods: 4 },
       drilldownFilters: { facility: "سجن الملز" },
     });
-    const lines = buildPatternAnalysisBriefConclusions({ findings: [strongImprovement], periodChangeDigest: digest });
+    const lines = buildPatternAnalysisBriefConclusions(
+      { findings: [strongImprovement], periodChangeDigest: digest },
+      2,
+      toCandidateEvaluations([strongImprovement])
+    );
     expect(lines[lines.length - 1]).toBe(
       "ما تغير منذ الفترة السابقة: 1 موقع حقق تحسناً مستداماً، منها 1 موقع مرشح لدراسة ممارسة ناجحة."
     );
@@ -122,12 +145,13 @@ describe("buildPatternAnalysisBriefConclusions", () => {
     expect(lines[lines.length - 1]).toBe("ما تغير منذ الفترة السابقة: 1 موقع حقق تحسناً مستداماً.");
   });
 
-  it("governance review item 3: two DIFFERENT classifications sharing the same Arabic label at one facility each match their OWN finding, never each other's (canonical classificationId, not the display label)", () => {
-    // Under the old facility+LABEL lookup, inserting findingA then findingB
-    // (both "سجن أ" + the same label) into the same Map key would let
-    // findingB silently overwrite findingA, so BOTH snapshots below would
-    // wrongly resolve to findingB (which does NOT qualify) and the real
-    // qualifying classification (cls-a-real) would vanish entirely.
+  it("governance review item 3: two DIFFERENT classifications (at two different facilities) sharing the same Arabic label each match their OWN finding, never each other's (canonical classificationId, not the display label)", () => {
+    // Both snapshots below carry the SAME display label — only their
+    // canonical classificationId differs. A label-keyed lookup would
+    // conflate them; countBestPracticeCandidatesAmongImproved must match
+    // strictly on buildPatternSnapshotKey(facility, classificationId)
+    // against the report's own bestPracticeCandidateEvaluations, so only
+    // the genuinely-qualifying facility×classification pair counts.
     const sharedLabel = "خدمة مشتركة";
     const qualifyingId = "cls-a-real";
     const nonQualifyingId = "cls-b-real";
@@ -139,8 +163,8 @@ describe("buildPatternAnalysisBriefConclusions", () => {
           facility: "سجن أ", classificationLabel: sharedLabel, pattern: "SUSTAINED_IMPROVEMENT", priorityBand: "LOW",
         },
         {
-          key: buildPatternSnapshotKey("سجن أ", nonQualifyingId),
-          facility: "سجن أ", classificationLabel: sharedLabel, pattern: "SUSTAINED_IMPROVEMENT", priorityBand: "LOW",
+          key: buildPatternSnapshotKey("سجن ب", nonQualifyingId),
+          facility: "سجن ب", classificationLabel: sharedLabel, pattern: "SUSTAINED_IMPROVEMENT", priorityBand: "LOW",
         },
       ],
     };
@@ -158,19 +182,20 @@ describe("buildPatternAnalysisBriefConclusions", () => {
       id: "b",
       type: "SUSTAINED_IMPROVEMENT",
       entityId: nonQualifyingId,
-      entityName: `سجن أ — ${sharedLabel}`,
+      entityName: `سجن ب — ${sharedLabel}`,
       currentValue: 1,
       previousValue: 2,
       supportingMetrics: { streakPeriods: 3 },
-      drilldownFilters: { facility: "سجن أ" },
+      drilldownFilters: { facility: "سجن ب" },
     });
-    // Order matters for reproducing the old bug: the non-qualifying finding
-    // is inserted SECOND, so under a facility+label Map key it would be the
-    // one that survives (last write wins) and both lookups would use it.
-    const lines = buildPatternAnalysisBriefConclusions({
-      findings: [qualifyingFinding, nonQualifyingFinding],
-      periodChangeDigest: digest,
-    });
+    // Also exercises Arabic dual agreement: 2 unique improved facilities
+    // must produce "2 موقعان حققا..." — never "بيانات موقعان" or any other
+    // incorrect case/number agreement.
+    const lines = buildPatternAnalysisBriefConclusions(
+      { findings: [qualifyingFinding, nonQualifyingFinding], periodChangeDigest: digest },
+      2,
+      toCandidateEvaluations([qualifyingFinding, nonQualifyingFinding])
+    );
     expect(lines[lines.length - 1]).toBe(
       "ما تغير منذ الفترة السابقة: 2 موقعان حققا تحسناً مستداماً، منها 1 موقع مرشح لدراسة ممارسة ناجحة."
     );

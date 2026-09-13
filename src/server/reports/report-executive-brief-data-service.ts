@@ -35,6 +35,7 @@ import {
   buildBestPracticeComparisonConclusion,
   type BestPracticeCandidateEvaluation,
 } from "@/lib/analytics/best-practice-candidate";
+import { selectOperationalPractices } from "@/lib/reports/operational-practices";
 import type {
   ExecutiveBriefData,
   ExecutiveBriefV2Data,
@@ -643,7 +644,7 @@ function toBestPracticeCandidateRow(evaluation: BestPracticeCandidateEvaluation)
 }
 
 /**
- * "الجهات المتميزة والمرشحة لدراسة الممارسات الناجحة": every facility×
+ * "حالات التحسن المستدام المرشحة للدراسة": every facility×
  * classification pair with a SUSTAINED_IMPROVEMENT finding that ALSO clears
  * the best-practice-candidate gates (see best-practice-candidate.ts /
  * PATTERN_ANALYSIS_CONFIG.bestPracticeCandidate) — a real multi-period
@@ -1458,8 +1459,16 @@ async function buildExecutiveBriefDataWithSnapshot(
     // engine's own explanation text, never re-derived — capped small enough
     // (spec §1: "دون إغراق التقرير بالتفاصيل") to stay inside the existing
     // conclusions-box budget alongside the base region/department conclusions.
+    // Same authoritative candidate list the V2 path uses (see
+    // buildExecutiveBriefV2Data) — computed here too so this legacy/base
+    // brief's own digest sentence never loses its "منها N مواقع مرشحة"
+    // clause just because this call site predates that parameter existing.
     conclusions: [
-      ...buildPatternAnalysisBriefConclusions(patternAnalysis, 2),
+      ...buildPatternAnalysisBriefConclusions(
+        patternAnalysis,
+        2,
+        rankBestPracticeCandidateEvaluations(patternAnalysis?.findings ?? [])
+      ),
       ...buildConclusions(result, comparison, snapshotData.byDepartment, snapshotData.byClassification),
     ],
     notes: buildNotes(result, comparison),
@@ -2078,6 +2087,27 @@ export async function buildExecutiveBriefV2Data(
   const classificationTrends = buildClassificationTrendRows(patternFindings);
   const classificationAffectedFacilityCounts = computeClassificationAffectedFacilityCounts(patternFindings);
 
+  // "ممارسات تشغيلية مقترحة" (spec-governed operational-practices section):
+  // the topic-ranking selector needs the FULL facility×classification trend
+  // set, not the page-4 table's top-CLASSIFICATION_TRENDS_LIMIT slice, so a
+  // real chronic/high-priority topic can never lose its selection weight
+  // just because it missed that unrelated display cut.
+  //
+  // Known limitation: recentPracticeIds is always [] for now — avoiding the
+  // last 3 comparable reports' practices requires threading reportTemplateId
+  // through this (currently template-agnostic) function and querying
+  // ReportRun.resultSummary (an existing Json column — no migration needed)
+  // for prior runs of that template. That plumbing is out of scope here;
+  // until it exists, the deterministic report-period rotation below is the
+  // only anti-repetition mechanism. See operational-practices.ts.
+  const operationalPractices = selectOperationalPractices({
+    classificationTrends: buildClassificationTrendRows(patternFindings, Number.POSITIVE_INFINITY),
+    facilitiesNeedingFollowUp: allFacilityFollowUpRows,
+    patternFindings,
+    recentPracticeIds: [],
+    reportPeriod: { from: filters.from, to: filters.to },
+  });
+
   // Best-practice sentences (spec items 5, 10) are inserted right after the
   // pattern-analysis conclusions. Room for them is reserved DYNAMICALLY —
   // the pattern-analysis cap only shrinks from its original 3 by exactly
@@ -2102,13 +2132,14 @@ export async function buildExecutiveBriefV2Data(
     facilitiesNeedingFollowUp,
     bestPracticeCandidates,
     classificationTrends,
+    operationalPractices,
     // V2-only: region-only conclusions stay the base, led by up to
     // `patternConclusionsCap` high-priority pattern-analysis sentences
     // (spec §10, dynamically sized — see above), then the best-practice-
     // candidate summary/comparison sentences — the engine's own
     // explanation text, never re-derived here.
     conclusions: [
-      ...buildPatternAnalysisBriefConclusions(briefData.patternAnalysis, patternConclusionsCap),
+      ...buildPatternAnalysisBriefConclusions(briefData.patternAnalysis, patternConclusionsCap, bestPracticeCandidateEvaluations),
       ...(bestPracticeSummary ? [bestPracticeSummary] : []),
       ...(bestPracticeComparison ? [bestPracticeComparison] : []),
       ...buildRegionOnlyConclusions(comparison),

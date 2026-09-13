@@ -17,11 +17,45 @@ import {
   resolveV2ConclusionsAvailableHeight,
   resolveV2FacilityRowCounts,
   computeV2ConclusionsBoxHeight,
+  operationalPracticesSectionHeight,
+  computePracticeCardHeight,
+  practiceCardInnerWidth,
+  PRACTICE_TITLE_MAX_LINES,
+  PRACTICE_DESCRIPTION_MAX_LINES,
+  PRACTICE_TITLE_FONT_SIZE,
+  PRACTICE_DESCRIPTION_FONT_SIZE,
 } from "./report-executive-brief-v2-pdf-service";
-import { preparePdfText } from "./arabic-pdf-text";
+import { preparePdfText, preparePdfTextLayout } from "./arabic-pdf-text";
 import { REPORT_DESIGN_TOKENS } from "@/lib/reports/design-tokens";
 import { UNCLASSIFIED_CLASSIFICATION_KEY } from "@/lib/reports/classification-keys";
 import { MIN_CHART_HEIGHT } from "./report-chart-service";
+import { OPERATIONAL_PRACTICES, OPERATIONAL_PRACTICE_CARD_COUNT } from "@/lib/reports/operational-practices";
+
+function makeFontDoc(): PDFKit.PDFDocument {
+  const doc = new PDFDocument({ size: [200, 200], margin: 0 });
+  const assets = path.join(process.cwd(), "src/server/reports/assets/fonts");
+  doc.registerFont("Body", fs.readFileSync(path.join(assets, "Amiri-Regular.ttf")));
+  doc.registerFont("Bold", fs.readFileSync(path.join(assets, "Amiri-Bold.ttf")));
+  return doc;
+}
+
+/**
+ * Extracted to cut duplicated spy/try/finally boilerplate across the many
+ * "render then inspect drawn text" tests below (SonarCloud duplication) —
+ * test-only helper, changes no assertions or test intent.
+ */
+async function captureRenderedPdfText(
+  report: ReportData
+): Promise<{ result: Awaited<ReturnType<typeof renderExecutiveBriefV2Pdf>>; rendered: string[]; joined: string }> {
+  const textSpy = vi.spyOn(PDFDocument.prototype, "text");
+  try {
+    const result = await renderExecutiveBriefV2Pdf(report);
+    const rendered = textSpy.mock.calls.map((call) => String(call[0]));
+    return { result, rendered, joined: rendered.join("\n") };
+  } finally {
+    textSpy.mockRestore();
+  }
+}
 
 const DANGER = REPORT_DESIGN_TOKENS.colors.danger;
 const UNAVAILABLE_TREND_DATA_MESSAGE =
@@ -97,6 +131,12 @@ function makeV2Brief(overrides: Partial<ExecutiveBriefV2Data> = {}): ExecutiveBr
       { facility: "سجن الملز", classification: "نقل", currentCount: 60, difference: 40, trail: "20، 35، 48، 60", streakPeriods: 4, patternLabel: "استمرار مرتفع", priorityScore: 80 },
       { facility: "سجن الشميسي", classification: "استفسار", currentCount: 12, difference: 12, trail: "0، 0، 1، 12", streakPeriods: 1, patternLabel: "مشكلة ناشئة", priorityScore: 55 },
       { facility: "سجن الدمام", classification: "صيانة", currentCount: 5, difference: -25, trail: "30، 22، 12، 5", streakPeriods: 4, patternLabel: "تحسن مستدام", priorityScore: 0 },
+    ],
+    operationalPractices: [
+      { id: "request-tracking-number", title: "رقم متابعة لكل طلب", description: "منح كل طلب رقماً مرجعياً يتيح معرفة حالته والإجراء المتخذ عليه حتى الإقفال.", topic: "REQUEST_MANAGEMENT", selectionReason: "REPORT_VOLUME" },
+      { id: "medication-continuity", title: "استمرارية صرف الأدوية", description: "متابعة الوصفات والأدوية قبل نفادها ومعالجة أي تعثر في الصرف قبل أن يؤدي إلى انقطاع العلاج.", topic: "MEDICATION", selectionReason: "REPORT_PRIORITY" },
+      { id: "belongings-custody-control", title: "ضبط الأمانات والمقتنيات", description: "توثيق استلام وتسليم وحركة الأمانات والمقتنيات بما يتيح الرجوع إلى سجل واضح عند وجود مطالبة أو شكوى.", topic: "BELONGINGS", selectionReason: "REPORT_PRIORITY" },
+      { id: "root-cause-remediation", title: "معالجة السبب الجذري", description: "عند تكرار المشكلة يتم تحديد السبب التشغيلي ووضع إجراء يمنع تكرارها بدلاً من معالجة الحالات بصورة منفردة.", topic: "ROOT_CAUSE", selectionReason: "GENERAL_ROTATION" },
     ],
     conclusions: ["استنتاج تجريبي."],
     notes: ["ملاحظة جودة بيانات تجريبية."],
@@ -352,15 +392,9 @@ describe("renderExecutiveBriefV2Pdf", () => {
   });
 
   it("shows جديد when previousCount is 0 and uses signed subject declines", async () => {
-    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
-    try {
-      await renderExecutiveBriefV2Pdf(makeV2Report());
-      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
-      expect(joined).toContain("جديد");
-      expect(joined).toMatch(/−7/);
-    } finally {
-      textSpy.mockRestore();
-    }
+    const { joined } = await captureRenderedPdfText(makeV2Report());
+    expect(joined).toContain("جديد");
+    expect(joined).toMatch(/−7/);
   });
 
   it("renders table headers without deleted note section titles", async () => {
@@ -495,23 +529,17 @@ describe("V2 page 4 — facilities replace departments (spec sections 5-9, 14-16
 
 describe("V2 page 4 — classification trends replace classification changes (spec sections 1-2, 9, 14-16)", () => {
   it("renders 'المستمرة' and every facility/classification/pattern label, never the old rises heading or its department-based text", async () => {
-    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
-    try {
-      await renderExecutiveBriefV2Pdf(makeV2Report());
-      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
-      expect(joined).toContain("المستمرة");
-      for (const token of ["نقل", "استفسار", "صيانة"]) {
-        expect(joined).toContain(token);
-      }
-      expect(joined).not.toContain("الارتفاعات الملحوظة");
-      expect(joined).not.toContain("لا توجد ارتفاعات إدارية حادة في هذه الفترة");
-      // "المتابعة" is the department name in makeV2Report()'s deptClassRises
-      // fixture (still a valid ComparisonResult field — just unused by V2
-      // page 4 now). It must never leak into the rendered page text.
-      expect(joined).not.toContain("المتابعة");
-    } finally {
-      textSpy.mockRestore();
+    const { joined } = await captureRenderedPdfText(makeV2Report());
+    expect(joined).toContain("المستمرة");
+    for (const token of ["نقل", "استفسار", "صيانة"]) {
+      expect(joined).toContain(token);
     }
+    expect(joined).not.toContain("الارتفاعات الملحوظة");
+    expect(joined).not.toContain("لا توجد ارتفاعات إدارية حادة في هذه الفترة");
+    // "المتابعة" is the department name in makeV2Report()'s deptClassRises
+    // fixture (still a valid ComparisonResult field — just unused by V2
+    // page 4 now). It must never leak into the rendered page text.
+    expect(joined).not.toContain("المتابعة");
   });
 
   it("never reads comparisonData.deptClassRises for page 4, even when it has real department data and classificationTrends is empty", async () => {
@@ -626,82 +654,202 @@ describe("V2 page 4 — classification trends replace classification changes (sp
   });
 });
 
+describe("V2 page 4 — operational practices grid (\"ممارسات تشغيلية مقترحة\")", () => {
+  it("renders exactly the 4 fixture cards' titles and descriptions verbatim, the section title, and never an internal field", async () => {
+    const { rendered } = await captureRenderedPdfText(makeV2Report());
+    expect(rendered).toContain(preparePdfText("ممارسات تشغيلية مقترحة"));
+    for (const practice of makeV2Brief().operationalPractices!) {
+      expect(rendered).toContain(preparePdfText(practice.title));
+      expect(rendered).toContain(preparePdfText(practice.description));
+      // Internal-only fields must never be drawn.
+      expect(rendered.join("\n")).not.toContain(practice.topic);
+      expect(rendered.join("\n")).not.toContain(practice.selectionReason);
+    }
+  });
+
+  it("is visually and semantically separate from the best-practice-candidate section (both titles render, neither text is dropped)", async () => {
+    const { joined } = await captureRenderedPdfText(makeV2Report());
+    expect(joined).toContain(preparePdfText("ممارسات تشغيلية مقترحة"));
+    expect(joined).toContain(preparePdfText("حالات التحسن المستدام المرشحة للدراسة"));
+    // Never the disallowed "أفضل الممارسات" title (spec §7 — not proven from this facility's data).
+    expect(joined).not.toContain(preparePdfText("أفضل الممارسات"));
+  });
+
+  it("never claims a practice is proven or already the cause of an improvement", async () => {
+    const { joined } = await captureRenderedPdfText(makeV2Report());
+    for (const forbidden of ["هذه الممارسات ستعالج المشكلات", "ثبت نجاحها", "هي سبب انخفاض الشكاوى"]) {
+      expect(joined).not.toContain(preparePdfText(forbidden));
+    }
+  });
+
+  it("stays exactly 4 pages with the practices grid populated, and with it empty", async () => {
+    const withPractices = await renderExecutiveBriefV2Pdf(makeV2Report());
+    expect(countPageObjects(withPractices.buffer)).toBe(4);
+    expect(withPractices.warnings.every((w) => !w.includes("بدلًا من"))).toBe(true);
+
+    const withoutPractices = await renderExecutiveBriefV2Pdf(
+      makeV2Report({ briefData: makeV2Brief({ operationalPractices: [] }) })
+    );
+    expect(countPageObjects(withoutPractices.buffer)).toBe(4);
+    expect(withoutPractices.buffer.slice(0, 4).toString()).toBe("%PDF");
+  });
+
+  it("shows a graceful fallback message (not a crash) when there are no practices", async () => {
+    const { joined } = await captureRenderedPdfText(makeV2Report({ briefData: makeV2Brief({ operationalPractices: [] }) }));
+    expect(joined).toContain(preparePdfText("لا تتوفر ممارسات تشغيلية مقترحة لهذه الفترة."));
+  });
+
+  it("reserves real, non-zero room for the empty-state fallback (regression: layout previously reserved 0 while still drawing title/subtitle/info box)", () => {
+    const doc = makeFontDoc();
+    const emptyReserve = operationalPracticesSectionHeight(doc, 0, 816);
+    const populatedReserve = operationalPracticesSectionHeight(doc, OPERATIONAL_PRACTICE_CARD_COUNT, 816);
+    expect(emptyReserve).toBeGreaterThan(0);
+    // The empty fallback (title + subtitle + one info box) is legitimately
+    // shorter than a full 2x2 card grid, but never zero.
+    expect(emptyReserve).toBeLessThan(populatedReserve);
+    doc.end();
+  });
+
+  it("invariant: every approved OPERATIONAL_PRACTICES entry's title/description fits within the card's line budget — no truncation is ever possible for approved-library text", () => {
+    const doc = makeFontDoc();
+    const width = practiceCardInnerWidth(816); // production contentWidth: PRINT_EXECUTIVE_PAGE_SIZE[0] (900) - margin*2 (84)
+    const violations: string[] = [];
+    for (const practice of OPERATIONAL_PRACTICES) {
+      doc.font("Bold").fontSize(PRACTICE_TITLE_FONT_SIZE);
+      const titleLayout = preparePdfTextLayout(doc, practice.title, { width, align: "right", wordSpacing: REPORT_DESIGN_TOKENS.typography.wordSpacing });
+      doc.font("Body").fontSize(PRACTICE_DESCRIPTION_FONT_SIZE);
+      const descriptionLayout = preparePdfTextLayout(doc, practice.description, { width, align: "right", wordSpacing: REPORT_DESIGN_TOKENS.typography.wordSpacing });
+      if (titleLayout.lines.length > PRACTICE_TITLE_MAX_LINES || titleLayout.lines.some((l) => l.overflowsWidth)) {
+        violations.push(`${practice.id}: title needs ${titleLayout.lines.length} line(s) (max ${PRACTICE_TITLE_MAX_LINES})`);
+      }
+      if (descriptionLayout.lines.length > PRACTICE_DESCRIPTION_MAX_LINES || descriptionLayout.lines.some((l) => l.overflowsWidth)) {
+        violations.push(`${practice.id}: description needs ${descriptionLayout.lines.length} line(s) (max ${PRACTICE_DESCRIPTION_MAX_LINES})`);
+      }
+    }
+    expect(violations).toEqual([]);
+    doc.end();
+  });
+
+  it("long-boundary regression: the library's own longest title and longest description specifically fit, not just the average entry", () => {
+    const doc = makeFontDoc();
+    const width = practiceCardInnerWidth(816);
+    const longestTitle = OPERATIONAL_PRACTICES.reduce((a, b) => (b.title.length > a.title.length ? b : a));
+    const longestDescription = OPERATIONAL_PRACTICES.reduce((a, b) => (b.description.length > a.description.length ? b : a));
+    doc.font("Bold").fontSize(PRACTICE_TITLE_FONT_SIZE);
+    const titleLayout = preparePdfTextLayout(doc, longestTitle.title, { width, align: "right", wordSpacing: REPORT_DESIGN_TOKENS.typography.wordSpacing });
+    doc.font("Body").fontSize(PRACTICE_DESCRIPTION_FONT_SIZE);
+    const descriptionLayout = preparePdfTextLayout(doc, longestDescription.description, { width, align: "right", wordSpacing: REPORT_DESIGN_TOKENS.typography.wordSpacing });
+    expect(titleLayout.lines.length).toBeLessThanOrEqual(PRACTICE_TITLE_MAX_LINES);
+    expect(descriptionLayout.lines.length).toBeLessThanOrEqual(PRACTICE_DESCRIPTION_MAX_LINES);
+    doc.end();
+  });
+
+  it("computePracticeCardHeight matches the sum operationalPracticesSectionHeight actually reserves for a populated grid (no duplicated magic constants)", () => {
+    const doc = makeFontDoc();
+    const width = 816;
+    const cardH = computePracticeCardHeight(doc);
+    const reserved = operationalPracticesSectionHeight(doc, OPERATIONAL_PRACTICE_CARD_COUNT, width);
+    const gridRows = Math.ceil(OPERATIONAL_PRACTICE_CARD_COUNT / 2);
+    // reserved = titleH + subtitleH + gridRows*cardH + (gridRows-1)*cardGap + trailingGap;
+    // this just re-derives the same terms to prove cardH is genuinely load-bearing, not a stray constant.
+    expect(reserved).toBeGreaterThanOrEqual(gridRows * cardH);
+    doc.end();
+  });
+
+  it("does not shrink or drop conclusions just to make room for the practices grid — facility rows flex first", async () => {
+    const manyConclusions = Array.from({ length: 5 }, (_, i) => `استنتاج رقم ${i + 1}.`);
+    const result = await renderExecutiveBriefV2Pdf(
+      makeV2Report({ briefData: makeV2Brief({ conclusions: manyConclusions }) })
+    );
+    expect(countPageObjects(result.buffer)).toBe(4);
+    const { joined } = await captureRenderedPdfText(makeV2Report({ briefData: makeV2Brief({ conclusions: manyConclusions }) }));
+    for (const c of manyConclusions) {
+      expect(joined).toContain(preparePdfText(c));
+    }
+  });
+
+  it("regression: empty operationalPractices + near-maximum facility rows + 5 conclusions never drops a conclusion, and the report stays 4 pages", async () => {
+    const manyConclusions = Array.from({ length: 5 }, (_, i) => `استنتاج رقم ${i + 1}.`);
+    const manyFollowUp = Array.from({ length: 5 }, (_, i) => ({
+      facility: `سجن ${i}`, totalComplaints: 20, isHistoricalOnly: false, topIssueLabel: "قضية",
+      patternLabel: "استمرار مرتفع" as const, streakPeriods: 3,
+      repeatComplainants: null, repeatComplaints: null, spreadComplainants: null, spreadComplaints: null,
+      priorityBand: "مرتفعة" as const, priorityScore: 80 - i, isChronic: true, distinctComplainantsForRanking: 0,
+    }));
+    const manyBestPractice = Array.from({ length: 5 }, (_, i) => ({
+      facility: `سجن ${i}`, startValue: 30, currentValue: 5, decrease: 25, streakPeriods: 4,
+      classificationLabel: "تصنيف", reasonLabel: "تحسن قوي ومستدام",
+    }));
+    const report = makeV2Report({
+      briefData: makeV2Brief({
+        conclusions: manyConclusions,
+        facilitiesNeedingFollowUp: manyFollowUp,
+        bestPracticeCandidates: manyBestPractice,
+        operationalPractices: [],
+      }),
+    });
+    const result = await renderExecutiveBriefV2Pdf(report);
+    expect(countPageObjects(result.buffer)).toBe(4);
+    const { joined } = await captureRenderedPdfText(report);
+    for (const c of manyConclusions) {
+      expect(joined).toContain(preparePdfText(c));
+    }
+    expect(joined).toContain(preparePdfText("لا تتوفر ممارسات تشغيلية مقترحة لهذه الفترة."));
+  });
+});
+
 describe("V2 cover cards — decision-focused KPIs (spec §6)", () => {
   it("cover cards show period-volume comparison, continued-problem count, and high-priority facility count; open/late move to the secondary footer line", async () => {
-    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
-    try {
-      await renderExecutiveBriefV2Pdf(makeV2Report());
-      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
-      // periodMetrics.current: received=100 (fixture); continuedProblemFindingCount=2; highPriorityFacilityCount=1.
-      expect(joined).toContain("100");
-      expect(joined).toContain(preparePdfText("المشكلات المستمرة"));
-      expect(joined).toContain(preparePdfText("سجون ذات أولوية متابعة مرتفعة"));
-      // open=30, late=8 (fixture) still appear, but only as the secondary footer line.
-      expect(joined).toContain("30");
-      expect(joined).toContain("8");
-    } finally {
-      textSpy.mockRestore();
-    }
+    const { joined } = await captureRenderedPdfText(makeV2Report());
+    // periodMetrics.current: received=100 (fixture); continuedProblemFindingCount=2; highPriorityFacilityCount=1.
+    expect(joined).toContain("100");
+    expect(joined).toContain(preparePdfText("المشكلات المستمرة"));
+    expect(joined).toContain(preparePdfText("سجون ذات أولوية متابعة مرتفعة"));
+    // open=30, late=8 (fixture) still appear, but only as the secondary footer line.
+    expect(joined).toContain("30");
+    expect(joined).toContain("8");
   });
 
   it("shows جديد (never 0% or Infinity) on the period-volume card when the previous period had zero registrations", async () => {
-    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
-    try {
-      await renderExecutiveBriefV2Pdf(
-        makeV2Report({
-          briefData: makeV2Brief({
-            periodMetrics: {
-              current: { receivedDuringPeriod: 100, closedDuringPeriod: 12, openAtEnd: 30, lateAtEnd: 8 },
-              previous: { receivedDuringPeriod: 0, closedDuringPeriod: 0, openAtEnd: 25, lateAtEnd: 10 },
-            },
-          }),
-        })
-      );
-      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
-      expect(joined).toContain("جديد");
-      // A literal computed "(0%)" would mean a bogus 0-from-0 percentage leaked in;
-      // other unrelated percentages on the page (e.g. a classification's 30% share)
-      // legitimately contain the bare substring "0%", so this must stay specific.
-      expect(joined).not.toContain("(0%)");
-      expect(joined).not.toContain("Infinity");
-    } finally {
-      textSpy.mockRestore();
-    }
+    const { joined } = await captureRenderedPdfText(
+      makeV2Report({
+        briefData: makeV2Brief({
+          periodMetrics: {
+            current: { receivedDuringPeriod: 100, closedDuringPeriod: 12, openAtEnd: 30, lateAtEnd: 8 },
+            previous: { receivedDuringPeriod: 0, closedDuringPeriod: 0, openAtEnd: 25, lateAtEnd: 10 },
+          },
+        }),
+      })
+    );
+    expect(joined).toContain("جديد");
+    // A literal computed "(0%)" would mean a bogus 0-from-0 percentage leaked in;
+    // other unrelated percentages on the page (e.g. a classification's 30% share)
+    // legitimately contain the bare substring "0%", so this must stay specific.
+    expect(joined).not.toContain("(0%)");
+    expect(joined).not.toContain("Infinity");
   });
 
   it("uses periodMetrics.previous.receivedDuringPeriod for the period-volume card's difference/rate", async () => {
-    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
-    try {
-      await renderExecutiveBriefV2Pdf(
-        makeV2Report({
-          briefData: makeV2Brief({
-            periodMetrics: {
-              current: { receivedDuringPeriod: 100, closedDuringPeriod: 65, openAtEnd: 30, lateAtEnd: 8 },
-              previous: { receivedDuringPeriod: 80, closedDuringPeriod: 40, openAtEnd: 25, lateAtEnd: 10 },
-            },
-          }),
-        })
-      );
-      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
-      // difference = 100 - 80 = 20, changeRate = +25%
-      expect(joined).toMatch(/\+20/);
-      expect(joined).toContain("25");
-    } finally {
-      textSpy.mockRestore();
-    }
+    const { joined } = await captureRenderedPdfText(
+      makeV2Report({
+        briefData: makeV2Brief({
+          periodMetrics: {
+            current: { receivedDuringPeriod: 100, closedDuringPeriod: 65, openAtEnd: 30, lateAtEnd: 8 },
+            previous: { receivedDuringPeriod: 80, closedDuringPeriod: 40, openAtEnd: 25, lateAtEnd: 10 },
+          },
+        }),
+      })
+    );
+    // difference = 100 - 80 = 20, changeRate = +25%
+    expect(joined).toMatch(/\+20/);
+    expect(joined).toContain("25");
   });
 
   it("renders the windowed-totals caption on the monthly trend page", async () => {
-    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
-    try {
-      await renderExecutiveBriefV2Pdf(makeV2Report());
-      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
-      expect(joined).toContain(
-        preparePdfText("الإجماليان أعلاه يشملان الأشهر المعروضة في الرسم أدناه فقط (حتى 13 شهرًا).")
-      );
-    } finally {
-      textSpy.mockRestore();
-    }
+    const { joined } = await captureRenderedPdfText(makeV2Report());
+    expect(joined).toContain(
+      preparePdfText("الإجماليان أعلاه يشملان الأشهر المعروضة في الرسم أدناه فقط (حتى 13 شهرًا).")
+    );
   });
 });
 
@@ -971,6 +1119,36 @@ describe("V2 monthly chart contract + KPI packing", () => {
     });
     expect(topRows).toBe(5);
     expect(bottomRows).toBe(5);
+  });
+
+  it("resolveV2FacilityRowCounts reserves additionalReservedHeight (e.g. the operational-practices grid) before granting facility rows", () => {
+    const shared = {
+      pageHeight: 1200,
+      margin: 42,
+      y: 300,
+      gap: 14,
+      topAvailableRows: 5,
+      bottomAvailableRows: 5,
+      requiredConclusionsHeight: computeV2ConclusionsBoxHeight(3),
+    };
+    const withoutReserve = resolveV2FacilityRowCounts(shared);
+    const withReserve = resolveV2FacilityRowCounts({ ...shared, additionalReservedHeight: 400 });
+    expect(withoutReserve.topRows).toBe(5);
+    expect(withReserve.topRows).toBeLessThan(withoutReserve.topRows);
+    expect(withReserve.bottomRows).toBeLessThan(withoutReserve.bottomRows);
+  });
+
+  it("resolveV2FacilityRowCounts treats a missing additionalReservedHeight as 0 (backward compatible)", () => {
+    const shared = {
+      pageHeight: 1200,
+      margin: 42,
+      y: 300,
+      gap: 14,
+      topAvailableRows: 5,
+      bottomAvailableRows: 5,
+      requiredConclusionsHeight: computeV2ConclusionsBoxHeight(3),
+    };
+    expect(resolveV2FacilityRowCounts(shared)).toEqual(resolveV2FacilityRowCounts({ ...shared, additionalReservedHeight: 0 }));
   });
 
   // These mirror the resolver's own internal layout constants (row height 26,
