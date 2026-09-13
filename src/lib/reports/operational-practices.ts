@@ -54,204 +54,66 @@ export type OperationalPractice = {
   isGeneral: boolean;
 };
 
-export const OPERATIONAL_PRACTICES: readonly OperationalPractice[] = [
-  {
-    id: "daily-health-request-followup",
-    title: "المتابعة اليومية للطلبات الصحية",
-    description: "حصر طلبات النزلاء الصحية يومياً، وتحديد الأولوية، ومتابعتها حتى العرض على المختص وإقفال الطلب.",
-    topic: "HEALTH_ACCESS",
-    classificationMatchers: ["طبيب", "صحة", "رعاية صحية", "عيادة", "كشف طبي"],
-    isGeneral: false,
-  },
-  {
-    id: "medical-appointment-attendance",
-    title: "ضمان حضور المواعيد الطبية",
-    description: "تسجيل المواعيد وترتيبات النقل مسبقاً ومتابعة تنفيذها لمنع فوات الموعد أو تأخر النزيل عنه.",
-    topic: "MEDICAL_APPOINTMENTS",
-    classificationMatchers: ["موعد طبي", "مستشفى", "عيادة خارجية", "نقل طبي"],
-    isGeneral: false,
-  },
-  {
-    id: "medication-continuity",
-    title: "استمرارية صرف الأدوية",
-    description: "متابعة الوصفات والأدوية قبل نفادها ومعالجة أي تعثر في الصرف قبل أن يؤدي إلى انقطاع العلاج.",
-    topic: "MEDICATION",
-    classificationMatchers: ["دواء", "علاج", "وصفة", "صرف علاج", "استمرارية العلاج"],
-    isGeneral: false,
-  },
-  {
-    id: "urgent-health-case-triage",
-    title: "فرز الحالات الصحية العاجلة",
-    description: "تطبيق آلية واضحة لتمييز الحالات الصحية العاجلة وإحالتها فوراً دون انتظار مسار الطلبات الاعتيادي.",
-    topic: "HEALTH_ACCESS",
-    classificationMatchers: ["حالة عاجلة", "مرض", "تسمم", "خطر صحي"],
-    isGeneral: false,
-  },
-  {
-    id: "request-tracking-number",
-    title: "رقم متابعة لكل طلب",
-    description: "منح كل طلب رقماً مرجعياً يتيح معرفة حالته والإجراء المتخذ عليه حتى الإقفال.",
-    topic: "REQUEST_MANAGEMENT",
-    classificationMatchers: ["طلبات", "متابعة", "خدمات", "معاملات"],
-    isGeneral: false,
-  },
-  {
-    id: "verified-request-closure",
-    title: "إقفال الطلب بعد التحقق من التنفيذ",
-    description: "عدم اعتبار الطلب منجزاً بمجرد إحالته، بل بعد تنفيذ الإجراء وتوثيق النتيجة.",
-    topic: "REQUEST_MANAGEMENT",
-    classificationMatchers: ["طلبات", "معاملات", "تأخر", "لم يتم التنفيذ"],
-    isGeneral: true,
-  },
-  {
-    id: "repeat-complaint-root-review",
-    title: "منع تكرار الشكوى",
-    description: "عند تكرار الشكوى تتم مراجعة المعالجة السابقة والتأكد من معالجة السبب الجذري وليس إعادة الإجراء نفسه.",
-    topic: "REPEAT_COMPLAINTS",
-    classificationMatchers: ["الشكاوى المتكررة", "إعادة الشكوى", "نفس المشتكي"],
-    isGeneral: false,
-  },
-  {
-    id: "collective-complaint-pattern-review",
-    title: "تحليل الشكاوى الجماعية",
-    description: "ارتفاع الشكوى نفسها لدى عدة نزلاء يعامل كمؤشر على مشكلة تشغيلية مشتركة وليس كحالات فردية منفصلة.",
-    topic: "COLLECTIVE_COMPLAINTS",
-    classificationMatchers: ["شكاوى جماعية", "انتشار المشكلة", "عدد كبير من النزلاء"],
-    isGeneral: false,
-  },
-  {
-    id: "complaint-owner-assignment",
-    title: "تحديد مسؤول لكل شكوى",
-    description: "إسناد كل شكوى إلى مسؤول واضح مع مدة مستهدفة للمعالجة ومتابعتها حتى الإقفال.",
-    topic: "REQUEST_MANAGEMENT",
-    classificationMatchers: ["متابعة", "تأخر", "عدم الرد", "شكوى مفتوحة"],
-    isGeneral: true,
-  },
-  {
-    id: "early-overdue-escalation",
-    title: "التصعيد المبكر للمتأخرات",
-    description: "تصعيد الشكاوى التي تتجاوز المدة المعتمدة إلى المستوى الإداري المناسب قبل تحولها إلى مشكلة مزمنة.",
-    topic: "SERVICE_TIME",
-    classificationMatchers: ["متأخرة", "تجاوز المدة", "تأخر المعالجة"],
-    isGeneral: false,
-  },
-  {
-    id: "periodic-ward-rounds",
-    title: "المرور الدوري داخل العنابر",
-    description: "تنظيم مرور المختصين بصورة دورية لاستقبال طلبات النزلاء ميدانياً وتقليل الحاجة إلى تقديم شكوى للوصول إلى الخدمة.",
-    topic: "FIELD_VISITS",
-    classificationMatchers: ["عدم دخول المختص", "مقابلة المختص", "طلبات النزلاء", "عنابر"],
-    isGeneral: false,
-  },
-  {
-    id: "field-visit-documentation",
-    title: "توثيق نتائج المرور الميداني",
-    description: "تسجيل ما تم رصده خلال الجولات والإجراء المتخذ والمسؤول عن المعالجة وتاريخ الإقفال.",
-    topic: "FIELD_VISITS",
-    classificationMatchers: ["جولات", "متابعة ميدانية", "ملاحظات"],
-    isGeneral: false,
-  },
-  {
-    id: "belongings-custody-control",
-    title: "ضبط الأمانات والمقتنيات",
-    description: "توثيق استلام وتسليم وحركة الأمانات والمقتنيات بما يتيح الرجوع إلى سجل واضح عند وجود مطالبة أو شكوى.",
-    topic: "BELONGINGS",
-    classificationMatchers: ["أمانات", "مقتنيات", "ودائع", "أموال", "أغراض شخصية"],
-    isGeneral: false,
-  },
-  {
-    id: "agency-service-control",
-    title: "ضبط إجراءات الوكالات والخدمات الشخصية",
-    description: "تحديد متطلبات الخدمة ومسؤول التنفيذ والمدة المستهدفة وإبلاغ النزيل بحالة الطلب.",
-    topic: "AGENCIES",
-    // "وكالات" (plural) is listed alongside "وكالة" (singular) because a real
-    // classification label is as likely to read "الوكالات" as "الوكالة", and
-    // substring matching after normalization cannot bridge that plural/
-    // singular difference on its own (topic-mapping fix — spec review).
-    classificationMatchers: ["وكالة", "وكالات", "جهات", "خدمات شخصية", "وثائق"],
-    isGeneral: false,
-  },
-  {
-    id: "release-case-followup",
-    title: "متابعة طلبات الإفراج والقضايا",
-    description: "متابعة الطلبات المرتبطة بالإفراج والقضايا والجهات العدلية وفق مدة محددة وعدم تركها دون تحديث.",
-    topic: "LEGAL_RELEASE",
-    classificationMatchers: ["إفراج", "قضية", "عدلية", "محكمة", "نيابة"],
-    isGeneral: false,
-  },
-  {
-    id: "periodic-legal-status-review",
-    title: "المراجعة الدورية للوضع النظامي",
-    description: "مراجعة مدد المحكوميات وأوامر التوقيف والإجراءات النظامية قبل تواريخ الانتهاء وليس بعد حدوث التأخير.",
-    topic: "LEGAL_RELEASE",
-    classificationMatchers: ["انتهاء محكومية", "توقيف", "سند نظامي", "إطلاق سراح"],
-    isGeneral: false,
-  },
-  {
-    id: "nazeel-data-immediate-update",
-    title: "تحديث بيانات نظام نزيل فوراً",
-    description: "تسجيل المواعيد والإجراءات وحركة النزيل والتغير في حالته فور حدوثها لضمان سلامة البيانات والقرارات المبنية عليها.",
-    topic: "NAZEEL_DATA",
-    classificationMatchers: ["نظام نزيل", "بيانات", "تحديث", "موعد", "نقل"],
-    isGeneral: false,
-  },
-  {
-    id: "direct-interagency-coordination",
-    title: "التنسيق المباشر بين الجهات",
-    description: "معالجة الموضوعات المشتركة بالتواصل المباشر بين المختصين مع استخدام المخاطبات الرسمية لتوثيق ما تم.",
-    topic: "COORDINATION",
-    classificationMatchers: ["تنسيق", "جهة أخرى", "منطقة أخرى", "انتظار إفادة"],
-    isGeneral: true,
-  },
-  {
-    id: "service-completion-time-measurement",
-    title: "قياس زمن إنجاز الخدمة",
-    description: "قياس المدة من تقديم الطلب حتى تنفيذه، وعدم الاكتفاء بقياس أعداد الطلبات أو الشكاوى.",
-    topic: "SERVICE_TIME",
-    classificationMatchers: ["مدة", "تأخير", "إنجاز", "خدمة"],
-    isGeneral: true,
-  },
-  {
-    id: "root-cause-remediation",
-    title: "معالجة السبب الجذري",
-    description: "عند تكرار المشكلة يتم تحديد السبب التشغيلي ووضع إجراء يمنع تكرارها بدلاً من معالجة الحالات بصورة منفردة.",
-    topic: "ROOT_CAUSE",
-    classificationMatchers: ["مشكلة مزمنة", "تكرار", "استمرار", "ارتفاع مستمر"],
-    isGeneral: true,
-  },
-  {
-    id: "weekly-chronic-issue-review",
-    title: "مراجعة المشكلات المزمنة أسبوعياً",
-    description: "عرض المشكلات المستمرة على إدارة الموقع أسبوعياً مع تحديد مسؤول وخطة معالجة وتاريخ مستهدف للإقفال.",
-    topic: "CHRONIC_PROBLEMS",
-    classificationMatchers: ["CHRONIC_ISSUE", "مشكلة مزمنة", "استمرار عدة فترات"],
-    isGeneral: true,
-  },
-  {
-    id: "post-action-improvement-monitoring",
-    title: "متابعة التحسن بعد المعالجة",
-    description: "استمرار قياس المؤشر عدة فترات بعد تنفيذ المعالجة للتأكد من أن الانخفاض مستدام وليس مؤقتاً.",
-    topic: "POST_ACTION_MONITORING",
-    classificationMatchers: ["تحسن", "انخفاض", "متابعة النتائج"],
-    isGeneral: true,
-  },
-  {
-    id: "cross-facility-knowledge-transfer",
-    title: "نقل التجارب الناجحة بين السجون",
-    description: "دراسة المواقع التي تحقق تحسناً مستداماً في مشكلة محددة ومقارنتها بالمواقع التي لا تزال تواجه المشكلة نفسها.",
-    topic: "KNOWLEDGE_TRANSFER",
-    classificationMatchers: ["SUSTAINED_IMPROVEMENT", "مقارنة المواقع", "نقل المعرفة"],
-    isGeneral: false,
-  },
-  {
-    id: "response-quality-verification",
-    title: "التحقق من جودة الرد على الشكوى",
-    description: "يجب أن يوضح الرد الإجراء المنفذ ونتيجته وألا يقتصر على عبارات عامة مثل «تمت الإفادة» أو «تم التوجيه».",
-    topic: "RESPONSE_QUALITY",
-    classificationMatchers: ["رد الشكوى", "تمت الإفادة", "تم التوجيه", "إقفال الشكوى"],
-    isGeneral: true,
-  },
-] as const satisfies readonly OperationalPractice[];
+/**
+ * One row per approved practice. Authored as a compact data table (one line
+ * per practice) rather than 24 repeated `{ id:, title:, description:, ... }`
+ * object literals — the previous shape was flagged as duplicated code (every
+ * entry has the exact same field sequence, so any run of a few consecutive
+ * entries structurally matched any other run) even though the actual data
+ * never repeated. The 24 practices' ids, text, topics, matchers, and order
+ * are byte-for-byte unchanged — see OPERATIONAL_PRACTICES below, and
+ * operational-practices.test.ts for the invariant that keeps every row's
+ * title/description within the PDF card's line budget.
+ */
+type OperationalPracticeSeed = readonly [
+  id: string,
+  title: string,
+  description: string,
+  topic: OperationalPracticeTopic,
+  classificationMatchers: readonly string[],
+  isGeneral: boolean,
+];
+
+const OPERATIONAL_PRACTICE_SEEDS: readonly OperationalPracticeSeed[] = [
+  ["daily-health-request-followup", "المتابعة اليومية للطلبات الصحية", "حصر طلبات النزلاء الصحية يومياً، وتحديد الأولوية، ومتابعتها حتى العرض على المختص وإقفال الطلب.", "HEALTH_ACCESS", ["طبيب", "صحة", "رعاية صحية", "عيادة", "كشف طبي"], false],
+  ["medical-appointment-attendance", "ضمان حضور المواعيد الطبية", "تسجيل المواعيد وترتيبات النقل مسبقاً ومتابعة تنفيذها لمنع فوات الموعد أو تأخر النزيل عنه.", "MEDICAL_APPOINTMENTS", ["موعد طبي", "مستشفى", "عيادة خارجية", "نقل طبي"], false],
+  ["medication-continuity", "استمرارية صرف الأدوية", "متابعة الوصفات والأدوية قبل نفادها ومعالجة أي تعثر في الصرف قبل أن يؤدي إلى انقطاع العلاج.", "MEDICATION", ["دواء", "علاج", "وصفة", "صرف علاج", "استمرارية العلاج"], false],
+  ["urgent-health-case-triage", "فرز الحالات الصحية العاجلة", "تطبيق آلية واضحة لتمييز الحالات الصحية العاجلة وإحالتها فوراً دون انتظار مسار الطلبات الاعتيادي.", "HEALTH_ACCESS", ["حالة عاجلة", "مرض", "تسمم", "خطر صحي"], false],
+  ["request-tracking-number", "رقم متابعة لكل طلب", "منح كل طلب رقماً مرجعياً يتيح معرفة حالته والإجراء المتخذ عليه حتى الإقفال.", "REQUEST_MANAGEMENT", ["طلبات", "متابعة", "خدمات", "معاملات"], false],
+  ["verified-request-closure", "إقفال الطلب بعد التحقق من التنفيذ", "عدم اعتبار الطلب منجزاً بمجرد إحالته، بل بعد تنفيذ الإجراء وتوثيق النتيجة.", "REQUEST_MANAGEMENT", ["طلبات", "معاملات", "تأخر", "لم يتم التنفيذ"], true],
+  ["repeat-complaint-root-review", "منع تكرار الشكوى", "عند تكرار الشكوى تتم مراجعة المعالجة السابقة والتأكد من معالجة السبب الجذري وليس إعادة الإجراء نفسه.", "REPEAT_COMPLAINTS", ["الشكاوى المتكررة", "إعادة الشكوى", "نفس المشتكي"], false],
+  ["collective-complaint-pattern-review", "تحليل الشكاوى الجماعية", "ارتفاع الشكوى نفسها لدى عدة نزلاء يعامل كمؤشر على مشكلة تشغيلية مشتركة وليس كحالات فردية منفصلة.", "COLLECTIVE_COMPLAINTS", ["شكاوى جماعية", "انتشار المشكلة", "عدد كبير من النزلاء"], false],
+  ["complaint-owner-assignment", "تحديد مسؤول لكل شكوى", "إسناد كل شكوى إلى مسؤول واضح مع مدة مستهدفة للمعالجة ومتابعتها حتى الإقفال.", "REQUEST_MANAGEMENT", ["متابعة", "تأخر", "عدم الرد", "شكوى مفتوحة"], true],
+  ["early-overdue-escalation", "التصعيد المبكر للمتأخرات", "تصعيد الشكاوى التي تتجاوز المدة المعتمدة إلى المستوى الإداري المناسب قبل تحولها إلى مشكلة مزمنة.", "SERVICE_TIME", ["متأخرة", "تجاوز المدة", "تأخر المعالجة"], false],
+  ["periodic-ward-rounds", "المرور الدوري داخل العنابر", "تنظيم مرور المختصين بصورة دورية لاستقبال طلبات النزلاء ميدانياً وتقليل الحاجة إلى تقديم شكوى للوصول إلى الخدمة.", "FIELD_VISITS", ["عدم دخول المختص", "مقابلة المختص", "طلبات النزلاء", "عنابر"], false],
+  ["field-visit-documentation", "توثيق نتائج المرور الميداني", "تسجيل ما تم رصده خلال الجولات والإجراء المتخذ والمسؤول عن المعالجة وتاريخ الإقفال.", "FIELD_VISITS", ["جولات", "متابعة ميدانية", "ملاحظات"], false],
+  ["belongings-custody-control", "ضبط الأمانات والمقتنيات", "توثيق استلام وتسليم وحركة الأمانات والمقتنيات بما يتيح الرجوع إلى سجل واضح عند وجود مطالبة أو شكوى.", "BELONGINGS", ["أمانات", "مقتنيات", "ودائع", "أموال", "أغراض شخصية"], false],
+  // "وكالات" (plural) is listed alongside "وكالة" (singular): a real classification
+  // label is as likely to read "الوكالات" as "الوكالة", and substring matching
+  // after normalization cannot bridge that plural/singular difference alone.
+  ["agency-service-control", "ضبط إجراءات الوكالات والخدمات الشخصية", "تحديد متطلبات الخدمة ومسؤول التنفيذ والمدة المستهدفة وإبلاغ النزيل بحالة الطلب.", "AGENCIES", ["وكالة", "وكالات", "جهات", "خدمات شخصية", "وثائق"], false],
+  ["release-case-followup", "متابعة طلبات الإفراج والقضايا", "متابعة الطلبات المرتبطة بالإفراج والقضايا والجهات العدلية وفق مدة محددة وعدم تركها دون تحديث.", "LEGAL_RELEASE", ["إفراج", "قضية", "عدلية", "محكمة", "نيابة"], false],
+  ["periodic-legal-status-review", "المراجعة الدورية للوضع النظامي", "مراجعة مدد المحكوميات وأوامر التوقيف والإجراءات النظامية قبل تواريخ الانتهاء وليس بعد حدوث التأخير.", "LEGAL_RELEASE", ["انتهاء محكومية", "توقيف", "سند نظامي", "إطلاق سراح"], false],
+  ["nazeel-data-immediate-update", "تحديث بيانات نظام نزيل فوراً", "تسجيل المواعيد والإجراءات وحركة النزيل والتغير في حالته فور حدوثها لضمان سلامة البيانات والقرارات المبنية عليها.", "NAZEEL_DATA", ["نظام نزيل", "بيانات", "تحديث", "موعد", "نقل"], false],
+  ["direct-interagency-coordination", "التنسيق المباشر بين الجهات", "معالجة الموضوعات المشتركة بالتواصل المباشر بين المختصين مع استخدام المخاطبات الرسمية لتوثيق ما تم.", "COORDINATION", ["تنسيق", "جهة أخرى", "منطقة أخرى", "انتظار إفادة"], true],
+  ["service-completion-time-measurement", "قياس زمن إنجاز الخدمة", "قياس المدة من تقديم الطلب حتى تنفيذه، وعدم الاكتفاء بقياس أعداد الطلبات أو الشكاوى.", "SERVICE_TIME", ["مدة", "تأخير", "إنجاز", "خدمة"], true],
+  ["root-cause-remediation", "معالجة السبب الجذري", "عند تكرار المشكلة يتم تحديد السبب التشغيلي ووضع إجراء يمنع تكرارها بدلاً من معالجة الحالات بصورة منفردة.", "ROOT_CAUSE", ["مشكلة مزمنة", "تكرار", "استمرار", "ارتفاع مستمر"], true],
+  ["weekly-chronic-issue-review", "مراجعة المشكلات المزمنة أسبوعياً", "عرض المشكلات المستمرة على إدارة الموقع أسبوعياً مع تحديد مسؤول وخطة معالجة وتاريخ مستهدف للإقفال.", "CHRONIC_PROBLEMS", ["CHRONIC_ISSUE", "مشكلة مزمنة", "استمرار عدة فترات"], true],
+  ["post-action-improvement-monitoring", "متابعة التحسن بعد المعالجة", "استمرار قياس المؤشر عدة فترات بعد تنفيذ المعالجة للتأكد من أن الانخفاض مستدام وليس مؤقتاً.", "POST_ACTION_MONITORING", ["تحسن", "انخفاض", "متابعة النتائج"], true],
+  ["cross-facility-knowledge-transfer", "نقل التجارب الناجحة بين السجون", "دراسة المواقع التي تحقق تحسناً مستداماً في مشكلة محددة ومقارنتها بالمواقع التي لا تزال تواجه المشكلة نفسها.", "KNOWLEDGE_TRANSFER", ["SUSTAINED_IMPROVEMENT", "مقارنة المواقع", "نقل المعرفة"], false],
+  ["response-quality-verification", "التحقق من جودة الرد على الشكوى", "يجب أن يوضح الرد الإجراء المنفذ ونتيجته وألا يقتصر على عبارات عامة مثل «تمت الإفادة» أو «تم التوجيه».", "RESPONSE_QUALITY", ["رد الشكوى", "تمت الإفادة", "تم التوجيه", "إقفال الشكوى"], true],
+];
+
+export const OPERATIONAL_PRACTICES: readonly OperationalPractice[] = OPERATIONAL_PRACTICE_SEEDS.map(
+  ([id, title, description, topic, classificationMatchers, isGeneral]) => ({
+    id,
+    title,
+    description,
+    topic,
+    classificationMatchers,
+    isGeneral,
+  })
+);
 
 const OPERATIONAL_PRACTICE_BY_ID: ReadonlyMap<string, OperationalPractice> = new Map(
   OPERATIONAL_PRACTICES.map((p) => [p.id, p])

@@ -86,6 +86,30 @@ function baseInput(overrides: Partial<SelectOperationalPracticesInput> = {}): Se
 
 const ALL_PRACTICE_IDS = new Set(OPERATIONAL_PRACTICES.map((p) => p.id));
 
+describe("OPERATIONAL_PRACTICES library", () => {
+  it("has exactly 24 entries, each with unique id and non-empty content in every field (regression: seed-table authoring must never drop or blank a field)", () => {
+    expect(OPERATIONAL_PRACTICES).toHaveLength(24);
+    expect(ALL_PRACTICE_IDS.size).toBe(24);
+    for (const practice of OPERATIONAL_PRACTICES) {
+      expect(practice.id.length).toBeGreaterThan(0);
+      expect(practice.title.length).toBeGreaterThan(0);
+      expect(practice.description.length).toBeGreaterThan(0);
+      expect(practice.topic.length).toBeGreaterThan(0);
+      expect(practice.classificationMatchers.length).toBeGreaterThan(0);
+      expect(typeof practice.isGeneral).toBe("boolean");
+    }
+  });
+
+  it("general pool ids are a subset of the library and all non-general ids have real classification matchers", () => {
+    for (const id of GENERAL_OPERATIONAL_PRACTICE_IDS) {
+      expect(ALL_PRACTICE_IDS.has(id)).toBe(true);
+    }
+    for (const practice of OPERATIONAL_PRACTICES) {
+      if (!practice.isGeneral) expect(practice.classificationMatchers.length).toBeGreaterThan(0);
+    }
+  });
+});
+
 describe("selectOperationalPractices", () => {
   it("1. returns 4 practices when normal data is available", () => {
     const result = selectOperationalPractices(

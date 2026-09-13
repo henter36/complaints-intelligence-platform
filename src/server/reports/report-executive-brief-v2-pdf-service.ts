@@ -32,7 +32,7 @@ import { OPERATIONAL_PRACTICE_CARD_COUNT, type OperationalPracticeRow } from "@/
 import type { ExecutiveBriefV2Data, ReportData } from "./report-data-service";
 import { isExecutiveBriefV2Data } from "./report-data-service";
 import { renderLineChartPng, MIN_CHART_HEIGHT } from "./report-chart-service";
-import { preparePdfText } from "./arabic-pdf-text";
+import { preparePdfText, preparePdfTextLayout } from "./arabic-pdf-text";
 import { getComparisonModeDescription } from "@/lib/reports/comparison-mode-labels";
 import {
   isValidMonthKey,
@@ -72,6 +72,27 @@ function loadFonts(): { regular: Buffer; bold: Buffer } {
   return { regular: fontRegularBuffer, bold: fontBoldBuffer };
 }
 
+let measurementDoc: PDFKit.PDFDocument | null = null;
+
+/**
+ * A throwaway PDFKit document that is NEVER rendered or written anywhere —
+ * used only to query font metrics (currentLineHeight, widthOfString,
+ * preparePdfTextLayout) at layout-planning time, before the real page-sized
+ * document exists yet (createV2Layout runs before `new PDFDocument(...)`
+ * because it computes the page SIZE). Metrics are a pure function of
+ * (font buffer, font size) — never of page content — so measuring with this
+ * document and measuring later with the real one always agree exactly.
+ */
+function getMeasurementDoc(): PDFKit.PDFDocument {
+  if (!measurementDoc) {
+    const { regular, bold } = loadFonts();
+    measurementDoc = new PDFDocument({ size: [10, 10] });
+    measurementDoc.registerFont("Body", regular);
+    measurementDoc.registerFont("Bold", bold);
+  }
+  return measurementDoc;
+}
+
 export type ExecutiveBriefV2PdfResult = {
   buffer: Buffer;
   warnings: string[];
@@ -89,19 +110,24 @@ type V2Layout = {
 };
 
 /**
- * `operationalPracticesCount` grows page 4's height by the fixed
- * "ممارسات تشغيلية مقترحة" grid reserve (see OPERATIONAL_PRACTICES_SECTION_HEIGHT)
- * on top of whatever the region-count term already produces — the same
- * "expand height, not page count" pattern the region-card term already uses.
+ * `operationalPracticesCount` grows page 4's height by exactly what
+ * "ممارسات تشغيلية مقترحة" will actually render at (see
+ * operationalPracticesSectionHeight — the SAME function
+ * drawOperationalPracticesSection and resolveV2FacilityRowCounts's budget
+ * use), on top of whatever the region-count term already produces — the
+ * same "expand height, not page count" pattern the region-card term
+ * already uses. Reserves real room even at count 0: the empty-state
+ * fallback still draws a title, subtitle, and info box, never nothing.
  */
 function createV2Layout(regionCount: number, operationalPracticesCount: number): V2Layout {
   const margin = 42;
   const [pw, ph] = PRINT_EXECUTIVE_PAGE_SIZE;
   const safeCount = Math.min(regionCount, MAX_REGION_ROWS);
   const cardRows = Math.ceil(safeCount / 4);
-  const practicesReserve = operationalPracticesCount > 0 ? OPERATIONAL_PRACTICES_SECTION_HEIGHT : 0;
+  const contentWidth = pw - margin * 2;
+  const practicesReserve = operationalPracticesSectionHeight(getMeasurementDoc(), operationalPracticesCount, contentWidth);
   const pageH = Math.max(ph, 880 + cardRows * 118 + safeCount * 28) + practicesReserve;
-  return { pageSize: [pw, pageH] as const, margin, contentWidth: pw - margin * 2 };
+  return { pageSize: [pw, pageH] as const, margin, contentWidth };
 }
 
 const FOOTER_RESERVE = 26;
@@ -653,6 +679,34 @@ function drawBulletBox(options: DrawBulletBoxOptions): void {
 
 // ── Info box (ℹ methodology note) ─────────────────────────────────────────────
 
+const INFO_BOX_ICON_ZONE_WIDTH = 42;
+const INFO_BOX_PAD_X = 6;
+const INFO_BOX_PAD_Y = 10;
+const INFO_BOX_MIN_HEIGHT = 46;
+
+/**
+ * The exact height drawInfoBox will render at for this text/width/fontSize —
+ * extracted so a caller that needs to RESERVE room for an info box (e.g. the
+ * operational-practices section's empty-state fallback) can never compute a
+ * different number than what drawInfoBox itself actually draws.
+ */
+export function computeInfoBoxHeight(
+  doc: PDFKit.PDFDocument,
+  text: string,
+  width: number,
+  fontSize: number = REPORT_DESIGN_TOKENS.fontSize.body
+): number {
+  const textWidth = Math.max(40, width - INFO_BOX_ICON_ZONE_WIDTH - INFO_BOX_PAD_X);
+  doc.font("Body").fontSize(fontSize);
+  const textH = doc.heightOfString(preparePdfText(text), {
+    width: textWidth,
+    align: "right",
+    wordSpacing: WORD_SPACING,
+    lineGap: 1,
+  });
+  return Math.max(INFO_BOX_MIN_HEIGHT, textH + INFO_BOX_PAD_Y * 2);
+}
+
 export function drawInfoBox(
   doc: PDFKit.PDFDocument,
   text: string,
@@ -663,34 +717,25 @@ export function drawInfoBox(
 ): number {
   const r = REPORT_DESIGN_TOKENS.card.radius;
   const fontSize = options.fontSize ?? REPORT_DESIGN_TOKENS.fontSize.body;
-  const iconZoneWidth = 42;
-  const padX = 6;
-  const padY = 10;
-  const textWidth = Math.max(40, width - iconZoneWidth - padX);
   const preparedText = preparePdfText(text);
-
-  doc.font("Body").fontSize(fontSize);
-  const textOptions = {
-    width: textWidth,
-    align: "right" as const,
-    wordSpacing: WORD_SPACING,
-    lineGap: 1,
-  };
-  const textH = doc.heightOfString(preparedText, textOptions);
-  const boxH = Math.max(46, textH + padY * 2);
+  const boxH = computeInfoBoxHeight(doc, text, width, fontSize);
 
   doc.roundedRect(x, y, width, boxH, r).fillAndStroke(COLORS.background, COLORS.border);
   drawIcon(doc, "info", x + 24, y + boxH / 2, 16);
 
-  const textX = x + iconZoneWidth;
-  const textY = y + padY;
+  const textX = x + INFO_BOX_ICON_ZONE_WIDTH;
+  const textY = y + INFO_BOX_PAD_Y;
+  const textWidth = Math.max(40, width - INFO_BOX_ICON_ZONE_WIDTH - INFO_BOX_PAD_X);
   doc.font("Body").fontSize(fontSize).fillColor(COLORS.neutral).text(
     preparedText,
     textX,
     textY,
     {
-      ...textOptions,
-      height: Math.max(fontSize + 2, boxH - padY * 2),
+      width: textWidth,
+      align: "right",
+      wordSpacing: WORD_SPACING,
+      lineGap: 1,
+      height: Math.max(fontSize + 2, boxH - INFO_BOX_PAD_Y * 2),
     }
   );
   resetInk(doc);
@@ -1323,20 +1368,91 @@ async function renderPage3(ctx: V2Context): Promise<void> {
 
 // ── Operational practices grid ("ممارسات تشغيلية مقترحة") ──────────────────────
 
-const PRACTICE_SUBTITLE_H = 16;
 const PRACTICE_CARD_GAP = 10;
-const PRACTICE_CARD_H = 92;
 const PRACTICE_GRID_COLS = 2;
-const PRACTICE_GRID_ROWS = 2;
 const PRACTICE_SECTION_TRAILING_GAP = 14;
+const PRACTICE_SECTION_SUBTITLE =
+  "ممارسات مختارة بما يتناسب مع أبرز موضوعات الشكاوى خلال الفترة — توصيات تشغيلية عامة وليست ممارسات مثبتة من بيانات موقع بعينه.";
+const PRACTICE_SECTION_EMPTY_MESSAGE = "لا تتوفر ممارسات تشغيلية مقترحة لهذه الفترة.";
 
-/** Fixed vertical reserve createV2Layout grows page 4 by when practices exist — kept as a single source of truth with the draw function below. */
-const OPERATIONAL_PRACTICES_SECTION_HEIGHT =
-  FACILITY_SECTION_TITLE_H
-  + PRACTICE_SUBTITLE_H
-  + PRACTICE_GRID_ROWS * PRACTICE_CARD_H
-  + (PRACTICE_GRID_ROWS - 1) * PRACTICE_CARD_GAP
-  + PRACTICE_SECTION_TRAILING_GAP;
+// Card content budget — approved-library text is never clipped or
+// ellipsis-truncated (spec review): every title/description is measured
+// with preparePdfTextLayout and wrapped into real lines, capped at these
+// line counts. A dedicated test (operational-practices.test.ts) proves
+// every current OPERATIONAL_PRACTICES entry fits within this budget at the
+// exact card width used here, and fails if a future entry does not.
+export const PRACTICE_TITLE_MAX_LINES = 2;
+export const PRACTICE_DESCRIPTION_MAX_LINES = 3;
+export const PRACTICE_TITLE_FONT_SIZE = 10.5;
+export const PRACTICE_DESCRIPTION_FONT_SIZE = 8.5;
+const PRACTICE_BADGE_FONT_SIZE = 9;
+const PRACTICE_CARD_PAD_X = 10;
+const PRACTICE_CARD_PAD_TOP = 8;
+const PRACTICE_CARD_PAD_BOTTOM = 8;
+const PRACTICE_BADGE_TO_TITLE_GAP = 4;
+const PRACTICE_TITLE_TO_DESCRIPTION_GAP = 4;
+
+export function practiceCardInnerWidth(sectionWidth: number): number {
+  const cardW = (sectionWidth - PRACTICE_CARD_GAP * (PRACTICE_GRID_COLS - 1)) / PRACTICE_GRID_COLS;
+  return cardW - PRACTICE_CARD_PAD_X * 2;
+}
+
+/** Real font-metric line heights for the card's three text roles — a pure function of (font, size), so layout time (no page yet) and render time (real doc) always agree exactly. */
+function measurePracticeLineHeights(doc: PDFKit.PDFDocument): { badge: number; title: number; description: number } {
+  doc.font("Bold").fontSize(PRACTICE_BADGE_FONT_SIZE);
+  const badge = doc.currentLineHeight(true);
+  doc.font("Bold").fontSize(PRACTICE_TITLE_FONT_SIZE);
+  const title = doc.currentLineHeight(true);
+  doc.font("Body").fontSize(PRACTICE_DESCRIPTION_FONT_SIZE);
+  const description = doc.currentLineHeight(true);
+  return { badge, title, description };
+}
+
+/** Fixed per-card height sized to fit the MAX_LINES budget above — single source of truth for both drawing and the layout reserve. */
+export function computePracticeCardHeight(doc: PDFKit.PDFDocument): number {
+  const { badge, title, description } = measurePracticeLineHeights(doc);
+  return (
+    PRACTICE_CARD_PAD_TOP
+    + badge
+    + PRACTICE_BADGE_TO_TITLE_GAP
+    + title * PRACTICE_TITLE_MAX_LINES
+    + PRACTICE_TITLE_TO_DESCRIPTION_GAP
+    + description * PRACTICE_DESCRIPTION_MAX_LINES
+    + PRACTICE_CARD_PAD_BOTTOM
+  );
+}
+
+/** Real wrapped height of the fixed subtitle sentence at this section width — never assumed to be one line. */
+function computePracticeSubtitleHeight(doc: PDFKit.PDFDocument, width: number): number {
+  doc.font("Body").fontSize(9.5);
+  return preparePdfTextLayout(doc, PRACTICE_SECTION_SUBTITLE, { width, align: "right", wordSpacing: WORD_SPACING }).height;
+}
+
+/**
+ * The exact height "ممارسات تشغيلية مقترحة" will occupy for this
+ * `practiceCount`, at this section `width` — used to both RESERVE room
+ * (createV2Layout, resolveV2FacilityRowCounts) and to actually draw
+ * (drawOperationalPracticesSection), so the rendered section can never be
+ * taller than what was reserved for it. Reserves real, non-zero room for
+ * the empty-state fallback box too — an empty practices list still draws a
+ * title, subtitle, and info box, never "nothing".
+ */
+export function operationalPracticesSectionHeight(
+  doc: PDFKit.PDFDocument,
+  practiceCount: number,
+  width: number
+): number {
+  const titleH = FACILITY_SECTION_TITLE_H;
+  const subtitleH = computePracticeSubtitleHeight(doc, width);
+  if (practiceCount === 0) {
+    const emptyBoxH = computeInfoBoxHeight(doc, PRACTICE_SECTION_EMPTY_MESSAGE, width);
+    return titleH + subtitleH + emptyBoxH + PRACTICE_SECTION_TRAILING_GAP;
+  }
+  const shownCount = Math.min(practiceCount, OPERATIONAL_PRACTICE_CARD_COUNT);
+  const gridRows = Math.ceil(shownCount / PRACTICE_GRID_COLS);
+  const cardH = computePracticeCardHeight(doc);
+  return titleH + subtitleH + gridRows * cardH + Math.max(0, gridRows - 1) * PRACTICE_CARD_GAP + PRACTICE_SECTION_TRAILING_GAP;
+}
 
 /**
  * "ممارسات تشغيلية مقترحة" (spec): up to 4 pre-approved, generic
@@ -1345,7 +1461,12 @@ const OPERATIONAL_PRACTICES_SECTION_HEIGHT =
  * above: only title/description are ever rendered, never topic,
  * selectionReason, or any other internal field, and the wording never
  * claims these practices are proven or already the cause of any facility's
- * improvement.
+ * improvement. Every piece of text (subtitle, title, description) is
+ * measured and wrapped with preparePdfTextLayout and drawn line-by-line
+ * with `lineBreak: false` — never PDFKit's own automatic wrapping of
+ * already RTL-prepared text, and never `ellipsis` (see
+ * operationalPracticesSectionHeight for why this can never overflow the
+ * reserved space).
  */
 function drawOperationalPracticesSection(
   doc: PDFKit.PDFDocument,
@@ -1356,58 +1477,67 @@ function drawOperationalPracticesSection(
 ): number {
   const cursorY = drawSectionTitle(doc, "ممارسات تشغيلية مقترحة", x, y, width);
 
-  doc.font("Body").fontSize(9.5).fillColor(COLORS.neutral).text(
-    preparePdfText("ممارسات مختارة بما يتناسب مع أبرز موضوعات الشكاوى خلال الفترة — توصيات تشغيلية عامة وليست ممارسات مثبتة من بيانات موقع بعينه."),
-    x,
-    cursorY,
-    { width, align: "right", wordSpacing: WORD_SPACING, lineBreak: false, ellipsis: true }
-  );
-  const gridY = cursorY + PRACTICE_SUBTITLE_H;
+  doc.font("Body").fontSize(9.5).fillColor(COLORS.neutral);
+  const subtitleLayout = preparePdfTextLayout(doc, PRACTICE_SECTION_SUBTITLE, { width, align: "right", wordSpacing: WORD_SPACING });
+  subtitleLayout.lines.forEach((line, idx) => {
+    doc.text(line.visualText, x, cursorY + idx * subtitleLayout.lineHeight, { width, align: "right", wordSpacing: WORD_SPACING, lineBreak: false });
+  });
+  const gridY = cursorY + subtitleLayout.height;
 
   if (practices.length === 0) {
-    const boxBottom = drawInfoBox(doc, "لا تتوفر ممارسات تشغيلية مقترحة لهذه الفترة.", x, gridY, width);
+    const boxBottom = drawInfoBox(doc, PRACTICE_SECTION_EMPTY_MESSAGE, x, gridY, width);
     resetInk(doc);
     return boxBottom + PRACTICE_SECTION_TRAILING_GAP;
   }
 
   const shown = practices.slice(0, OPERATIONAL_PRACTICE_CARD_COUNT);
   const cardW = (width - PRACTICE_CARD_GAP * (PRACTICE_GRID_COLS - 1)) / PRACTICE_GRID_COLS;
+  const innerW = practiceCardInnerWidth(width);
   const r = REPORT_DESIGN_TOKENS.card.radius;
-  const padX = 10;
-  const innerW = cardW - padX * 2;
+  const cardH = computePracticeCardHeight(doc);
+  const { badge: badgeLineH, title: titleLineH, description: descriptionLineH } = measurePracticeLineHeights(doc);
 
   shown.forEach((practice, idx) => {
     const row = Math.floor(idx / PRACTICE_GRID_COLS);
     const col = idx % PRACTICE_GRID_COLS;
     // RTL reading order: card 1 sits top-right, matching region-card layout elsewhere on this page.
     const cx = x + (PRACTICE_GRID_COLS - 1 - col) * (cardW + PRACTICE_CARD_GAP);
-    const cy = gridY + row * (PRACTICE_CARD_H + PRACTICE_CARD_GAP);
+    const cy = gridY + row * (cardH + PRACTICE_CARD_GAP);
+    const textX = cx + PRACTICE_CARD_PAD_X;
 
-    doc.roundedRect(cx, cy, cardW, PRACTICE_CARD_H, r).fillAndStroke(COLORS.background, COLORS.border);
+    doc.roundedRect(cx, cy, cardW, cardH, r).fillAndStroke(COLORS.background, COLORS.border);
 
-    doc.font("Bold").fontSize(9).fillColor(COLORS.gold).text(
+    doc.font("Bold").fontSize(PRACTICE_BADGE_FONT_SIZE).fillColor(COLORS.gold).text(
       String(idx + 1).padStart(2, "0"),
-      cx + padX,
-      cy + 8,
+      textX,
+      cy + PRACTICE_CARD_PAD_TOP,
       { width: innerW, align: "right" }
     );
-    doc.font("Bold").fontSize(10.5).fillColor(COLORS.primary).text(
-      preparePdfText(practice.title),
-      cx + padX,
-      cy + 21,
-      { width: innerW, height: 27, align: "right", wordSpacing: WORD_SPACING, ellipsis: true }
-    );
-    doc.font("Body").fontSize(8.5).fillColor(COLORS.text).text(
-      preparePdfText(practice.description),
-      cx + padX,
-      cy + 50,
-      { width: innerW, height: 34, align: "right", wordSpacing: WORD_SPACING, ellipsis: true, lineGap: 1 }
-    );
+
+    let lineY = cy + PRACTICE_CARD_PAD_TOP + badgeLineH + PRACTICE_BADGE_TO_TITLE_GAP;
+    doc.font("Bold").fontSize(PRACTICE_TITLE_FONT_SIZE).fillColor(COLORS.primary);
+    const titleLayout = preparePdfTextLayout(doc, practice.title, { width: innerW, align: "right", wordSpacing: WORD_SPACING });
+    // Capped at PRACTICE_TITLE_MAX_LINES as defense-in-depth for the card's
+    // own bottom edge — never actually reached for approved library text,
+    // which the invariant test in operational-practices.test.ts guarantees
+    // fits well within this budget.
+    titleLayout.lines.slice(0, PRACTICE_TITLE_MAX_LINES).forEach((line) => {
+      doc.text(line.visualText, textX, lineY, { width: innerW, align: "right", wordSpacing: WORD_SPACING, lineBreak: false });
+      lineY += titleLineH;
+    });
+
+    lineY = cy + PRACTICE_CARD_PAD_TOP + badgeLineH + PRACTICE_BADGE_TO_TITLE_GAP + titleLineH * PRACTICE_TITLE_MAX_LINES + PRACTICE_TITLE_TO_DESCRIPTION_GAP;
+    doc.font("Body").fontSize(PRACTICE_DESCRIPTION_FONT_SIZE).fillColor(COLORS.text);
+    const descriptionLayout = preparePdfTextLayout(doc, practice.description, { width: innerW, align: "right", wordSpacing: WORD_SPACING });
+    descriptionLayout.lines.slice(0, PRACTICE_DESCRIPTION_MAX_LINES).forEach((line) => {
+      doc.text(line.visualText, textX, lineY, { width: innerW, align: "right", wordSpacing: WORD_SPACING, lineBreak: false });
+      lineY += descriptionLineH;
+    });
   });
   resetInk(doc);
 
   const gridRows = Math.ceil(shown.length / PRACTICE_GRID_COLS);
-  return gridY + gridRows * PRACTICE_CARD_H + Math.max(0, gridRows - 1) * PRACTICE_CARD_GAP + PRACTICE_SECTION_TRAILING_GAP;
+  return gridY + gridRows * cardH + Math.max(0, gridRows - 1) * PRACTICE_CARD_GAP + PRACTICE_SECTION_TRAILING_GAP;
 }
 
 // ── Page 4: Classifications + Facilities + Conclusions ─────────────────────────
@@ -1505,7 +1635,7 @@ function renderPage4(ctx: V2Context): void {
     topAvailableRows: followUpRows.length,
     bottomAvailableRows: bestPracticeRows.length,
     requiredConclusionsHeight: computeV2ConclusionsBoxHeight(conclusions.length),
-    additionalReservedHeight: operationalPractices.length > 0 ? OPERATIONAL_PRACTICES_SECTION_HEIGHT : 0,
+    additionalReservedHeight: operationalPracticesSectionHeight(doc, operationalPractices.length, contentWidth),
   });
   const followUpCols: ColDef[] = [
     { key: "facility", label: "السجن", weight: 1.3 },
