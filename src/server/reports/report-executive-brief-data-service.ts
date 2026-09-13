@@ -1459,8 +1459,16 @@ async function buildExecutiveBriefDataWithSnapshot(
     // engine's own explanation text, never re-derived — capped small enough
     // (spec §1: "دون إغراق التقرير بالتفاصيل") to stay inside the existing
     // conclusions-box budget alongside the base region/department conclusions.
+    // Same authoritative candidate list the V2 path uses (see
+    // buildExecutiveBriefV2Data) — computed here too so this legacy/base
+    // brief's own digest sentence never loses its "منها N مواقع مرشحة"
+    // clause just because this call site predates that parameter existing.
     conclusions: [
-      ...buildPatternAnalysisBriefConclusions(patternAnalysis, 2),
+      ...buildPatternAnalysisBriefConclusions(
+        patternAnalysis,
+        2,
+        rankBestPracticeCandidateEvaluations(patternAnalysis?.findings ?? [])
+      ),
       ...buildConclusions(result, comparison, snapshotData.byDepartment, snapshotData.byClassification),
     ],
     notes: buildNotes(result, comparison),
