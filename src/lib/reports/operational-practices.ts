@@ -387,12 +387,14 @@ function baseReasonForTier(tier: Tier): OperationalPracticeSelectionReason {
 // ---------------------------------------------------------------------------
 
 function hashReportPeriod(period: { from: string; to: string }): number {
-  const str = `${period.from}|${period.to}`;
+  const value = `${period.from}|${period.to}`;
   let hash = 2166136261;
-  for (let i = 0; i < str.length; i++) {
-    hash ^= str.charCodeAt(i);
+
+  for (const char of value) {
+    hash ^= char.codePointAt(0) ?? 0;
     hash = Math.imul(hash, 16777619);
   }
+
   return Math.abs(hash);
 }
 
