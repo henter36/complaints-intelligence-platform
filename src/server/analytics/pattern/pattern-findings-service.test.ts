@@ -197,7 +197,7 @@ describe("computePatternFindingsWithOperationalPracticeSource — uncapped class
 
     // Precondition: the fixture actually produced 11 real chronic findings
     // (otherwise this test would pass vacuously without exercising the cap).
-    expect(chronicUncapped.length).toBe(11);
+    expect(chronicUncapped).toHaveLength(11);
     expect(chronicUncapped.some((f) => f.entityId === "cls-A")).toBe(true);
     expect(chronicUncapped.some((f) => f.entityId === "cls-B")).toBe(true);
 

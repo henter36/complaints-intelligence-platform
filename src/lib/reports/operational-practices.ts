@@ -243,33 +243,36 @@ const NEGATIVE_PATTERN_LABELS: ReadonlySet<ClassificationTrendRow["patternLabel"
   "تصاعد مستمر",
 ]);
 
-function buildClassificationTopicSignals(input: {
-  classificationTrends: readonly ClassificationTrendRow[];
-  facilitiesNeedingFollowUp: readonly FacilityFollowUpRow[];
-  patternFindings: readonly AnalyticalFinding[];
-}): ClassificationTopicSignal[] {
-  const { classificationTrends, facilitiesNeedingFollowUp, patternFindings } = input;
-
-  // CHRONIC_ISSUE is only reliable straight from the finding type — a
-  // ClassificationTrendRow's patternLabel falls back to the generic "نمط
-  // ملحوظ" for chronic rows (they carry no supportingMetrics.pattern), so it
-  // can never be told apart from a merely-notable trend there.
+// CHRONIC_ISSUE is only reliable straight from the finding type — a
+// ClassificationTrendRow's patternLabel falls back to the generic "نمط
+// ملحوظ" for chronic rows (they carry no supportingMetrics.pattern), so it
+// can never be told apart from a merely-notable trend there.
+function buildChronicLabelByKey(patternFindings: readonly AnalyticalFinding[]): Map<string, string> {
   const chronicLabelByKey = new Map<string, string>();
   for (const finding of patternFindings) {
     if (finding.entityType !== "CLASSIFICATION" || finding.type !== "CHRONIC_ISSUE") continue;
     const label = classificationLabelFromEntityName(finding.entityName);
     chronicLabelByKey.set(normalizeForTopicMatching(label), label);
   }
+  return chronicLabelByKey;
+}
 
+function buildHighPriorityVotesByKey(facilitiesNeedingFollowUp: readonly FacilityFollowUpRow[]): Map<string, number> {
   const highPriorityVotesByKey = new Map<string, number>();
   for (const row of facilitiesNeedingFollowUp) {
     if (row.priorityBand !== "مرتفعة" || row.topIssueLabel === "—") continue;
     const key = normalizeForTopicMatching(row.topIssueLabel);
     highPriorityVotesByKey.set(key, (highPriorityVotesByKey.get(key) ?? 0) + 1);
   }
+  return highPriorityVotesByKey;
+}
 
-  type Group = { label: string; rows: ClassificationTrendRow[]; facilities: Set<string> };
-  const groupByKey = new Map<string, Group>();
+type ClassificationTrendGroup = { label: string; rows: ClassificationTrendRow[]; facilities: Set<string> };
+
+function groupClassificationTrends(
+  classificationTrends: readonly ClassificationTrendRow[]
+): Map<string, ClassificationTrendGroup> {
+  const groupByKey = new Map<string, ClassificationTrendGroup>();
   for (const row of classificationTrends) {
     const key = normalizeForTopicMatching(row.classification);
     const group = groupByKey.get(key) ?? { label: row.classification, rows: [], facilities: new Set<string>() };
@@ -277,31 +280,56 @@ function buildClassificationTopicSignals(input: {
     group.facilities.add(row.facility);
     groupByKey.set(key, group);
   }
+  return groupByKey;
+}
 
+/** One classification's raw trend rows reduced to the signal fields buildClassificationTopicSignals ranks on. */
+function buildClassificationSignal(
+  key: string,
+  group: ClassificationTrendGroup,
+  chronicLabelByKey: ReadonlyMap<string, string>,
+  highPriorityVotesByKey: ReadonlyMap<string, number>
+): Omit<ClassificationTopicSignal, "tier"> {
   const { high } = PATTERN_ANALYSIS_CONFIG.priorityBandThresholds;
+  const minVolume = PATTERN_ANALYSIS_CONFIG.minComplaintsForSignal;
+
+  const currentVolume = group.rows.reduce((sum, r) => sum + r.currentCount, 0);
+  const maxPriorityScore = Math.max(...group.rows.map((r) => r.priorityScore));
+  // Never gate on percentage/priorityScore alone (spec §2): a genuine
+  // signal must also clear a minimum absolute current-period volume.
+  const isHighPriorityNegative = group.rows.some(
+    (r) => NEGATIVE_PATTERN_LABELS.has(r.patternLabel) && r.priorityScore >= high && r.currentCount >= minVolume
+  );
+  const isRelapse = group.rows.some((r) => r.patternLabel === "عودة للارتفاع بعد تحسن");
+
+  return {
+    label: group.label,
+    normalizedLabel: key,
+    isChronic: chronicLabelByKey.has(key),
+    isHighPriorityNegative,
+    isRelapse,
+    affectedFacilityCount: group.facilities.size,
+    currentVolume,
+    maxPriorityScore,
+    highPriorityFollowUpVotes: highPriorityVotesByKey.get(key) ?? 0,
+  };
+}
+
+function buildClassificationTopicSignals(input: {
+  classificationTrends: readonly ClassificationTrendRow[];
+  facilitiesNeedingFollowUp: readonly FacilityFollowUpRow[];
+  patternFindings: readonly AnalyticalFinding[];
+}): ClassificationTopicSignal[] {
+  const { classificationTrends, facilitiesNeedingFollowUp, patternFindings } = input;
+
+  const chronicLabelByKey = buildChronicLabelByKey(patternFindings);
+  const highPriorityVotesByKey = buildHighPriorityVotesByKey(facilitiesNeedingFollowUp);
+  const groupByKey = groupClassificationTrends(classificationTrends);
   const minVolume = PATTERN_ANALYSIS_CONFIG.minComplaintsForSignal;
 
   const partial: Array<Omit<ClassificationTopicSignal, "tier">> = [];
   for (const [key, group] of groupByKey) {
-    const currentVolume = group.rows.reduce((sum, r) => sum + r.currentCount, 0);
-    const maxPriorityScore = Math.max(...group.rows.map((r) => r.priorityScore));
-    // Never gate on percentage/priorityScore alone (spec §2): a genuine
-    // signal must also clear a minimum absolute current-period volume.
-    const isHighPriorityNegative = group.rows.some(
-      (r) => NEGATIVE_PATTERN_LABELS.has(r.patternLabel) && r.priorityScore >= high && r.currentCount >= minVolume
-    );
-    const isRelapse = group.rows.some((r) => r.patternLabel === "عودة للارتفاع بعد تحسن");
-    partial.push({
-      label: group.label,
-      normalizedLabel: key,
-      isChronic: chronicLabelByKey.has(key),
-      isHighPriorityNegative,
-      isRelapse,
-      affectedFacilityCount: group.facilities.size,
-      currentVolume,
-      maxPriorityScore,
-      highPriorityFollowUpVotes: highPriorityVotesByKey.get(key) ?? 0,
-    });
+    partial.push(buildClassificationSignal(key, group, chronicLabelByKey, highPriorityVotesByKey));
   }
 
   // A chronic classification that fell outside the (possibly capped)
