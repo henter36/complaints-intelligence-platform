@@ -16,7 +16,7 @@ import {
   resolveV2MonthlyChartRenderPlan,
   resolveV2ConclusionsAvailableHeight,
   resolveV2FacilityRowCounts,
-  computeV2ConclusionsBoxHeight,
+  computeBulletBoxHeight,
   computeBulletBoxLineCount,
   computeV2Page3Height,
   planPage4Layout,
@@ -27,12 +27,24 @@ import {
   PRACTICE_DESCRIPTION_MAX_LINES,
   PRACTICE_TITLE_FONT_SIZE,
   PRACTICE_DESCRIPTION_FONT_SIZE,
+  PAGE2_TOTALS_NOTE_FONT_SIZE,
 } from "./report-executive-brief-v2-pdf-service";
 import { preparePdfText, preparePdfTextLayout } from "./arabic-pdf-text";
 import { REPORT_DESIGN_TOKENS, PRINT_EXECUTIVE_PAGE_SIZE } from "@/lib/reports/design-tokens";
 import { UNCLASSIFIED_CLASSIFICATION_KEY } from "@/lib/reports/classification-keys";
 import { MIN_CHART_HEIGHT } from "./report-chart-service";
 import { OPERATIONAL_PRACTICES, OPERATIONAL_PRACTICE_CARD_COUNT } from "@/lib/reports/operational-practices";
+
+// Wraps the REAL buildMonthlyTrendInsights by default (every other test's
+// behavior is unaffected) — only the page-2 long-insight-wrap regression
+// test below overrides it, to exercise a 3-line-wrapping insight that no
+// legitimate monthlyStockFlow input can produce (the real templates are all
+// short, bounded sentences).
+vi.mock("./report-monthly-trend-presentation", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./report-monthly-trend-presentation")>();
+  return { ...actual, buildMonthlyTrendInsights: vi.fn(actual.buildMonthlyTrendInsights) };
+});
+import { buildMonthlyTrendInsights } from "./report-monthly-trend-presentation";
 
 function makeFontDoc(): PDFKit.PDFDocument {
   const doc = new PDFDocument({ size: [200, 200], margin: 0 });
@@ -1115,15 +1127,15 @@ describe("V2 monthly chart contract + KPI packing", () => {
     expect(availableH).toBe(pageHeight - margin - 26 - y);
     expect(availableH).not.toBe(pageHeight - margin * 2 - 26 - y);
 
-    const conclusionsBoxH = Math.min(computeV2ConclusionsBoxHeight(3), availableH);
+    const conclusionsBoxH = Math.min(computeBulletBoxHeight(3), availableH);
     expect(y + conclusionsBoxH).toBeLessThanOrEqual(pageHeight - margin - 26);
   });
 
-  it("computeV2ConclusionsBoxHeight sizes the box so drawBulletBox's own maxLines formula fits every conclusion (regression: off-by-one truncated the last line)", () => {
+  it("computeBulletBoxHeight sizes the box so drawBulletBox's own maxLines formula fits every conclusion (regression: off-by-one truncated the last line)", () => {
     const lineH = 22;
     const boxHdrH = 30;
     for (const conclusionsCount of [1, 2, 3, 4, 5]) {
-      const conclusionsBoxH = computeV2ConclusionsBoxHeight(conclusionsCount);
+      const conclusionsBoxH = computeBulletBoxHeight(conclusionsCount);
       // Mirrors drawBulletBox's own maxLines computation exactly.
       const maxLines = Math.max(1, Math.floor((conclusionsBoxH - boxHdrH - 16) / lineH));
       expect(maxLines).toBeGreaterThanOrEqual(conclusionsCount);
@@ -1138,7 +1150,7 @@ describe("V2 monthly chart contract + KPI packing", () => {
       gap: 14,
       topAvailableRows: 5,
       bottomAvailableRows: 5,
-      requiredConclusionsHeight: computeV2ConclusionsBoxHeight(3),
+      requiredConclusionsHeight: computeBulletBoxHeight(3),
     });
     expect(topRows).toBe(5);
     expect(bottomRows).toBe(5);
@@ -1152,7 +1164,7 @@ describe("V2 monthly chart contract + KPI packing", () => {
       gap: 14,
       topAvailableRows: 5,
       bottomAvailableRows: 5,
-      requiredConclusionsHeight: computeV2ConclusionsBoxHeight(3),
+      requiredConclusionsHeight: computeBulletBoxHeight(3),
     };
     const withoutReserve = resolveV2FacilityRowCounts(shared);
     const withReserve = resolveV2FacilityRowCounts({ ...shared, additionalReservedHeight: 400 });
@@ -1169,7 +1181,7 @@ describe("V2 monthly chart contract + KPI packing", () => {
       gap: 14,
       topAvailableRows: 5,
       bottomAvailableRows: 5,
-      requiredConclusionsHeight: computeV2ConclusionsBoxHeight(3),
+      requiredConclusionsHeight: computeBulletBoxHeight(3),
     };
     expect(resolveV2FacilityRowCounts(shared)).toEqual(resolveV2FacilityRowCounts({ ...shared, additionalReservedHeight: 0 }));
   });
@@ -1190,7 +1202,7 @@ describe("V2 monthly chart contract + KPI packing", () => {
     const pageHeight = 1200;
     const margin = 42;
     const gap = 14;
-    const requiredConclusionsHeight = computeV2ConclusionsBoxHeight(3);
+    const requiredConclusionsHeight = computeBulletBoxHeight(3);
 
     // y chosen so the budget only fits 2 rows per side (3 rows would overflow).
     const y = 762;
@@ -1213,7 +1225,7 @@ describe("V2 monthly chart contract + KPI packing", () => {
     const pageHeight = 1200;
     const margin = 42;
     const gap = 14;
-    const requiredConclusionsHeight = computeV2ConclusionsBoxHeight(3);
+    const requiredConclusionsHeight = computeBulletBoxHeight(3);
     const y = 812;
     const { topRows, bottomRows } = resolveV2FacilityRowCounts({
       pageHeight, margin, y, gap,
@@ -1229,7 +1241,7 @@ describe("V2 monthly chart contract + KPI packing", () => {
     const pageHeight = 1200;
     const margin = 42;
     const gap = 14;
-    const requiredConclusionsHeight = computeV2ConclusionsBoxHeight(3);
+    const requiredConclusionsHeight = computeBulletBoxHeight(3);
     const y = 872; // only room for headers-only facility tables (0 rows each)
     const { topRows, bottomRows } = resolveV2FacilityRowCounts({
       pageHeight, margin, y, gap,
@@ -1256,7 +1268,7 @@ describe("V2 monthly chart contract + KPI packing", () => {
       gap: 14,
       topAvailableRows: 2,
       bottomAvailableRows: 0,
-      requiredConclusionsHeight: computeV2ConclusionsBoxHeight(3),
+      requiredConclusionsHeight: computeBulletBoxHeight(3),
     });
     expect(topRows).toBe(2);
     expect(bottomRows).toBe(0);
@@ -1575,5 +1587,72 @@ describe("V2 practice card font-size floor (regression: must never regress to th
 
   it("PRACTICE_DESCRIPTION_FONT_SIZE never drops below 10.5pt", () => {
     expect(PRACTICE_DESCRIPTION_FONT_SIZE).toBeGreaterThanOrEqual(10.5);
+  });
+});
+
+// ── Page 2 notes height (spec: driven by wrapped line count, not insights.length) ──
+
+describe("V2 page 2 notes height (spec: driven by wrapped line count, not insights.length)", () => {
+  const LONG_INSIGHT_TEXT =
+    "اتجاه الشكاوى المسجلة يواصل الارتفاع بشكل ملحوظ خلال الأشهر الأخيرة من الفترة المشمولة بالتقرير، وهو ما يستدعي مراجعة شاملة وفورية للإجراءات التشغيلية الحالية المعمول بها في جميع المواقع الأكثر تأثراً بهذا الاتجاه على وجه الخصوص، مع ضرورة توثيق كل إجراء تصحيحي يُتخذ لمعالجته أولاً بأول دون أي تأخير، وإبلاغ الإدارة العليا بمستجدات المتابعة بصورة دورية ومنتظمة، وتخصيص فريق عمل مختص لمتابعة هذا الملف تحديداً حتى استقراره بصورة كاملة ونهائية خلال الفترات القادمة.";
+
+  it("computeBulletBoxLineCount/computeBulletBoxHeight grow for a wrapping insight — page 2 no longer sizes its notes box from raw insights.length", () => {
+    const doc = makeFontDoc();
+    const shortInsights = ["ملاحظة قصيرة."];
+    const longInsights = [LONG_INSIGHT_TEXT];
+    const shortLineCount = computeBulletBoxLineCount(doc, shortInsights, 816);
+    const longLineCount = computeBulletBoxLineCount(doc, longInsights, 816);
+    expect(longLineCount).toBeGreaterThan(shortLineCount);
+    // Proves it actually wrapped — the old insights.length-based sizing would
+    // have used 1 for both (one insight each).
+    expect(longLineCount).toBeGreaterThan(longInsights.length);
+    expect(computeBulletBoxHeight(longLineCount)).toBeGreaterThan(computeBulletBoxHeight(longInsights.length));
+    doc.end();
+  });
+
+  it("regression: a long monthly-trend insight that wraps to 3+ visual lines renders in full inside page 2's notes box, the chart adapts, and the report stays a valid 4 pages", async () => {
+    vi.mocked(buildMonthlyTrendInsights).mockImplementationOnce(() => [
+      { key: "trend-direction", text: LONG_INSIGHT_TEXT },
+    ]);
+
+    const doc = makeFontDoc();
+    doc.font("Body").fontSize(REPORT_DESIGN_TOKENS.fontSize.body);
+    const expectedLayout = preparePdfTextLayout(doc, `• ${LONG_INSIGHT_TEXT}`, {
+      width: 816 - 20, align: "right", wordSpacing: REPORT_DESIGN_TOKENS.typography.wordSpacing,
+    });
+    expect(expectedLayout.lines.length).toBeGreaterThanOrEqual(3);
+    doc.end();
+
+    const { rendered, result } = await captureRenderedPdfText(makeV2Report());
+    for (const line of expectedLayout.lines) {
+      expect(rendered).toContain(line.visualText);
+    }
+    expect(countPageObjects(result.buffer)).toBe(4);
+    expect(rendered).toContain(preparePdfText("صفحة 2 من 4"));
+    expect(result.warnings.some((w) => w.includes("عدد صفحات التقرير"))).toBe(false);
+  });
+});
+
+// ── Page 2 totals-scope note (spec: >=10.5pt, measured wrapped height) ──
+
+describe("V2 page 2 totals-scope note (spec: explanatory text >=10.5pt with real measured height)", () => {
+  it("PAGE2_TOTALS_NOTE_FONT_SIZE never drops below 10.5pt", () => {
+    expect(PAGE2_TOTALS_NOTE_FONT_SIZE).toBeGreaterThanOrEqual(10.5);
+  });
+
+  it("renders every wrapped line of the totals-scope note in full at the real page width/font, never truncated by an assumed fixed height", async () => {
+    const doc = makeFontDoc();
+    doc.font("Body").fontSize(PAGE2_TOTALS_NOTE_FONT_SIZE);
+    const layout = preparePdfTextLayout(
+      doc,
+      "الإجماليان أعلاه يشملان الأشهر المعروضة في الرسم أدناه فقط (حتى 13 شهرًا).",
+      { width: 816, align: "center", wordSpacing: REPORT_DESIGN_TOKENS.typography.wordSpacing }
+    );
+    doc.end();
+
+    const { rendered } = await captureRenderedPdfText(makeV2Report());
+    for (const line of layout.lines) {
+      expect(rendered).toContain(line.visualText);
+    }
   });
 });

@@ -162,14 +162,6 @@ export function resolveV2MonthlyChartRenderPlan(availableForChart: number): {
   };
 }
 
-export function resolveMonthlyTrendNotesHeight(insightCount: number): number {
-  const hdrH = 30;
-  const lineH = 22;
-  const pad = 16;
-  const lines = Math.max(insightCount, 1);
-  return Math.max(hdrH + lineH + 12, hdrH + pad + lines * lineH);
-}
-
 /** Remaining height for conclusions; y is absolute from page top so top margin is not subtracted again. */
 export function resolveV2ConclusionsAvailableHeight(
   pageHeight: number,
@@ -190,11 +182,11 @@ const FACILITY_MAX_ROWS = 5;
 // truth here is what prevents the box-sizing math and drawBulletBox's own
 // rendering math from drifting apart again (previously 12 vs. 16, which
 // silently truncated a line).
-const CONCLUSIONS_BOX_HEADER_H = 30;
-const CONCLUSIONS_BOX_LINE_H = 22;
-const CONCLUSIONS_BOX_BODY_PADDING = 16;
-const CONCLUSIONS_BOX_PAD_X = 10;
-const CONCLUSIONS_BOX_PAD_TOP = 8;
+const BULLET_BOX_HEADER_H = 30;
+const BULLET_BOX_LINE_H = 22;
+const BULLET_BOX_BODY_PADDING = 16;
+const BULLET_BOX_PAD_X = 10;
+const BULLET_BOX_PAD_TOP = 8;
 
 /**
  * Exact box height drawBulletBox needs to display `lineCount` VISUAL
@@ -202,13 +194,13 @@ const CONCLUSIONS_BOX_PAD_TOP = 8;
  * drawBulletBox's own `maxLines = floor((height - hdrH - 16) / lineH)`
  * formula. `lineCount` is the sum of each point's own wrapped-line count
  * (see computeBulletBoxLineCount), never just `points.length` — a single
- * long conclusion can take 2-3 visual lines. Used both to size the
- * conclusions box itself and to budget room for it before facility rows are
- * picked, so the two can never disagree.
+ * long point can take 2-3 visual lines. Shared by every drawBulletBox
+ * caller — page 4's conclusions AND page 2's "ملاحظات رئيسية" notes — so
+ * box sizing and drawBulletBox's own rendering math can never disagree.
  */
-export function computeV2ConclusionsBoxHeight(lineCount: number): number {
+export function computeBulletBoxHeight(lineCount: number): number {
   const lines = Math.max(lineCount, 1);
-  return CONCLUSIONS_BOX_HEADER_H + CONCLUSIONS_BOX_BODY_PADDING + lines * CONCLUSIONS_BOX_LINE_H;
+  return BULLET_BOX_HEADER_H + BULLET_BOX_BODY_PADDING + lines * BULLET_BOX_LINE_H;
 }
 
 /**
@@ -225,11 +217,11 @@ export function computeBulletBoxLineCount(
   width: number
 ): number {
   if (points.length === 0) return 0;
-  const innerWidth = width - CONCLUSIONS_BOX_PAD_X * 2;
+  const innerWidth = width - BULLET_BOX_PAD_X * 2;
   doc.font("Body").fontSize(REPORT_DESIGN_TOKENS.fontSize.body);
   let total = 0;
   for (const pt of points) {
-    total += preparePdfTextLayout(doc, `• ${pt}`, { width: innerWidth, align: "right", wordSpacing: WORD_SPACING }).lines.length;
+    total += preparePdfTextLayout(doc, `• ${pt}`, { width: innerWidth, align: "right", wordSpacing: WORD_SPACING, splitOversizedTokens: true }).lines.length;
   }
   return total;
 }
@@ -249,7 +241,7 @@ export function resolveV2FacilityRowCounts(input: {
   gap: number;
   topAvailableRows: number;
   bottomAvailableRows: number;
-  /** Height drawBulletBox needs to show every actual conclusion — see {@link computeV2ConclusionsBoxHeight}. */
+  /** Height drawBulletBox needs to show every actual conclusion — see {@link computeBulletBoxHeight}. */
   requiredConclusionsHeight: number;
   /** Height of any other fixed section drawn between the facility tables and conclusions (e.g. the operational-practices grid) — reserved before facility rows, just like requiredConclusionsHeight. */
   additionalReservedHeight?: number;
@@ -691,7 +683,7 @@ type DrawBulletBoxOptions = {
 function drawBulletBox(options: DrawBulletBoxOptions): void {
   const { doc, title, icon, points, x, y, width, height } = options;
   const r = REPORT_DESIGN_TOKENS.card.radius;
-  const hdrH = CONCLUSIONS_BOX_HEADER_H;
+  const hdrH = BULLET_BOX_HEADER_H;
   doc.roundedRect(x, y, width, height, r).fillAndStroke(COLORS.background, COLORS.border);
   doc.moveTo(x + r, y).lineTo(x + width - r, y)
     .quadraticCurveTo(x + width, y, x + width, y + r)
@@ -704,11 +696,11 @@ function drawBulletBox(options: DrawBulletBoxOptions): void {
   // Draw icon (small, in header)
   drawIcon(doc, icon, x + 20, y + hdrH / 2, 14);
 
-  const lineH = CONCLUSIONS_BOX_LINE_H;
+  const lineH = BULLET_BOX_LINE_H;
   const bodyFontSize = REPORT_DESIGN_TOKENS.fontSize.body;
-  const innerWidth = width - CONCLUSIONS_BOX_PAD_X * 2;
-  const textX = x + CONCLUSIONS_BOX_PAD_X;
-  const firstLineY = y + hdrH + CONCLUSIONS_BOX_PAD_TOP;
+  const innerWidth = width - BULLET_BOX_PAD_X * 2;
+  const textX = x + BULLET_BOX_PAD_X;
+  const firstLineY = y + hdrH + BULLET_BOX_PAD_TOP;
 
   if (points.length === 0) {
     doc.font("Body").fontSize(bodyFontSize).fillColor(COLORS.neutral).text(
@@ -719,19 +711,19 @@ function drawBulletBox(options: DrawBulletBoxOptions): void {
     return;
   }
 
-  // Defense-in-depth only: computeV2ConclusionsBoxHeight (via
+  // Defense-in-depth only: computeBulletBoxHeight (via
   // computeBulletBoxLineCount, the exact same wrapping this loop performs)
   // is expected to always reserve `height` large enough for every real
   // visual line, so this cap is never actually hit for conclusions in normal
   // operation — it only guards against an upstream sizing bug, and unlike
   // the old single-line-per-point version, it can never cut a point
   // mid-sentence: it only ever stops BETWEEN points.
-  const maxLines = Math.max(1, Math.floor((height - hdrH - CONCLUSIONS_BOX_BODY_PADDING) / lineH));
+  const maxLines = Math.max(1, Math.floor((height - hdrH - BULLET_BOX_BODY_PADDING) / lineH));
   doc.font("Body").fontSize(bodyFontSize).fillColor(COLORS.text);
   let lineIdx = 0;
   for (const pt of points) {
     if (lineIdx >= maxLines) break;
-    const layout = preparePdfTextLayout(doc, `• ${pt}`, { width: innerWidth, align: "right", wordSpacing: WORD_SPACING });
+    const layout = preparePdfTextLayout(doc, `• ${pt}`, { width: innerWidth, align: "right", wordSpacing: WORD_SPACING, splitOversizedTokens: true });
     for (const line of layout.lines) {
       if (lineIdx >= maxLines) break;
       doc.text(line.visualText, textX, firstLineY + lineIdx * lineH, {
@@ -953,6 +945,10 @@ function renderCoverPage(ctx: V2Context): void {
 
 // ── Page 2: registered/closed monthly trend ───────────────────────────────────
 
+/** Explanatory note, not footer/badge/metadata print — follows the >=10.5pt body-text floor. */
+export const PAGE2_TOTALS_NOTE_FONT_SIZE = 10.5;
+const PAGE2_TOTALS_NOTE_GAP = 8;
+
 function drawMonthlyTrendTotalCard(
   doc: PDFKit.PDFDocument,
   options: {
@@ -1018,7 +1014,13 @@ async function renderPage2(ctx: V2Context): Promise<void> {
     reportEndDate,
   });
   const notesGap = 10;
-  const notesHeight = resolveMonthlyTrendNotesHeight(insights.length);
+  // Sized from the REAL wrapped visual line count (an insight sentence can
+  // take 2-3 lines), not insights.length — the same single-source-of-truth
+  // helper page 4's conclusions box uses, so drawBulletBox never truncates
+  // or overflows a wrapped insight here either.
+  const insightTexts = insights.map((insight) => insight.text);
+  const notesLineCount = computeBulletBoxLineCount(doc, insightTexts, contentWidth);
+  const notesHeight = computeBulletBoxHeight(notesLineCount);
 
   const cardGap = 12;
   const cardH = 88;
@@ -1045,14 +1047,21 @@ async function renderPage2(ctx: V2Context): Promise<void> {
 
   // Clarifies that both totals are windowed to the displayed months (up to 13),
   // not an absolute all-time total — see spec section 17.
-  doc.font("Body").fontSize(8.5).fillColor(COLORS.neutral).text(
-    preparePdfText("الإجماليان أعلاه يشملان الأشهر المعروضة في الرسم أدناه فقط (حتى 13 شهرًا)."),
-    margin,
-    y,
-    { width: contentWidth, align: "center", wordSpacing: WORD_SPACING, lineBreak: false }
+  doc.font("Body").fontSize(PAGE2_TOTALS_NOTE_FONT_SIZE).fillColor(COLORS.neutral);
+  const totalsScopeLayout = preparePdfTextLayout(
+    doc,
+    "الإجماليان أعلاه يشملان الأشهر المعروضة في الرسم أدناه فقط (حتى 13 شهرًا).",
+    { width: contentWidth, align: "center", wordSpacing: WORD_SPACING }
   );
+  totalsScopeLayout.lines.forEach((line, idx) => {
+    doc.text(line.visualText, margin, y + idx * totalsScopeLayout.lineHeight, {
+      width: contentWidth, align: "center", wordSpacing: WORD_SPACING, lineBreak: false,
+    });
+  });
   resetInk(doc);
-  y += 16;
+  // Measured height, not a fixed assumption — this note now wraps to more
+  // than one line at the raised font size on a narrower report if needed.
+  y += totalsScopeLayout.height + PAGE2_TOTALS_NOTE_GAP;
 
   const hasMonthlyRegisteredOrClosed = flow.some(
     (point) => point.receivedCount > 0 || point.closedDuringMonthCount > 0
@@ -1134,7 +1143,7 @@ async function renderPage2(ctx: V2Context): Promise<void> {
     doc,
     title: "ملاحظات رئيسية",
     icon: "info",
-    points: insights.map((insight) => insight.text),
+    points: insightTexts,
     x: margin,
     y,
     width: contentWidth,
@@ -1628,7 +1637,7 @@ export type V2Page4Plan = {
  * Plans page 4 purely from measurement (no drawing) by mirroring
  * renderPage4's own y-arithmetic term for term, so the two can never
  * disagree — the same "single source of truth" pattern as
- * operationalPracticesSectionHeight / computeV2ConclusionsBoxHeight. Called
+ * operationalPracticesSectionHeight / computeBulletBoxHeight. Called
  * twice for a real render: once (with the real `doc`, before `addPage`) to
  * size page 4, and once more (same doc, now on that page) inside
  * renderPage4 for the actual topRows/bottomRows/conclusions height — both
@@ -1677,7 +1686,7 @@ export function planPage4Layout(
   y += gap;
 
   const conclusionsLineCount = computeBulletBoxLineCount(doc, conclusions, contentWidth);
-  const requiredConclusionsHeight = computeV2ConclusionsBoxHeight(conclusionsLineCount);
+  const requiredConclusionsHeight = computeBulletBoxHeight(conclusionsLineCount);
   const practicesReserve = operationalPracticesSectionHeight(doc, operationalPractices.length, contentWidth);
 
   // The row-reduction ceiling includes practicesReserve on TOP of the base
@@ -1868,13 +1877,13 @@ function renderPage4(ctx: V2Context): void {
     return;
   }
   // Uses the exact same formula the facility row-count budget above already
-  // reserved room for (computeV2ConclusionsBoxHeight, fed the same wrapped
+  // reserved room for (computeBulletBoxHeight, fed the same wrapped
   // line count via page4Plan), so this box is never sized differently than
   // what was actually planned for it — clamped only by availableH itself
   // (page 4's own height was already sized to fit this exactly), and full
   // conclusion text is never dropped or ellipsis-truncated (drawBulletBox
   // wraps every point instead).
-  const conclusionsBoxH = Math.min(computeV2ConclusionsBoxHeight(page4Plan.conclusionsLineCount), availableH);
+  const conclusionsBoxH = Math.min(computeBulletBoxHeight(page4Plan.conclusionsLineCount), availableH);
 
   drawBulletBox({
     doc,
