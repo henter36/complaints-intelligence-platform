@@ -234,10 +234,37 @@ type CellWork = {
 // Public entry point
 // ---------------------------------------------------------------------------
 
+export type PatternFindingsComputation = {
+  /** Display-facing findings — capped at MAX_FINDINGS_PER_TYPE per type, exactly what computePatternFindings has always returned. Never widen this for any report/API consumer. */
+  findings: AnalyticalFinding[];
+  /**
+   * Every CLASSIFICATION-scoped CHRONIC_ISSUE / TREND_PATTERN /
+   * SUSTAINED_IMPROVEMENT finding this run produced, BEFORE the
+   * MAX_FINDINGS_PER_TYPE display cap. Exists solely to feed the
+   * operational-practices topic selector (see operational-practices.ts) so
+   * a real topic ranked just outside the top 10 chronic issues can still be
+   * considered for a practice recommendation — it is never itself shown in
+   * a report or exposed through an API response.
+   */
+  operationalPracticeFindings: AnalyticalFinding[];
+};
+
+/**
+ * Optional out-parameter through which computePatternFindings hands its
+ * uncapped classification findings back to
+ * computePatternFindingsWithOperationalPracticeSource — an explicit, per-call
+ * object (never module/global state) that lets both public entry points
+ * share this single engine run without computePatternFindings itself
+ * changing shape for its many existing callers.
+ */
+type OperationalPracticeFindingsSink = { findings: AnalyticalFinding[] };
+
+/** Display-facing findings only — capped at MAX_FINDINGS_PER_TYPE per type. */
 export function computePatternFindings(
   series: PatternSeries,
   config: PatternAnalysisConfig = PATTERN_ANALYSIS_CONFIG,
-  periodUnit: PeriodUnit = "فترة"
+  periodUnit: PeriodUnit = "فترة",
+  operationalPracticeSink?: OperationalPracticeFindingsSink
 ): AnalyticalFinding[] {
   const totalPeriods = series.periods.length;
   // Need minPeriodsForContinuity current periods + 1 extra for the
@@ -536,9 +563,21 @@ export function computePatternFindings(
     }
   }
 
+  // Snapshot BEFORE the display cap below — this is the operational-practices
+  // selector's own source, never returned to a report/API consumer (see
+  // PatternFindingsComputation / computePatternFindingsWithOperationalPracticeSource).
+  const operationalPracticeFindings: AnalyticalFinding[] = [
+    ...chronicFindings,
+    ...trendFindings,
+    ...improvementFindings,
+  ].toSorted((a, b) => b.priorityScore - a.priorityScore);
+  if (operationalPracticeSink) operationalPracticeSink.findings = operationalPracticeFindings;
+
+  const sortedChronicFindings = chronicFindings.toSorted((a, b) => b.priorityScore - a.priorityScore);
+  const sortedTrendFindings = trendFindings.toSorted((a, b) => b.priorityScore - a.priorityScore);
   const findings: AnalyticalFinding[] = [
-    ...chronicFindings.sort((a, b) => b.priorityScore - a.priorityScore).slice(0, MAX_FINDINGS_PER_TYPE),
-    ...trendFindings.sort((a, b) => b.priorityScore - a.priorityScore).slice(0, MAX_FINDINGS_PER_TYPE),
+    ...sortedChronicFindings.slice(0, MAX_FINDINGS_PER_TYPE),
+    ...sortedTrendFindings.slice(0, MAX_FINDINGS_PER_TYPE),
     ...improvementFindings.slice(0, MAX_FINDINGS_PER_TYPE),
   ];
 
@@ -775,7 +814,25 @@ export function computePatternFindings(
     );
   }
 
-  return findings.sort((a, b) => b.priorityScore - a.priorityScore);
+  const sortedFindings = findings.toSorted((a, b) => b.priorityScore - a.priorityScore);
+  return sortedFindings;
+}
+
+/**
+ * Same single engine run computePatternFindings always performs (never
+ * executed twice) — captures the uncapped CLASSIFICATION-scoped findings via
+ * the sink out-parameter above and pairs them with the exact same capped
+ * display findings computePatternFindings itself would return for this
+ * series. See PatternFindingsComputation.
+ */
+export function computePatternFindingsWithOperationalPracticeSource(
+  series: PatternSeries,
+  config: PatternAnalysisConfig = PATTERN_ANALYSIS_CONFIG,
+  periodUnit: PeriodUnit = "فترة"
+): PatternFindingsComputation {
+  const sink: OperationalPracticeFindingsSink = { findings: [] };
+  const findings = computePatternFindings(series, config, periodUnit, sink);
+  return { findings, operationalPracticeFindings: sink.findings };
 }
 
 /**

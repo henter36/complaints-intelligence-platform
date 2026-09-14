@@ -11,7 +11,7 @@ import { loadFacilityOperationalRegistry } from "@/server/facilities/facility-op
 import { loadPatternSeries } from "./pattern-period-series-service";
 import {
   computeFacilityCurrentPeriodTotals,
-  computePatternFindings,
+  computePatternFindingsWithOperationalPracticeSource,
   computePeriodChangeDigest,
   describePatternSeriesPeriods,
 } from "./pattern-findings-service";
@@ -24,6 +24,15 @@ export type PatternAnalysisReportData = {
   periods: { from: string; to: string }[];
   /** Per-facility current-period total, same aggregation that produced `findings` (spec §1). */
   facilityCurrentPeriodTotals: Record<string, number>;
+  /**
+   * Uncapped CLASSIFICATION-scoped CHRONIC_ISSUE/TREND_PATTERN/
+   * SUSTAINED_IMPROVEMENT findings, scoped exactly like `findings` (same
+   * facility/region/filters) — used ONLY by the operational-practices
+   * topic selector, never rendered or exposed as its own API field. A real
+   * classification ranked just outside `findings`'s MAX_FINDINGS_PER_TYPE
+   * cap must still be visible here.
+   */
+  operationalPracticeFindings?: AnalyticalFinding[];
 };
 
 async function buildFacilityRegionLookup(): Promise<Map<string, string>> {
@@ -51,13 +60,20 @@ export async function loadPatternAnalysisForFilters(
   config: PatternAnalysisConfig = PATTERN_ANALYSIS_CONFIG
 ): Promise<PatternAnalysisReportData> {
   const series = await loadPatternSeries(currentFrom, currentToExclusive, config.analysisWindowPeriods + 1);
-  const allFindings = computePatternFindings(series, config);
+  const { findings: allFindings, operationalPracticeFindings: allOperationalPracticeFindings } =
+    computePatternFindingsWithOperationalPracticeSource(series, config);
   const digest = computePeriodChangeDigest(series, config);
   const periods = describePatternSeriesPeriods(series);
   const facilityCurrentPeriodTotals = computeFacilityCurrentPeriodTotals(series, config);
 
   if (isEmptyScope(scope)) {
-    return { findings: allFindings, periodChangeDigest: digest, periods, facilityCurrentPeriodTotals };
+    return {
+      findings: allFindings,
+      periodChangeDigest: digest,
+      periods,
+      facilityCurrentPeriodTotals,
+      operationalPracticeFindings: allOperationalPracticeFindings,
+    };
   }
 
   const facilityRegionLookup = scope.region ? await buildFacilityRegionLookup() : new Map<string, string>();
@@ -66,5 +82,9 @@ export async function loadPatternAnalysisForFilters(
     periodChangeDigest: filterPeriodChangeDigestByScope(digest, scope, facilityRegionLookup),
     periods,
     facilityCurrentPeriodTotals,
+    // Same scope filter as `findings` — a practice must never be suggested
+    // off the back of a classification signal outside this report's own
+    // facility/region/filters.
+    operationalPracticeFindings: filterFindingsByScope(allOperationalPracticeFindings, scope, facilityRegionLookup),
   };
 }

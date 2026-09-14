@@ -385,6 +385,39 @@ describe("buildBestPracticeSectionSummary", () => {
     expect(summary).not.toContain("موقعان");
     expect(summary).toContain("سجن الملز");
   });
+
+  function evaluationAt(facility: string, classificationId: string): BestPracticeCandidateEvaluation {
+    return evaluateBestPracticeCandidacy(
+      finding({ entityId: classificationId, entityName: `${facility} — ت-${classificationId}`, drilldownFilters: { facility } }),
+      facility
+    ) as BestPracticeCandidateEvaluation;
+  }
+
+  it("source-of-truth item 1: 5 candidate rows from 5 DIFFERENT facilities => summary says 5 مواقع (same count the table would show)", () => {
+    const evaluations = [
+      evaluationAt("سجن 1", "c1"), evaluationAt("سجن 2", "c2"), evaluationAt("سجن 3", "c3"),
+      evaluationAt("سجن 4", "c4"), evaluationAt("سجن 5", "c5"),
+    ];
+    expect(evaluations).toHaveLength(5); // same source the table rows would be built from
+    const summary = buildBestPracticeSectionSummary(evaluations) ?? "";
+    expect(summary).toContain("5 مواقع");
+  });
+
+  it("source-of-truth item 2/3: 5 candidate rows but only 4 unique facilities => summary says 4 مواقع, never 5", () => {
+    const evaluations = [
+      evaluationAt("سجن 1", "c1"),
+      evaluationAt("سجن 1", "c1b"), // same facility, second classification — still 1 site
+      evaluationAt("سجن 2", "c2"),
+      evaluationAt("سجن 3", "c3"),
+      evaluationAt("سجن 4", "c4"),
+    ];
+    expect(evaluations).toHaveLength(5); // the table can legitimately show all 5 rows
+    const uniqueFacilities = new Set(evaluations.map((e) => e.facility));
+    expect(uniqueFacilities.size).toBe(4);
+    const summary = buildBestPracticeSectionSummary(evaluations) ?? "";
+    expect(summary).toContain("4 مواقع");
+    expect(summary).not.toContain("5 مواقع");
+  });
 });
 
 describe("buildBestPracticeComparisonConclusion", () => {

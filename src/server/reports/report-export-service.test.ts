@@ -4,6 +4,7 @@ import { ReportFormat, ReportType } from "@prisma/client";
 const dbMocks = vi.hoisted(() => ({
   runCreate: vi.fn(),
   runUpdate: vi.fn(),
+  runFindMany: vi.fn(),
   artifactCreate: vi.fn(),
   artifactDeleteMany: vi.fn(),
   templateUpdate: vi.fn(),
@@ -12,7 +13,7 @@ const dbMocks = vi.hoisted(() => ({
 
 vi.mock("@/lib/db", () => ({
   db: {
-    reportRun: { create: dbMocks.runCreate, update: dbMocks.runUpdate },
+    reportRun: { create: dbMocks.runCreate, update: dbMocks.runUpdate, findMany: dbMocks.runFindMany },
     reportArtifact: { create: dbMocks.artifactCreate, deleteMany: dbMocks.artifactDeleteMany },
     reportTemplate: { update: dbMocks.templateUpdate },
     auditLog: { create: dbMocks.auditLogCreate },
@@ -79,6 +80,7 @@ describe("runReport orchestration", () => {
     storageMocks.deleteReportArtifact.mockReset().mockResolvedValue({ deleted: true });
     dbMocks.auditLogCreate.mockResolvedValue({ id: "audit_1" });
     dbMocks.artifactDeleteMany.mockResolvedValue({ count: 1 });
+    dbMocks.runFindMany.mockReset().mockResolvedValue([]);
   });
 
   it("creates a ReportRun, stores artifacts, and marks COMPLETED on success", async () => {
@@ -452,5 +454,154 @@ describe("runReport orchestration", () => {
     expect(isReportRunError(caught)).toBe(true);
     if (isReportRunError(caught)) expect(caught.code).toBe("REPORT_FORMAT_UNSUPPORTED");
     expect(dbMocks.runCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("runReport — recent operational-practice history (governance review)", () => {
+  beforeEach(() => {
+    Object.values(dbMocks).forEach((m) => m.mockReset());
+    dataMocks.buildReportData.mockReset();
+    pdfMocks.renderReportPdf.mockReset();
+    xlsxMocks.renderReportXlsx.mockReset();
+    storageMocks.storeReportArtifact.mockReset();
+    storageMocks.deleteReportArtifact.mockReset().mockResolvedValue({ deleted: true });
+    dbMocks.auditLogCreate.mockResolvedValue({ id: "audit_1" });
+    dbMocks.artifactDeleteMany.mockResolvedValue({ count: 1 });
+    dbMocks.runFindMany.mockReset().mockResolvedValue([]);
+    dbMocks.runCreate.mockResolvedValue({ id: "run_h" });
+    dbMocks.runUpdate.mockResolvedValue({ id: "run_h" });
+    pdfMocks.renderReportPdf.mockResolvedValue({ buffer: Buffer.from("pdf"), warnings: [] });
+    storageMocks.storeReportArtifact.mockResolvedValue({ storageKey: "abc.pdf", fileSize: 3, sha256: "hash" });
+    dbMocks.artifactCreate.mockResolvedValue({ id: "art_1", format: ReportFormat.PDF, fileName: "x.pdf", fileSize: 3, sha256: "hash" });
+  });
+
+  function v2BriefData(operationalPracticeIds: string[]) {
+    return {
+      allTimeTotal: 0,
+      monthlyStockFlow: [],
+      classificationOpenLate: {},
+      briefKpis: [],
+      allRegions: [],
+      topClassifications: [],
+      comparativeTimeline: { current: { label: "x", points: [] }, previous: null, periodDays: 0 },
+      concentrationBands: [],
+      operationalPractices: operationalPracticeIds.map((id) => ({
+        id, title: "t", description: "d", topic: "HEALTH_ACCESS", selectionReason: "REPORT_PRIORITY",
+      })),
+    };
+  }
+
+  async function run(reportTemplateId: string | null = "tmpl-1") {
+    const { runReport } = await import("./report-export-service");
+    return runReport(
+      { request: buildRequest(), formats: [ReportFormat.PDF], requestedBy: "admin", reportTemplateId },
+      new Date("2026-08-01T00:00:00Z")
+    );
+  }
+
+  it("C: collects all valid unique ids across the last 3 comparable runs and threads them into buildReportData's context", async () => {
+    dbMocks.runFindMany.mockResolvedValue([
+      { resultSummary: { operationalPracticeIds: ["daily-health-request-followup", "agency-service-control"] } },
+      { resultSummary: { operationalPracticeIds: ["medication-continuity"] } },
+      { resultSummary: { operationalPracticeIds: ["daily-health-request-followup"] } }, // duplicate across runs
+    ]);
+    dataMocks.buildReportData.mockResolvedValue(reportData());
+
+    await run();
+
+    expect(dbMocks.runFindMany).toHaveBeenCalledWith({
+      where: { reportTemplateId: "tmpl-1", status: "COMPLETED" },
+      orderBy: { completedAt: "desc" },
+      take: 3,
+      select: { resultSummary: true },
+    });
+    const context = dataMocks.buildReportData.mock.calls[0][3];
+    expect(new Set(context.recentOperationalPracticeIds)).toEqual(
+      new Set(["daily-health-request-followup", "agency-service-control", "medication-continuity"])
+    );
+  });
+
+  it("D: an unknown/stale persisted practice id is ignored", async () => {
+    dbMocks.runFindMany.mockResolvedValue([
+      { resultSummary: { operationalPracticeIds: ["daily-health-request-followup", "totally-made-up-id"] } },
+    ]);
+    dataMocks.buildReportData.mockResolvedValue(reportData());
+
+    await run();
+
+    const context = dataMocks.buildReportData.mock.calls[0][3];
+    expect(context.recentOperationalPracticeIds).toEqual(["daily-health-request-followup"]);
+  });
+
+  it("E: a legacy resultSummary with no operationalPracticeIds field at all never throws and contributes nothing", async () => {
+    dbMocks.runFindMany.mockResolvedValue([
+      { resultSummary: { rowCount: 5, warnings: [], formats: ["PDF"] } },
+    ]);
+    dataMocks.buildReportData.mockResolvedValue(reportData());
+
+    await expect(run()).resolves.toBeDefined();
+    const context = dataMocks.buildReportData.mock.calls[0][3];
+    expect(context.recentOperationalPracticeIds).toEqual([]);
+  });
+
+  it("F: malformed resultSummary/operationalPracticeIds shapes are ignored without throwing", async () => {
+    dbMocks.runFindMany.mockResolvedValue([
+      { resultSummary: "not-an-object" },
+      { resultSummary: null },
+      { resultSummary: { operationalPracticeIds: "not-an-array" } },
+      { resultSummary: { operationalPracticeIds: [123, null, "daily-health-request-followup"] } },
+    ]);
+    dataMocks.buildReportData.mockResolvedValue(reportData());
+
+    await expect(run()).resolves.toBeDefined();
+    const context = dataMocks.buildReportData.mock.calls[0][3];
+    expect(context.recentOperationalPracticeIds).toEqual(["daily-health-request-followup"]);
+  });
+
+  it("G: a different reportTemplateId's history never affects the current run's ad-hoc history (query is scoped by template)", async () => {
+    dataMocks.buildReportData.mockResolvedValue(reportData());
+    await run("tmpl-1");
+    expect(dbMocks.runFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { reportTemplateId: "tmpl-1", status: "COMPLETED" } })
+    );
+  });
+
+  it("G2: an ad-hoc run with no reportTemplateId never queries history and passes []", async () => {
+    dataMocks.buildReportData.mockResolvedValue(reportData());
+    await run(null);
+    expect(dbMocks.runFindMany).not.toHaveBeenCalled();
+    const context = dataMocks.buildReportData.mock.calls[0][3];
+    expect(context.recentOperationalPracticeIds).toEqual([]);
+  });
+
+  it("H: only COMPLETED runs are queried — the query itself excludes FAILED/RUNNING (never relies on filtering after the fact)", async () => {
+    dataMocks.buildReportData.mockResolvedValue(reportData());
+    await run();
+    expect(dbMocks.runFindMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ status: "COMPLETED" }) })
+    );
+  });
+
+  it("I: after a successful run, resultSummary.operationalPracticeIds exactly matches briefData.operationalPractices (never re-derived independently)", async () => {
+    dataMocks.buildReportData.mockResolvedValue(
+      reportData({ reportMode: "PRINT_EXECUTIVE_BRIEF_V2", briefData: v2BriefData(["daily-health-request-followup", "medication-continuity"]) })
+    );
+
+    await run();
+
+    const completedUpdate = dbMocks.runUpdate.mock.calls.find((c) => c[0].data.status === "COMPLETED");
+    expect(completedUpdate![0].data.resultSummary.operationalPracticeIds).toEqual([
+      "daily-health-request-followup",
+      "medication-continuity",
+    ]);
+  });
+
+  it("I2: a non-V2 report (no operationalPractices at all) persists an empty operationalPracticeIds array, never throwing", async () => {
+    dataMocks.buildReportData.mockResolvedValue(reportData());
+
+    await run();
+
+    const completedUpdate = dbMocks.runUpdate.mock.calls.find((c) => c[0].data.status === "COMPLETED");
+    expect(completedUpdate![0].data.resultSummary.operationalPracticeIds).toEqual([]);
   });
 });

@@ -20,6 +20,7 @@ import {
   buildTopClassifications,
   buildFacilitiesNeedingFollowUp,
   buildBestPracticeCandidateRows,
+  rankBestPracticeCandidateEvaluations,
   buildClassificationTrendRows,
   buildRegionOnlyConclusions,
   MONTHLY_WINDOW_SIZE,
@@ -2746,7 +2747,7 @@ function makeImprovementFinding(
   });
 }
 
-describe("buildBestPracticeCandidateRows — الجهات المتميزة والمرشحة لدراسة الممارسات الناجحة (real, strong, sustained decline only)", () => {
+describe("buildBestPracticeCandidateRows — حالات التحسن المستدام المرشحة للدراسة (real, strong, sustained decline only)", () => {
   it("requires an actual SUSTAINED_IMPROVEMENT finding — a low current value alone is never 'best'", () => {
     const rows = buildBestPracticeCandidateRows([
       makeFinding({ id: "chronic-but-small", facility: "سجن أ", type: "CHRONIC_ISSUE", currentValue: 2, previousValue: 2 }),
@@ -2764,6 +2765,14 @@ describe("buildBestPracticeCandidateRows — الجهات المتميزة وا�
     expect(rows).toHaveLength(1);
     expect(rows[0].facility).toBe("سجن الملز");
     expect(rows[0].decrease).toBe(41);
+  });
+
+  it("governance review item 4 (source of truth): an OBSERVED_IMPROVEMENT finding (real but trivial decline) never enters the candidate table — status is never re-derived independently between evaluation and table", () => {
+    const finding = makeImprovementFinding({ id: "trivial", facility: "سجن أ", currentValue: 1, previousValue: 2, changeRate: -50, streakPeriods: 3 });
+    const evaluations = rankBestPracticeCandidateEvaluations([finding]);
+    expect(evaluations).toEqual([]);
+    const rows = buildBestPracticeCandidateRows([finding]);
+    expect(rows).toEqual([]);
   });
 
   it("a single-period improvement (streak below the minimum) is never a candidate", () => {

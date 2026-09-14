@@ -49,6 +49,8 @@ import type {
   FacilityFollowUpRow,
   BestPracticeCandidateRow,
 } from "@/lib/reports/report-contract";
+import type { OperationalPracticeRow } from "@/lib/reports/operational-practices";
+export type { OperationalPracticeRow } from "@/lib/reports/operational-practices";
 // Types that are only re-exported (not used locally) — direct re-export avoids a redundant import.
 export type { KpiAssessment, ComparativeTimelinePoint, ComparativeTimelineSeries } from "@/lib/reports/report-contract";
 import type { PatternAnalysisReportData } from "@/server/analytics/pattern/pattern-report-integration-service";
@@ -219,10 +221,18 @@ export type ExecutiveBriefV2Data = ExecutiveBriefData & {
   continuedProblemFindingCount: number;
   /** V2-only: facilities ranked by follow-up priority, from the pattern-analysis engine (page 4 "السجون الأكثر حاجة للمتابعة"). Not used by other report modes. */
   facilitiesNeedingFollowUp?: FacilityFollowUpRow[];
-  /** V2-only: facility×classification best-practice candidates (page 4 "الجهات المتميزة والمرشحة لدراسة الممارسات الناجحة"). Never overlaps facilitiesNeedingFollowUp. */
+  /** V2-only: facility×classification best-practice candidates (page 4 "حالات التحسن المستدام المرشحة للدراسة"). Never overlaps facilitiesNeedingFollowUp. */
   bestPracticeCandidates?: BestPracticeCandidateRow[];
   /** V2-only: classification×facility multi-period trends from the pattern-analysis engine (page 4 "أبرز اتجاهات التصنيفات عبر الفترات"). */
   classificationTrends?: ClassificationTrendRow[];
+  /**
+   * V2-only: the periodic "ممارسات تشغيلية مقترحة" section (page 4) — up to
+   * 4 pre-approved, generic operational-practice recommendations selected by
+   * selectOperationalPractices(). These are suggestions, never a claim that
+   * any of them caused a real improvement, and are intentionally unrelated
+   * to bestPracticeCandidates (see operational-practices.ts header).
+   */
+  operationalPractices?: OperationalPracticeRow[];
 };
 
 /** Extended payload for FULL_ANALYTICAL mode (super-set of ExecutiveBriefData). */
@@ -661,7 +671,8 @@ async function buildExecutiveSummaryWithMode(
   request: ReportRequest,
   mode: "preview" | "run",
   now: Date,
-  reportMode: ReportMode
+  reportMode: ReportMode,
+  context: ReportBuildContext = {}
 ): Promise<ReportData> {
   const { data: base, kpiResult: result, comparison } = await buildExecutiveSummaryCore(request, mode, now);
 
@@ -712,7 +723,8 @@ async function buildExecutiveSummaryWithMode(
       result,
       comparison,
       previousResult,
-      now
+      now,
+      context.recentOperationalPracticeIds ?? []
     );
     return { ...base, title, reportMode, briefData };
   }
@@ -956,15 +968,26 @@ async function buildOverdueComplaintsReport(
   };
 }
 
+/**
+ * Explicit, per-call context that does not fit `ReportRequest` itself —
+ * never module-global mutable state. Every field is optional so existing
+ * callers (preview routes, tests) keep working unchanged at [].
+ */
+export type ReportBuildContext = {
+  /** Operational-practice ids shown in the last 3 comparable COMPLETED runs of this report's own template — see report-export-service.ts. */
+  recentOperationalPracticeIds?: readonly string[];
+};
+
 export async function buildReportData(
   request: ReportRequest,
   mode: "preview" | "run",
-  now: Date = new Date()
+  now: Date = new Date(),
+  context: ReportBuildContext = {}
 ): Promise<ReportData> {
   switch (request.type) {
     case ReportType.EXECUTIVE_SUMMARY: {
       if (isReportMode(request.options.reportMode)) {
-        return buildExecutiveSummaryWithMode(request, mode, now, request.options.reportMode);
+        return buildExecutiveSummaryWithMode(request, mode, now, request.options.reportMode, context);
       }
       return buildExecutiveSummary(request, mode, now);
     }

@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { HalfOpenDateRange } from "@/lib/reports/period-range";
-import { computePatternFindings, computePeriodChangeDigest } from "./pattern-findings-service";
+import {
+  computePatternFindings,
+  computePatternFindingsWithOperationalPracticeSource,
+  computePeriodChangeDigest,
+} from "./pattern-findings-service";
 import type { PatternSeries, PatternSeriesRecord } from "./pattern-period-series-service";
 import { evaluateBestPracticeCandidacy } from "@/lib/analytics/best-practice-candidate";
 
@@ -168,6 +172,51 @@ describe("computePatternFindings — data quality", () => {
       records: genCountRecords("سجن أ", "cls-food", "التغذية", [8, 8], "short"),
     };
     expect(computePatternFindings(shortSeries)).toEqual([]);
+  });
+});
+
+describe("computePatternFindingsWithOperationalPracticeSource — uncapped classification source for the operational-practices selector (governance review)", () => {
+  it("a real chronic classification ranked 11th (just outside MAX_FINDINGS_PER_TYPE=10) stays visible to operationalPracticeFindings even though it is cut from the capped display findings", () => {
+    const periods = buildPeriods(7);
+    const records: PatternSeriesRecord[] = [];
+    // 10 facilities, classification A — each independently a strong, real chronic finding.
+    for (let i = 1; i <= 10; i++) {
+      records.push(...genCountRecords(`سجن A${i}`, "cls-A", "تصنيف أ", [5, 5, 20, 20, 20, 20, 20], `a${i}`));
+    }
+    // An 11th, deliberately weaker (lower volume/change) real chronic signal
+    // for a DIFFERENT classification at a different facility — verified
+    // (below) to score lower than every "A" instance on priorityScore, so
+    // it is the one the display cap actually drops.
+    records.push(...genCountRecords("سجن B1", "cls-B", "تصنيف ب", [4, 4, 5, 5, 5, 5, 5], "b1"));
+
+    const series: PatternSeries = { periods, records };
+    const { findings, operationalPracticeFindings } = computePatternFindingsWithOperationalPracticeSource(series);
+
+    const chronicDisplay = findings.filter((f) => f.type === "CHRONIC_ISSUE");
+    const chronicUncapped = operationalPracticeFindings.filter((f) => f.type === "CHRONIC_ISSUE");
+
+    // Precondition: the fixture actually produced 11 real chronic findings
+    // (otherwise this test would pass vacuously without exercising the cap).
+    expect(chronicUncapped).toHaveLength(11);
+    expect(chronicUncapped.some((f) => f.entityId === "cls-A")).toBe(true);
+    expect(chronicUncapped.some((f) => f.entityId === "cls-B")).toBe(true);
+
+    // Display findings stay capped exactly as before — never widened.
+    expect(chronicDisplay.length).toBeLessThanOrEqual(10);
+    expect(chronicDisplay.some((f) => f.entityId === "cls-B")).toBe(false);
+
+    // computePatternFindings() itself (the pre-existing public API every
+    // other consumer calls) must produce the exact same capped set of ids —
+    // compared by id/type rather than deep-equal, since each is an
+    // independent engine run and only firstDetectedAt/lastDetectedAt (wall
+    // clock, not analysis output) can legitimately differ between them.
+    expect(computePatternFindings(series).map((f) => f.id).sort()).toEqual(findings.map((f) => f.id).sort());
+  });
+
+  it("never returns more display findings than computePatternFindings itself would (analytics/report display is never widened)", () => {
+    const series = buildFixtureSeries();
+    const { findings } = computePatternFindingsWithOperationalPracticeSource(series);
+    expect(findings.map((f) => f.id).sort()).toEqual(computePatternFindings(series).map((f) => f.id).sort());
   });
 });
 
