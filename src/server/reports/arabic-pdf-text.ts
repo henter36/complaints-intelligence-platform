@@ -239,25 +239,17 @@ export function splitOversizedToken(
 }
 
 /**
- * Wraps a paragraph into visual lines by measuring LOGICAL token widths —
- * direction-agnostic; the caller decides whether to reverse token order per
- * line based on the paragraph's own direction. Works for RTL Arabic, LTR
- * English/numeric, and mixed-direction text alike, since word-wrap-by-width
- * is the same algorithm regardless of script. A token wider than `maxWidth`
- * by itself always lands alone on its own line first (the packing loop below
- * can never place a second token beside it), then gets split into width-safe
- * fragment lines via splitOversizedToken — so long, unbreakable tokens (a
- * URL, a run-on compound word) still render in full instead of being
- * flagged for the caller to ellipsis-truncate.
+ * Pure word-boundary packing: groups `tokens` into lines that each fit
+ * `maxWidth` (direction-agnostic — RTL/LTR/mixed all pack the same way by
+ * width). Never looks at oversized-token expansion — see
+ * expandOversizedWrappedLine for that separate concern.
  */
-function wrapParagraphIntoLines(
+function packTokensIntoLines(
   doc: PDFKit.PDFDocument,
-  paragraph: string,
+  tokens: readonly string[],
   maxWidth: number,
-  wordSpacing: number,
-  splitOversizedTokens: boolean
-): WrappedLineTokens[] {
-  const tokens = paragraph.split(" ").filter((t) => t.length > 0);
+  wordSpacing: number
+): string[][] {
   const spaceWidth = doc.widthOfString(" ") + wordSpacing;
   const wrappedLines: string[][] = [];
   let lineTokens: string[] = [];
@@ -275,40 +267,78 @@ function wrapParagraphIntoLines(
     }
   }
   if (lineTokens.length > 0) wrappedLines.push(lineTokens);
+  return wrappedLines;
+}
 
-  // A line is only ever a single unbreakable token when that token's own
-  // width already exceeds maxWidth (otherwise it would have absorbed the
-  // next token too) — so re-measuring just single-token lines is enough to
-  // find the "cannot be fixed by word-wrapping" case without re-measuring
-  // every line.
-  //
-  // splitOversizedTokens is opt-in (default false, see preparePdfTextLayout)
-  // — a "grow to fit everything" caller (a bullet/notes box) wants the token
-  // split into fragment lines instead of ellipsis-truncated; a fixed-height
-  // table cell caller (see repeat-complainant-pdf-shared.ts) instead relies
-  // on `overflowsWidth` staying true for the WHOLE oversized token so it can
-  // apply its own maxLines-aware ellipsis truncation. Changing the default
-  // would silently change that caller's rendered output, so it stays off
-  // unless a caller explicitly asks for it.
+/**
+ * A line is only ever a single unbreakable token when that token's own
+ * width already exceeds maxWidth (otherwise packTokensIntoLines would have
+ * absorbed the next token too) — so re-measuring just single-token lines is
+ * enough to find the "cannot be fixed by word-wrapping" case without
+ * re-measuring every line.
+ */
+function toWrappedLineTokens(doc: PDFKit.PDFDocument, lineTokens: readonly string[]): WrappedLineTokens {
+  return {
+    tokens: [...lineTokens],
+    singleTokenWidth: lineTokens.length === 1 ? doc.widthOfString(lineTokens[0]) : null,
+  };
+}
+
+/**
+ * splitOversizedTokens is opt-in (default false, see preparePdfTextLayout)
+ * — a "grow to fit everything" caller (a bullet/notes box) wants an
+ * oversized token split into fragment lines instead of ellipsis-truncated;
+ * a fixed-height table cell caller (see repeat-complainant-pdf-shared.ts)
+ * instead relies on `overflowsWidth` staying true for the WHOLE oversized
+ * token so it can apply its own maxLines-aware ellipsis truncation.
+ * Changing the default would silently change that caller's rendered
+ * output, so a normal (or already-fitting single-token) line is returned
+ * unchanged; only a genuinely oversized single-token line gets expanded,
+ * via splitOversizedToken, into one WrappedLineTokens per width-safe
+ * fragment.
+ */
+function expandOversizedWrappedLine(
+  doc: PDFKit.PDFDocument,
+  lineTokens: readonly string[],
+  maxWidth: number
+): WrappedLineTokens[] {
+  const wrapped = toWrappedLineTokens(doc, lineTokens);
+  if (wrapped.singleTokenWidth === null || wrapped.singleTokenWidth <= maxWidth) {
+    return [wrapped];
+  }
+  return splitOversizedToken(doc, lineTokens[0], maxWidth).map((fragment) => ({
+    tokens: [fragment],
+    singleTokenWidth: doc.widthOfString(fragment),
+  }));
+}
+
+/**
+ * Wraps a paragraph into visual lines by measuring LOGICAL token widths —
+ * direction-agnostic; the caller decides whether to reverse token order per
+ * line based on the paragraph's own direction. Works for RTL Arabic, LTR
+ * English/numeric, and mixed-direction text alike, since word-wrap-by-width
+ * is the same algorithm regardless of script. A token wider than `maxWidth`
+ * by itself always lands alone on its own line first (packTokensIntoLines
+ * can never place a second token beside it); with splitOversizedTokens it
+ * then gets split into width-safe fragment lines via splitOversizedToken —
+ * so long, unbreakable tokens (a URL, a run-on compound word) still render
+ * in full instead of being flagged for the caller to ellipsis-truncate.
+ */
+function wrapParagraphIntoLines(
+  doc: PDFKit.PDFDocument,
+  paragraph: string,
+  maxWidth: number,
+  wordSpacing: number,
+  splitOversizedTokens: boolean
+): WrappedLineTokens[] {
+  const tokens = paragraph.split(" ").filter((token) => token.length > 0);
+  const packedLines = packTokensIntoLines(doc, tokens, maxWidth, wordSpacing);
+
   if (!splitOversizedTokens) {
-    return wrappedLines.map((lineTok) => ({
-      tokens: lineTok,
-      singleTokenWidth: lineTok.length === 1 ? doc.widthOfString(lineTok[0]) : null,
-    }));
+    return packedLines.map((lineTokens) => toWrappedLineTokens(doc, lineTokens));
   }
 
-  const result: WrappedLineTokens[] = [];
-  for (const lineTok of wrappedLines) {
-    const singleTokenWidth = lineTok.length === 1 ? doc.widthOfString(lineTok[0]) : null;
-    if (singleTokenWidth !== null && singleTokenWidth > maxWidth) {
-      for (const fragment of splitOversizedToken(doc, lineTok[0], maxWidth)) {
-        result.push({ tokens: [fragment], singleTokenWidth: doc.widthOfString(fragment) });
-      }
-      continue;
-    }
-    result.push({ tokens: lineTok, singleTokenWidth });
-  }
-  return result;
+  return packedLines.flatMap((lineTokens) => expandOversizedWrappedLine(doc, lineTokens, maxWidth));
 }
 
 /**
