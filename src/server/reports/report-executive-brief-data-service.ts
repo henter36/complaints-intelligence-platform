@@ -644,7 +644,7 @@ function toBestPracticeCandidateRow(evaluation: BestPracticeCandidateEvaluation)
 }
 
 /**
- * "حالات التحسن المستدام المرشحة للدراسة": every facility×
+ * "حالات التحسن المستدام" (page 4 section title): every facility×
  * classification pair with a SUSTAINED_IMPROVEMENT finding that ALSO clears
  * the best-practice-candidate gates (see best-practice-candidate.ts /
  * PATTERN_ANALYSIS_CONFIG.bestPracticeCandidate) — a real multi-period

@@ -1,8 +1,11 @@
 /**
  * PRINT_EXECUTIVE_BRIEF_V2 — standalone 4-page PDF renderer.
  *
- * Page layout targets A4-portrait (PRINT_EXECUTIVE_PAGE_SIZE). createV2Layout may
- * expand the height when many regions need cards + table space so content fits.
+ * Page width (PRINT_EXECUTIVE_PAGE_SIZE[0]) and margins are shared, but each
+ * page gets its OWN height via PDFKit per-page `addPage({ size })` — pages 1
+ * and 2 always use BASE_PAGE_HEIGHT; page 3 may grow with region count
+ * (computeV2Page3Height); page 4 is sized from its own actual content
+ * (planPage4Layout). No page's extra content ever inflates another page.
  *
  *   1. Cover   — large title + 3 summary cards + all-time total
  *   2. Trend   — registered/closed totals + monthly combo chart + key notes
@@ -72,27 +75,6 @@ function loadFonts(): { regular: Buffer; bold: Buffer } {
   return { regular: fontRegularBuffer, bold: fontBoldBuffer };
 }
 
-let measurementDoc: PDFKit.PDFDocument | null = null;
-
-/**
- * A throwaway PDFKit document that is NEVER rendered or written anywhere —
- * used only to query font metrics (currentLineHeight, widthOfString,
- * preparePdfTextLayout) at layout-planning time, before the real page-sized
- * document exists yet (createV2Layout runs before `new PDFDocument(...)`
- * because it computes the page SIZE). Metrics are a pure function of
- * (font buffer, font size) — never of page content — so measuring with this
- * document and measuring later with the real one always agree exactly.
- */
-function getMeasurementDoc(): PDFKit.PDFDocument {
-  if (!measurementDoc) {
-    const { regular, bold } = loadFonts();
-    measurementDoc = new PDFDocument({ size: [10, 10] });
-    measurementDoc.registerFont("Body", regular);
-    measurementDoc.registerFont("Bold", bold);
-  }
-  return measurementDoc;
-}
-
 export type ExecutiveBriefV2PdfResult = {
   buffer: Buffer;
   warnings: string[];
@@ -102,32 +84,46 @@ export type ExecutiveBriefV2PdfResult = {
 export type { ExecutiveBriefV2Data };
 
 // ── Layout ────────────────────────────────────────────────────────────────────
+//
+// Each of the 4 pages gets its OWN height via PDFKit's per-page `addPage({
+// size })` — only page WIDTH and margins are shared (V2Layout below). A page
+// whose content needs more room (page 3's region cards/table, page 4's
+// facility tables/practices grid/conclusions) grows ONLY that page; it never
+// inflates the other 3, which is what previously made every page ~2020pt
+// tall (900×1200 base) whenever region or practice counts were large —
+// visually shrinking all text once a PDF viewer's "fit page" scaled to that
+// exaggerated height. See computeV2Page3Height / planPage4Layout below.
 
 type V2Layout = {
-  pageSize: readonly [number, number];
+  pageWidth: number;
   margin: number;
   contentWidth: number;
 };
 
-/**
- * `operationalPracticesCount` grows page 4's height by exactly what
- * "ممارسات تشغيلية مقترحة" will actually render at (see
- * operationalPracticesSectionHeight — the SAME function
- * drawOperationalPracticesSection and resolveV2FacilityRowCounts's budget
- * use), on top of whatever the region-count term already produces — the
- * same "expand height, not page count" pattern the region-card term
- * already uses. Reserves real room even at count 0: the empty-state
- * fallback still draws a title, subtitle, and info box, never nothing.
- */
-function createV2Layout(regionCount: number, operationalPracticesCount: number): V2Layout {
+const BASE_PAGE_WIDTH = PRINT_EXECUTIVE_PAGE_SIZE[0];
+/** The shared base page height — pages 1 and 2's fixed height, and the floor every other page's content-driven height is clamped to. */
+const BASE_PAGE_HEIGHT = PRINT_EXECUTIVE_PAGE_SIZE[1];
+
+function createV2Layout(): V2Layout {
   const margin = 42;
-  const [pw, ph] = PRINT_EXECUTIVE_PAGE_SIZE;
+  return { pageWidth: BASE_PAGE_WIDTH, margin, contentWidth: BASE_PAGE_WIDTH - margin * 2 };
+}
+
+/** PDFKit's addPage(options) does NOT inherit the document's own margins when `size` is passed explicitly — every per-page addPage call must repeat them. */
+function v2PageMargins(margin: number): { top: number; bottom: number; left: number; right: number } {
+  return { top: margin, bottom: margin + 24, left: margin, right: margin };
+}
+
+/**
+ * Page 3 (regions) legitimately grows with region count — its own cards +
+ * table need real extra room. Never applied to any other page (spec: a
+ * 13-region report must not shrink text on the cover, trend, or
+ * classifications/conclusions pages).
+ */
+export function computeV2Page3Height(regionCount: number): number {
   const safeCount = Math.min(regionCount, MAX_REGION_ROWS);
   const cardRows = Math.ceil(safeCount / 4);
-  const contentWidth = pw - margin * 2;
-  const practicesReserve = operationalPracticesSectionHeight(getMeasurementDoc(), operationalPracticesCount, contentWidth);
-  const pageH = Math.max(ph, 880 + cardRows * 118 + safeCount * 28) + practicesReserve;
-  return { pageSize: [pw, pageH] as const, margin, contentWidth };
+  return Math.max(BASE_PAGE_HEIGHT, 880 + cardRows * 118 + safeCount * 28);
 }
 
 const FOOTER_RESERVE = 26;
@@ -188,25 +184,54 @@ const FACILITY_TABLE_HEADER_H = FACILITY_ROW_HEIGHT + 2;
 const FACILITY_SECTION_TITLE_H = 13 + 8; // matches drawSectionTitle's y advance
 const FACILITY_MAX_ROWS = 5;
 
-// These three mirror drawBulletBox's own internal layout constants exactly
-// (hdrH, lineH, and the "height - hdrH - 16" reserved-padding term in its
-// maxLines formula). Keeping a single source of truth here is what prevents
-// the box-sizing math and drawBulletBox's own rendering math from drifting
-// apart again (previously 12 vs. 16, which silently truncated a line).
+// These mirror drawBulletBox's own internal layout constants exactly (hdrH,
+// lineH, the horizontal/top text padding, and the "height - hdrH - 16"
+// reserved-padding term in its maxLines formula). Keeping a single source of
+// truth here is what prevents the box-sizing math and drawBulletBox's own
+// rendering math from drifting apart again (previously 12 vs. 16, which
+// silently truncated a line).
 const CONCLUSIONS_BOX_HEADER_H = 30;
 const CONCLUSIONS_BOX_LINE_H = 22;
 const CONCLUSIONS_BOX_BODY_PADDING = 16;
+const CONCLUSIONS_BOX_PAD_X = 10;
+const CONCLUSIONS_BOX_PAD_TOP = 8;
 
 /**
- * Exact box height drawBulletBox needs to display `lineCount` conclusion
- * lines without truncating the last one — the inverse of drawBulletBox's own
- * `maxLines = floor((height - hdrH - 16) / lineH)` formula. Used both to size
- * the conclusions box itself and to budget room for it before facility rows
- * are picked, so the two can never disagree.
+ * Exact box height drawBulletBox needs to display `lineCount` VISUAL
+ * (already-wrapped) lines without truncating the last one — the inverse of
+ * drawBulletBox's own `maxLines = floor((height - hdrH - 16) / lineH)`
+ * formula. `lineCount` is the sum of each point's own wrapped-line count
+ * (see computeBulletBoxLineCount), never just `points.length` — a single
+ * long conclusion can take 2-3 visual lines. Used both to size the
+ * conclusions box itself and to budget room for it before facility rows are
+ * picked, so the two can never disagree.
  */
 export function computeV2ConclusionsBoxHeight(lineCount: number): number {
   const lines = Math.max(lineCount, 1);
   return CONCLUSIONS_BOX_HEADER_H + CONCLUSIONS_BOX_BODY_PADDING + lines * CONCLUSIONS_BOX_LINE_H;
+}
+
+/**
+ * Total VISUAL (wrapped) line count drawBulletBox will actually render for
+ * `points` at this box `width` — the exact same measurement (same inner
+ * width, same body font/size, same preparePdfTextLayout call) drawBulletBox
+ * itself performs when drawing, so a box sized from this count can never be
+ * shorter than what rendering actually needs. Callers must set no font
+ * before calling — this sets Body/fontSize.body itself, matching drawBulletBox.
+ */
+export function computeBulletBoxLineCount(
+  doc: PDFKit.PDFDocument,
+  points: readonly string[],
+  width: number
+): number {
+  if (points.length === 0) return 0;
+  const innerWidth = width - CONCLUSIONS_BOX_PAD_X * 2;
+  doc.font("Body").fontSize(REPORT_DESIGN_TOKENS.fontSize.body);
+  let total = 0;
+  for (const pt of points) {
+    total += preparePdfTextLayout(doc, `• ${pt}`, { width: innerWidth, align: "right", wordSpacing: WORD_SPACING }).lines.length;
+  }
+  return total;
 }
 
 /**
@@ -507,10 +532,36 @@ export function drawKpiMeta(
 
 // ── Page banner (pages 2-4) ───────────────────────────────────────────────────
 
+/**
+ * The banner/title/separator "chrome" shared by pages 2-4 is sized from
+ * BASE_PAGE_HEIGHT, never from the CURRENT page's own (possibly taller,
+ * content-driven) height. Two reasons: (1) visual consistency — page 3's
+ * banner shouldn't grow just because it has more regions, and (2) it breaks
+ * a circular dependency for page 4, whose own height is computed FROM its
+ * content, which starts right after this header — a header size that
+ * depended on that same not-yet-known page height would have no fixed
+ * point. `contentStartY` is therefore a constant across pages 2-4 for a
+ * given title, used identically by planPage4Layout (before page 4 exists)
+ * and drawPageHeader (drawing it for real).
+ */
+function computePageHeaderLayout(
+  doc: PDFKit.PDFDocument,
+  title: string,
+  contentWidth: number
+): { titleY: number; sepY: number; contentStartY: number } {
+  const bannerH = Math.round(BASE_PAGE_HEIGHT * 0.18);
+  const titleY = Math.round(bannerH * 0.82);
+  doc.font("Bold").fontSize(42);
+  const titleH = doc.heightOfString(preparePdfText(title), { width: contentWidth, align: "right", wordSpacing: WORD_SPACING });
+  const sepY = titleY + titleH + 10;
+  return { titleY, sepY, contentStartY: sepY + 20 };
+}
+
 function drawPageBanner(doc: PDFKit.PDFDocument, layout: V2Layout): void {
-  const [PW, PH] = layout.pageSize;
+  const PW = doc.page.width;
+  const PH = doc.page.height;
   doc.rect(0, 0, PW, PH).fill(COLORS.background);
-  const bannerH = Math.round(PH * 0.18);
+  const bannerH = Math.round(BASE_PAGE_HEIGHT * 0.18);
   doc.moveTo(0, 0).lineTo(PW * 0.5, 0)
     .bezierCurveTo(PW * 0.38, bannerH * 0.52, PW * 0.22, bannerH * 0.8, 0, bannerH * 0.72)
     .closePath().fill(COLORS.primary);
@@ -527,21 +578,17 @@ function drawPageHeader(ctx: V2Context, title: string): number {
   const { doc, layout } = ctx;
   drawPageBanner(doc, layout);
 
-  const [PW] = layout.pageSize;
+  const PW = doc.page.width;
   const { margin, contentWidth } = layout;
-  const bannerH = Math.round(layout.pageSize[1] * 0.18);
-  const titleSize = 42;
-  const titleY = Math.round(bannerH * 0.82);
+  const { titleY, sepY, contentStartY } = computePageHeaderLayout(doc, title, contentWidth);
 
-  doc.font("Bold").fontSize(titleSize).fillColor(COLORS.primary).text(
+  doc.font("Bold").fontSize(42).fillColor(COLORS.primary).text(
     preparePdfText(title), margin, titleY,
     { width: contentWidth, align: "right", wordSpacing: WORD_SPACING }
   );
-  const titleH = doc.heightOfString(preparePdfText(title), { width: contentWidth });
-  const sepY = titleY + titleH + 10;
   drawGoldSeparator(doc, PW / 2, sepY, contentWidth * 0.35);
   resetInk(doc);
-  return sepY + 20;
+  return contentStartY;
 }
 
 // ── Shared table renderer ────────────────────────────────────────────────────
@@ -644,7 +691,7 @@ type DrawBulletBoxOptions = {
 function drawBulletBox(options: DrawBulletBoxOptions): void {
   const { doc, title, icon, points, x, y, width, height } = options;
   const r = REPORT_DESIGN_TOKENS.card.radius;
-  const hdrH = 30;
+  const hdrH = CONCLUSIONS_BOX_HEADER_H;
   doc.roundedRect(x, y, width, height, r).fillAndStroke(COLORS.background, COLORS.border);
   doc.moveTo(x + r, y).lineTo(x + width - r, y)
     .quadraticCurveTo(x + width, y, x + width, y + r)
@@ -657,22 +704,41 @@ function drawBulletBox(options: DrawBulletBoxOptions): void {
   // Draw icon (small, in header)
   drawIcon(doc, icon, x + 20, y + hdrH / 2, 14);
 
-  const lineH = 22;
+  const lineH = CONCLUSIONS_BOX_LINE_H;
   const bodyFontSize = REPORT_DESIGN_TOKENS.fontSize.body;
-  const maxLines = Math.max(1, Math.floor((height - hdrH - 16) / lineH));
-  doc.font("Body").fontSize(bodyFontSize).fillColor(COLORS.text);
-  const display = points.slice(0, maxLines);
-  display.forEach((pt, idx) => {
-    doc.text(preparePdfText(`• ${pt}`), x + 10, y + hdrH + 8 + idx * lineH, {
-      width: width - 20, height: lineH - 2, align: "right",
-      wordSpacing: WORD_SPACING, lineBreak: false, ellipsis: true,
-    });
-  });
-  if (display.length === 0) {
+  const innerWidth = width - CONCLUSIONS_BOX_PAD_X * 2;
+  const textX = x + CONCLUSIONS_BOX_PAD_X;
+  const firstLineY = y + hdrH + CONCLUSIONS_BOX_PAD_TOP;
+
+  if (points.length === 0) {
     doc.font("Body").fontSize(bodyFontSize).fillColor(COLORS.neutral).text(
-      preparePdfText("لا توجد بيانات."), x + 10, y + hdrH + 8,
-      { width: width - 20, align: "center" }
+      preparePdfText("لا توجد بيانات."), textX, firstLineY,
+      { width: innerWidth, align: "center" }
     );
+    resetInk(doc);
+    return;
+  }
+
+  // Defense-in-depth only: computeV2ConclusionsBoxHeight (via
+  // computeBulletBoxLineCount, the exact same wrapping this loop performs)
+  // is expected to always reserve `height` large enough for every real
+  // visual line, so this cap is never actually hit for conclusions in normal
+  // operation — it only guards against an upstream sizing bug, and unlike
+  // the old single-line-per-point version, it can never cut a point
+  // mid-sentence: it only ever stops BETWEEN points.
+  const maxLines = Math.max(1, Math.floor((height - hdrH - CONCLUSIONS_BOX_BODY_PADDING) / lineH));
+  doc.font("Body").fontSize(bodyFontSize).fillColor(COLORS.text);
+  let lineIdx = 0;
+  for (const pt of points) {
+    if (lineIdx >= maxLines) break;
+    const layout = preparePdfTextLayout(doc, `• ${pt}`, { width: innerWidth, align: "right", wordSpacing: WORD_SPACING });
+    for (const line of layout.lines) {
+      if (lineIdx >= maxLines) break;
+      doc.text(line.visualText, textX, firstLineY + lineIdx * lineH, {
+        width: innerWidth, align: "right", wordSpacing: WORD_SPACING, lineBreak: false,
+      });
+      lineIdx++;
+    }
   }
   resetInk(doc);
 }
@@ -746,7 +812,8 @@ export function drawInfoBox(
 
 function renderCoverPage(ctx: V2Context): void {
   const { doc, data, brief, layout } = ctx;
-  const [PW, PH] = layout.pageSize;
+  const PW = doc.page.width;
+  const PH = doc.page.height;
   const { margin, contentWidth } = layout;
 
   // Background
@@ -992,7 +1059,7 @@ async function renderPage2(ctx: V2Context): Promise<void> {
   );
 
   const availableForChart = resolveV2MonthlyChartAvailableHeight({
-    pageHeight: layout.pageSize[1],
+    pageHeight: doc.page.height,
     margin: layout.margin,
     chartY: y,
     footerReserve: FOOTER_RESERVE,
@@ -1383,9 +1450,11 @@ const PRACTICE_SECTION_EMPTY_MESSAGE = "لا تتوفر ممارسات تشغي�
 // exact card width used here, and fails if a future entry does not.
 export const PRACTICE_TITLE_MAX_LINES = 2;
 export const PRACTICE_DESCRIPTION_MAX_LINES = 3;
-export const PRACTICE_TITLE_FONT_SIZE = 10.5;
-export const PRACTICE_DESCRIPTION_FONT_SIZE = 8.5;
-const PRACTICE_BADGE_FONT_SIZE = 9;
+export const PRACTICE_TITLE_FONT_SIZE = 11.5;
+export const PRACTICE_DESCRIPTION_FONT_SIZE = 10.5;
+const PRACTICE_BADGE_FONT_SIZE = 9.5;
+/** Section subtitle above the practice grid — not footer/badge print, so it follows the >=10.5pt body-text floor. */
+const PRACTICE_SUBTITLE_FONT_SIZE = 10.5;
 const PRACTICE_CARD_PAD_X = 10;
 const PRACTICE_CARD_PAD_TOP = 8;
 const PRACTICE_CARD_PAD_BOTTOM = 8;
@@ -1424,7 +1493,7 @@ export function computePracticeCardHeight(doc: PDFKit.PDFDocument): number {
 
 /** Real wrapped height of the fixed subtitle sentence at this section width — never assumed to be one line. */
 function computePracticeSubtitleHeight(doc: PDFKit.PDFDocument, width: number): number {
-  doc.font("Body").fontSize(9.5);
+  doc.font("Body").fontSize(PRACTICE_SUBTITLE_FONT_SIZE);
   return preparePdfTextLayout(doc, PRACTICE_SECTION_SUBTITLE, { width, align: "right", wordSpacing: WORD_SPACING }).height;
 }
 
@@ -1457,7 +1526,7 @@ export function operationalPracticesSectionHeight(
 /**
  * "ممارسات تشغيلية مقترحة" (spec): up to 4 pre-approved, generic
  * operational-practice recommendations — see operational-practices.ts.
- * Deliberately separate from "حالات التحسن المستدام المرشحة للدراسة"
+ * Deliberately separate from "حالات التحسن المستدام"
  * above: only title/description are ever rendered, never topic,
  * selectionReason, or any other internal field, and the wording never
  * claims these practices are proven or already the cause of any facility's
@@ -1477,7 +1546,7 @@ function drawOperationalPracticesSection(
 ): number {
   const cursorY = drawSectionTitle(doc, "ممارسات تشغيلية مقترحة", x, y, width);
 
-  doc.font("Body").fontSize(9.5).fillColor(COLORS.neutral);
+  doc.font("Body").fontSize(PRACTICE_SUBTITLE_FONT_SIZE).fillColor(COLORS.neutral);
   const subtitleLayout = preparePdfTextLayout(doc, PRACTICE_SECTION_SUBTITLE, { width, align: "right", wordSpacing: WORD_SPACING });
   subtitleLayout.lines.forEach((line, idx) => {
     doc.text(line.visualText, x, cursorY + idx * subtitleLayout.lineHeight, { width, align: "right", wordSpacing: WORD_SPACING, lineBreak: false });
@@ -1542,6 +1611,112 @@ function drawOperationalPracticesSection(
 
 // ── Page 4: Classifications + Facilities + Conclusions ─────────────────────────
 
+const PAGE4_TITLE = "التصنيفات والسجون والاستنتاجات";
+/** Item 8: page 4's final height is content-bottom + this reserve, never inflated further. */
+const PAGE4_BOTTOM_SAFETY_MARGIN = 8;
+
+export type V2Page4Plan = {
+  /** Final page 4 height: max(BASE_PAGE_HEIGHT, actual content bottom + footer reserve + safety margin) — never page 3's region-driven height. */
+  pageHeight: number;
+  topRows: number;
+  bottomRows: number;
+  /** Total wrapped visual lines the conclusions box will render — see computeBulletBoxLineCount. */
+  conclusionsLineCount: number;
+};
+
+/**
+ * Plans page 4 purely from measurement (no drawing) by mirroring
+ * renderPage4's own y-arithmetic term for term, so the two can never
+ * disagree — the same "single source of truth" pattern as
+ * operationalPracticesSectionHeight / computeV2ConclusionsBoxHeight. Called
+ * twice for a real render: once (with the real `doc`, before `addPage`) to
+ * size page 4, and once more (same doc, now on that page) inside
+ * renderPage4 for the actual topRows/bottomRows/conclusions height — both
+ * calls are pure functions of (font metrics, brief data, margin,
+ * contentWidth) so they always agree.
+ *
+ * Facility rows are reduced first (BASE_PAGE_HEIGHT is the planning
+ * ceiling passed to resolveV2FacilityRowCounts, matching what it already
+ * does); page height only grows past that ceiling — "modestly" — when even
+ * 0 facility rows still would not leave room for every conclusion line
+ * (spec priority: reduce rows, then use space efficiently, then grow the
+ * page — never drop a conclusion).
+ */
+export function planPage4Layout(
+  doc: PDFKit.PDFDocument,
+  brief: ExecutiveBriefV2Data,
+  margin: number,
+  contentWidth: number
+): V2Page4Plan {
+  const classRows = brief.topClassifications.slice(0, TOP_CLASSIFICATIONS_V2_LIMIT);
+  const followUpRows = brief.facilitiesNeedingFollowUp ?? [];
+  const bestPracticeRows = brief.bestPracticeCandidates ?? [];
+  const operationalPractices = brief.operationalPractices ?? [];
+  const conclusions = (brief.conclusions ?? []).slice(0, 5);
+  const trendRows = brief.classificationTrends;
+  const gap = 14;
+  const rowH = 26;
+
+  let y = computePageHeaderLayout(doc, PAGE4_TITLE, contentWidth).contentStartY;
+
+  // Trend table (or info-box fallback) — mirrors renderPage4 exactly.
+  y += FACILITY_SECTION_TITLE_H;
+  if (trendRows && trendRows.length > 0) {
+    y += 22 + 2 + trendRows.length * 22;
+  } else {
+    const message = trendRows === undefined
+      ? "تعذر احتساب اتجاهات التصنيفات لهذه الفترة."
+      : "لا تتوفر بيانات كافية عبر عدة فترات لاستخراج اتجاهات التصنيفات.";
+    y += computeInfoBoxHeight(doc, message, contentWidth);
+  }
+  y += gap;
+
+  // Classifications table (top TOP_CLASSIFICATIONS_V2_LIMIT rows).
+  y += FACILITY_SECTION_TITLE_H;
+  y += rowH + 2 + classRows.length * rowH;
+  y += gap;
+
+  const conclusionsLineCount = computeBulletBoxLineCount(doc, conclusions, contentWidth);
+  const requiredConclusionsHeight = computeV2ConclusionsBoxHeight(conclusionsLineCount);
+  const practicesReserve = operationalPracticesSectionHeight(doc, operationalPractices.length, contentWidth);
+
+  // The row-reduction ceiling includes practicesReserve on TOP of the base
+  // height (same "expand height, not shrink rows" treatment page 3's region
+  // term gets) — practicesReserve is passed as additionalReservedHeight too,
+  // so the two exactly cancel out in resolveV2FacilityRowCounts's own budget
+  // formula, leaving the ceiling effectively at BASE_PAGE_HEIGHT for rows.
+  // Only conclusion-line growth (not the practices grid) ever pressures
+  // facility rows to shrink — matching this section's pre-existing behavior
+  // before page-3's region count started leaking into every page's height.
+  const facilityRowCounts = resolveV2FacilityRowCounts({
+    pageHeight: BASE_PAGE_HEIGHT + practicesReserve,
+    margin,
+    y,
+    gap,
+    topAvailableRows: followUpRows.length,
+    bottomAvailableRows: bestPracticeRows.length,
+    requiredConclusionsHeight,
+    additionalReservedHeight: practicesReserve,
+  });
+
+  y += FACILITY_SECTION_TITLE_H + FACILITY_TABLE_HEADER_H + facilityRowCounts.topRows * FACILITY_ROW_HEIGHT + gap;
+  y += FACILITY_SECTION_TITLE_H + FACILITY_TABLE_HEADER_H + facilityRowCounts.bottomRows * FACILITY_ROW_HEIGHT + gap;
+  y += practicesReserve;
+
+  const contentBottom = y + requiredConclusionsHeight;
+  const pageHeight = Math.max(
+    BASE_PAGE_HEIGHT,
+    contentBottom + margin + FOOTER_RESERVE + PAGE4_BOTTOM_SAFETY_MARGIN
+  );
+
+  return {
+    pageHeight,
+    topRows: facilityRowCounts.topRows,
+    bottomRows: facilityRowCounts.bottomRows,
+    conclusionsLineCount,
+  };
+}
+
 function renderPage4(ctx: V2Context): void {
   const { doc, brief, layout } = ctx;
   const { margin, contentWidth } = layout;
@@ -1553,9 +1728,14 @@ function renderPage4(ctx: V2Context): void {
   const trendRows = brief.classificationTrends;
   const hasClassComparison = classRows.some((r) => r.previousCount > 0);
 
-  let y = drawPageHeader(ctx, "التصنيفات والسجون والاستنتاجات");
+  let y = drawPageHeader(ctx, PAGE4_TITLE);
   const gap = 14;
   const rowH = 26;
+
+  // Single source of truth for row counts / conclusions height — the exact
+  // same measurement already used to size THIS page before addPage() was
+  // called for it (see the main entry point), so it can never disagree.
+  const page4Plan = planPage4Layout(doc, brief, margin, contentWidth);
 
   // ── Continuing problems by facility × classification (V2-only; multi-period, sourced from the shared pattern-analysis engine — never department-based) ──
   y = drawSectionTitle(doc, "أبرز المشكلات المستمرة حسب السجن والتصنيف", margin, y, contentWidth);
@@ -1627,16 +1807,7 @@ function renderPage4(ctx: V2Context): void {
   // ── Facilities: needing follow-up + sustained improvement ───────────────────
   // Row counts flex (5 down to 0) so the conclusions box below always keeps
   // room for every actual conclusion — facility rows never cause truncation.
-  const facilityRowCounts = resolveV2FacilityRowCounts({
-    pageHeight: layout.pageSize[1],
-    margin,
-    y,
-    gap,
-    topAvailableRows: followUpRows.length,
-    bottomAvailableRows: bestPracticeRows.length,
-    requiredConclusionsHeight: computeV2ConclusionsBoxHeight(conclusions.length),
-    additionalReservedHeight: operationalPracticesSectionHeight(doc, operationalPractices.length, contentWidth),
-  });
+  const facilityRowCounts = { topRows: page4Plan.topRows, bottomRows: page4Plan.bottomRows };
   const followUpCols: ColDef[] = [
     { key: "facility", label: "السجن", weight: 1.3 },
     { key: "totalComplaints", label: "شكاوى الفترة", weight: 0.85 },
@@ -1669,7 +1840,7 @@ function renderPage4(ctx: V2Context): void {
   });
   y += gap;
 
-  y = drawSectionTitle(doc, "حالات التحسن المستدام المرشحة للدراسة", margin, y, contentWidth);
+  y = drawSectionTitle(doc, "حالات التحسن المستدام", margin, y, contentWidth);
   y = drawTable({
     doc,
     rows: bestPracticeRows.slice(0, facilityRowCounts.bottomRows),
@@ -1689,7 +1860,7 @@ function renderPage4(ctx: V2Context): void {
 
   // ── Conclusions (full-width) — data-quality notes are intentionally not rendered in V2 ──
   const availableH = resolveV2ConclusionsAvailableHeight(
-    layout.pageSize[1],
+    doc.page.height,
     layout.margin,
     y
   );
@@ -1697,10 +1868,13 @@ function renderPage4(ctx: V2Context): void {
     return;
   }
   // Uses the exact same formula the facility row-count budget above already
-  // reserved room for (computeV2ConclusionsBoxHeight), so this box is never
-  // sized differently than what was actually planned for it — clamped only
-  // by availableH itself, never inflated past the footer reserve.
-  const conclusionsBoxH = Math.min(computeV2ConclusionsBoxHeight(conclusions.length), availableH);
+  // reserved room for (computeV2ConclusionsBoxHeight, fed the same wrapped
+  // line count via page4Plan), so this box is never sized differently than
+  // what was actually planned for it — clamped only by availableH itself
+  // (page 4's own height was already sized to fit this exactly), and full
+  // conclusion text is never dropped or ellipsis-truncated (drawBulletBox
+  // wraps every point instead).
+  const conclusionsBoxH = Math.min(computeV2ConclusionsBoxHeight(page4Plan.conclusionsLineCount), availableH);
 
   drawBulletBox({
     doc,
@@ -1731,7 +1905,10 @@ function drawFooters(doc: PDFKit.PDFDocument, layout: V2Layout, warnings: string
     doc.font("Body").fontSize(REPORT_DESIGN_TOKENS.fontSize.footer).fillColor(COLORS.neutral);
     doc.text(
       preparePdfText(`صفحة ${formatReportNumber(pageNum)} من ${formatReportNumber(range.count)}`),
-      layout.margin, layout.pageSize[1] - layout.margin - 12,
+      // Each page now has its own height (see V2Layout) — never a single
+      // shared pageSize — so the footer's y must read the CURRENT page's
+      // own height after switchToPage, not one page's height applied to all.
+      layout.margin, doc.page.height - layout.margin - 12,
       { width: layout.contentWidth, align: "center", lineBreak: false }
     );
     doc.page.margins.bottom = origBottom;
@@ -1792,12 +1969,13 @@ export async function renderExecutiveBriefV2Pdf(data: ReportData): Promise<Execu
     ? rawBrief
     : buildFallbackBrief(rawBrief);
 
-  const layout = createV2Layout(brief.allRegions.length, (brief.operationalPractices ?? []).length);
-  const [PW, PH] = layout.pageSize;
+  const layout = createV2Layout();
 
   const doc = new PDFDocument({
-    size: [PW, PH],
-    margins: { top: layout.margin, bottom: layout.margin + 24, left: layout.margin, right: layout.margin },
+    // Page 1 (cover) is always the base size — its content never scales
+    // with region/practice counts. Pages 2-4 each get their own size below.
+    size: [layout.pageWidth, BASE_PAGE_HEIGHT],
+    margins: v2PageMargins(layout.margin),
     bufferPages: true,
     autoFirstPage: true,
     info: { Title: data.title, Author: "تقارير الشكاوى", Subject: "تقرير الشكاوى" },
@@ -1836,16 +2014,27 @@ export async function renderExecutiveBriefV2Pdf(data: ReportData): Promise<Execu
       warnings.push(`تم عرض أول ${MAX_REGION_ROWS} منطقة فقط.`);
     }
 
-    // Page 1
+    // Page 1 — cover, base size.
     renderCoverPage(ctx);
-    // Page 2
-    doc.addPage();
+
+    // Page 2 — trend chart + notes, base size (content already adapts to
+    // whatever room the base height leaves after the notes box).
+    doc.addPage({ size: [layout.pageWidth, BASE_PAGE_HEIGHT], margins: v2PageMargins(layout.margin) });
     await renderPage2(ctx);
-    // Page 3
-    doc.addPage();
+
+    // Page 3 — regions: the one page whose OWN content (cards/table) may
+    // legitimately need more than base height. Never applied to any other page.
+    const page3Height = computeV2Page3Height(brief.allRegions.length);
+    doc.addPage({ size: [layout.pageWidth, page3Height], margins: v2PageMargins(layout.margin) });
     await renderPage3(ctx);
-    // Page 4
-    doc.addPage();
+
+    // Page 4 — sized from its OWN actual content (classification/facility
+    // tables + practices grid + conclusions), never from page 3's region
+    // count. planPage4Layout is measurement-only (no drawing), using the
+    // real `doc` before its page exists — renderPage4 below re-derives the
+    // identical plan once page 4 is the current page (see planPage4Layout).
+    const page4Height = planPage4Layout(doc, brief, layout.margin, layout.contentWidth).pageHeight;
+    doc.addPage({ size: [layout.pageWidth, page4Height], margins: v2PageMargins(layout.margin) });
     renderPage4(ctx);
 
     drawFooters(doc, layout, warnings);

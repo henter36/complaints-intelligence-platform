@@ -221,7 +221,7 @@ export type ExecutiveBriefV2Data = ExecutiveBriefData & {
   continuedProblemFindingCount: number;
   /** V2-only: facilities ranked by follow-up priority, from the pattern-analysis engine (page 4 "السجون الأكثر حاجة للمتابعة"). Not used by other report modes. */
   facilitiesNeedingFollowUp?: FacilityFollowUpRow[];
-  /** V2-only: facility×classification best-practice candidates (page 4 "حالات التحسن المستدام المرشحة للدراسة"). Never overlaps facilitiesNeedingFollowUp. */
+  /** V2-only: facility×classification best-practice candidates (page 4 "حالات التحسن المستدام"). Never overlaps facilitiesNeedingFollowUp. */
   bestPracticeCandidates?: BestPracticeCandidateRow[];
   /** V2-only: classification×facility multi-period trends from the pattern-analysis engine (page 4 "أبرز اتجاهات التصنيفات عبر الفترات"). */
   classificationTrends?: ClassificationTrendRow[];
