@@ -48,6 +48,8 @@ import type {
   ClassificationTrendRow,
   FacilityFollowUpRow,
   BestPracticeCandidateRow,
+  SustainedImprovementRow,
+  ExecutiveConclusionRow,
 } from "@/lib/reports/report-contract";
 import type { OperationalPracticeRow } from "@/lib/reports/operational-practices";
 export type { OperationalPracticeRow } from "@/lib/reports/operational-practices";
@@ -221,8 +223,25 @@ export type ExecutiveBriefV2Data = ExecutiveBriefData & {
   continuedProblemFindingCount: number;
   /** V2-only: facilities ranked by follow-up priority, from the pattern-analysis engine (page 4 "السجون الأكثر حاجة للمتابعة"). Not used by other report modes. */
   facilitiesNeedingFollowUp?: FacilityFollowUpRow[];
-  /** V2-only: facility×classification best-practice candidates (page 4 "حالات التحسن المستدام المرشحة للدراسة"). Never overlaps facilitiesNeedingFollowUp. */
+  /**
+   * V2-only: facility×classification best-practice-candidate EVALUATIONS
+   * (gated subset — see best-practice-candidate.ts) mapped to rows. Kept for
+   * the candidate-evaluation domain logic and its other consumers (the
+   * legacy digest sentence, the best-practice comparison conclusion) —
+   * deliberately NOT rendered as page 4's sustained-improvement table
+   * anymore; see {@link sustainedImprovements}.
+   */
   bestPracticeCandidates?: BestPracticeCandidateRow[];
+  /**
+   * V2-only: EVERY facility×classification with a real SUSTAINED_IMPROVEMENT
+   * finding that newly cleared a flagged prior state this period (page 4
+   * "أبرز حالات التحسن المستدام") — built from periodChangeDigest.
+   * improvedFacilities, the SAME canonical source and ranking
+   * buildExecutiveConclusions' "تحسن مستدام" row uses, so the table and the
+   * conclusion can never name different sites under the same heading. Never
+   * bestPracticeCandidates (a stricter, gated SUBSET).
+   */
+  sustainedImprovements?: SustainedImprovementRow[];
   /** V2-only: classification×facility multi-period trends from the pattern-analysis engine (page 4 "أبرز اتجاهات التصنيفات عبر الفترات"). */
   classificationTrends?: ClassificationTrendRow[];
   /**
@@ -233,6 +252,13 @@ export type ExecutiveBriefV2Data = ExecutiveBriefData & {
    * to bestPracticeCandidates (see operational-practices.ts header).
    */
   operationalPractices?: OperationalPracticeRow[];
+  /**
+   * V2-only: up to 4 short "الاستنتاجات التنفيذية" rows for page 4 — see
+   * buildExecutiveConclusions. Structured (title + one sentence) rather than
+   * the free-form `conclusions` string list every other report mode still
+   * uses; V2's PDF renders THIS field, never `conclusions`.
+   */
+  executiveConclusions?: ExecutiveConclusionRow[];
 };
 
 /** Extended payload for FULL_ANALYTICAL mode (super-set of ExecutiveBriefData). */
@@ -277,6 +303,7 @@ export type {
   RegionSnapshotAtEndRow,
   DepartmentPeriodMetricsRow,
   ClassificationSnapshotAtEndRow,
+  ExecutiveConclusionRow,
 };
 const PREVIEW_TABLE_ROW_CAP = 100;
 

@@ -223,6 +223,13 @@ const v2BriefData: ExecutiveBriefV2Data = {
   bestPracticeCandidates: [
     { facility: "سجن نشط برصيد سابق", startValue: 40, currentValue: 12, decrease: 28, streakPeriods: 4, classificationLabel: "التغذية", reasonLabel: "تحسن قوي ومستدام" },
   ],
+  // Page 4's actual "أبرز حالات التحسن المستدام" table source (see
+  // buildSustainedImprovementRows) — matches bestPracticeCandidates above
+  // only because this review fixture keeps every improved site a
+  // best-practice candidate too; real data can (and often does) diverge.
+  sustainedImprovements: [
+    { facility: "سجن نشط برصيد سابق", startValue: 40, currentValue: 12, decrease: 28, streakPeriods: 4, classificationLabel: "التغذية", reasonLabel: "تحسن قوي ومستدام" },
+  ],
   classificationOpenLate: {
     c1: { openAtEnd: 41, lateAtEnd: 11 },
     c2: { openAtEnd: 26, lateAtEnd: 4 },

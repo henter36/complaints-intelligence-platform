@@ -23,6 +23,9 @@ import {
   rankBestPracticeCandidateEvaluations,
   buildClassificationTrendRows,
   buildRegionOnlyConclusions,
+  buildExecutiveConclusions,
+  buildSustainedImprovementRows,
+  selectDiverseSustainedImprovementRows,
   MONTHLY_WINDOW_SIZE,
   ARABIC_MONTH_NAMES,
 } from "./report-executive-brief-data-service";
@@ -30,6 +33,8 @@ import { ComplaintStatus } from "@prisma/client";
 import type { Prisma } from "@prisma/client";
 import type { ReportFilters } from "./report-definition-service";
 import type { ComparisonResult, DeptClassPeriodCount, PeriodRange, RegionChangeRow } from "./report-comparison";
+import type { ClassificationBriefRow } from "@/lib/reports/report-contract";
+import { buildPatternSnapshotKey, type PatternSnapshot, type PeriodChangeDigest } from "@/lib/analytics/period-change-digest";
 import type { ReportPeriodGroupSnapshot } from "./report-period-snapshot-service";
 import type { ComplaintGroupMetrics, ComplaintKpiResult } from "@/server/complaints/complaint-kpi-service";
 import type { AnalyticalFinding } from "@/lib/analytics/analytical-finding";
@@ -3176,5 +3181,637 @@ describe("buildClassificationTrendRows — V2 only, spec sections 1-2 (multi-per
 
   it("returns an empty list when there are no relevant findings", () => {
     expect(buildClassificationTrendRows([])).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildExecutiveConclusions — V2 page 4 "الاستنتاجات التنفيذية" (spec §17-30)
+// ---------------------------------------------------------------------------
+
+describe("buildExecutiveConclusions", () => {
+  function classificationRow(overrides: Partial<ClassificationBriefRow> = {}): ClassificationBriefRow {
+    return {
+      categoryId: "cat1",
+      categoryName: "فئة اختبار",
+      classificationId: "c1",
+      classificationName: "الرعاية الصحية والوصول إلى الطبيب",
+      classificationPath: "فئة اختبار / الرعاية الصحية والوصول إلى الطبيب",
+      currentCount: 1116,
+      previousCount: 1000,
+      difference: 116,
+      changeRate: 11.6,
+      shareOfTotal: 42.4,
+      ...overrides,
+    };
+  }
+
+  function snapshot(overrides: Partial<PatternSnapshot> = {}): PatternSnapshot {
+    return {
+      key: "k",
+      facility: "سجن أ",
+      classificationLabel: "التغذية",
+      pattern: "SUSTAINED_IMPROVEMENT",
+      priorityBand: "LOW",
+      ...overrides,
+    };
+  }
+
+  const EMPTY_DIGEST: PeriodChangeDigest = {
+    newProblems: [],
+    continuingProblems: [],
+    worsenedProblems: [],
+    relapsedProblems: [],
+    improvedFacilities: [],
+    exitedPriorityList: [],
+    newlySpreadingClassifications: [],
+  };
+
+  function regionRow(overrides: Partial<RegionChangeRow> = {}): RegionChangeRow {
+    return {
+      regionName: "منطقة جازان",
+      currentCount: 192,
+      previousCount: 186,
+      difference: 7,
+      changeRate: 3.8,
+      direction: "ارتفاع",
+      ...overrides,
+    };
+  }
+
+  /**
+   * Builds a matching {PatternSnapshot, AnalyticalFinding} pair for a
+   * sustained-improvement fixture. buildSustainedImprovementRows joins
+   * periodChangeDigest.improvedFacilities against patternFindings by the
+   * SAME buildPatternSnapshotKey identity real production data always
+   * shares (both computed from the same pattern-analysis engine run), so a
+   * realistic fixture must supply both, consistently keyed — never a bare
+   * PatternSnapshot with no matching finding (that would silently vanish
+   * from buildSustainedImprovementRows' output).
+   */
+  function sustainedImprovementFixture(input: {
+    facility: string;
+    classificationId?: string;
+    classificationLabel: string;
+    startValue?: number;
+    currentValue?: number;
+    streakPeriods?: number;
+  }): { snapshot: PatternSnapshot; finding: AnalyticalFinding } {
+    const classificationId = input.classificationId ?? input.classificationLabel;
+    const startValue = input.startValue ?? 30;
+    const currentValue = input.currentValue ?? 5;
+    const streakPeriods = input.streakPeriods ?? 4;
+    const key = buildPatternSnapshotKey(input.facility, classificationId);
+    return {
+      snapshot: {
+        key,
+        facility: input.facility,
+        classificationLabel: input.classificationLabel,
+        pattern: "SUSTAINED_IMPROVEMENT",
+        priorityBand: "LOW",
+      },
+      finding: makeFinding({
+        id: `sustained_improvement:${key}`,
+        type: "SUSTAINED_IMPROVEMENT",
+        entityType: "CLASSIFICATION",
+        entityId: classificationId,
+        entityName: `${input.facility} — ${input.classificationLabel}`,
+        currentValue,
+        previousValue: startValue,
+        difference: currentValue - startValue,
+        changeRate: startValue > 0 ? ((currentValue - startValue) / startValue) * 100 : null,
+        supportingMetrics: { streakPeriods },
+        facility: input.facility,
+      }),
+    };
+  }
+
+  /** Builds the "تحسن مستدام" row from a list of sustained-improvement fixture specs — every other buildExecutiveConclusions input is fixed/irrelevant to that bucket, so callers testing its wording don't each repeat the full fixture. */
+  function buildImprovementRow(specs: readonly Parameters<typeof sustainedImprovementFixture>[0][]) {
+    const fixtures = specs.map(sustainedImprovementFixture);
+    const result = buildExecutiveConclusions({
+      topClassifications: [],
+      currentPeriodTotal: 0,
+      patternFindings: fixtures.map((f) => f.finding),
+      periodChangeDigest: { ...EMPTY_DIGEST, improvedFacilities: fixtures.map((f) => f.snapshot) },
+      regionChanges: [],
+      hasPreviousPeriod: false,
+    });
+    return result.find((row) => row.title === "تحسن مستدام");
+  }
+
+  const richFindings = [
+    makeFinding({
+      id: "chronic-top",
+      entityType: "CLASSIFICATION",
+      type: "CHRONIC_ISSUE",
+      entityName: "سجن الدمام — الرعاية الصحية والوصول إلى الطبيب",
+    }),
+  ];
+
+  it("A. never returns more than 4 executive conclusions, even when every bucket has real data", () => {
+    const improved = sustainedImprovementFixture({ facility: "سجن جدة", classificationLabel: "التغذية" });
+    const result = buildExecutiveConclusions({
+      topClassifications: [classificationRow()],
+      currentPeriodTotal: 2681,
+      patternFindings: [...richFindings, improved.finding],
+      periodChangeDigest: {
+        ...EMPTY_DIGEST,
+        relapsedProblems: [snapshot({ key: "r1" }), snapshot({ key: "r2" })],
+        improvedFacilities: [improved.snapshot],
+      },
+      regionChanges: [regionRow(), regionRow({ regionName: "منطقة أخرى", difference: -30, changeRate: -12, direction: "انخفاض" })],
+      hasPreviousPeriod: true,
+    });
+    expect(result.length).toBeLessThanOrEqual(4);
+    expect(result).toHaveLength(4);
+  });
+
+  it("B. never produces two rows with the same title (no semantic duplication across buckets)", () => {
+    const improved = sustainedImprovementFixture({ facility: "سجن جدة", classificationLabel: "التغذية" });
+    const result = buildExecutiveConclusions({
+      topClassifications: [classificationRow()],
+      currentPeriodTotal: 2681,
+      patternFindings: [...richFindings, improved.finding],
+      periodChangeDigest: {
+        ...EMPTY_DIGEST,
+        relapsedProblems: [snapshot({ key: "r1" })],
+        improvedFacilities: [improved.snapshot],
+      },
+      regionChanges: [regionRow()],
+      hasPreviousPeriod: true,
+    });
+    const titles = result.map((row) => row.title);
+    expect(new Set(titles).size).toBe(titles.length);
+  });
+
+  it("A/C/D. one facility improving in TWO classifications (candidate ROWS, not unique facilities) names the SITE and both classifications — never the generic 'موقع واحد' phrase when a real name is available", () => {
+    const improvement = buildImprovementRow([
+      { facility: "إصلاحية جدة", classificationLabel: "الرعاية الصحية" },
+      { facility: "إصلاحية جدة", classificationLabel: "الوكالات" },
+    ]);
+    expect(improvement).toBeDefined();
+    expect(improvement!.text).not.toContain("موقع واحد");
+    expect(improvement!.text).not.toContain("موقعان");
+    expect(improvement!.text).toContain("إصلاحية جدة");
+    expect(improvement!.text).toContain("الرعاية الصحية");
+    expect(improvement!.text).toContain("الوكالات");
+  });
+
+  it("strips the bureaucratic 'الإدارة العامة لـ' prefix for the single-site sentence (spec review item 7), and picks the correct Arabic verb gender from the shortened name", () => {
+    const improvement = buildImprovementRow([
+      { facility: "الإدارة العامة لإصلاحية محافظة جدة", classificationLabel: "الوصول إلى الطبيب والخدمة الصحية", startValue: 60, currentValue: 19, streakPeriods: 5 },
+      { facility: "الإدارة العامة لإصلاحية محافظة جدة", classificationLabel: "استمرارية العلاج والدواء", startValue: 30, currentValue: 15, streakPeriods: 4 },
+    ]);
+    expect(improvement).toBeDefined();
+    expect(improvement!.text).not.toContain("الإدارة العامة");
+    expect(improvement!.text).toBe(
+      "حققت إصلاحية محافظة جدة تحسناً مستداماً في الوصول إلى الطبيب والخدمة الصحية، واستمرارية العلاج والدواء."
+    );
+  });
+
+  it("also strips the 'الأدارة العامة لـ' prefix spelling variant (alef-hamza vs. bare alef — a real source-data inconsistency, confirmed against real production facility names)", () => {
+    const improvement = buildImprovementRow([{ facility: "الأدارة العامة لسجن الحائر", classificationLabel: "الصيانة العامة" }]);
+    expect(improvement).toBeDefined();
+    expect(improvement!.text).not.toContain("الأدارة العامة");
+    expect(improvement!.text).not.toContain("الإدارة العامة");
+    expect(improvement!.text).toContain("سجن الحائر");
+  });
+
+  it("picks the masculine verb form for a facility name that does not end in 'ة' (e.g. 'سجن ...')", () => {
+    const improvement = buildImprovementRow([{ facility: "سجن الدمام", classificationLabel: "الاتصال" }]);
+    expect(improvement).toBeDefined();
+    expect(improvement!.text.startsWith("حقق سجن الدمام")).toBe(true);
+  });
+
+  it("E. two DIFFERENT facilities improving (one classification each) is worded 'موقعان', never '2 موقعان'", () => {
+    const improvement = buildImprovementRow([
+      { facility: "سجن أ", classificationLabel: "التغذية" },
+      { facility: "سجن ب", classificationLabel: "الاتصال" },
+    ]);
+    expect(improvement).toBeDefined();
+    expect(improvement!.text).toContain("موقعان");
+    expect(improvement!.text).not.toContain("2 موقعان");
+    // B. both facility names, and each one's own classification, must appear.
+    expect(improvement!.text).toContain("سجن أ");
+    expect(improvement!.text).toContain("سجن ب");
+    expect(improvement!.text).toContain("التغذية");
+    expect(improvement!.text).toContain("الاتصال");
+  });
+
+  it("C. four improved facilities: names at most 3 sites (plus 'وغيرها'), never all 4, and the sentence stays short", () => {
+    const improvement = buildImprovementRow([
+      { facility: "سجن أ", classificationLabel: "التغذية" },
+      { facility: "سجن ب", classificationLabel: "الاتصال" },
+      { facility: "سجن ج", classificationLabel: "الرعاية الصحية" },
+      { facility: "سجن د", classificationLabel: "الوكالات" },
+    ]);
+    expect(improvement).toBeDefined();
+    expect(improvement!.text).toContain("سجن أ");
+    expect(improvement!.text).toContain("سجن ب");
+    expect(improvement!.text).toContain("سجن ج");
+    expect(improvement!.text).not.toContain("سجن د");
+    expect(improvement!.text).toContain("وغيرها");
+    expect(improvement!.text.length).toBeLessThan(220);
+  });
+
+  it("D/E. the sustained-improvement text never contains the deleted generic recommendation sentence, never claims the accompanying procedures caused the result, and never mentions 'إقليمي'", () => {
+    const rows = [
+      buildImprovementRow([{ facility: "سجن أ", classificationLabel: "التغذية" }]),
+      buildImprovementRow([
+        { facility: "سجن أ", classificationLabel: "التغذية" },
+        { facility: "سجن ب", classificationLabel: "التغذية" },
+      ]),
+      buildImprovementRow([
+        { facility: "سجن أ", classificationLabel: "التغذية" },
+        { facility: "سجن ب", classificationLabel: "التغذية" },
+        { facility: "سجن ج", classificationLabel: "التغذية" },
+        { facility: "سجن د", classificationLabel: "التغذية" },
+      ]),
+    ];
+    for (const improvement of rows) {
+      expect(improvement).toBeDefined();
+      expect(improvement!.text).not.toContain("الإجراءات التي أسهمت");
+      expect(improvement!.text).not.toContain("يُوصى بدراسة الإجراءات المصاحبة");
+      expect(improvement!.text).not.toContain("إقليمي");
+      expect(improvement!.title).not.toContain("إقليمي");
+    }
+  });
+
+  // ── Table/conclusion single-source-of-truth regression tests (governance
+  // review: the table and the executive conclusion previously named
+  // different sites under the same "sustained improvement" heading because
+  // the table read bestPracticeCandidates — a stricter, gated SUBSET — while
+  // the conclusion read periodChangeDigest.improvedFacilities directly, in
+  // digest order rather than any real ranking). ──
+
+  it("13.A. the table (buildSustainedImprovementRows) and the executive conclusion are built from the exact same source — never two independently-derived lists", () => {
+    const fixtures = [
+      sustainedImprovementFixture({ facility: "إصلاحية جدة", classificationLabel: "الرعاية الصحية", startValue: 73, currentValue: 32, streakPeriods: 5 }),
+      sustainedImprovementFixture({ facility: "سجن الملز", classificationLabel: "الاتصال", startValue: 40, currentValue: 12, streakPeriods: 4 }),
+      sustainedImprovementFixture({ facility: "سجن الحائر", classificationLabel: "التغذية", startValue: 35, currentValue: 10, streakPeriods: 3 }),
+    ];
+    const improvedFacilities = fixtures.map((f) => f.snapshot);
+    const patternFindings = fixtures.map((f) => f.finding);
+
+    const tableRows = buildSustainedImprovementRows(improvedFacilities, patternFindings);
+    const result = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings,
+      periodChangeDigest: { ...EMPTY_DIGEST, improvedFacilities },
+      regionChanges: [], hasPreviousPeriod: false,
+    });
+    const improvement = result.find((row) => row.title === "تحسن مستدام");
+    expect(improvement).toBeDefined();
+
+    // Every table row's facility (all 3 here, within the "أبرزها" name limit) must appear in the conclusion text.
+    const uniqueTableFacilities = [...new Set(tableRows.map((r) => r.facility))];
+    expect(uniqueTableFacilities).toHaveLength(3);
+    for (const facility of uniqueTableFacilities) {
+      expect(improvement!.text).toContain(facility);
+    }
+  });
+
+  it("13.B. 8 unique improved facilities => the conclusion states '8 مواقع'", () => {
+    const improvement = buildImprovementRow(
+      Array.from({ length: 8 }, (_, i) => ({
+        facility: `سجن ${i + 1}`,
+        classificationLabel: "التغذية",
+        startValue: 30 - i,
+        currentValue: 5,
+        streakPeriods: 4,
+      }))
+    );
+    expect(improvement).toBeDefined();
+    expect(improvement!.text).toContain("8 مواقع");
+  });
+
+  it("13.C. selectDiverseSustainedImprovementRows shows 3 DIFFERENT facilities when the display limit is 3 and enough distinct facilities exist", () => {
+    const fixtures = Array.from({ length: 5 }, (_, i) =>
+      sustainedImprovementFixture({ facility: `سجن ${i + 1}`, classificationLabel: "التغذية", startValue: 30 - i, currentValue: 5 })
+    );
+    const rows = buildSustainedImprovementRows(fixtures.map((f) => f.snapshot), fixtures.map((f) => f.finding));
+    const displayed = selectDiverseSustainedImprovementRows(rows, 3);
+    expect(displayed).toHaveLength(3);
+    expect(new Set(displayed.map((r) => r.facility)).size).toBe(3);
+  });
+
+  it("13.D. the conclusion's top-3 'أبرزها' facility names exactly match the table's own first-3 ranked unique facilities (real ranking, never alphabetical or digest-insertion order)", () => {
+    // Deliberately non-alphabetical facility names with DECREASING decrease
+    // magnitude, so real ranking — not alphabetical luck — determines order.
+    const specs = [
+      { facility: "سجن الملز", classificationLabel: "الرعاية الصحية", startValue: 90, currentValue: 10 }, // decrease 80
+      { facility: "إصلاحية جدة", classificationLabel: "الاتصال", startValue: 70, currentValue: 20 },       // decrease 50
+      { facility: "سجن الحائر", classificationLabel: "التغذية", startValue: 50, currentValue: 20 },         // decrease 30
+      { facility: "سجن أبها", classificationLabel: "الزيارات", startValue: 30, currentValue: 20 },          // decrease 10
+    ];
+    const fixtures = specs.map(sustainedImprovementFixture);
+    const improvedFacilities = fixtures.map((f) => f.snapshot);
+    const patternFindings = fixtures.map((f) => f.finding);
+
+    const rows = buildSustainedImprovementRows(improvedFacilities, patternFindings);
+    const rankedUniqueFacilities: string[] = [];
+    for (const row of rows) {
+      if (!rankedUniqueFacilities.includes(row.facility)) rankedUniqueFacilities.push(row.facility);
+    }
+    const top3FromTable = rankedUniqueFacilities.slice(0, 3);
+    expect(top3FromTable).toEqual(["سجن الملز", "إصلاحية جدة", "سجن الحائر"]);
+
+    const result = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings,
+      periodChangeDigest: { ...EMPTY_DIGEST, improvedFacilities },
+      regionChanges: [], hasPreviousPeriod: false,
+    });
+    const improvement = result.find((row) => row.title === "تحسن مستدام");
+    expect(improvement).toBeDefined();
+    for (const facility of top3FromTable) {
+      expect(improvement!.text).toContain(facility);
+    }
+    // The 4th-ranked site is excluded from "أبرزها", replaced by "وغيرها".
+    expect(improvement!.text).not.toContain("سجن أبها");
+    expect(improvement!.text).toContain("وغيرها");
+  });
+
+  it("13.E. one facility improving in TWO classifications has a unique-facility count of 1, never 2", () => {
+    const specs = [
+      { facility: "إصلاحية جدة", classificationLabel: "الرعاية الصحية" },
+      { facility: "إصلاحية جدة", classificationLabel: "الوكالات" },
+    ];
+    const fixtures = specs.map(sustainedImprovementFixture);
+    const rows = buildSustainedImprovementRows(fixtures.map((f) => f.snapshot), fixtures.map((f) => f.finding));
+    expect(rows).toHaveLength(2); // 2 facility×classification rows...
+    expect(new Set(rows.map((r) => r.facility)).size).toBe(1); // ...but only 1 unique facility.
+
+    const improvement = buildImprovementRow(specs);
+    expect(improvement!.text).not.toContain("2 مواقع");
+    expect(improvement!.text).not.toContain("موقعان");
+  });
+
+  it("13.F. when the top-ranked rows would all belong to the SAME facility, the displayed table still diversifies across other real facilities", () => {
+    const specs = [
+      // Facility X: 3 classifications, all ranking ahead of Y/Z by decrease magnitude.
+      { facility: "سجن X", classificationLabel: "تصنيف 1", startValue: 90, currentValue: 10 }, // decrease 80
+      { facility: "سجن X", classificationLabel: "تصنيف 2", startValue: 80, currentValue: 15 }, // decrease 65
+      { facility: "سجن X", classificationLabel: "تصنيف 3", startValue: 70, currentValue: 20 }, // decrease 50
+      { facility: "سجن Y", classificationLabel: "تصنيف 4", startValue: 40, currentValue: 20 }, // decrease 20
+      { facility: "سجن Z", classificationLabel: "تصنيف 5", startValue: 30, currentValue: 20 }, // decrease 10
+    ];
+    const fixtures = specs.map(sustainedImprovementFixture);
+    const rows = buildSustainedImprovementRows(fixtures.map((f) => f.snapshot), fixtures.map((f) => f.finding));
+    // Confirms the premise: without diversifying, the naive first-3 ranked rows would all be "سجن X".
+    expect(rows.slice(0, 3).every((r) => r.facility === "سجن X")).toBe(true);
+
+    const displayed = selectDiverseSustainedImprovementRows(rows, 3);
+    expect(displayed).toHaveLength(3);
+    expect(new Set(displayed.map((r) => r.facility))).toEqual(new Set(["سجن X", "سجن Y", "سجن Z"]));
+  });
+
+  it("13.G. buildSustainedImprovementRows includes an improved facility that does NOT clear the best-practice-candidate gates — never sourced from the gated bestPracticeCandidateEvaluations/rankBestPracticeCandidateEvaluations", () => {
+    // Trivial 2→1 decline: a real SUSTAINED_IMPROVEMENT per the trend engine,
+    // but far below best-practice-candidate.ts's minAbsoluteDecrease/
+    // minBaseVolume gates — status OBSERVED_IMPROVEMENT, never
+    // BEST_PRACTICE_CANDIDATE.
+    const trivial = sustainedImprovementFixture({ facility: "سجن صغير", classificationLabel: "الاتصال", startValue: 2, currentValue: 1, streakPeriods: 3 });
+    const rows = buildSustainedImprovementRows([trivial.snapshot], [trivial.finding]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.facility).toBe("سجن صغير");
+
+    // Confirms the premise: this same finding does NOT clear the best-practice gates.
+    const candidateRows = buildBestPracticeCandidateRows([trivial.finding]);
+    expect(candidateRows).toHaveLength(0);
+  });
+
+  it("F. 'إقليمي' never appears anywhere across a rich, multi-bucket executive-conclusions fixture", () => {
+    const result = buildExecutiveConclusions({
+      topClassifications: [classificationRow()],
+      currentPeriodTotal: 2632,
+      patternFindings: [],
+      periodChangeDigest: {
+        ...EMPTY_DIGEST,
+        relapsedProblems: [snapshot({ key: "r", pattern: "RELAPSE_AFTER_IMPROVEMENT" })],
+        improvedFacilities: [
+          snapshot({ key: "a", facility: "سجن أ", classificationLabel: "التغذية" }),
+          snapshot({ key: "b", facility: "سجن ب", classificationLabel: "الاتصال" }),
+        ],
+      },
+      regionChanges: [
+        regionRow({ regionName: "جازان", currentCount: 192, previousCount: 185, difference: 7, changeRate: 3.8, direction: "ارتفاع" }),
+        regionRow({ regionName: "الرياض", currentCount: 5, previousCount: 20, difference: -15, changeRate: -75, direction: "انخفاض" }),
+      ],
+      hasPreviousPeriod: true,
+    });
+    for (const row of result) {
+      expect(row.title).not.toContain("إقليمي");
+      expect(row.text).not.toContain("إقليمي");
+    }
+  });
+
+  it("skips a bucket entirely (never a filler sentence) when it has no real data, so fewer than 4 rows can be returned", () => {
+    const result = buildExecutiveConclusions({
+      topClassifications: [],
+      currentPeriodTotal: 0,
+      patternFindings: [],
+      periodChangeDigest: EMPTY_DIGEST,
+      regionChanges: [],
+      hasPreviousPeriod: false,
+    });
+    expect(result).toEqual([]);
+  });
+
+  it("priority 1 uses volume SHARE (never the raw table count) and frames the title as 'ضغط مستمر' only when that classification is also a real CHRONIC_ISSUE", () => {
+    const top = classificationRow();
+    const withChronic = buildExecutiveConclusions({
+      topClassifications: [top], currentPeriodTotal: 2681, patternFindings: richFindings,
+      periodChangeDigest: EMPTY_DIGEST, regionChanges: [], hasPreviousPeriod: false,
+    });
+    expect(withChronic[0]!.title).toContain("ضغط مستمر");
+    expect(withChronic[0]!.text).toContain("42.4%");
+    expect(withChronic[0]!.text).not.toContain(String(top.currentCount));
+
+    const withoutChronic = buildExecutiveConclusions({
+      topClassifications: [top], currentPeriodTotal: 2681, patternFindings: [],
+      periodChangeDigest: EMPTY_DIGEST, regionChanges: [], hasPreviousPeriod: false,
+    });
+    expect(withoutChronic[0]!.title).not.toContain("ضغط مستمر");
+  });
+
+  it("priority 2 prefers a relapse over a new signal, and a new signal over a plain worsening", () => {
+    const relapseFirst = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], regionChanges: [], hasPreviousPeriod: false,
+      periodChangeDigest: {
+        ...EMPTY_DIGEST,
+        relapsedProblems: [snapshot({ key: "r" })],
+        newProblems: [snapshot({ key: "n" })],
+        worsenedProblems: [{ key: "w", facility: "سجن", classificationLabel: "ص", from: "MEDIUM", to: "HIGH" }],
+      },
+    });
+    expect(relapseFirst[0]!.title).toBe("عودة مشكلات بعد تحسن");
+
+    const newOnly = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], regionChanges: [], hasPreviousPeriod: false,
+      periodChangeDigest: {
+        ...EMPTY_DIGEST,
+        newProblems: [snapshot({ key: "n" })],
+        worsenedProblems: [{ key: "w", facility: "سجن", classificationLabel: "ص", from: "MEDIUM", to: "HIGH" }],
+      },
+    });
+    expect(newOnly[0]!.title).toBe("إشارات ناشئة جديدة");
+  });
+
+  it("priority 4 adds a 'بينما...' contrarian clause only when the top region's direction is the true minority pattern", () => {
+    const contrarian = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [
+        regionRow({ regionName: "جازان", difference: 7, changeRate: 3.8, direction: "ارتفاع" }),
+        regionRow({ regionName: "الرياض", difference: -304, changeRate: -21.1, direction: "انخفاض" }),
+        regionRow({ regionName: "مكة", difference: -230, changeRate: -28.3, direction: "انخفاض" }),
+      ],
+    });
+    expect(contrarian[0]!.text).toContain("بينما سجلت غالبية المناطق انخفاضاً");
+
+    const uniform = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [
+        regionRow({ regionName: "جازان", difference: 700, changeRate: 300, direction: "ارتفاع" }),
+        regionRow({ regionName: "الرياض", difference: 10, changeRate: 5, direction: "ارتفاع" }),
+      ],
+    });
+    expect(uniform[0]!.text).not.toContain("بينما");
+  });
+
+  it("A. 2 rising + 1 declining picks the minority (declining) region, with 'بينما سجلت غالبية المناطق ارتفاعاً'", () => {
+    const result = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [
+        regionRow({ regionName: "جازان", difference: 700, changeRate: 300, direction: "ارتفاع" }),
+        regionRow({ regionName: "الرياض", difference: 10, changeRate: 5, direction: "ارتفاع" }),
+        regionRow({ regionName: "مكة", difference: -5, changeRate: -2, direction: "انخفاض" }),
+      ],
+    });
+    expect(result[0]!.title).toBe("انخفاض ملحوظ في إحدى المناطق");
+    expect(result[0]!.text).toContain("مكة");
+    expect(result[0]!.text).toContain("بينما سجلت غالبية المناطق ارتفاعاً");
+  });
+
+  it("B. an exact 1-vs-1 tie is never treated as a majority split — picks the larger-magnitude change, with no 'بينما' clause", () => {
+    const result = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [
+        regionRow({ regionName: "جازان", difference: 7, changeRate: 3.8, direction: "ارتفاع" }),
+        regionRow({ regionName: "الرياض", difference: -304, changeRate: -21.1, direction: "انخفاض" }),
+      ],
+    });
+    expect(result[0]!.text).not.toContain("بينما");
+    // -304's magnitude (304) beats +7, so the decline wins the tie fallback.
+    expect(result[0]!.text).toContain("الرياض");
+    expect(result[0]!.title).toBe("انخفاض ملحوظ في إحدى المناطق");
+  });
+
+  it("C/D/E. rate suffix: null omits the parens entirely, positive gets a '+' sign, negative does not double up on '-'", () => {
+    const nullRate = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [regionRow({ regionName: "جازان", difference: 7, changeRate: null, direction: "ارتفاع" })],
+    });
+    expect(nullRate[0]!.text).not.toContain("(");
+    expect(nullRate[0]!.text).not.toContain(")");
+
+    const positiveRate = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [regionRow({ regionName: "جازان", difference: 7, changeRate: 3.8, direction: "ارتفاع" })],
+    });
+    expect(positiveRate[0]!.text).toContain("(+3.8%)");
+
+    const negativeRate = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [regionRow({ regionName: "الرياض", difference: -304, changeRate: -21.1, direction: "انخفاض" })],
+    });
+    expect(negativeRate[0]!.text).toContain("(-21.1%)");
+    expect(negativeRate[0]!.text).not.toContain("(+-");
+    expect(negativeRate[0]!.text).not.toContain("(-+");
+  });
+
+  it("F. all region differences 0 (no rising, no declining) yields no regional conclusion", () => {
+    const result = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [
+        regionRow({ regionName: "جازان", difference: 0, changeRate: 0, direction: "دون تغير" }),
+        regionRow({ regionName: "الرياض", difference: 0, changeRate: 0, direction: "دون تغير" }),
+      ],
+    });
+    expect(result).toEqual([]);
+  });
+
+  it("G. regional magnitude uses correct Arabic count-noun agreement for 'شكوى' (1 / 2 / 3-10 / 11+), matching the acceptance example exactly", () => {
+    const sixComplaints = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [
+        regionRow({ regionName: "تبوك", difference: 6, changeRate: 15.8, direction: "ارتفاع" }),
+        regionRow({ regionName: "الرياض", difference: -50, changeRate: -20, direction: "انخفاض" }),
+        regionRow({ regionName: "جدة", difference: -30, changeRate: -15, direction: "انخفاض" }),
+      ],
+    });
+    expect(sixComplaints[0]!.text).toBe(
+      "سجلت تبوك زيادة قدرها 6 شكاوى (+15.8%)، بينما سجلت غالبية المناطق انخفاضاً."
+    );
+    expect(sixComplaints[0]!.text).not.toContain("6 شكوى ");
+    expect(sixComplaints[0]!.text).not.toContain("6 شكوى(");
+
+    const oneComplaint = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [regionRow({ regionName: "تبوك", difference: 1, changeRate: 5, direction: "ارتفاع" })],
+    });
+    expect(oneComplaint[0]!.text).toContain("شكوى واحدة");
+
+    const twoComplaints = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [regionRow({ regionName: "تبوك", difference: 2, changeRate: 8, direction: "ارتفاع" })],
+    });
+    expect(twoComplaints[0]!.text).toContain("شكويان");
+    expect(twoComplaints[0]!.text).not.toContain("2 شكويان");
+
+    const elevenComplaints = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [regionRow({ regionName: "تبوك", difference: 11, changeRate: 20, direction: "ارتفاع" })],
+    });
+    expect(elevenComplaints[0]!.text).toContain("11 شكوى");
+    expect(elevenComplaints[0]!.text).not.toContain("11 شكاوى");
+  });
+
+  it("K. a realistic fixture (matching the acceptance style) produces exactly 4 distinct, non-empty executive conclusions", () => {
+    const improvedA = sustainedImprovementFixture({ facility: "إصلاحية جدة", classificationLabel: "الرعاية الصحية" });
+    const improvedB = sustainedImprovementFixture({ facility: "إصلاحية جدة", classificationLabel: "الوكالات" });
+    const result = buildExecutiveConclusions({
+      topClassifications: [classificationRow()],
+      currentPeriodTotal: 2681,
+      patternFindings: [...richFindings, improvedA.finding, improvedB.finding],
+      periodChangeDigest: {
+        ...EMPTY_DIGEST,
+        relapsedProblems: Array.from({ length: 13 }, (_, i) => snapshot({ key: `r${i}` })),
+        improvedFacilities: [improvedA.snapshot, improvedB.snapshot],
+      },
+      regionChanges: [
+        regionRow({ regionName: "جازان", difference: 7, changeRate: 3.8, direction: "ارتفاع" }),
+        regionRow({ regionName: "الرياض", difference: -304, changeRate: -21.1, direction: "انخفاض" }),
+      ],
+      hasPreviousPeriod: true,
+    });
+    expect(result).toHaveLength(4);
+    for (const row of result) {
+      expect(row.title.length).toBeGreaterThan(0);
+      expect(row.text.length).toBeGreaterThan(0);
+      // No long classification list dumped into an executive conclusion.
+      expect(row.text.split("،").length).toBeLessThan(6);
+    }
+    expect(result[1]!.text).toContain("13 حالة");
   });
 });

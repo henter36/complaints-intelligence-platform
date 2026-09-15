@@ -23,12 +23,12 @@ import { comparisonWarningMessage } from "./report-comparison";
 import type { DeptClassPeriodCount, ComparisonResult, PeriodRange, RegionChangeRow } from "./report-comparison";
 import { buildComplaintQueryParams, type ReportFilters } from "./report-definition-service";
 import { loadPatternAnalysisForFilters } from "@/server/analytics/pattern/pattern-report-integration-service";
-import { buildPatternAnalysisBriefConclusions } from "@/lib/analytics/finding-brief-conclusions";
+import { buildPatternAnalysisBriefConclusions, formatArabicCountedNoun } from "@/lib/analytics/finding-brief-conclusions";
 import { rankFindingsForExecutiveBrief } from "@/lib/analytics/finding-ranking";
 import { PATTERN_ANALYSIS_CONFIG } from "@/lib/analytics/pattern-analysis-config";
 import type { AnalyticalFinding } from "@/lib/analytics/analytical-finding";
 import { classificationLabelFromEntityName } from "@/lib/analytics/finding-labels";
-import { buildPatternSnapshotKey } from "@/lib/analytics/period-change-digest";
+import { buildPatternSnapshotKey, type PatternSnapshot, type PeriodChangeDigest } from "@/lib/analytics/period-change-digest";
 import {
   evaluateBestPracticeCandidacy,
   buildBestPracticeSectionSummary,
@@ -61,6 +61,8 @@ import type {
   ClassificationTrendRow,
   FacilityFollowUpRow,
   BestPracticeCandidateRow,
+  SustainedImprovementRow,
+  ExecutiveConclusionRow,
 } from "@/lib/reports/report-contract";
 import {
   buildClassificationPath,
@@ -644,7 +646,7 @@ function toBestPracticeCandidateRow(evaluation: BestPracticeCandidateEvaluation)
 }
 
 /**
- * "حالات التحسن المستدام المرشحة للدراسة": every facility×
+ * "حالات التحسن المستدام" (page 4 section title): every facility×
  * classification pair with a SUSTAINED_IMPROVEMENT finding that ALSO clears
  * the best-practice-candidate gates (see best-practice-candidate.ts /
  * PATTERN_ANALYSIS_CONFIG.bestPracticeCandidate) — a real multi-period
@@ -702,7 +704,10 @@ export function buildBestPracticeCandidateRows(
 }
 
 // ---------------------------------------------------------------------------
-// V2: region-only conclusions (page 4 "الاستنتاجات")
+// V2: region-only conclusions — populates the legacy `conclusions` field
+// (kept for backward compatibility; no other current consumer reads it).
+// Page 4's rendered "الاستنتاجات التنفيذية" section reads
+// `executiveConclusions` instead — see buildExecutiveConclusions below.
 // ---------------------------------------------------------------------------
 
 const MAX_REGION_CONCLUSIONS = 5;
@@ -801,6 +806,472 @@ export function buildRegionOnlyConclusions(comparison: ComparisonResult): string
   return selectBalancedRegionConclusions(rising, declining).map((row) =>
     row.difference > 0 ? formatRisingRegionConclusion(row) : formatDecliningRegionConclusion(row)
   );
+}
+
+// ---------------------------------------------------------------------------
+// V2: executive conclusions (page 4 "الاستنتاجات التنفيذية")
+// ---------------------------------------------------------------------------
+
+/**
+ * At most 4 short, high-signal rows — never filler. Each bucket below has
+ * ONE clear responsibility (spec: no two rows may carry the same meaning),
+ * so buildExecutiveConclusions itself only orchestrates priority order and
+ * drops a bucket entirely when it has nothing real to say, rather than
+ * padding to a fixed count.
+ */
+const MAX_EXECUTIVE_CONCLUSIONS = 4;
+
+/**
+ * Priority 1 — the period's single most dominant classification by volume
+ * (never re-stating the table's raw count; always volume SHARE, which is
+ * the number that actually carries executive meaning). Framed as "ضغط
+ * مستمر" only when this same classification also has a real CHRONIC_ISSUE
+ * finding somewhere this period — never asserted from volume alone.
+ */
+function buildTopVolumeConclusion(
+  topClassifications: readonly ClassificationBriefRow[],
+  currentPeriodTotal: number,
+  patternFindings: readonly AnalyticalFinding[]
+): ExecutiveConclusionRow | null {
+  const top = topClassifications[0];
+  if (!top || currentPeriodTotal <= 0 || top.currentCount <= 0) return null;
+
+  const chronicClassificationLabels = new Set(
+    patternFindings
+      .filter((finding) => finding.entityType === "CLASSIFICATION" && finding.type === "CHRONIC_ISSUE")
+      .map((finding) => classificationLabelFromEntityName(finding.entityName))
+  );
+  const isChronic = chronicClassificationLabels.has(top.classificationName);
+
+  return {
+    title: isChronic ? `ضغط مستمر في ${top.classificationName}` : `${top.classificationName} الأبرز بين الشكاوى`,
+    text: `تظل شكاوى ${top.classificationName} الأعلى حجماً، وتمثل ${top.shareOfTotal}% من شكاوى الفترة.`,
+  };
+}
+
+/**
+ * Priority 2 — the most important NEW change since last period: a relapse
+ * after improvement outranks a brand-new signal, which outranks a plain
+ * worsening (spec: "أهم تغير جديد/عودة للارتفاع"). Reuses
+ * patternAnalysis.periodChangeDigest — the SAME digest the legacy sentence
+ * (finding-brief-conclusions.ts) already computes — never re-derived.
+ */
+function buildEmergingOrRelapseConclusion(digest: PeriodChangeDigest | null): ExecutiveConclusionRow | null {
+  if (!digest) return null;
+
+  if (digest.relapsedProblems.length > 0) {
+    const phrase = formatArabicCountedNoun(digest.relapsedProblems.length, {
+      one: "حالة واحدة عادت للارتفاع بعد تحسن سابق",
+      two: "حالتان عادتا للارتفاع بعد تحسن سابق",
+      few: "حالات عادت للارتفاع بعد تحسن سابق",
+      many: "حالة عادت للارتفاع بعد تحسن سابق",
+    });
+    return { title: "عودة مشكلات بعد تحسن", text: `رُصدت ${phrase}، بما يستدعي متابعة استدامة المعالجات.` };
+  }
+
+  if (digest.newProblems.length > 0) {
+    const phrase = formatArabicCountedNoun(digest.newProblems.length, {
+      one: "إشارة ناشئة واحدة",
+      two: "إشارتان ناشئتان",
+      few: "إشارات ناشئة",
+      many: "إشارة ناشئة",
+    });
+    return { title: "إشارات ناشئة جديدة", text: `رُصدت ${phrase} خلال هذه الفترة تستحق المتابعة المبكرة.` };
+  }
+
+  if (digest.worsenedProblems.length > 0) {
+    const phrase = formatArabicCountedNoun(digest.worsenedProblems.length, {
+      one: "مشكلة واحدة تفاقمت",
+      two: "مشكلتان تفاقمتا",
+      few: "مشكلات تفاقمت",
+      many: "مشكلة تفاقمت",
+    });
+    return { title: "تفاقم مشكلات قائمة", text: `رُصدت ${phrase} في حدتها مقارنة بالفترة السابقة.` };
+  }
+
+  return null;
+}
+
+/** Arabic-style list join: "A" | "A، وB" | "A، B، وC" — comma-separated, the LAST item prefixed with "و" instead of "، ". */
+function joinArabicList(items: readonly string[]): string {
+  if (items.length === 0) return "";
+  if (items.length === 1) return items[0]!;
+  const last = items.at(-1)!;
+  const rest = items.slice(0, -1).join("، ");
+  return `${rest}، و${last}`;
+}
+
+/**
+ * Drops a leading "الإدارة العامة لـ/ل" bureaucratic prefix for a more
+ * direct executive-report reading (spec review item 7 / item 12: "إصلاحية
+ * محافظة جدة", not "الإدارة العامة لإصلاحية محافظة جدة") — applied ONCE, in
+ * buildSustainedImprovementRows, so the "أبرز حالات التحسن المستدام" table
+ * and the "تحسن مستدام" executive conclusion always show the SAME display
+ * name for the same site; the facility's real, full name is never altered
+ * anywhere else (the underlying facility entity, drilldowns, other tables).
+ */
+function shortenFacilityNameForDisplay(facility: string): string {
+  // [إأا] tolerates real source-data alef spelling variants seen on this
+  // exact prefix ("الإدارة" / "الأدارة" / "الادارة") — a genuine data-entry
+  // inconsistency confirmed against real production facility names, not a
+  // hypothetical.
+  const stripped = facility.replace(/^ال[إأا]دارة العامة لـ?/, "").trim();
+  return stripped.length > 0 ? stripped : facility;
+}
+
+const IMPROVEMENT_CLASSIFICATIONS_PER_FACILITY_LIMIT = 2;
+const IMPROVEMENT_FACILITY_NAMES_LIMIT = 3;
+/** Heuristic character budget for the "3+ facilities" case's optional trailing classification-summary clause (spec review item 5: "عند توفر المساحة"). */
+const IMPROVEMENT_TEXT_SOFT_LIMIT = 150;
+
+/** At most IMPROVEMENT_CLASSIFICATIONS_PER_FACILITY_LIMIT classification names for one facility, Arabic-list-joined (spec review item 5: "اختصر إلى أبرز تصنيف أو تصنيفين لكل موقع"). */
+function formatFacilityClassifications(labels: readonly string[]): string {
+  return joinArabicList(labels.slice(0, IMPROVEMENT_CLASSIFICATIONS_PER_FACILITY_LIMIT));
+}
+
+/** Default "سبب الاختيار" text for a sustained-improvement row that has NOT (also) cleared the best-practice-candidate merit gates — honest and short, never overclaiming a strength this row hasn't itself demonstrated (that stronger wording is reserved for evaluation.reasonLabel, set only when status === "BEST_PRACTICE_CANDIDATE"). */
+const SUSTAINED_IMPROVEMENT_DEFAULT_REASON_LABEL = "تحسن مستدام";
+
+/**
+ * Ranking for both the "أبرز حالات التحسن المستدام" table and the "تحسن
+ * مستدام" executive conclusion (spec review item 5): (1) strongest actual
+ * decrease, (2) longest improvement streak, (3) higher current value on a
+ * tie, (4) deterministic facility/classification name order — never an
+ * arbitrary or digest-insertion order.
+ */
+function compareSustainedImprovementRows(a: SustainedImprovementRow, b: SustainedImprovementRow): number {
+  return (
+    b.decrease - a.decrease
+    || b.streakPeriods - a.streakPeriods
+    || b.currentValue - a.currentValue
+    || a.facility.localeCompare(b.facility, "ar")
+    || a.classificationLabel.localeCompare(b.classificationLabel, "ar")
+  );
+}
+
+/**
+ * THE single canonical source for every V2 page-4 element under the
+ * "sustained improvement" heading — the "أبرز حالات التحسن المستدام" table
+ * AND the "تحسن مستدام" executive conclusion's facility/classification list
+ * are both built from this function's output (spec review item 2/15).
+ * `periodChangeDigest.improvedFacilities` (never `bestPracticeCandidates` —
+ * a stricter, gated SUBSET; using that as this table's source was the root
+ * cause of the table and the conclusion naming different sites under the
+ * same heading) is enriched with the matching SUSTAINED_IMPROVEMENT
+ * finding's real numbers (startValue/currentValue/decrease/streakPeriods),
+ * joined by the identical buildPatternSnapshotKey identity PatternSnapshot.key
+ * already carries — the digest and the findings engine run over the SAME
+ * series/config, so every improvedFacilities entry should always have a
+ * matching finding; a snapshot with no match is skipped rather than shown
+ * with fabricated numbers.
+ *
+ * Facility display names have their "الإدارة العامة لـ" bureaucratic prefix
+ * stripped HERE (spec review item 12) — the single point both the table and
+ * the conclusion read from, so the two can never show two different name
+ * forms for the same site.
+ */
+export function buildSustainedImprovementRows(
+  improvedFacilities: readonly PatternSnapshot[],
+  patternFindings: readonly AnalyticalFinding[]
+): SustainedImprovementRow[] {
+  if (improvedFacilities.length === 0) return [];
+
+  const evaluationsByKey = new Map<string, BestPracticeCandidateEvaluation>();
+  for (const finding of patternFindings) {
+    if (finding.type !== "SUSTAINED_IMPROVEMENT") continue;
+    const facility = facilityOfFinding(finding);
+    if (!facility) continue;
+    const evaluation = evaluateBestPracticeCandidacy(finding, facility);
+    if (!evaluation) continue;
+    evaluationsByKey.set(buildPatternSnapshotKey(facility, evaluation.classificationId), evaluation);
+  }
+
+  const rows: SustainedImprovementRow[] = [];
+  const seenKeys = new Set<string>();
+  for (const snapshot of improvedFacilities) {
+    if (seenKeys.has(snapshot.key)) continue;
+    seenKeys.add(snapshot.key);
+    const evaluation = evaluationsByKey.get(snapshot.key);
+    if (!evaluation) continue;
+    rows.push({
+      facility: shortenFacilityNameForDisplay(evaluation.facility),
+      classificationLabel: evaluation.classificationLabel,
+      startValue: evaluation.startValue,
+      currentValue: evaluation.currentValue,
+      decrease: evaluation.decrease,
+      streakPeriods: evaluation.streakPeriods,
+      reasonLabel: evaluation.reasonLabel ?? SUSTAINED_IMPROVEMENT_DEFAULT_REASON_LABEL,
+    });
+  }
+
+  return rows.sort(compareSustainedImprovementRows);
+}
+
+/**
+ * Display selection for the page-4 table (spec review item 10): prefers ONE
+ * row per distinct facility first (in rank order) so a table capped to a
+ * handful of rows represents as many different sites as the data allows,
+ * rather than several rows all belonging to the single top-ranked facility.
+ * Only once every distinct facility already has a row does a facility get a
+ * SECOND row, still in overall rank order. Output stays in the original
+ * ranked order (never "diversity pass" order), so it still matches the
+ * conclusion's own top-N facility order (spec review item 7).
+ */
+export function selectDiverseSustainedImprovementRows(
+  rows: readonly SustainedImprovementRow[],
+  limit: number
+): SustainedImprovementRow[] {
+  if (rows.length <= limit) return [...rows];
+
+  const usedFacilities = new Set<string>();
+  const selected = new Set<SustainedImprovementRow>();
+  for (const row of rows) {
+    if (selected.size >= limit) break;
+    if (usedFacilities.has(row.facility)) continue;
+    selected.add(row);
+    usedFacilities.add(row.facility);
+  }
+  if (selected.size < limit) {
+    for (const row of rows) {
+      if (selected.size >= limit) break;
+      selected.add(row);
+    }
+  }
+
+  return rows.filter((row) => selected.has(row));
+}
+
+/**
+ * Priority 3 — the most important sustained improvement. Takes the SAME
+ * ranked `SustainedImprovementRow[]` the page-4 table renders (built by
+ * {@link buildSustainedImprovementRows}) — never re-derives its own facility
+ * list, count, or order directly from periodChangeDigest.improvedFacilities
+ * (spec review item 7/15): doing so independently is exactly what let the
+ * conclusion and the table name different sites under the same "sustained
+ * improvement" heading. Names real sites and classifications (spec review)
+ * instead of a generic "study the accompanying procedures" recommendation —
+ * never claims any accompanying procedure CAUSED the improvement.
+ */
+function buildSustainedImprovementConclusion(
+  rows: readonly SustainedImprovementRow[]
+): ExecutiveConclusionRow | null {
+  if (rows.length === 0) return null;
+
+  const classificationsByFacility = new Map<string, Set<string>>();
+  for (const row of rows) {
+    const set = classificationsByFacility.get(row.facility) ?? new Set<string>();
+    set.add(row.classificationLabel);
+    classificationsByFacility.set(row.facility, set);
+  }
+  // Map insertion order mirrors `rows`' own rank order (first appearance per
+  // facility) — the SAME order the table's rows are ranked in, so the
+  // "أبرزها" names below are guaranteed to match the table's top rows.
+  const facilities = [...classificationsByFacility.entries()].map(
+    ([facility, classifications]): [string, string[]] => [facility, [...classifications]]
+  );
+
+  // One improved site: the site's own name IS the sentence subject — never
+  // the generic "موقع واحد" when a real name is available (spec review
+  // item 3). Arabic verb-subject gender agreement follows the name's own
+  // first word (a trailing "ة" marks it feminine — "إصلاحية...", "الإدارة
+  // العامة..."; otherwise masculine — "سجن...").
+  if (facilities.length === 1) {
+    const [facility, classifications] = facilities[0]!;
+    const firstWord = facility.split(/\s+/)[0] ?? "";
+    const verb = firstWord.endsWith("ة") ? "حققت" : "حقق";
+    return {
+      title: "تحسن مستدام",
+      text: `${verb} ${facility} تحسناً مستداماً في ${formatFacilityClassifications(classifications)}.`,
+    };
+  }
+
+  // Two improved sites: name both, each with its own (capped) classifications
+  // (spec review item 4). "موقعان" is masculine — Arabic verb-initial
+  // agreement with a dual subject keeps the verb singular ("حقق", not "حققا").
+  if (facilities.length === 2) {
+    const clauses = facilities.map(
+      ([facility, classifications]) => `${facility} في ${formatFacilityClassifications(classifications)}`
+    );
+    return {
+      title: "تحسن مستدام",
+      text: `حقق موقعان تحسناً مستداماً: ${joinArabicList(clauses)}.`,
+    };
+  }
+
+  // Three or more improved sites: name up to IMPROVEMENT_FACILITY_NAMES_LIMIT
+  // sites, never the full list (spec review item 5). "مواقع" (plural,
+  // inanimate) takes feminine-singular verb agreement ("حققت").
+  const uniqueFacilityCount = facilities.length;
+  const sitePhrase = formatArabicCountedNoun(uniqueFacilityCount, {
+    one: "موقع واحد",
+    two: "موقعان",
+    few: "مواقع",
+    many: "موقعاً",
+  });
+  const namedFacilities = facilities.slice(0, IMPROVEMENT_FACILITY_NAMES_LIMIT).map(([facility]) => facility);
+  const hasMoreFacilities = facilities.length > IMPROVEMENT_FACILITY_NAMES_LIMIT;
+  const namesClause = hasMoreFacilities
+    ? `${namedFacilities.join("، ")}، وغيرها`
+    : joinArabicList(namedFacilities);
+  const baseText = `حققت ${sitePhrase} تحسناً مستداماً، أبرزها ${namesClause}.`;
+
+  // Optional trailing clause naming the most common improved classification(s)
+  // overall — only added when it still fits the section's length budget
+  // (spec review item 5: "عند توفر المساحة"), never at the cost of dropping
+  // a named site above.
+  const classificationFrequency = new Map<string, number>();
+  for (const [, classifications] of facilities) {
+    for (const label of classifications) {
+      classificationFrequency.set(label, (classificationFrequency.get(label) ?? 0) + 1);
+    }
+  }
+  const topClassifications = [...classificationFrequency.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, IMPROVEMENT_CLASSIFICATIONS_PER_FACILITY_LIMIT)
+    .map(([label]) => label);
+  if (topClassifications.length === 0) {
+    return { title: "تحسن مستدام", text: baseText };
+  }
+  const extendedText = `${baseText} وشمل التحسن بصورة رئيسية ${joinArabicList(topClassifications)}.`;
+  return { title: "تحسن مستدام", text: extendedText.length <= IMPROVEMENT_TEXT_SOFT_LIMIT ? extendedText : baseText };
+}
+
+/** شكوى (1) / شكويان (2) / N شكاوى (3-10) / N شكوى (11+) — Arabic count-noun agreement for a complaint count. */
+const COMPLAINT_COUNT_FORMS = {
+  one: "شكوى واحدة",
+  two: "شكويان",
+  few: "شكاوى",
+  many: "شكوى",
+};
+
+function formatRegionalMagnitude(row: RegionChangeRow): string {
+  const magnitude = Math.abs(row.difference);
+  const countPhrase = formatArabicCountedNoun(magnitude, COMPLAINT_COUNT_FORMS);
+  return row.difference > 0 ? `زيادة قدرها ${countPhrase}` : `انخفاضاً قدره ${countPhrase}`;
+}
+
+/** "" for null; a leading space + parenthesized signed percent otherwise — e.g. " (+3.8%)", " (-28.9%)", " (0%)". */
+function formatRegionalRateSuffix(changeRate: number | null): string {
+  if (changeRate === null) return "";
+  const sign = changeRate > 0 ? "+" : "";
+  return ` (${sign}${changeRate}%)`;
+}
+
+/**
+ * "، بينما سجلت غالبية المناطق ...ا." when a genuine majority/minority
+ * split exists (naming the MAJORITY's own direction, opposite of
+ * `selectedDirection`); just "." otherwise. No ternary is nested here —
+ * kept as an explicit if/else so Sonar's cognitive-complexity accounting
+ * for buildRegionalConclusion never has to look inside this function.
+ */
+function buildRegionalContextClause(
+  hasMajoritySplit: boolean,
+  selectedDirection: "ارتفاع" | "انخفاض"
+): string {
+  if (!hasMajoritySplit) return ".";
+
+  let majorityDirection: string;
+  if (selectedDirection === "ارتفاع") {
+    majorityDirection = "انخفاضاً";
+  } else {
+    majorityDirection = "ارتفاعاً";
+  }
+  return `، بينما سجلت غالبية المناطق ${majorityDirection}.`;
+}
+
+type RegionalConclusionCandidate = {
+  row: RegionChangeRow;
+  hasMajoritySplit: boolean;
+};
+
+/**
+ * Pure selection: WHICH region change buildRegionalConclusion should report
+ * on, and whether the majority-direction context clause applies — no text
+ * formatting. When regions genuinely split between directions (spec item
+ * 30: a conclusion must add context, not just restate the table's biggest
+ * row), the region bucking the majority trend is the more noteworthy
+ * signal — a rise while most regions fall (or vice versa) is worth
+ * flagging even if its own magnitude is smaller than the majority side's
+ * biggest mover, so the STRONGEST example of the MINORITY direction wins.
+ * An exact tie (equal counts) or a single direction is never treated as a
+ * split; that case (and only that case) falls back to the single largest
+ * change overall — rising when its magnitude is >= the absolute largest
+ * decline, declining otherwise.
+ */
+function selectRegionalConclusionCandidate(
+  regionChanges: readonly RegionChangeRow[]
+): RegionalConclusionCandidate | null {
+  const rising = regionChanges.filter((row) => row.difference > 0);
+  const declining = regionChanges.filter((row) => row.difference < 0);
+  const topRising = rising.length > 0 ? [...rising].sort(compareRisingRegionChanges)[0] : null;
+  const topDeclining = declining.length > 0 ? [...declining].sort(compareDecliningRegionChanges)[0] : null;
+
+  if (!topRising) return topDeclining ? { row: topDeclining, hasMajoritySplit: false } : null;
+  if (!topDeclining) return { row: topRising, hasMajoritySplit: false };
+
+  // Both directions are present here — a genuine split only when the counts differ.
+  if (rising.length !== declining.length) {
+    const minorityRow = rising.length < declining.length ? topRising : topDeclining;
+    return { row: minorityRow, hasMajoritySplit: true };
+  }
+
+  const row = topRising.difference >= Math.abs(topDeclining.difference) ? topRising : topDeclining;
+  return { row, hasMajoritySplit: false };
+}
+
+/**
+ * Priority 4 — the most executively significant regional change. See
+ * {@link selectRegionalConclusionCandidate} for the selection policy; this
+ * function is orchestration only (pick candidate, format its text).
+ */
+function buildRegionalConclusion(
+  regionChanges: readonly RegionChangeRow[],
+  hasPreviousPeriod: boolean
+): ExecutiveConclusionRow | null {
+  if (!hasPreviousPeriod || regionChanges.length === 0) return null;
+
+  const candidate = selectRegionalConclusionCandidate(regionChanges);
+  if (!candidate) return null;
+
+  const { row, hasMajoritySplit } = candidate;
+  const isRising = row.difference > 0;
+  const rateSuffix = formatRegionalRateSuffix(row.changeRate);
+  const contextClause = buildRegionalContextClause(hasMajoritySplit, isRising ? "ارتفاع" : "انخفاض");
+
+  return {
+    title: isRising ? "ارتفاع في إحدى المناطق" : "انخفاض ملحوظ في إحدى المناطق",
+    text: `سجلت ${row.regionName} ${formatRegionalMagnitude(row)}${rateSuffix}${contextClause}`,
+  };
+}
+
+/**
+ * V2's "الاستنتاجات التنفيذية" (spec §17-30): up to
+ * {@link MAX_EXECUTIVE_CONCLUSIONS} short, non-redundant executive rows, in
+ * strict priority order — persistent/dominant problem, then the most
+ * important new change or relapse, then the most important sustained
+ * improvement, then the most significant regional change. A bucket that has
+ * no real information this period is skipped entirely (never a filler
+ * sentence), so the report can legitimately show fewer than 4 rows.
+ */
+export function buildExecutiveConclusions(input: {
+  topClassifications: readonly ClassificationBriefRow[];
+  currentPeriodTotal: number;
+  patternFindings: readonly AnalyticalFinding[];
+  periodChangeDigest: PeriodChangeDigest | null;
+  regionChanges: readonly RegionChangeRow[];
+  hasPreviousPeriod: boolean;
+}): ExecutiveConclusionRow[] {
+  const sustainedImprovementRows = buildSustainedImprovementRows(
+    input.periodChangeDigest?.improvedFacilities ?? [],
+    input.patternFindings
+  );
+  const candidates = [
+    buildTopVolumeConclusion(input.topClassifications, input.currentPeriodTotal, input.patternFindings),
+    buildEmergingOrRelapseConclusion(input.periodChangeDigest),
+    buildSustainedImprovementConclusion(sustainedImprovementRows),
+    buildRegionalConclusion(input.regionChanges, input.hasPreviousPeriod),
+  ];
+  return candidates.filter((row): row is ExecutiveConclusionRow => row !== null).slice(0, MAX_EXECUTIVE_CONCLUSIONS);
 }
 
 function hasMeaningfulPreviousData(comparison: ComparisonResult): boolean {
@@ -2113,6 +2584,15 @@ export async function buildExecutiveBriefV2Data(
     PATTERN_ANALYSIS_CONFIG.bestPracticeCandidate.maxCandidates
   );
   const bestPracticeCandidates = bestPracticeCandidateEvaluations.map(toBestPracticeCandidateRow);
+  // Page 4's "أبرز حالات التحسن المستدام" table source — the SAME canonical
+  // set and ranking the "تحسن مستدام" executive conclusion uses (see
+  // buildSustainedImprovementRows), never bestPracticeCandidates above (a
+  // stricter, gated SUBSET) — so the table and the conclusion can never
+  // name different sites under the same heading.
+  const sustainedImprovements = buildSustainedImprovementRows(
+    briefData.patternAnalysis?.periodChangeDigest?.improvedFacilities ?? [],
+    patternFindings
+  );
   const classificationTrends = buildClassificationTrendRows(patternFindings);
   const classificationAffectedFacilityCounts = computeClassificationAffectedFacilityCounts(patternFindings);
 
@@ -2155,6 +2635,7 @@ export async function buildExecutiveBriefV2Data(
     continuedProblemFindingCount,
     facilitiesNeedingFollowUp,
     bestPracticeCandidates,
+    sustainedImprovements,
     classificationTrends,
     operationalPractices,
     // V2-only: region-only conclusions stay the base, led by up to
@@ -2168,5 +2649,16 @@ export async function buildExecutiveBriefV2Data(
       ...(bestPracticeComparison ? [bestPracticeComparison] : []),
       ...buildRegionOnlyConclusions(comparison),
     ],
+    // V2 page 4 renders THIS field ("الاستنتاجات التنفيذية"), not
+    // `conclusions` above — up to 4 short, non-redundant executive rows;
+    // see buildExecutiveConclusions.
+    executiveConclusions: buildExecutiveConclusions({
+      topClassifications: briefData.topClassifications,
+      currentPeriodTotal: result.volume.total,
+      patternFindings,
+      periodChangeDigest: briefData.patternAnalysis?.periodChangeDigest ?? null,
+      regionChanges: comparison.regionChanges,
+      hasPreviousPeriod: comparison.previousPeriod !== null,
+    }),
   };
 }
