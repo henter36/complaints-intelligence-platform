@@ -895,7 +895,7 @@ function buildEmergingOrRelapseConclusion(digest: PeriodChangeDigest | null): Ex
 function joinArabicList(items: readonly string[]): string {
   if (items.length === 0) return "";
   if (items.length === 1) return items[0]!;
-  const last = items[items.length - 1]!;
+  const last = items.at(-1)!;
   const rest = items.slice(0, -1).join("، ");
   return `${rest}، و${last}`;
 }
