@@ -3542,6 +3542,46 @@ describe("buildExecutiveConclusions", () => {
     expect(result).toEqual([]);
   });
 
+  it("G. regional magnitude uses correct Arabic count-noun agreement for 'شكوى' (1 / 2 / 3-10 / 11+), matching the acceptance example exactly", () => {
+    const sixComplaints = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [
+        regionRow({ regionName: "تبوك", difference: 6, changeRate: 15.8, direction: "ارتفاع" }),
+        regionRow({ regionName: "الرياض", difference: -50, changeRate: -20, direction: "انخفاض" }),
+        regionRow({ regionName: "جدة", difference: -30, changeRate: -15, direction: "انخفاض" }),
+      ],
+    });
+    expect(sixComplaints[0]!.text).toBe(
+      "سجلت تبوك زيادة قدرها 6 شكاوى (+15.8%)، بينما سجلت غالبية المناطق انخفاضاً."
+    );
+    expect(sixComplaints[0]!.text).not.toContain("6 شكوى ");
+    expect(sixComplaints[0]!.text).not.toContain("6 شكوى(");
+
+    const oneComplaint = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [regionRow({ regionName: "تبوك", difference: 1, changeRate: 5, direction: "ارتفاع" })],
+    });
+    expect(oneComplaint[0]!.text).toContain("شكوى واحدة");
+
+    const twoComplaints = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [regionRow({ regionName: "تبوك", difference: 2, changeRate: 8, direction: "ارتفاع" })],
+    });
+    expect(twoComplaints[0]!.text).toContain("شكويان");
+    expect(twoComplaints[0]!.text).not.toContain("2 شكويان");
+
+    const elevenComplaints = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [regionRow({ regionName: "تبوك", difference: 11, changeRate: 20, direction: "ارتفاع" })],
+    });
+    expect(elevenComplaints[0]!.text).toContain("11 شكوى");
+    expect(elevenComplaints[0]!.text).not.toContain("11 شكاوى");
+  });
+
   it("K. a realistic fixture (matching the acceptance style) produces exactly 4 distinct, non-empty executive conclusions", () => {
     const result = buildExecutiveConclusions({
       topClassifications: [classificationRow()],

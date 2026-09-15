@@ -167,6 +167,16 @@ const FACILITY_ROW_HEIGHT = 26;
 const FACILITY_TABLE_HEADER_H = FACILITY_ROW_HEIGHT + 2;
 const FACILITY_SECTION_TITLE_H = 13 + 8; // matches drawSectionTitle's y advance
 const FACILITY_MAX_ROWS = 5;
+/**
+ * Facility rows never shrink below this floor while real data exists for
+ * that table (capped to whatever rows are actually available, per side) —
+ * a regression previously let the row-reduction loop go all the way to 0,
+ * rendering an empty "header only" table on top of real, non-empty source
+ * data. Once this floor still doesn't fit BASE_PAGE_HEIGHT, page 4 grows
+ * past it instead (see planPage4Layout); rows never drop further to buy
+ * back page height.
+ */
+const FACILITY_MIN_ROWS = 3;
 
 // These mirror drawBulletBox's own internal layout constants exactly (hdrH,
 // lineH, the horizontal/top text padding, and the "height - hdrH - 16"
@@ -219,11 +229,17 @@ export function computeBulletBoxLineCount(
 }
 
 /**
- * Picks how many rows the top/bottom facility tables get (5 down to 0) so
- * the conclusions box below always keeps room for every actual conclusion —
- * facility rows are reduced, down to zero if truly necessary, before a
- * single conclusion line is ever dropped. Never requests more rows than are
- * actually available on either side.
+ * Picks how many rows the top/bottom facility tables get — desired 5 down to
+ * a floor of {@link FACILITY_MIN_ROWS} (never fewer while that table's own
+ * source data has rows to show) — so the conclusions box below still keeps
+ * room for every actual conclusion whenever possible. Facility rows are
+ * reduced first, but ONLY down to the floor; a table with real data can
+ * never render as headers-only. When even the floor doesn't fit
+ * `pageHeight`, the floor is still what's returned — planPage4Layout grows
+ * page 4's actual height past `pageHeight` to fit it, rather than dropping
+ * rows further. Never requests more rows than are actually available on
+ * either side (so a table with fewer than the floor's worth of source rows
+ * simply shows all of them, never padded).
  */
 export function resolveV2FacilityRowCounts(input: {
   pageHeight: number;
@@ -241,7 +257,7 @@ export function resolveV2FacilityRowCounts(input: {
   const fixedChrome = FACILITY_SECTION_TITLE_H * 2 + input.gap * 2;
   const budget = input.pageHeight - input.margin - 26 - input.y - fixedChrome - (input.additionalReservedHeight ?? 0);
 
-  for (let rows = FACILITY_MAX_ROWS; rows >= 0; rows--) {
+  for (let rows = FACILITY_MAX_ROWS; rows >= FACILITY_MIN_ROWS; rows--) {
     const topRows = Math.min(rows, input.topAvailableRows);
     const bottomRows = Math.min(rows, input.bottomAvailableRows);
     const facilitiesHeight =
@@ -251,11 +267,14 @@ export function resolveV2FacilityRowCounts(input: {
       return { topRows, bottomRows };
     }
   }
-  // Even zero facility rows (headers only) doesn't leave room for every
-  // conclusion — an extreme page-budget shortage facility rows cannot fix by
-  // shrinking further. Zero rows still maximizes whatever room conclusions
-  // get; it is never the cause of a conclusion being dropped.
-  return { topRows: 0, bottomRows: 0 };
+  // Not even FACILITY_MIN_ROWS on each side leaves room for every conclusion
+  // within `pageHeight` — facility rows still never drop below the floor to
+  // buy back space; planPage4Layout grows the actual page height instead to
+  // fit this floor's real content bottom.
+  return {
+    topRows: Math.min(FACILITY_MIN_ROWS, input.topAvailableRows),
+    bottomRows: Math.min(FACILITY_MIN_ROWS, input.bottomAvailableRows),
+  };
 }
 
 type V2Context = {
@@ -1797,12 +1816,14 @@ export type V2Page4Plan = {
  * calls are pure functions of (font metrics, brief data, margin,
  * contentWidth) so they always agree.
  *
- * Facility rows are reduced first (BASE_PAGE_HEIGHT is the planning
- * ceiling passed to resolveV2FacilityRowCounts, matching what it already
- * does); page height only grows past that ceiling — "modestly" — when even
- * 0 facility rows still would not leave room for every conclusion line
- * (spec priority: reduce rows, then use space efficiently, then grow the
- * page — never drop a conclusion).
+ * Facility rows are reduced first, but only down to FACILITY_MIN_ROWS
+ * (BASE_PAGE_HEIGHT is the planning ceiling passed to
+ * resolveV2FacilityRowCounts, matching what it already does) — a table with
+ * real data never renders as headers-only. Page height grows past that
+ * ceiling when even the row floor still would not leave room for every
+ * conclusion line (spec priority: core tables and their minimum rows, then
+ * use space efficiently, then grow the page — never drop a table's rows
+ * below its floor or a conclusion to keep the page short).
  */
 export function planPage4Layout(
   doc: PDFKit.PDFDocument,
@@ -1965,8 +1986,9 @@ function renderPage4(ctx: V2Context): void {
   y += gap;
 
   // ── Facilities: needing follow-up + sustained improvement ───────────────────
-  // Row counts flex (5 down to 0) so the conclusions box below always keeps
-  // room for every actual conclusion — facility rows never cause truncation.
+  // Row counts flex (5 down to a floor of FACILITY_MIN_ROWS, never below
+  // while that table has real data) to try to keep room for every actual
+  // conclusion — page 4 grows instead once the floor itself doesn't fit.
   const facilityRowCounts = { topRows: page4Plan.topRows, bottomRows: page4Plan.bottomRows };
   const followUpCols: ColDef[] = [
     { key: "facility", label: "السجن", weight: 1.3 },
@@ -1979,7 +2001,7 @@ function renderPage4(ctx: V2Context): void {
   ];
   const bestPracticeCols: ColDef[] = [
     { key: "facility", label: "السجن", weight: 1.3 },
-    { key: "classificationLabel", label: "مجال التميز", weight: 1.3 },
+    { key: "classificationLabel", label: "مجال التحسن", weight: 1.3 },
     { key: "startValue", label: "البداية", weight: 0.55 },
     { key: "currentValue", label: "الحالية", weight: 0.55 },
     { key: "improvementAmount", label: "مقدار التحسن", weight: 0.75 },

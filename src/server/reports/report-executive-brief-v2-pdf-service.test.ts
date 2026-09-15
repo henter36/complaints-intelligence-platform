@@ -1187,24 +1187,24 @@ describe("V2 monthly chart contract + KPI packing", () => {
 
   // These mirror the resolver's own internal layout constants (row height 26,
   // table header 28, two section titles + two gaps of chrome) so each case
-  // can independently predict which row count the budget forces, instead of
-  // just asserting a floor of 3 the resolver itself no longer enforces.
+  // can independently predict which row count the budget forces.
   const FACILITY_ROW_H = 26;
   const FACILITY_HEADER_H = FACILITY_ROW_H + 2;
   const FACILITY_CHROME = (13 + 8) * 2 + 14 * 2; // two section titles + two gaps (gap=14 below)
+  const FACILITY_MIN_ROWS_UNDER_TEST = 3;
 
   function facilityBudget(pageHeight: number, margin: number, y: number): number {
     return pageHeight - margin - 26 - y - FACILITY_CHROME;
   }
 
-  it("resolveV2FacilityRowCounts picks the largest feasible row count (down to 0) so facility rows + conclusions never exceed the page budget", () => {
+  it("resolveV2FacilityRowCounts picks the largest feasible row count within 5..3 so facility rows + conclusions fit the page budget when a floor-respecting fit exists", () => {
     const pageHeight = 1200;
     const margin = 42;
     const gap = 14;
     const requiredConclusionsHeight = computeBulletBoxHeight(3);
 
-    // y chosen so the budget only fits 2 rows per side (3 rows would overflow).
-    const y = 762;
+    // y chosen so the budget fits exactly 4 rows per side (5 would overflow, 4 does not).
+    const y = 650;
     const budget = facilityBudget(pageHeight, margin, y);
     const { topRows, bottomRows } = resolveV2FacilityRowCounts({
       pageHeight, margin, y, gap,
@@ -1212,52 +1212,50 @@ describe("V2 monthly chart contract + KPI packing", () => {
       bottomAvailableRows: 5,
       requiredConclusionsHeight,
     });
-    expect(topRows).toBe(2);
-    expect(bottomRows).toBe(2);
+    expect(topRows).toBe(4);
+    expect(bottomRows).toBe(4);
     const facilitiesHeight = 2 * (FACILITY_HEADER_H + topRows * FACILITY_ROW_H);
     // The chosen rows plus the full conclusions requirement must fit inside
     // the budget computed from the exact same y/chrome the resolver used.
     expect(facilitiesHeight + requiredConclusionsHeight).toBeLessThanOrEqual(budget);
   });
 
-  it("resolveV2FacilityRowCounts reduces to exactly 1 row per side when only that much room remains", () => {
+  it("resolveV2FacilityRowCounts never drops facility rows below the 3-row floor, even when that floor itself overflows the page budget (spec: the page grows instead — see planPage4Layout)", () => {
     const pageHeight = 1200;
     const margin = 42;
     const gap = 14;
     const requiredConclusionsHeight = computeBulletBoxHeight(3);
-    const y = 812;
+    // y chosen so even the 3-row floor overflows the budget (previously this
+    // forced rows all the way down to 0 — a real, non-empty table rendered
+    // as headers-only, which is exactly the regression this floor fixes).
+    const y = 872;
+    const budget = facilityBudget(pageHeight, margin, y);
     const { topRows, bottomRows } = resolveV2FacilityRowCounts({
       pageHeight, margin, y, gap,
       topAvailableRows: 5,
       bottomAvailableRows: 5,
       requiredConclusionsHeight,
     });
-    expect(topRows).toBe(1);
-    expect(bottomRows).toBe(1);
+    expect(topRows).toBe(FACILITY_MIN_ROWS_UNDER_TEST);
+    expect(bottomRows).toBe(FACILITY_MIN_ROWS_UNDER_TEST);
+    // Confirms this really is the "doesn't fit" branch, not a coincidence —
+    // the floor's own facilities height genuinely overflows this budget.
+    const facilitiesHeight = 2 * (FACILITY_HEADER_H + FACILITY_MIN_ROWS_UNDER_TEST * FACILITY_ROW_H);
+    expect(facilitiesHeight + requiredConclusionsHeight).toBeGreaterThan(budget);
   });
 
-  it("resolveV2FacilityRowCounts reduces facility rows all the way to 0 (not floored at 3) while conclusions keep their full required height", () => {
-    const pageHeight = 1200;
-    const margin = 42;
-    const gap = 14;
-    const requiredConclusionsHeight = computeBulletBoxHeight(3);
-    const y = 872; // only room for headers-only facility tables (0 rows each)
+  it("resolveV2FacilityRowCounts never returns 0 rows on a side that has real data, no matter how severe the budget shortage", () => {
     const { topRows, bottomRows } = resolveV2FacilityRowCounts({
-      pageHeight, margin, y, gap,
-      topAvailableRows: 5,
-      bottomAvailableRows: 5,
-      requiredConclusionsHeight,
+      pageHeight: 200, // absurdly small — the page a moment ago fit comfortably at 1200
+      margin: 42,
+      y: 900,
+      gap: 14,
+      topAvailableRows: 10,
+      bottomAvailableRows: 8,
+      requiredConclusionsHeight: computeBulletBoxHeight(4),
     });
-    expect(topRows).toBe(0);
-    expect(bottomRows).toBe(0);
-
-    // After drawing zero-row (headers-only) tables, conclusions must still
-    // get their full required height — never sacrificed for facility rows.
-    // (Matches resolveV2FacilityRowCounts's own "pageHeight - margin - 26 - y" budget formula.)
-    const facilitiesHeight = 2 * FACILITY_HEADER_H;
-    const yAfterFacilities = y + FACILITY_CHROME + facilitiesHeight;
-    const availableH = Math.max(0, pageHeight - margin - 26 - yAfterFacilities);
-    expect(availableH).toBeGreaterThanOrEqual(requiredConclusionsHeight);
+    expect(topRows).toBe(FACILITY_MIN_ROWS_UNDER_TEST);
+    expect(bottomRows).toBe(FACILITY_MIN_ROWS_UNDER_TEST);
   });
 
   it("resolveV2FacilityRowCounts never asks for more rows than are actually available", () => {
@@ -1518,6 +1516,102 @@ describe("V2 per-page sizing (spec: each page's content-driven height never leak
       expect(rendered).toContain(preparePdfText(`صفحة ${page} من 4`));
     }
     expect(result.warnings.some((w) => w.includes("عدد صفحات التقرير"))).toBe(false);
+  });
+});
+
+describe("V2 page 4 facility-row minimum floor (regression: real 2026-09-01..09-16 report rendered both facility tables headers-only despite real source data)", () => {
+  // Realistic squeeze: 10 follow-up facilities, 8 sustained-improvement
+  // candidates, a full 4-card practices grid, and 4 long executive
+  // conclusions (matching the real report's "حققت 8 مواقع تحسناً مستداماً"
+  // case) — everything simultaneously competing for page-4 space, which is
+  // exactly the combination that previously reduced both facility tables to
+  // 0 rows even though facilitiesNeedingFollowUp/bestPracticeCandidates both
+  // had real rows.
+  const manyFollowUp = Array.from({ length: 10 }, (_, i) => ({
+    facility: `سجن متابعة ${i + 1}`, totalComplaints: 20 - i, isHistoricalOnly: false, topIssueLabel: "قضية",
+    patternLabel: "استمرار مرتفع" as const, streakPeriods: 3,
+    repeatComplainants: null, repeatComplaints: null, spreadComplainants: null, spreadComplaints: null,
+    priorityBand: "مرتفعة" as const, priorityScore: 90 - i, isChronic: true, distinctComplainantsForRanking: 0,
+  }));
+  const manyBestPractice = Array.from({ length: 8 }, (_, i) => ({
+    facility: `سجن تحسن ${i + 1}`, startValue: 30, currentValue: 5, decrease: 25, streakPeriods: 3,
+    classificationLabel: "تصنيف", reasonLabel: "تحسن قوي ومستدام",
+  }));
+  const fourLongConclusions = [
+    { title: "ضغط مستمر في الخدمات الصحية", text: "تظل شكاوى الوصول إلى الطبيب الأعلى حجماً، وتمثل 42.4% من شكاوى الفترة." },
+    { title: "عودة مشكلات بعد تحسن", text: "رُصدت 13 حالة عادت للارتفاع بعد تحسن سابق، بما يستدعي متابعة استدامة المعالجات." },
+    { title: "تحسن مستدام", text: "حققت 8 مواقع تحسناً مستداماً، أبرزها سجن تحسن 1، وسجن تحسن 2، وسجن تحسن 3." },
+    { title: "ارتفاع في إحدى المناطق", text: "سجلت جازان زيادة قدرها 7 شكاوى (+3.8%)، بينما سجلت غالبية المناطق انخفاضاً." },
+  ];
+
+  function squeezeBrief(overrides: Partial<ExecutiveBriefV2Data> = {}) {
+    return makeV2Brief({
+      facilitiesNeedingFollowUp: manyFollowUp,
+      bestPracticeCandidates: manyBestPractice,
+      executiveConclusions: fourLongConclusions,
+      ...overrides,
+    });
+  }
+
+  it("A. facilitiesNeedingFollowUp.length = 10 => planned AND rendered top rows are never fewer than 3", async () => {
+    const doc = makeFontDoc();
+    const plan = planPage4Layout(doc, squeezeBrief(), 42, 816);
+    doc.end();
+    expect(plan.topRows).toBeGreaterThanOrEqual(3);
+
+    const report = makeV2Report({ briefData: squeezeBrief() });
+    const { joined } = await captureRenderedPdfText(report);
+    const renderedFollowUpNames = manyFollowUp.filter((row) => joined.includes(preparePdfText(row.facility)));
+    expect(renderedFollowUpNames.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("B. bestPracticeCandidates.length = 8 => planned AND rendered bottom rows are never fewer than 3", async () => {
+    const doc = makeFontDoc();
+    const plan = planPage4Layout(doc, squeezeBrief(), 42, 816);
+    doc.end();
+    expect(plan.bottomRows).toBeGreaterThanOrEqual(3);
+
+    const report = makeV2Report({ briefData: squeezeBrief() });
+    const { joined } = await captureRenderedPdfText(report);
+    const renderedBestPracticeNames = manyBestPractice.filter((row) => joined.includes(preparePdfText(row.facility)));
+    expect(renderedBestPracticeNames.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("C. topRows is never 0 while facilitiesNeedingFollowUp has real rows", () => {
+    const doc = makeFontDoc();
+    const plan = planPage4Layout(doc, squeezeBrief(), 42, 816);
+    doc.end();
+    expect(plan.topRows).not.toBe(0);
+  });
+
+  it("D. bottomRows is never 0 while bestPracticeCandidates has real rows", () => {
+    const doc = makeFontDoc();
+    const plan = planPage4Layout(doc, squeezeBrief(), 42, 816);
+    doc.end();
+    expect(plan.bottomRows).not.toBe(0);
+  });
+
+  it("E. page 4 grows past BASE_PAGE_HEIGHT when the 3-row floor plus practices plus conclusions no longer fit the base height", () => {
+    const doc = makeFontDoc();
+    const plan = planPage4Layout(doc, squeezeBrief(), 42, 816);
+    doc.end();
+    expect(plan.pageHeight).toBeGreaterThan(PRINT_EXECUTIVE_PAGE_SIZE[1]);
+  });
+
+  it("F. the report stays exactly 4 pages even after page 4 grows to fit the floor rows", async () => {
+    const report = makeV2Report({ briefData: squeezeBrief() });
+    const result = await renderExecutiveBriefV2Pdf(report);
+    expect(countPageObjects(result.buffer)).toBe(4);
+    expect(result.warnings.some((w) => w.includes("عدد صفحات التقرير"))).toBe(false);
+  });
+
+  it("never renders an empty (headers-only) 'السجون الأكثر حاجة للمتابعة' or 'حالات التحسن المستدام' table while the executive conclusions describe real improved/flagged sites", async () => {
+    const report = makeV2Report({ briefData: squeezeBrief() });
+    const { joined } = await captureRenderedPdfText(report);
+    expect(joined).toContain(preparePdfText("السجون الأكثر حاجة للمتابعة"));
+    expect(joined).toContain(preparePdfText("حالات التحسن المستدام"));
+    expect(joined).toContain(preparePdfText(manyFollowUp[0]!.facility));
+    expect(joined).toContain(preparePdfText(manyBestPractice[0]!.facility));
   });
 });
 

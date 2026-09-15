@@ -269,7 +269,7 @@ export type FacilityFollowUpRow = {
  */
 export type BestPracticeCandidateRow = {
   facility: string;
-  /** The classification this facility improved on ("مجال التميز") — never a general facility ranking (spec item 9). */
+  /** The classification this facility improved on ("مجال التحسن") — never a general facility ranking (spec item 9). */
   classificationLabel: string;
   startValue: number;
   currentValue: number;

@@ -1013,10 +1013,18 @@ function buildSustainedImprovementConclusion(
   return { title: "تحسن مستدام", text: extendedText.length <= IMPROVEMENT_TEXT_SOFT_LIMIT ? extendedText : baseText };
 }
 
+/** شكوى (1) / شكويان (2) / N شكاوى (3-10) / N شكوى (11+) — Arabic count-noun agreement for a complaint count. */
+const COMPLAINT_COUNT_FORMS = {
+  one: "شكوى واحدة",
+  two: "شكويان",
+  few: "شكاوى",
+  many: "شكوى",
+};
+
 function formatRegionalMagnitude(row: RegionChangeRow): string {
-  return row.difference > 0
-    ? `زيادة قدرها ${row.difference} شكوى`
-    : `انخفاضاً قدره ${Math.abs(row.difference)} شكوى`;
+  const magnitude = Math.abs(row.difference);
+  const countPhrase = formatArabicCountedNoun(magnitude, COMPLAINT_COUNT_FORMS);
+  return row.difference > 0 ? `زيادة قدرها ${countPhrase}` : `انخفاضاً قدره ${countPhrase}`;
 }
 
 /** "" for null; a leading space + parenthesized signed percent otherwise — e.g. " (+3.8%)", " (-28.9%)", " (0%)". */
