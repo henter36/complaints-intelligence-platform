@@ -29,9 +29,10 @@ import type {
   PeriodSnapshotMetrics,
   ClassificationTrendRow,
   FacilityFollowUpRow,
-  BestPracticeCandidateRow,
+  SustainedImprovementRow,
   ExecutiveConclusionRow,
 } from "@/lib/reports/report-contract";
+import { selectDiverseSustainedImprovementRows } from "./report-executive-brief-data-service";
 import { OPERATIONAL_PRACTICE_CARD_COUNT, type OperationalPracticeRow } from "@/lib/reports/operational-practices";
 import type { ExecutiveBriefV2Data, ReportData } from "./report-data-service";
 import { isExecutiveBriefV2Data } from "./report-data-service";
@@ -1282,25 +1283,79 @@ function formatFacilityFollowUpCell(row: FacilityFollowUpRow, key: string): stri
 }
 
 /**
- * PDF-display-only shortening of the candidate table's "سبب الاختيار"
- * column — the full-length reasonLabel produced by best-practice-candidate.ts
- * (see its buildReasonLabel) stays unchanged everywhere else (conclusions
- * text, any future documentation workflow); only this narrow table column
- * gets a short version so a long sentence never renders truncated inside
- * the cell. Candidacy gates, merit score, and ranking are untouched — this
- * is a wording map only, keyed on the exact known reasonLabel values.
+ * PDF-display-only shortening of the sustained-improvement table's "سبب
+ * الاختيار" column — the full-length reasonLabel produced by
+ * best-practice-candidate.ts (see its buildReasonLabel) or the default
+ * ungated label (SUSTAINED_IMPROVEMENT_DEFAULT_REASON_LABEL) stays
+ * unchanged everywhere else (conclusions text, any future documentation
+ * workflow); only this narrow table column gets a short version so a long
+ * sentence never renders truncated inside the cell. Candidacy gates, merit
+ * score, and ranking are untouched — this is a wording map only, keyed on
+ * the exact known reasonLabel values.
  */
-function shortenBestPracticeReasonForDisplay(reasonLabel: string): string {
+function shortenSustainedImprovementReasonForDisplay(reasonLabel: string): string {
   if (reasonLabel.startsWith("انخفاض مستدام عبر")) return "تحسن مستدام";
   if (reasonLabel === "تحسن مستدام مع انخفاض جوهري في حجم الشكاوى") return "انخفاض جوهري ومستدام";
-  return reasonLabel; // "تحسن قوي ومستدام" is already short; defensive fallback for any other value.
+  return reasonLabel; // "تحسن قوي ومستدام" / "تحسن مستدام" are already short; defensive fallback for any other value.
 }
 
 /** "مقدار التحسن" is shown as a negative amount (e.g. "−41") — the decrease itself is stored positive so other math (merit score, sorting) never has to fight a sign. */
-function formatBestPracticeCandidateCell(row: BestPracticeCandidateRow, key: string): string {
+function formatSustainedImprovementCell(row: SustainedImprovementRow, key: string): string {
   if (key === "improvementAmount") return formatReportNumber(-row.decrease);
-  if (key === "reasonLabel") return shortenBestPracticeReasonForDisplay(row.reasonLabel);
+  if (key === "reasonLabel") return shortenSustainedImprovementReasonForDisplay(row.reasonLabel);
   return formatTableValue((row as Record<string, unknown>)[key]);
+}
+
+/** Explanatory note under "أبرز حالات التحسن المستدام" when the table can't show every improved site (spec review item 9) — follows the >=10.5pt body-text floor, like PAGE2_TOTALS_NOTE_FONT_SIZE. */
+const SUSTAINED_IMPROVEMENT_NOTE_FONT_SIZE = 10.5;
+const SUSTAINED_IMPROVEMENT_NOTE_GAP = 6;
+
+/** null when every unique improved facility is already shown (no note needed) — the displayed/total counts are dynamic, never hardcoded (spec review item 9). */
+function sustainedImprovementNoteText(displayedUniqueFacilities: number, totalUniqueFacilities: number): string | null {
+  if (totalUniqueFacilities <= displayedUniqueFacilities) return null;
+  return `يعرض الجدول أبرز ${formatReportNumber(displayedUniqueFacilities)} من أصل ${formatReportNumber(totalUniqueFacilities)} مواقع حققت تحسناً مستداماً.`;
+}
+
+/**
+ * Height reserved for the note above — ALWAYS reserved, using a
+ * representative placeholder string of the same real shape, since the
+ * actual displayed/total counts aren't known until AFTER
+ * resolveV2FacilityRowCounts has already picked a row count (the note's own
+ * height must be part of that budget). So plan/render heights can never
+ * disagree regardless of the final numbers or whether the note ends up
+ * drawn at all — the same "reserve worst case, draw conditionally" pattern
+ * the practices grid and facility-row chrome already use.
+ */
+function sustainedImprovementNoteReservedHeight(doc: PDFKit.PDFDocument, contentWidth: number): number {
+  doc.font("Body").fontSize(SUSTAINED_IMPROVEMENT_NOTE_FONT_SIZE);
+  const layout = preparePdfTextLayout(doc, sustainedImprovementNoteText(3, 12)!, {
+    width: contentWidth, align: "right", wordSpacing: WORD_SPACING,
+  });
+  return layout.height + SUSTAINED_IMPROVEMENT_NOTE_GAP;
+}
+
+/** Draws the note (a no-op when null) and always advances `y` by the reserved height — matching planPage4Layout exactly regardless of whether text was actually drawn. */
+function drawSustainedImprovementNote(
+  doc: PDFKit.PDFDocument,
+  x: number,
+  y: number,
+  contentWidth: number,
+  displayedUniqueFacilities: number,
+  totalUniqueFacilities: number
+): number {
+  const text = sustainedImprovementNoteText(displayedUniqueFacilities, totalUniqueFacilities);
+  const reserved = sustainedImprovementNoteReservedHeight(doc, contentWidth);
+  if (text) {
+    doc.font("Body").fontSize(SUSTAINED_IMPROVEMENT_NOTE_FONT_SIZE).fillColor(COLORS.neutral);
+    const layout = preparePdfTextLayout(doc, text, { width: contentWidth, align: "right", wordSpacing: WORD_SPACING });
+    layout.lines.forEach((line, idx) => {
+      doc.text(line.visualText, x, y + idx * layout.lineHeight, {
+        width: contentWidth, align: "right", wordSpacing: WORD_SPACING, lineBreak: false,
+      });
+    });
+    resetInk(doc);
+  }
+  return y + reserved;
 }
 
 async function renderPage3(ctx: V2Context): Promise<void> {
@@ -1833,7 +1888,7 @@ export function planPage4Layout(
 ): V2Page4Plan {
   const classRows = brief.topClassifications.slice(0, TOP_CLASSIFICATIONS_V2_LIMIT);
   const followUpRows = brief.facilitiesNeedingFollowUp ?? [];
-  const bestPracticeRows = brief.bestPracticeCandidates ?? [];
+  const sustainedImprovementRows = brief.sustainedImprovements ?? [];
   const operationalPractices = brief.operationalPractices ?? [];
   const executiveConclusions = (brief.executiveConclusions ?? []).slice(0, MAX_EXECUTIVE_CONCLUSIONS_V2);
   const trendRows = brief.classificationTrends;
@@ -1861,28 +1916,32 @@ export function planPage4Layout(
 
   const requiredConclusionsHeight = executiveConclusionsSectionHeight(doc, executiveConclusions, contentWidth);
   const practicesReserve = operationalPracticesSectionHeight(doc, operationalPractices.length, contentWidth);
+  const sustainedImprovementNoteReserve = sustainedImprovementNoteReservedHeight(doc, contentWidth);
+  const fixedSectionReserve = practicesReserve + sustainedImprovementNoteReserve;
 
-  // The row-reduction ceiling includes practicesReserve on TOP of the base
-  // height (same "expand height, not shrink rows" treatment page 3's region
-  // term gets) — practicesReserve is passed as additionalReservedHeight too,
-  // so the two exactly cancel out in resolveV2FacilityRowCounts's own budget
-  // formula, leaving the ceiling effectively at BASE_PAGE_HEIGHT for rows.
-  // Only conclusion-line growth (not the practices grid) ever pressures
-  // facility rows to shrink — matching this section's pre-existing behavior
-  // before page-3's region count started leaking into every page's height.
+  // The row-reduction ceiling includes fixedSectionReserve on TOP of the
+  // base height (same "expand height, not shrink rows" treatment page 3's
+  // region term gets) — fixedSectionReserve is passed as
+  // additionalReservedHeight too, so the two exactly cancel out in
+  // resolveV2FacilityRowCounts's own budget formula, leaving the ceiling
+  // effectively at BASE_PAGE_HEIGHT for rows. Only conclusion-line growth
+  // (not the practices grid or this note) ever pressures facility rows to
+  // shrink — matching this section's pre-existing behavior before page-3's
+  // region count started leaking into every page's height.
   const facilityRowCounts = resolveV2FacilityRowCounts({
-    pageHeight: BASE_PAGE_HEIGHT + practicesReserve,
+    pageHeight: BASE_PAGE_HEIGHT + fixedSectionReserve,
     margin,
     y,
     gap,
     topAvailableRows: followUpRows.length,
-    bottomAvailableRows: bestPracticeRows.length,
+    bottomAvailableRows: sustainedImprovementRows.length,
     requiredConclusionsHeight,
-    additionalReservedHeight: practicesReserve,
+    additionalReservedHeight: fixedSectionReserve,
   });
 
   y += FACILITY_SECTION_TITLE_H + FACILITY_TABLE_HEADER_H + facilityRowCounts.topRows * FACILITY_ROW_HEIGHT + gap;
-  y += FACILITY_SECTION_TITLE_H + FACILITY_TABLE_HEADER_H + facilityRowCounts.bottomRows * FACILITY_ROW_HEIGHT + gap;
+  y += FACILITY_SECTION_TITLE_H + sustainedImprovementNoteReserve
+    + FACILITY_TABLE_HEADER_H + facilityRowCounts.bottomRows * FACILITY_ROW_HEIGHT + gap;
   y += practicesReserve;
 
   const contentBottom = y + requiredConclusionsHeight;
@@ -1903,7 +1962,7 @@ function renderPage4(ctx: V2Context): void {
   const { margin, contentWidth } = layout;
   const classRows = brief.topClassifications.slice(0, TOP_CLASSIFICATIONS_V2_LIMIT);
   const followUpRows = brief.facilitiesNeedingFollowUp ?? [];
-  const bestPracticeRows = brief.bestPracticeCandidates ?? [];
+  const sustainedImprovementRows = brief.sustainedImprovements ?? [];
   const operationalPractices = brief.operationalPractices ?? [];
   const executiveConclusions = (brief.executiveConclusions ?? []).slice(0, MAX_EXECUTIVE_CONCLUSIONS_V2);
   const trendRows = brief.classificationTrends;
@@ -1999,7 +2058,7 @@ function renderPage4(ctx: V2Context): void {
     { key: "repeatOrSpread", label: "التكرار/الانتشار", weight: 1.5 },
     { key: "priorityBand", label: "الأولوية", weight: 0.65 },
   ];
-  const bestPracticeCols: ColDef[] = [
+  const sustainedImprovementCols: ColDef[] = [
     { key: "facility", label: "السجن", weight: 1.3 },
     { key: "classificationLabel", label: "مجال التحسن", weight: 1.3 },
     { key: "startValue", label: "البداية", weight: 0.55 },
@@ -2022,21 +2081,36 @@ function renderPage4(ctx: V2Context): void {
   });
   y += gap;
 
-  y = drawSectionTitle(doc, "حالات التحسن المستدام", margin, y, contentWidth);
+  // "أبرز" (never the bare "حالات التحسن المستدام") because the table only
+  // ever shows a capped, diversified subset of rows — the section note
+  // below makes the "N من أصل M" scope explicit whenever it's cropped.
+  y = drawSectionTitle(doc, "أبرز حالات التحسن المستدام", margin, y, contentWidth);
+  const displayedSustainedImprovementRows = selectDiverseSustainedImprovementRows(
+    sustainedImprovementRows,
+    facilityRowCounts.bottomRows
+  );
+  y = drawSustainedImprovementNote(
+    doc,
+    margin,
+    y,
+    contentWidth,
+    new Set(displayedSustainedImprovementRows.map((row) => row.facility)).size,
+    new Set(sustainedImprovementRows.map((row) => row.facility)).size
+  );
   y = drawTable({
     doc,
-    rows: bestPracticeRows.slice(0, facilityRowCounts.bottomRows),
-    columns: bestPracticeCols,
+    rows: displayedSustainedImprovementRows,
+    columns: sustainedImprovementCols,
     x: margin,
     y,
     width: contentWidth,
     rowHeight: rowH,
-    formatCell: formatBestPracticeCandidateCell,
+    formatCell: formatSustainedImprovementCell,
   });
   y += gap;
 
   // ── Operational practices grid — visually and semantically separate from
-  // the best-practice-candidate table above (spec): a fixed, pre-approved
+  // the sustained-improvement table above (spec): a fixed, pre-approved
   // set of generic suggestions, never a claim tied to this period's data. ──
   y = drawOperationalPracticesSection(doc, operationalPractices, margin, y, contentWidth);
 
@@ -2102,6 +2176,7 @@ const EMPTY_V2: ExecutiveBriefV2Data = {
   continuedProblemFindingCount: 0,
   facilitiesNeedingFollowUp: [],
   bestPracticeCandidates: [],
+  sustainedImprovements: [],
   classificationTrends: [],
   operationalPractices: [],
   periodMetrics: { current: EMPTY_PERIOD_SNAPSHOT_METRICS, previous: null },

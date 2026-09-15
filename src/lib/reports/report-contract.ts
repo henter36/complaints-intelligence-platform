@@ -279,6 +279,30 @@ export type BestPracticeCandidateRow = {
 };
 
 /**
+ * A facility×classification with a real, multi-period SUSTAINED_IMPROVEMENT
+ * finding (see multi-period-trend.ts) — the V2 page-4 "أبرز حالات التحسن
+ * المستدام" table's row shape. Deliberately NOT BestPracticeCandidateRow:
+ * this is the full, ungated set (built from periodChangeDigest.
+ * improvedFacilities, the same canonical source and ranking the "تحسن
+ * مستدام" executive conclusion uses), while BestPracticeCandidateRow is a
+ * stricter SUBSET that also clears the additional best-practice-candidate
+ * merit gates. Using the gated subset as this table's source was the root
+ * cause of the table and the executive conclusion naming different sites
+ * under the same "sustained improvement" heading — never reintroduce that
+ * split by pointing this table back at BestPracticeCandidateRow data.
+ */
+export type SustainedImprovementRow = {
+  facility: string;
+  /** The classification this facility improved on ("مجال التحسن"). */
+  classificationLabel: string;
+  startValue: number;
+  currentValue: number;
+  decrease: number;
+  streakPeriods: number;
+  reasonLabel: string;
+};
+
+/**
  * One row of the V2 page-4 "الاستنتاجات التنفيذية" section (up to
  * MAX_EXECUTIVE_CONCLUSIONS, see buildExecutiveConclusions) — a short,
  * scannable executive read, deliberately NOT a re-statement of a table row:

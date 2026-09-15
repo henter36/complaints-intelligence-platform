@@ -153,6 +153,15 @@ function makeV2Brief(overrides: Partial<ExecutiveBriefV2Data> = {}): ExecutiveBr
       { facility: "سجن الدمام", startValue: 30, currentValue: 2, decrease: 28, streakPeriods: 4, classificationLabel: "الاتصال", reasonLabel: "تحسن قوي ومستدام" },
       { facility: "سجن أبها", startValue: 20, currentValue: 3, decrease: 17, streakPeriods: 3, classificationLabel: "الزيارات", reasonLabel: "تحسن مستدام مع انخفاض جوهري في حجم الشكاوى" },
     ],
+    // Page 4's actual "أبرز حالات التحسن المستدام" table source (spec: same
+    // canonical set/ranking the "تحسن مستدام" executive conclusion uses) —
+    // matches bestPracticeCandidates' content above only because this
+    // fixture intentionally keeps every improved site a best-practice
+    // candidate too; real data can (and often does) diverge between the two.
+    sustainedImprovements: [
+      { facility: "سجن الدمام", startValue: 30, currentValue: 2, decrease: 28, streakPeriods: 4, classificationLabel: "الاتصال", reasonLabel: "تحسن قوي ومستدام" },
+      { facility: "سجن أبها", startValue: 20, currentValue: 3, decrease: 17, streakPeriods: 3, classificationLabel: "الزيارات", reasonLabel: "تحسن مستدام مع انخفاض جوهري في حجم الشكاوى" },
+    ],
     classificationTrends: [
       { facility: "سجن الملز", classification: "نقل", currentCount: 60, difference: 40, trail: "20، 35، 48، 60", streakPeriods: 4, patternLabel: "استمرار مرتفع", priorityScore: 80 },
       { facility: "سجن الشميسي", classification: "استفسار", currentCount: 12, difference: 12, trail: "0، 0، 1، 12", streakPeriods: 1, patternLabel: "مشكلة ناشئة", priorityScore: 55 },
@@ -836,6 +845,7 @@ describe("V2 page 4 — operational practices grid (\"ممارسات تشغيل�
         executiveConclusions: fourConclusions,
         facilitiesNeedingFollowUp: manyFollowUp,
         bestPracticeCandidates: manyBestPractice,
+        sustainedImprovements: manyBestPractice,
         operationalPractices: [],
       }),
     });
@@ -1548,6 +1558,7 @@ describe("V2 page 4 facility-row minimum floor (regression: real 2026-09-01..09-
     return makeV2Brief({
       facilitiesNeedingFollowUp: manyFollowUp,
       bestPracticeCandidates: manyBestPractice,
+      sustainedImprovements: manyBestPractice,
       executiveConclusions: fourLongConclusions,
       ...overrides,
     });

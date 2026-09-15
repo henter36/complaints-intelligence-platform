@@ -61,6 +61,7 @@ import type {
   ClassificationTrendRow,
   FacilityFollowUpRow,
   BestPracticeCandidateRow,
+  SustainedImprovementRow,
   ExecutiveConclusionRow,
 } from "@/lib/reports/report-contract";
 import {
@@ -902,13 +903,19 @@ function joinArabicList(items: readonly string[]): string {
 
 /**
  * Drops a leading "الإدارة العامة لـ/ل" bureaucratic prefix for a more
- * direct executive-conclusion reading (spec review item 7: "إصلاحية محافظة
- * جدة", not "الإدارة العامة لإصلاحية محافظة جدة") — used ONLY for this
- * sentence; the facility's real, full name is never altered anywhere else
- * (tables, drilldowns).
+ * direct executive-report reading (spec review item 7 / item 12: "إصلاحية
+ * محافظة جدة", not "الإدارة العامة لإصلاحية محافظة جدة") — applied ONCE, in
+ * buildSustainedImprovementRows, so the "أبرز حالات التحسن المستدام" table
+ * and the "تحسن مستدام" executive conclusion always show the SAME display
+ * name for the same site; the facility's real, full name is never altered
+ * anywhere else (the underlying facility entity, drilldowns, other tables).
  */
-function shortenFacilityNameForConclusion(facility: string): string {
-  const stripped = facility.replace(/^الإدارة العامة لـ?/, "").trim();
+function shortenFacilityNameForDisplay(facility: string): string {
+  // [إأا] tolerates real source-data alef spelling variants seen on this
+  // exact prefix ("الإدارة" / "الأدارة" / "الادارة") — a genuine data-entry
+  // inconsistency confirmed against real production facility names, not a
+  // hypothetical.
+  const stripped = facility.replace(/^ال[إأا]دارة العامة لـ?/, "").trim();
   return stripped.length > 0 ? stripped : facility;
 }
 
@@ -922,29 +929,145 @@ function formatFacilityClassifications(labels: readonly string[]): string {
   return joinArabicList(labels.slice(0, IMPROVEMENT_CLASSIFICATIONS_PER_FACILITY_LIMIT));
 }
 
+/** Default "سبب الاختيار" text for a sustained-improvement row that has NOT (also) cleared the best-practice-candidate merit gates — honest and short, never overclaiming a strength this row hasn't itself demonstrated (that stronger wording is reserved for evaluation.reasonLabel, set only when status === "BEST_PRACTICE_CANDIDATE"). */
+const SUSTAINED_IMPROVEMENT_DEFAULT_REASON_LABEL = "تحسن مستدام";
+
 /**
- * Priority 3 — the most important sustained improvement. `improvedFacilities`
- * is facility×classification snapshot ROWS (spec item 24: never confuse
- * with unique site count) — grouped by facility here so the site count AND
- * the NAMED sites/classifications in the sentence are always the true,
- * de-duplicated set, matching the table below exactly instead of drifting
- * from it. Names real sites and classifications (spec review) instead of a
- * generic "study the accompanying procedures" recommendation — never
- * claims any accompanying procedure CAUSED the improvement.
+ * Ranking for both the "أبرز حالات التحسن المستدام" table and the "تحسن
+ * مستدام" executive conclusion (spec review item 5): (1) strongest actual
+ * decrease, (2) longest improvement streak, (3) higher current value on a
+ * tie, (4) deterministic facility/classification name order — never an
+ * arbitrary or digest-insertion order.
+ */
+function compareSustainedImprovementRows(a: SustainedImprovementRow, b: SustainedImprovementRow): number {
+  return (
+    b.decrease - a.decrease
+    || b.streakPeriods - a.streakPeriods
+    || b.currentValue - a.currentValue
+    || a.facility.localeCompare(b.facility, "ar")
+    || a.classificationLabel.localeCompare(b.classificationLabel, "ar")
+  );
+}
+
+/**
+ * THE single canonical source for every V2 page-4 element under the
+ * "sustained improvement" heading — the "أبرز حالات التحسن المستدام" table
+ * AND the "تحسن مستدام" executive conclusion's facility/classification list
+ * are both built from this function's output (spec review item 2/15).
+ * `periodChangeDigest.improvedFacilities` (never `bestPracticeCandidates` —
+ * a stricter, gated SUBSET; using that as this table's source was the root
+ * cause of the table and the conclusion naming different sites under the
+ * same heading) is enriched with the matching SUSTAINED_IMPROVEMENT
+ * finding's real numbers (startValue/currentValue/decrease/streakPeriods),
+ * joined by the identical buildPatternSnapshotKey identity PatternSnapshot.key
+ * already carries — the digest and the findings engine run over the SAME
+ * series/config, so every improvedFacilities entry should always have a
+ * matching finding; a snapshot with no match is skipped rather than shown
+ * with fabricated numbers.
+ *
+ * Facility display names have their "الإدارة العامة لـ" bureaucratic prefix
+ * stripped HERE (spec review item 12) — the single point both the table and
+ * the conclusion read from, so the two can never show two different name
+ * forms for the same site.
+ */
+export function buildSustainedImprovementRows(
+  improvedFacilities: readonly PatternSnapshot[],
+  patternFindings: readonly AnalyticalFinding[]
+): SustainedImprovementRow[] {
+  if (improvedFacilities.length === 0) return [];
+
+  const evaluationsByKey = new Map<string, BestPracticeCandidateEvaluation>();
+  for (const finding of patternFindings) {
+    if (finding.type !== "SUSTAINED_IMPROVEMENT") continue;
+    const facility = facilityOfFinding(finding);
+    if (!facility) continue;
+    const evaluation = evaluateBestPracticeCandidacy(finding, facility);
+    if (!evaluation) continue;
+    evaluationsByKey.set(buildPatternSnapshotKey(facility, evaluation.classificationId), evaluation);
+  }
+
+  const rows: SustainedImprovementRow[] = [];
+  const seenKeys = new Set<string>();
+  for (const snapshot of improvedFacilities) {
+    if (seenKeys.has(snapshot.key)) continue;
+    seenKeys.add(snapshot.key);
+    const evaluation = evaluationsByKey.get(snapshot.key);
+    if (!evaluation) continue;
+    rows.push({
+      facility: shortenFacilityNameForDisplay(evaluation.facility),
+      classificationLabel: evaluation.classificationLabel,
+      startValue: evaluation.startValue,
+      currentValue: evaluation.currentValue,
+      decrease: evaluation.decrease,
+      streakPeriods: evaluation.streakPeriods,
+      reasonLabel: evaluation.reasonLabel ?? SUSTAINED_IMPROVEMENT_DEFAULT_REASON_LABEL,
+    });
+  }
+
+  return rows.sort(compareSustainedImprovementRows);
+}
+
+/**
+ * Display selection for the page-4 table (spec review item 10): prefers ONE
+ * row per distinct facility first (in rank order) so a table capped to a
+ * handful of rows represents as many different sites as the data allows,
+ * rather than several rows all belonging to the single top-ranked facility.
+ * Only once every distinct facility already has a row does a facility get a
+ * SECOND row, still in overall rank order. Output stays in the original
+ * ranked order (never "diversity pass" order), so it still matches the
+ * conclusion's own top-N facility order (spec review item 7).
+ */
+export function selectDiverseSustainedImprovementRows(
+  rows: readonly SustainedImprovementRow[],
+  limit: number
+): SustainedImprovementRow[] {
+  if (rows.length <= limit) return [...rows];
+
+  const usedFacilities = new Set<string>();
+  const selected = new Set<SustainedImprovementRow>();
+  for (const row of rows) {
+    if (selected.size >= limit) break;
+    if (usedFacilities.has(row.facility)) continue;
+    selected.add(row);
+    usedFacilities.add(row.facility);
+  }
+  if (selected.size < limit) {
+    for (const row of rows) {
+      if (selected.size >= limit) break;
+      selected.add(row);
+    }
+  }
+
+  return rows.filter((row) => selected.has(row));
+}
+
+/**
+ * Priority 3 — the most important sustained improvement. Takes the SAME
+ * ranked `SustainedImprovementRow[]` the page-4 table renders (built by
+ * {@link buildSustainedImprovementRows}) — never re-derives its own facility
+ * list, count, or order directly from periodChangeDigest.improvedFacilities
+ * (spec review item 7/15): doing so independently is exactly what let the
+ * conclusion and the table name different sites under the same "sustained
+ * improvement" heading. Names real sites and classifications (spec review)
+ * instead of a generic "study the accompanying procedures" recommendation —
+ * never claims any accompanying procedure CAUSED the improvement.
  */
 function buildSustainedImprovementConclusion(
-  improvedFacilities: readonly PatternSnapshot[]
+  rows: readonly SustainedImprovementRow[]
 ): ExecutiveConclusionRow | null {
-  if (improvedFacilities.length === 0) return null;
+  if (rows.length === 0) return null;
 
   const classificationsByFacility = new Map<string, Set<string>>();
-  for (const snapshot of improvedFacilities) {
-    const set = classificationsByFacility.get(snapshot.facility) ?? new Set<string>();
-    set.add(snapshot.classificationLabel);
-    classificationsByFacility.set(snapshot.facility, set);
+  for (const row of rows) {
+    const set = classificationsByFacility.get(row.facility) ?? new Set<string>();
+    set.add(row.classificationLabel);
+    classificationsByFacility.set(row.facility, set);
   }
+  // Map insertion order mirrors `rows`' own rank order (first appearance per
+  // facility) — the SAME order the table's rows are ranked in, so the
+  // "أبرزها" names below are guaranteed to match the table's top rows.
   const facilities = [...classificationsByFacility.entries()].map(
-    ([facility, classifications]): [string, string[]] => [shortenFacilityNameForConclusion(facility), [...classifications]]
+    ([facility, classifications]): [string, string[]] => [facility, [...classifications]]
   );
 
   // One improved site: the site's own name IS the sentence subject — never
@@ -1138,10 +1261,14 @@ export function buildExecutiveConclusions(input: {
   regionChanges: readonly RegionChangeRow[];
   hasPreviousPeriod: boolean;
 }): ExecutiveConclusionRow[] {
+  const sustainedImprovementRows = buildSustainedImprovementRows(
+    input.periodChangeDigest?.improvedFacilities ?? [],
+    input.patternFindings
+  );
   const candidates = [
     buildTopVolumeConclusion(input.topClassifications, input.currentPeriodTotal, input.patternFindings),
     buildEmergingOrRelapseConclusion(input.periodChangeDigest),
-    buildSustainedImprovementConclusion(input.periodChangeDigest?.improvedFacilities ?? []),
+    buildSustainedImprovementConclusion(sustainedImprovementRows),
     buildRegionalConclusion(input.regionChanges, input.hasPreviousPeriod),
   ];
   return candidates.filter((row): row is ExecutiveConclusionRow => row !== null).slice(0, MAX_EXECUTIVE_CONCLUSIONS);
@@ -2457,6 +2584,15 @@ export async function buildExecutiveBriefV2Data(
     PATTERN_ANALYSIS_CONFIG.bestPracticeCandidate.maxCandidates
   );
   const bestPracticeCandidates = bestPracticeCandidateEvaluations.map(toBestPracticeCandidateRow);
+  // Page 4's "أبرز حالات التحسن المستدام" table source — the SAME canonical
+  // set and ranking the "تحسن مستدام" executive conclusion uses (see
+  // buildSustainedImprovementRows), never bestPracticeCandidates above (a
+  // stricter, gated SUBSET) — so the table and the conclusion can never
+  // name different sites under the same heading.
+  const sustainedImprovements = buildSustainedImprovementRows(
+    briefData.patternAnalysis?.periodChangeDigest?.improvedFacilities ?? [],
+    patternFindings
+  );
   const classificationTrends = buildClassificationTrendRows(patternFindings);
   const classificationAffectedFacilityCounts = computeClassificationAffectedFacilityCounts(patternFindings);
 
@@ -2499,6 +2635,7 @@ export async function buildExecutiveBriefV2Data(
     continuedProblemFindingCount,
     facilitiesNeedingFollowUp,
     bestPracticeCandidates,
+    sustainedImprovements,
     classificationTrends,
     operationalPractices,
     // V2-only: region-only conclusions stay the base, led by up to
