@@ -948,17 +948,79 @@ function formatRegionalMagnitude(row: RegionChangeRow): string {
     : `انخفاضاً قدره ${Math.abs(row.difference)} شكوى`;
 }
 
+/** "" for null; a leading space + parenthesized signed percent otherwise — e.g. " (+3.8%)", " (-28.9%)", " (0%)". */
+function formatRegionalRateSuffix(changeRate: number | null): string {
+  if (changeRate === null) return "";
+  const sign = changeRate > 0 ? "+" : "";
+  return ` (${sign}${changeRate}%)`;
+}
+
 /**
- * Priority 4 — the most executively significant regional change. When
- * regions genuinely split between directions (spec item 30: a conclusion
- * must add context, not just restate the table's biggest row), the region
- * bucking the majority trend is the more noteworthy signal — a rise while
- * most regions fall (or vice versa) is worth flagging even if its own
- * magnitude is smaller than the majority side's biggest mover, so the
- * STRONGEST example of the MINORITY direction is picked, with a "بينما..."
- * context clause. Only when there is no real split (all one direction, or
- * an exact tie) does this fall back to the single largest change overall,
- * with no contrast clause.
+ * "، بينما سجلت غالبية المناطق ...ا." when a genuine majority/minority
+ * split exists (naming the MAJORITY's own direction, opposite of
+ * `selectedDirection`); just "." otherwise. No ternary is nested here —
+ * kept as an explicit if/else so Sonar's cognitive-complexity accounting
+ * for buildRegionalConclusion never has to look inside this function.
+ */
+function buildRegionalContextClause(
+  hasMajoritySplit: boolean,
+  selectedDirection: "ارتفاع" | "انخفاض"
+): string {
+  if (!hasMajoritySplit) return ".";
+
+  let majorityDirection: string;
+  if (selectedDirection === "ارتفاع") {
+    majorityDirection = "انخفاضاً";
+  } else {
+    majorityDirection = "ارتفاعاً";
+  }
+  return `، بينما سجلت غالبية المناطق ${majorityDirection}.`;
+}
+
+type RegionalConclusionCandidate = {
+  row: RegionChangeRow;
+  hasMajoritySplit: boolean;
+};
+
+/**
+ * Pure selection: WHICH region change buildRegionalConclusion should report
+ * on, and whether the majority-direction context clause applies — no text
+ * formatting. When regions genuinely split between directions (spec item
+ * 30: a conclusion must add context, not just restate the table's biggest
+ * row), the region bucking the majority trend is the more noteworthy
+ * signal — a rise while most regions fall (or vice versa) is worth
+ * flagging even if its own magnitude is smaller than the majority side's
+ * biggest mover, so the STRONGEST example of the MINORITY direction wins.
+ * An exact tie (equal counts) or a single direction is never treated as a
+ * split; that case (and only that case) falls back to the single largest
+ * change overall — rising when its magnitude is >= the absolute largest
+ * decline, declining otherwise.
+ */
+function selectRegionalConclusionCandidate(
+  regionChanges: readonly RegionChangeRow[]
+): RegionalConclusionCandidate | null {
+  const rising = regionChanges.filter((row) => row.difference > 0);
+  const declining = regionChanges.filter((row) => row.difference < 0);
+  const topRising = rising.length > 0 ? [...rising].sort(compareRisingRegionChanges)[0] : null;
+  const topDeclining = declining.length > 0 ? [...declining].sort(compareDecliningRegionChanges)[0] : null;
+
+  if (!topRising) return topDeclining ? { row: topDeclining, hasMajoritySplit: false } : null;
+  if (!topDeclining) return { row: topRising, hasMajoritySplit: false };
+
+  // Both directions are present here — a genuine split only when the counts differ.
+  if (rising.length !== declining.length) {
+    const minorityRow = rising.length < declining.length ? topRising : topDeclining;
+    return { row: minorityRow, hasMajoritySplit: true };
+  }
+
+  const row = topRising.difference >= Math.abs(topDeclining.difference) ? topRising : topDeclining;
+  return { row, hasMajoritySplit: false };
+}
+
+/**
+ * Priority 4 — the most executively significant regional change. See
+ * {@link selectRegionalConclusionCandidate} for the selection policy; this
+ * function is orchestration only (pick candidate, format its text).
  */
 function buildRegionalConclusion(
   regionChanges: readonly RegionChangeRow[],
@@ -966,34 +1028,17 @@ function buildRegionalConclusion(
 ): ExecutiveConclusionRow | null {
   if (!hasPreviousPeriod || regionChanges.length === 0) return null;
 
-  const rising = regionChanges.filter((row) => row.difference > 0);
-  const declining = regionChanges.filter((row) => row.difference < 0);
-  if (rising.length === 0 && declining.length === 0) return null;
+  const candidate = selectRegionalConclusionCandidate(regionChanges);
+  if (!candidate) return null;
 
-  const topRising = rising.length > 0 ? [...rising].sort(compareRisingRegionChanges)[0] : null;
-  const topDeclining = declining.length > 0 ? [...declining].sort(compareDecliningRegionChanges)[0] : null;
-  const hasMajoritySplit = rising.length > 0 && declining.length > 0 && rising.length !== declining.length;
-
-  let top: RegionChangeRow;
-  if (hasMajoritySplit) {
-    top = rising.length < declining.length ? topRising! : topDeclining!;
-  } else if (!topDeclining || (topRising && topRising.difference >= Math.abs(topDeclining.difference))) {
-    top = topRising!;
-  } else {
-    top = topDeclining!;
-  }
-
-  const isRising = top.difference > 0;
-  const rateSuffix = top.changeRate === null
-    ? ""
-    : ` (${top.changeRate > 0 ? "+" : ""}${top.changeRate}%)`;
-  const contextClause = hasMajoritySplit
-    ? `، بينما سجلت غالبية المناطق ${isRising ? "انخفاضاً" : "ارتفاعاً"}.`
-    : ".";
+  const { row, hasMajoritySplit } = candidate;
+  const isRising = row.difference > 0;
+  const rateSuffix = formatRegionalRateSuffix(row.changeRate);
+  const contextClause = buildRegionalContextClause(hasMajoritySplit, isRising ? "ارتفاع" : "انخفاض");
 
   return {
     title: isRising ? "ارتفاع إقليمي محدود" : "انخفاض إقليمي لافت",
-    text: `سجلت ${top.regionName} ${formatRegionalMagnitude(top)}${rateSuffix}${contextClause}`,
+    text: `سجلت ${row.regionName} ${formatRegionalMagnitude(row)}${rateSuffix}${contextClause}`,
   };
 }
 

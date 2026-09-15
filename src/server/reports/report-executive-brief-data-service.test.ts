@@ -3417,6 +3417,74 @@ describe("buildExecutiveConclusions", () => {
     expect(uniform[0]!.text).not.toContain("بينما");
   });
 
+  it("A. 2 rising + 1 declining picks the minority (declining) region, with 'بينما سجلت غالبية المناطق ارتفاعاً'", () => {
+    const result = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [
+        regionRow({ regionName: "جازان", difference: 700, changeRate: 300, direction: "ارتفاع" }),
+        regionRow({ regionName: "الرياض", difference: 10, changeRate: 5, direction: "ارتفاع" }),
+        regionRow({ regionName: "مكة", difference: -5, changeRate: -2, direction: "انخفاض" }),
+      ],
+    });
+    expect(result[0]!.title).toBe("انخفاض إقليمي لافت");
+    expect(result[0]!.text).toContain("مكة");
+    expect(result[0]!.text).toContain("بينما سجلت غالبية المناطق ارتفاعاً");
+  });
+
+  it("B. an exact 1-vs-1 tie is never treated as a majority split — picks the larger-magnitude change, with no 'بينما' clause", () => {
+    const result = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [
+        regionRow({ regionName: "جازان", difference: 7, changeRate: 3.8, direction: "ارتفاع" }),
+        regionRow({ regionName: "الرياض", difference: -304, changeRate: -21.1, direction: "انخفاض" }),
+      ],
+    });
+    expect(result[0]!.text).not.toContain("بينما");
+    // -304's magnitude (304) beats +7, so the decline wins the tie fallback.
+    expect(result[0]!.text).toContain("الرياض");
+    expect(result[0]!.title).toBe("انخفاض إقليمي لافت");
+  });
+
+  it("C/D/E. rate suffix: null omits the parens entirely, positive gets a '+' sign, negative does not double up on '-'", () => {
+    const nullRate = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [regionRow({ regionName: "جازان", difference: 7, changeRate: null, direction: "ارتفاع" })],
+    });
+    expect(nullRate[0]!.text).not.toContain("(");
+    expect(nullRate[0]!.text).not.toContain(")");
+
+    const positiveRate = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [regionRow({ regionName: "جازان", difference: 7, changeRate: 3.8, direction: "ارتفاع" })],
+    });
+    expect(positiveRate[0]!.text).toContain("(+3.8%)");
+
+    const negativeRate = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [regionRow({ regionName: "الرياض", difference: -304, changeRate: -21.1, direction: "انخفاض" })],
+    });
+    expect(negativeRate[0]!.text).toContain("(-21.1%)");
+    expect(negativeRate[0]!.text).not.toContain("(+-");
+    expect(negativeRate[0]!.text).not.toContain("(-+");
+  });
+
+  it("F. all region differences 0 (no rising, no declining) yields no regional conclusion", () => {
+    const result = buildExecutiveConclusions({
+      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], periodChangeDigest: EMPTY_DIGEST,
+      hasPreviousPeriod: true,
+      regionChanges: [
+        regionRow({ regionName: "جازان", difference: 0, changeRate: 0, direction: "دون تغير" }),
+        regionRow({ regionName: "الرياض", difference: 0, changeRate: 0, direction: "دون تغير" }),
+      ],
+    });
+    expect(result).toEqual([]);
+  });
+
   it("K. a realistic fixture (matching the acceptance style) produces exactly 4 distinct, non-empty executive conclusions", () => {
     const result = buildExecutiveConclusions({
       topClassifications: [classificationRow()],
