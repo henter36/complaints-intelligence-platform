@@ -3236,6 +3236,19 @@ describe("buildExecutiveConclusions", () => {
     };
   }
 
+  /** Builds the "تحسن مستدام" row from just the improvedFacilities snapshots — every other input is fixed/irrelevant to that bucket, so callers testing its wording don't each repeat the full buildExecutiveConclusions fixture. */
+  function buildImprovementRow(improvedFacilities: PatternSnapshot[]) {
+    const result = buildExecutiveConclusions({
+      topClassifications: [],
+      currentPeriodTotal: 0,
+      patternFindings: [],
+      periodChangeDigest: { ...EMPTY_DIGEST, improvedFacilities },
+      regionChanges: [],
+      hasPreviousPeriod: false,
+    });
+    return result.find((row) => row.title === "تحسن مستدام");
+  }
+
   const richFindings = [
     makeFinding({
       id: "chronic-top",
@@ -3280,21 +3293,10 @@ describe("buildExecutiveConclusions", () => {
   });
 
   it("A/C/D. one facility improving in TWO classifications (candidate ROWS, not unique facilities) names the SITE and both classifications — never the generic 'موقع واحد' phrase when a real name is available", () => {
-    const result = buildExecutiveConclusions({
-      topClassifications: [],
-      currentPeriodTotal: 0,
-      patternFindings: [],
-      periodChangeDigest: {
-        ...EMPTY_DIGEST,
-        improvedFacilities: [
-          snapshot({ key: "a", facility: "إصلاحية جدة", classificationLabel: "الرعاية الصحية" }),
-          snapshot({ key: "b", facility: "إصلاحية جدة", classificationLabel: "الوكالات" }),
-        ],
-      },
-      regionChanges: [],
-      hasPreviousPeriod: false,
-    });
-    const improvement = result.find((row) => row.title === "تحسن مستدام");
+    const improvement = buildImprovementRow([
+      snapshot({ key: "a", facility: "إصلاحية جدة", classificationLabel: "الرعاية الصحية" }),
+      snapshot({ key: "b", facility: "إصلاحية جدة", classificationLabel: "الوكالات" }),
+    ]);
     expect(improvement).toBeDefined();
     expect(improvement!.text).not.toContain("موقع واحد");
     expect(improvement!.text).not.toContain("موقعان");
@@ -3304,21 +3306,10 @@ describe("buildExecutiveConclusions", () => {
   });
 
   it("strips the bureaucratic 'الإدارة العامة لـ' prefix for the single-site sentence (spec review item 7), and picks the correct Arabic verb gender from the shortened name", () => {
-    const result = buildExecutiveConclusions({
-      topClassifications: [],
-      currentPeriodTotal: 0,
-      patternFindings: [],
-      periodChangeDigest: {
-        ...EMPTY_DIGEST,
-        improvedFacilities: [
-          snapshot({ key: "a", facility: "الإدارة العامة لإصلاحية محافظة جدة", classificationLabel: "الوصول إلى الطبيب والخدمة الصحية" }),
-          snapshot({ key: "b", facility: "الإدارة العامة لإصلاحية محافظة جدة", classificationLabel: "استمرارية العلاج والدواء" }),
-        ],
-      },
-      regionChanges: [],
-      hasPreviousPeriod: false,
-    });
-    const improvement = result.find((row) => row.title === "تحسن مستدام");
+    const improvement = buildImprovementRow([
+      snapshot({ key: "a", facility: "الإدارة العامة لإصلاحية محافظة جدة", classificationLabel: "الوصول إلى الطبيب والخدمة الصحية" }),
+      snapshot({ key: "b", facility: "الإدارة العامة لإصلاحية محافظة جدة", classificationLabel: "استمرارية العلاج والدواء" }),
+    ]);
     expect(improvement).toBeDefined();
     expect(improvement!.text).not.toContain("الإدارة العامة");
     expect(improvement!.text).toBe(
@@ -3327,38 +3318,16 @@ describe("buildExecutiveConclusions", () => {
   });
 
   it("picks the masculine verb form for a facility name that does not end in 'ة' (e.g. 'سجن ...')", () => {
-    const result = buildExecutiveConclusions({
-      topClassifications: [],
-      currentPeriodTotal: 0,
-      patternFindings: [],
-      periodChangeDigest: {
-        ...EMPTY_DIGEST,
-        improvedFacilities: [snapshot({ key: "a", facility: "سجن الدمام", classificationLabel: "الاتصال" })],
-      },
-      regionChanges: [],
-      hasPreviousPeriod: false,
-    });
-    const improvement = result.find((row) => row.title === "تحسن مستدام");
+    const improvement = buildImprovementRow([snapshot({ key: "a", facility: "سجن الدمام", classificationLabel: "الاتصال" })]);
     expect(improvement).toBeDefined();
     expect(improvement!.text.startsWith("حقق سجن الدمام")).toBe(true);
   });
 
   it("E. two DIFFERENT facilities improving (one classification each) is worded 'موقعان', never '2 موقعان'", () => {
-    const result = buildExecutiveConclusions({
-      topClassifications: [],
-      currentPeriodTotal: 0,
-      patternFindings: [],
-      periodChangeDigest: {
-        ...EMPTY_DIGEST,
-        improvedFacilities: [
-          snapshot({ key: "a", facility: "سجن أ", classificationLabel: "التغذية" }),
-          snapshot({ key: "b", facility: "سجن ب", classificationLabel: "الاتصال" }),
-        ],
-      },
-      regionChanges: [],
-      hasPreviousPeriod: false,
-    });
-    const improvement = result.find((row) => row.title === "تحسن مستدام");
+    const improvement = buildImprovementRow([
+      snapshot({ key: "a", facility: "سجن أ", classificationLabel: "التغذية" }),
+      snapshot({ key: "b", facility: "سجن ب", classificationLabel: "الاتصال" }),
+    ]);
     expect(improvement).toBeDefined();
     expect(improvement!.text).toContain("موقعان");
     expect(improvement!.text).not.toContain("2 موقعان");
@@ -3370,23 +3339,12 @@ describe("buildExecutiveConclusions", () => {
   });
 
   it("C. four improved facilities: names at most 3 sites (plus 'وغيرها'), never all 4, and the sentence stays short", () => {
-    const result = buildExecutiveConclusions({
-      topClassifications: [],
-      currentPeriodTotal: 0,
-      patternFindings: [],
-      periodChangeDigest: {
-        ...EMPTY_DIGEST,
-        improvedFacilities: [
-          snapshot({ key: "a", facility: "سجن أ", classificationLabel: "التغذية" }),
-          snapshot({ key: "b", facility: "سجن ب", classificationLabel: "الاتصال" }),
-          snapshot({ key: "c", facility: "سجن ج", classificationLabel: "الرعاية الصحية" }),
-          snapshot({ key: "d", facility: "سجن د", classificationLabel: "الوكالات" }),
-        ],
-      },
-      regionChanges: [],
-      hasPreviousPeriod: false,
-    });
-    const improvement = result.find((row) => row.title === "تحسن مستدام");
+    const improvement = buildImprovementRow([
+      snapshot({ key: "a", facility: "سجن أ", classificationLabel: "التغذية" }),
+      snapshot({ key: "b", facility: "سجن ب", classificationLabel: "الاتصال" }),
+      snapshot({ key: "c", facility: "سجن ج", classificationLabel: "الرعاية الصحية" }),
+      snapshot({ key: "d", facility: "سجن د", classificationLabel: "الوكالات" }),
+    ]);
     expect(improvement).toBeDefined();
     expect(improvement!.text).toContain("سجن أ");
     expect(improvement!.text).toContain("سجن ب");
@@ -3397,31 +3355,17 @@ describe("buildExecutiveConclusions", () => {
   });
 
   it("D/E. the sustained-improvement text never contains the deleted generic recommendation sentence, never claims the accompanying procedures caused the result, and never mentions 'إقليمي'", () => {
-    const withOneSite = buildExecutiveConclusions({
-      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], regionChanges: [], hasPreviousPeriod: false,
-      periodChangeDigest: { ...EMPTY_DIGEST, improvedFacilities: [snapshot({ key: "a" })] },
-    });
-    const withTwoSites = buildExecutiveConclusions({
-      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], regionChanges: [], hasPreviousPeriod: false,
-      periodChangeDigest: {
-        ...EMPTY_DIGEST,
-        improvedFacilities: [snapshot({ key: "a", facility: "سجن أ" }), snapshot({ key: "b", facility: "سجن ب" })],
-      },
-    });
-    const withFourSites = buildExecutiveConclusions({
-      topClassifications: [], currentPeriodTotal: 0, patternFindings: [], regionChanges: [], hasPreviousPeriod: false,
-      periodChangeDigest: {
-        ...EMPTY_DIGEST,
-        improvedFacilities: [
-          snapshot({ key: "a", facility: "سجن أ" }),
-          snapshot({ key: "b", facility: "سجن ب" }),
-          snapshot({ key: "c", facility: "سجن ج" }),
-          snapshot({ key: "d", facility: "سجن د" }),
-        ],
-      },
-    });
-    for (const result of [withOneSite, withTwoSites, withFourSites]) {
-      const improvement = result.find((row) => row.title === "تحسن مستدام");
+    const rows = [
+      buildImprovementRow([snapshot({ key: "a" })]),
+      buildImprovementRow([snapshot({ key: "a", facility: "سجن أ" }), snapshot({ key: "b", facility: "سجن ب" })]),
+      buildImprovementRow([
+        snapshot({ key: "a", facility: "سجن أ" }),
+        snapshot({ key: "b", facility: "سجن ب" }),
+        snapshot({ key: "c", facility: "سجن ج" }),
+        snapshot({ key: "d", facility: "سجن د" }),
+      ]),
+    ];
+    for (const improvement of rows) {
       expect(improvement).toBeDefined();
       expect(improvement!.text).not.toContain("الإجراءات التي أسهمت");
       expect(improvement!.text).not.toContain("يُوصى بدراسة الإجراءات المصاحبة");
