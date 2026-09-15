@@ -278,6 +278,20 @@ export type BestPracticeCandidateRow = {
   reasonLabel: string;
 };
 
+/**
+ * One row of the V2 page-4 "الاستنتاجات التنفيذية" section (up to
+ * MAX_EXECUTIVE_CONCLUSIONS, see buildExecutiveConclusions) — a short,
+ * scannable executive read, deliberately NOT a re-statement of a table row:
+ * `title` is a short label (<=~5 words), `text` is ONE explanatory sentence
+ * (result first, recommendation only when warranted — never a bare causal
+ * claim). Never a long list of classification names; never hardcoded —
+ * every number is generated from this period's real data.
+ */
+export type ExecutiveConclusionRow = {
+  title: string;
+  text: string;
+};
+
 // ---------------------------------------------------------------------------
 // Comparative timeline chart (current vs previous, relative day axis)
 // ---------------------------------------------------------------------------

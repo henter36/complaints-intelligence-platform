@@ -30,6 +30,7 @@ import type {
   ClassificationTrendRow,
   FacilityFollowUpRow,
   BestPracticeCandidateRow,
+  ExecutiveConclusionRow,
 } from "@/lib/reports/report-contract";
 import { OPERATIONAL_PRACTICE_CARD_COUNT, type OperationalPracticeRow } from "@/lib/reports/operational-practices";
 import type { ExecutiveBriefV2Data, ReportData } from "./report-data-service";
@@ -160,15 +161,6 @@ export function resolveV2MonthlyChartRenderPlan(availableForChart: number): {
     chartHeight,
     canRenderChart: chartHeight >= MIN_CHART_HEIGHT,
   };
-}
-
-/** Remaining height for conclusions; y is absolute from page top so top margin is not subtracted again. */
-export function resolveV2ConclusionsAvailableHeight(
-  pageHeight: number,
-  margin: number,
-  y: number
-): number {
-  return Math.max(0, pageHeight - margin - 26 - y);
 }
 
 const FACILITY_ROW_HEIGHT = 26;
@@ -1618,9 +1610,172 @@ function drawOperationalPracticesSection(
   return gridY + gridRows * cardH + Math.max(0, gridRows - 1) * PRACTICE_CARD_GAP + PRACTICE_SECTION_TRAILING_GAP;
 }
 
+// ── Executive conclusions ("الاستنتاجات التنفيذية") ─────────────────────────
+//
+// Replaces the old long bullet-point box (spec §27): up to 4 compact rows,
+// each a numbered badge + a short bold title + ONE explanatory sentence,
+// inside its own light-bordered card — never one long paragraph, never
+// ellipsis, never more than the real per-row wrapped height it measures.
+
+const EXEC_CONCLUSIONS_EMPTY_MESSAGE = "لا تتوفر استنتاجات تنفيذية لهذه الفترة.";
+const EXEC_CONCLUSIONS_BADGE_FONT_SIZE = 9.5;
+export const EXEC_CONCLUSIONS_TITLE_FONT_SIZE = 12;
+export const EXEC_CONCLUSIONS_TEXT_FONT_SIZE = 11.5;
+const EXEC_CONCLUSIONS_PAD_X = 14;
+const EXEC_CONCLUSIONS_PAD_TOP = 10;
+const EXEC_CONCLUSIONS_PAD_BOTTOM = 10;
+const EXEC_CONCLUSIONS_BADGE_TO_TITLE_GAP = 3;
+const EXEC_CONCLUSIONS_TITLE_TO_TEXT_GAP = 4;
+/** Vertical space BETWEEN row cards (spec §27: "مسافة واضحة بين الاستنتاجات"). */
+const EXEC_CONCLUSIONS_ROW_GAP = 10;
+
+export function executiveConclusionsInnerWidth(width: number): number {
+  return width - EXEC_CONCLUSIONS_PAD_X * 2;
+}
+
+/** Real font-metric line heights for a row's three text roles — pure function of (font, size), same pattern as measurePracticeLineHeights. */
+function measureExecutiveConclusionLineHeights(doc: PDFKit.PDFDocument): { badge: number; title: number; text: number } {
+  doc.font("Bold").fontSize(EXEC_CONCLUSIONS_BADGE_FONT_SIZE);
+  const badge = doc.currentLineHeight(true);
+  doc.font("Bold").fontSize(EXEC_CONCLUSIONS_TITLE_FONT_SIZE);
+  const title = doc.currentLineHeight(true);
+  doc.font("Body").fontSize(EXEC_CONCLUSIONS_TEXT_FONT_SIZE);
+  const text = doc.currentLineHeight(true);
+  return { badge, title, text };
+}
+
+type ExecutiveConclusionMeasurement = {
+  titleLayout: ReturnType<typeof preparePdfTextLayout>;
+  textLayout: ReturnType<typeof preparePdfTextLayout>;
+  rowHeight: number;
+};
+
+/**
+ * Exact height ONE row needs for its real wrapped title/text — never a
+ * fixed per-row assumption, so a short conclusion never reserves the same
+ * space as a long one (spec §28: the builder keeps text short; the
+ * renderer never truncates it either way, it just measures what is
+ * actually there). splitOversizedTokens is on so a single long word can
+ * never paint outside the row's frame.
+ */
+function measureExecutiveConclusionRow(
+  doc: PDFKit.PDFDocument,
+  row: ExecutiveConclusionRow,
+  width: number
+): ExecutiveConclusionMeasurement {
+  const innerWidth = executiveConclusionsInnerWidth(width);
+  const { badge: badgeLineH, title: titleLineH, text: textLineH } = measureExecutiveConclusionLineHeights(doc);
+
+  doc.font("Bold").fontSize(EXEC_CONCLUSIONS_TITLE_FONT_SIZE);
+  const titleLayout = preparePdfTextLayout(doc, row.title, {
+    width: innerWidth, align: "right", wordSpacing: WORD_SPACING, splitOversizedTokens: true,
+  });
+  doc.font("Body").fontSize(EXEC_CONCLUSIONS_TEXT_FONT_SIZE);
+  const textLayout = preparePdfTextLayout(doc, row.text, {
+    width: innerWidth, align: "right", wordSpacing: WORD_SPACING, splitOversizedTokens: true,
+  });
+
+  const rowHeight =
+    EXEC_CONCLUSIONS_PAD_TOP
+    + badgeLineH
+    + EXEC_CONCLUSIONS_BADGE_TO_TITLE_GAP
+    + titleLayout.lines.length * titleLineH
+    + EXEC_CONCLUSIONS_TITLE_TO_TEXT_GAP
+    + textLayout.lines.length * textLineH
+    + EXEC_CONCLUSIONS_PAD_BOTTOM;
+
+  return { titleLayout, textLayout, rowHeight };
+}
+
+/**
+ * The exact height "الاستنتاجات التنفيذية" will occupy for these `rows` at
+ * this `width` — used to both RESERVE room (planPage4Layout) and to
+ * actually draw (drawExecutiveConclusionsSection), so the section can never
+ * render taller than what was planned for it.
+ */
+function executiveConclusionsSectionHeight(
+  doc: PDFKit.PDFDocument,
+  rows: readonly ExecutiveConclusionRow[],
+  width: number
+): number {
+  const titleH = FACILITY_SECTION_TITLE_H;
+  if (rows.length === 0) {
+    return titleH + computeInfoBoxHeight(doc, EXEC_CONCLUSIONS_EMPTY_MESSAGE, width);
+  }
+  let rowsHeight = 0;
+  rows.forEach((row, idx) => {
+    rowsHeight += measureExecutiveConclusionRow(doc, row, width).rowHeight;
+    if (idx < rows.length - 1) rowsHeight += EXEC_CONCLUSIONS_ROW_GAP;
+  });
+  return titleH + rowsHeight;
+}
+
+/**
+ * "الاستنتاجات التنفيذية" (spec §17-30): up to 4 short executive rows —
+ * numbered badge + short bold title + one explanatory sentence each, inside
+ * its own light-bordered card. No bullet points, no single long paragraph,
+ * never ellipsis-truncated. Returns the bottom Y, matching every other
+ * page-4 section's "returns bottom Y" convention.
+ */
+function drawExecutiveConclusionsSection(
+  doc: PDFKit.PDFDocument,
+  rows: readonly ExecutiveConclusionRow[],
+  x: number,
+  y: number,
+  width: number
+): number {
+  const cursorY = drawSectionTitle(doc, "الاستنتاجات التنفيذية", x, y, width);
+
+  if (rows.length === 0) {
+    const boxBottom = drawInfoBox(doc, EXEC_CONCLUSIONS_EMPTY_MESSAGE, x, cursorY, width);
+    resetInk(doc);
+    return boxBottom;
+  }
+
+  const innerWidth = executiveConclusionsInnerWidth(width);
+  const { badge: badgeLineH, title: titleLineH, text: textLineH } = measureExecutiveConclusionLineHeights(doc);
+  const r = REPORT_DESIGN_TOKENS.card.radius;
+  const textX = x + EXEC_CONCLUSIONS_PAD_X;
+
+  let rowY = cursorY;
+  rows.forEach((row, idx) => {
+    const { titleLayout, textLayout, rowHeight } = measureExecutiveConclusionRow(doc, row, width);
+
+    doc.roundedRect(x, rowY, width, rowHeight, r).fillAndStroke(COLORS.background, COLORS.border);
+
+    doc.font("Bold").fontSize(EXEC_CONCLUSIONS_BADGE_FONT_SIZE).fillColor(COLORS.gold).text(
+      String(idx + 1).padStart(2, "0"),
+      textX,
+      rowY + EXEC_CONCLUSIONS_PAD_TOP,
+      { width: innerWidth, align: "right" }
+    );
+
+    let lineY = rowY + EXEC_CONCLUSIONS_PAD_TOP + badgeLineH + EXEC_CONCLUSIONS_BADGE_TO_TITLE_GAP;
+    doc.font("Bold").fontSize(EXEC_CONCLUSIONS_TITLE_FONT_SIZE).fillColor(COLORS.primary);
+    titleLayout.lines.forEach((line) => {
+      doc.text(line.visualText, textX, lineY, { width: innerWidth, align: "right", wordSpacing: WORD_SPACING, lineBreak: false });
+      lineY += titleLineH;
+    });
+
+    lineY += EXEC_CONCLUSIONS_TITLE_TO_TEXT_GAP;
+    doc.font("Body").fontSize(EXEC_CONCLUSIONS_TEXT_FONT_SIZE).fillColor(COLORS.text);
+    textLayout.lines.forEach((line) => {
+      doc.text(line.visualText, textX, lineY, { width: innerWidth, align: "right", wordSpacing: WORD_SPACING, lineBreak: false });
+      lineY += textLineH;
+    });
+
+    rowY += rowHeight + EXEC_CONCLUSIONS_ROW_GAP;
+  });
+  resetInk(doc);
+
+  return rowY - EXEC_CONCLUSIONS_ROW_GAP;
+}
+
 // ── Page 4: Classifications + Facilities + Conclusions ─────────────────────────
 
 const PAGE4_TITLE = "التصنيفات والسجون والاستنتاجات";
+/** Defense-in-depth cap matching MAX_EXECUTIVE_CONCLUSIONS in report-executive-brief-data-service.ts — the data layer already caps at 4; the renderer never trusts that unconditionally. */
+const MAX_EXECUTIVE_CONCLUSIONS_V2 = 4;
 /** Item 8: page 4's final height is content-bottom + this reserve, never inflated further. */
 const PAGE4_BOTTOM_SAFETY_MARGIN = 8;
 
@@ -1629,8 +1784,6 @@ export type V2Page4Plan = {
   pageHeight: number;
   topRows: number;
   bottomRows: number;
-  /** Total wrapped visual lines the conclusions box will render — see computeBulletBoxLineCount. */
-  conclusionsLineCount: number;
 };
 
 /**
@@ -1661,7 +1814,7 @@ export function planPage4Layout(
   const followUpRows = brief.facilitiesNeedingFollowUp ?? [];
   const bestPracticeRows = brief.bestPracticeCandidates ?? [];
   const operationalPractices = brief.operationalPractices ?? [];
-  const conclusions = (brief.conclusions ?? []).slice(0, 5);
+  const executiveConclusions = (brief.executiveConclusions ?? []).slice(0, MAX_EXECUTIVE_CONCLUSIONS_V2);
   const trendRows = brief.classificationTrends;
   const gap = 14;
   const rowH = 26;
@@ -1685,8 +1838,7 @@ export function planPage4Layout(
   y += rowH + 2 + classRows.length * rowH;
   y += gap;
 
-  const conclusionsLineCount = computeBulletBoxLineCount(doc, conclusions, contentWidth);
-  const requiredConclusionsHeight = computeBulletBoxHeight(conclusionsLineCount);
+  const requiredConclusionsHeight = executiveConclusionsSectionHeight(doc, executiveConclusions, contentWidth);
   const practicesReserve = operationalPracticesSectionHeight(doc, operationalPractices.length, contentWidth);
 
   // The row-reduction ceiling includes practicesReserve on TOP of the base
@@ -1722,7 +1874,6 @@ export function planPage4Layout(
     pageHeight,
     topRows: facilityRowCounts.topRows,
     bottomRows: facilityRowCounts.bottomRows,
-    conclusionsLineCount,
   };
 }
 
@@ -1733,7 +1884,7 @@ function renderPage4(ctx: V2Context): void {
   const followUpRows = brief.facilitiesNeedingFollowUp ?? [];
   const bestPracticeRows = brief.bestPracticeCandidates ?? [];
   const operationalPractices = brief.operationalPractices ?? [];
-  const conclusions = (brief.conclusions ?? []).slice(0, 5);
+  const executiveConclusions = (brief.executiveConclusions ?? []).slice(0, MAX_EXECUTIVE_CONCLUSIONS_V2);
   const trendRows = brief.classificationTrends;
   const hasClassComparison = classRows.some((r) => r.previousCount > 0);
 
@@ -1867,34 +2018,12 @@ function renderPage4(ctx: V2Context): void {
   // set of generic suggestions, never a claim tied to this period's data. ──
   y = drawOperationalPracticesSection(doc, operationalPractices, margin, y, contentWidth);
 
-  // ── Conclusions (full-width) — data-quality notes are intentionally not rendered in V2 ──
-  const availableH = resolveV2ConclusionsAvailableHeight(
-    doc.page.height,
-    layout.margin,
-    y
-  );
-  if (availableH <= 0) {
-    return;
-  }
-  // Uses the exact same formula the facility row-count budget above already
-  // reserved room for (computeBulletBoxHeight, fed the same wrapped
-  // line count via page4Plan), so this box is never sized differently than
-  // what was actually planned for it — clamped only by availableH itself
-  // (page 4's own height was already sized to fit this exactly), and full
-  // conclusion text is never dropped or ellipsis-truncated (drawBulletBox
-  // wraps every point instead).
-  const conclusionsBoxH = Math.min(computeBulletBoxHeight(page4Plan.conclusionsLineCount), availableH);
-
-  drawBulletBox({
-    doc,
-    title: "الاستنتاجات",
-    icon: "report",
-    points: conclusions,
-    x: margin,
-    y,
-    width: contentWidth,
-    height: conclusionsBoxH,
-  });
+  // ── "الاستنتاجات التنفيذية" (full-width) — replaces the old long
+  // bullet-point box (spec §27). Self-sizing per row (never a fixed box
+  // height), and page 4's own height was already planned (planPage4Layout,
+  // via the same executiveConclusionsSectionHeight) to fit this exactly —
+  // data-quality notes are intentionally not rendered in V2. ──
+  drawExecutiveConclusionsSection(doc, executiveConclusions, margin, y, contentWidth);
 }
 
 // ── Footers ───────────────────────────────────────────────────────────────────

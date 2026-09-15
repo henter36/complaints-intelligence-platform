@@ -23,12 +23,12 @@ import { comparisonWarningMessage } from "./report-comparison";
 import type { DeptClassPeriodCount, ComparisonResult, PeriodRange, RegionChangeRow } from "./report-comparison";
 import { buildComplaintQueryParams, type ReportFilters } from "./report-definition-service";
 import { loadPatternAnalysisForFilters } from "@/server/analytics/pattern/pattern-report-integration-service";
-import { buildPatternAnalysisBriefConclusions } from "@/lib/analytics/finding-brief-conclusions";
+import { buildPatternAnalysisBriefConclusions, formatArabicCountedNoun } from "@/lib/analytics/finding-brief-conclusions";
 import { rankFindingsForExecutiveBrief } from "@/lib/analytics/finding-ranking";
 import { PATTERN_ANALYSIS_CONFIG } from "@/lib/analytics/pattern-analysis-config";
 import type { AnalyticalFinding } from "@/lib/analytics/analytical-finding";
 import { classificationLabelFromEntityName } from "@/lib/analytics/finding-labels";
-import { buildPatternSnapshotKey } from "@/lib/analytics/period-change-digest";
+import { buildPatternSnapshotKey, type PatternSnapshot, type PeriodChangeDigest } from "@/lib/analytics/period-change-digest";
 import {
   evaluateBestPracticeCandidacy,
   buildBestPracticeSectionSummary,
@@ -61,6 +61,7 @@ import type {
   ClassificationTrendRow,
   FacilityFollowUpRow,
   BestPracticeCandidateRow,
+  ExecutiveConclusionRow,
 } from "@/lib/reports/report-contract";
 import {
   buildClassificationPath,
@@ -702,7 +703,10 @@ export function buildBestPracticeCandidateRows(
 }
 
 // ---------------------------------------------------------------------------
-// V2: region-only conclusions (page 4 "الاستنتاجات")
+// V2: region-only conclusions — populates the legacy `conclusions` field
+// (kept for backward compatibility; no other current consumer reads it).
+// Page 4's rendered "الاستنتاجات التنفيذية" section reads
+// `executiveConclusions` instead — see buildExecutiveConclusions below.
 // ---------------------------------------------------------------------------
 
 const MAX_REGION_CONCLUSIONS = 5;
@@ -801,6 +805,222 @@ export function buildRegionOnlyConclusions(comparison: ComparisonResult): string
   return selectBalancedRegionConclusions(rising, declining).map((row) =>
     row.difference > 0 ? formatRisingRegionConclusion(row) : formatDecliningRegionConclusion(row)
   );
+}
+
+// ---------------------------------------------------------------------------
+// V2: executive conclusions (page 4 "الاستنتاجات التنفيذية")
+// ---------------------------------------------------------------------------
+
+/**
+ * At most 4 short, high-signal rows — never filler. Each bucket below has
+ * ONE clear responsibility (spec: no two rows may carry the same meaning),
+ * so buildExecutiveConclusions itself only orchestrates priority order and
+ * drops a bucket entirely when it has nothing real to say, rather than
+ * padding to a fixed count.
+ */
+const MAX_EXECUTIVE_CONCLUSIONS = 4;
+
+/**
+ * Priority 1 — the period's single most dominant classification by volume
+ * (never re-stating the table's raw count; always volume SHARE, which is
+ * the number that actually carries executive meaning). Framed as "ضغط
+ * مستمر" only when this same classification also has a real CHRONIC_ISSUE
+ * finding somewhere this period — never asserted from volume alone.
+ */
+function buildTopVolumeConclusion(
+  topClassifications: readonly ClassificationBriefRow[],
+  currentPeriodTotal: number,
+  patternFindings: readonly AnalyticalFinding[]
+): ExecutiveConclusionRow | null {
+  const top = topClassifications[0];
+  if (!top || currentPeriodTotal <= 0 || top.currentCount <= 0) return null;
+
+  const chronicClassificationLabels = new Set(
+    patternFindings
+      .filter((finding) => finding.entityType === "CLASSIFICATION" && finding.type === "CHRONIC_ISSUE")
+      .map((finding) => classificationLabelFromEntityName(finding.entityName))
+  );
+  const isChronic = chronicClassificationLabels.has(top.classificationName);
+
+  return {
+    title: isChronic ? `ضغط مستمر في ${top.classificationName}` : `${top.classificationName} الأبرز بين الشكاوى`,
+    text: `تظل شكاوى ${top.classificationName} الأعلى حجماً، وتمثل ${top.shareOfTotal}% من شكاوى الفترة.`,
+  };
+}
+
+/**
+ * Priority 2 — the most important NEW change since last period: a relapse
+ * after improvement outranks a brand-new signal, which outranks a plain
+ * worsening (spec: "أهم تغير جديد/عودة للارتفاع"). Reuses
+ * patternAnalysis.periodChangeDigest — the SAME digest the legacy sentence
+ * (finding-brief-conclusions.ts) already computes — never re-derived.
+ */
+function buildEmergingOrRelapseConclusion(digest: PeriodChangeDigest | null): ExecutiveConclusionRow | null {
+  if (!digest) return null;
+
+  if (digest.relapsedProblems.length > 0) {
+    const phrase = formatArabicCountedNoun(digest.relapsedProblems.length, {
+      one: "حالة واحدة عادت للارتفاع بعد تحسن سابق",
+      two: "حالتان عادتا للارتفاع بعد تحسن سابق",
+      few: "حالات عادت للارتفاع بعد تحسن سابق",
+      many: "حالة عادت للارتفاع بعد تحسن سابق",
+    });
+    return { title: "عودة مشكلات بعد تحسن", text: `رُصدت ${phrase}، بما يستدعي متابعة استدامة المعالجات.` };
+  }
+
+  if (digest.newProblems.length > 0) {
+    const phrase = formatArabicCountedNoun(digest.newProblems.length, {
+      one: "إشارة ناشئة واحدة",
+      two: "إشارتان ناشئتان",
+      few: "إشارات ناشئة",
+      many: "إشارة ناشئة",
+    });
+    return { title: "إشارات ناشئة جديدة", text: `رُصدت ${phrase} خلال هذه الفترة تستحق المتابعة المبكرة.` };
+  }
+
+  if (digest.worsenedProblems.length > 0) {
+    const phrase = formatArabicCountedNoun(digest.worsenedProblems.length, {
+      one: "مشكلة واحدة تفاقمت",
+      two: "مشكلتان تفاقمتا",
+      few: "مشكلات تفاقمت",
+      many: "مشكلة تفاقمت",
+    });
+    return { title: "تفاقم مشكلات قائمة", text: `رُصدت ${phrase} في حدتها مقارنة بالفترة السابقة.` };
+  }
+
+  return null;
+}
+
+/**
+ * Priority 3 — the most important sustained improvement. `improvedFacilities`
+ * is facility×classification snapshot ROWS (spec item 24: never confuse
+ * with unique site count) — grouped by facility here so the site count in
+ * the sentence is always the true number of DISTINCT sites, and (when
+ * exactly one site improved) the classification count names how many
+ * classifications that ONE site improved in — matching the table below
+ * exactly instead of drifting from it. Never claims the accompanying
+ * procedures CAUSED the improvement (spec item 25) — only recommends they
+ * be studied.
+ */
+function buildSustainedImprovementConclusion(
+  improvedFacilities: readonly PatternSnapshot[]
+): ExecutiveConclusionRow | null {
+  if (improvedFacilities.length === 0) return null;
+
+  const classificationsByFacility = new Map<string, Set<string>>();
+  for (const snapshot of improvedFacilities) {
+    const set = classificationsByFacility.get(snapshot.facility) ?? new Set<string>();
+    set.add(snapshot.classificationLabel);
+    classificationsByFacility.set(snapshot.facility, set);
+  }
+  const uniqueFacilityCount = classificationsByFacility.size;
+  const sitePhrase = formatArabicCountedNoun(uniqueFacilityCount, {
+    one: "موقع واحد",
+    two: "موقعان",
+    few: "مواقع",
+    many: "موقعاً",
+  });
+  const recommendation = "ويُوصى بدراسة الإجراءات المصاحبة لفترة التحسن والتحقق من فاعليتها.";
+
+  if (uniqueFacilityCount === 1) {
+    const [classificationLabels] = classificationsByFacility.values();
+    const classificationPhrase = formatArabicCountedNoun(classificationLabels.size, {
+      one: "تصنيف واحد",
+      two: "تصنيفين",
+      few: "تصنيفات",
+      many: "تصنيفاً",
+    });
+    return {
+      title: "تحسن مستدام",
+      text: `حقق ${sitePhrase} تحسناً مستداماً في ${classificationPhrase}، ${recommendation}`,
+    };
+  }
+
+  return {
+    title: "تحسن مستدام",
+    text: `حققت ${sitePhrase} تحسناً مستداماً، ${recommendation}`,
+  };
+}
+
+function formatRegionalMagnitude(row: RegionChangeRow): string {
+  return row.difference > 0
+    ? `زيادة قدرها ${row.difference} شكوى`
+    : `انخفاضاً قدره ${Math.abs(row.difference)} شكوى`;
+}
+
+/**
+ * Priority 4 — the most executively significant regional change. When
+ * regions genuinely split between directions (spec item 30: a conclusion
+ * must add context, not just restate the table's biggest row), the region
+ * bucking the majority trend is the more noteworthy signal — a rise while
+ * most regions fall (or vice versa) is worth flagging even if its own
+ * magnitude is smaller than the majority side's biggest mover, so the
+ * STRONGEST example of the MINORITY direction is picked, with a "بينما..."
+ * context clause. Only when there is no real split (all one direction, or
+ * an exact tie) does this fall back to the single largest change overall,
+ * with no contrast clause.
+ */
+function buildRegionalConclusion(
+  regionChanges: readonly RegionChangeRow[],
+  hasPreviousPeriod: boolean
+): ExecutiveConclusionRow | null {
+  if (!hasPreviousPeriod || regionChanges.length === 0) return null;
+
+  const rising = regionChanges.filter((row) => row.difference > 0);
+  const declining = regionChanges.filter((row) => row.difference < 0);
+  if (rising.length === 0 && declining.length === 0) return null;
+
+  const topRising = rising.length > 0 ? [...rising].sort(compareRisingRegionChanges)[0] : null;
+  const topDeclining = declining.length > 0 ? [...declining].sort(compareDecliningRegionChanges)[0] : null;
+  const hasMajoritySplit = rising.length > 0 && declining.length > 0 && rising.length !== declining.length;
+
+  let top: RegionChangeRow;
+  if (hasMajoritySplit) {
+    top = rising.length < declining.length ? topRising! : topDeclining!;
+  } else if (!topDeclining || (topRising && topRising.difference >= Math.abs(topDeclining.difference))) {
+    top = topRising!;
+  } else {
+    top = topDeclining!;
+  }
+
+  const isRising = top.difference > 0;
+  const rateSuffix = top.changeRate === null
+    ? ""
+    : ` (${top.changeRate > 0 ? "+" : ""}${top.changeRate}%)`;
+  const contextClause = hasMajoritySplit
+    ? `، بينما سجلت غالبية المناطق ${isRising ? "انخفاضاً" : "ارتفاعاً"}.`
+    : ".";
+
+  return {
+    title: isRising ? "ارتفاع إقليمي محدود" : "انخفاض إقليمي لافت",
+    text: `سجلت ${top.regionName} ${formatRegionalMagnitude(top)}${rateSuffix}${contextClause}`,
+  };
+}
+
+/**
+ * V2's "الاستنتاجات التنفيذية" (spec §17-30): up to
+ * {@link MAX_EXECUTIVE_CONCLUSIONS} short, non-redundant executive rows, in
+ * strict priority order — persistent/dominant problem, then the most
+ * important new change or relapse, then the most important sustained
+ * improvement, then the most significant regional change. A bucket that has
+ * no real information this period is skipped entirely (never a filler
+ * sentence), so the report can legitimately show fewer than 4 rows.
+ */
+export function buildExecutiveConclusions(input: {
+  topClassifications: readonly ClassificationBriefRow[];
+  currentPeriodTotal: number;
+  patternFindings: readonly AnalyticalFinding[];
+  periodChangeDigest: PeriodChangeDigest | null;
+  regionChanges: readonly RegionChangeRow[];
+  hasPreviousPeriod: boolean;
+}): ExecutiveConclusionRow[] {
+  const candidates = [
+    buildTopVolumeConclusion(input.topClassifications, input.currentPeriodTotal, input.patternFindings),
+    buildEmergingOrRelapseConclusion(input.periodChangeDigest),
+    buildSustainedImprovementConclusion(input.periodChangeDigest?.improvedFacilities ?? []),
+    buildRegionalConclusion(input.regionChanges, input.hasPreviousPeriod),
+  ];
+  return candidates.filter((row): row is ExecutiveConclusionRow => row !== null).slice(0, MAX_EXECUTIVE_CONCLUSIONS);
 }
 
 function hasMeaningfulPreviousData(comparison: ComparisonResult): boolean {
@@ -2168,5 +2388,16 @@ export async function buildExecutiveBriefV2Data(
       ...(bestPracticeComparison ? [bestPracticeComparison] : []),
       ...buildRegionOnlyConclusions(comparison),
     ],
+    // V2 page 4 renders THIS field ("الاستنتاجات التنفيذية"), not
+    // `conclusions` above — up to 4 short, non-redundant executive rows;
+    // see buildExecutiveConclusions.
+    executiveConclusions: buildExecutiveConclusions({
+      topClassifications: briefData.topClassifications,
+      currentPeriodTotal: result.volume.total,
+      patternFindings,
+      periodChangeDigest: briefData.patternAnalysis?.periodChangeDigest ?? null,
+      regionChanges: comparison.regionChanges,
+      hasPreviousPeriod: comparison.previousPeriod !== null,
+    }),
   };
 }

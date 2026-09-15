@@ -48,6 +48,7 @@ import type {
   ClassificationTrendRow,
   FacilityFollowUpRow,
   BestPracticeCandidateRow,
+  ExecutiveConclusionRow,
 } from "@/lib/reports/report-contract";
 import type { OperationalPracticeRow } from "@/lib/reports/operational-practices";
 export type { OperationalPracticeRow } from "@/lib/reports/operational-practices";
@@ -233,6 +234,13 @@ export type ExecutiveBriefV2Data = ExecutiveBriefData & {
    * to bestPracticeCandidates (see operational-practices.ts header).
    */
   operationalPractices?: OperationalPracticeRow[];
+  /**
+   * V2-only: up to 4 short "الاستنتاجات التنفيذية" rows for page 4 — see
+   * buildExecutiveConclusions. Structured (title + one sentence) rather than
+   * the free-form `conclusions` string list every other report mode still
+   * uses; V2's PDF renders THIS field, never `conclusions`.
+   */
+  executiveConclusions?: ExecutiveConclusionRow[];
 };
 
 /** Extended payload for FULL_ANALYTICAL mode (super-set of ExecutiveBriefData). */
@@ -277,6 +285,7 @@ export type {
   RegionSnapshotAtEndRow,
   DepartmentPeriodMetricsRow,
   ClassificationSnapshotAtEndRow,
+  ExecutiveConclusionRow,
 };
 const PREVIEW_TABLE_ROW_CAP = 100;
 

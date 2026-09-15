@@ -14,7 +14,6 @@ import {
   resolveV2MonthlyChartAvailableHeight,
   resolveV2MonthlyChartHeight,
   resolveV2MonthlyChartRenderPlan,
-  resolveV2ConclusionsAvailableHeight,
   resolveV2FacilityRowCounts,
   computeBulletBoxHeight,
   computeBulletBoxLineCount,
@@ -28,6 +27,9 @@ import {
   PRACTICE_TITLE_FONT_SIZE,
   PRACTICE_DESCRIPTION_FONT_SIZE,
   PAGE2_TOTALS_NOTE_FONT_SIZE,
+  EXEC_CONCLUSIONS_TITLE_FONT_SIZE,
+  EXEC_CONCLUSIONS_TEXT_FONT_SIZE,
+  executiveConclusionsInnerWidth,
 } from "./report-executive-brief-v2-pdf-service";
 import { preparePdfText, preparePdfTextLayout } from "./arabic-pdf-text";
 import { REPORT_DESIGN_TOKENS, PRINT_EXECUTIVE_PAGE_SIZE } from "@/lib/reports/design-tokens";
@@ -163,6 +165,10 @@ function makeV2Brief(overrides: Partial<ExecutiveBriefV2Data> = {}): ExecutiveBr
       { id: "root-cause-remediation", title: "معالجة السبب الجذري", description: "عند تكرار المشكلة يتم تحديد السبب التشغيلي ووضع إجراء يمنع تكرارها بدلاً من معالجة الحالات بصورة منفردة.", topic: "ROOT_CAUSE", selectionReason: "GENERAL_ROTATION" },
     ],
     conclusions: ["استنتاج تجريبي."],
+    executiveConclusions: [
+      { title: "ضغط مستمر في الخدمات الصحية", text: "تظل شكاوى الرعاية الصحية الأعلى حجماً، وتمثل 42.4% من شكاوى الفترة." },
+      { title: "عودة مشكلات بعد تحسن", text: "رُصدت 13 حالة عادت للارتفاع بعد تحسن سابق، بما يستدعي متابعة استدامة المعالجات." },
+    ],
     notes: ["ملاحظة جودة بيانات تجريبية."],
     allTimeTotal: 18560,
     monthlyStockFlow: [
@@ -525,28 +531,29 @@ describe("V2 page 4 — facilities replace departments (spec sections 5-9, 14-16
     expect(countPageObjects(result.buffer)).toBe(4);
   });
 
-  it("renders all 5 conclusions, not just the first 4 (regression: conclusions box off-by-one truncated the last line)", async () => {
-    const textSpy = vi.spyOn(PDFDocument.prototype, "text");
-    try {
-      await renderExecutiveBriefV2Pdf(
-        makeV2Report({
-          briefData: makeV2Brief({
-            conclusions: [
-              "سجلت منطقة1 ارتفاعًا قدره 10 شكوى مقارنة بالفترة السابقة، بنسبة تغير 10%.",
-              "سجلت منطقة2 ارتفاعًا قدره 20 شكوى مقارنة بالفترة السابقة، بنسبة تغير 20%.",
-              "سجلت منطقة3 ارتفاعًا قدره 30 شكوى مقارنة بالفترة السابقة، بنسبة تغير 30%.",
-              "سجلت منطقة4 ارتفاعًا قدره 40 شكوى مقارنة بالفترة السابقة، بنسبة تغير 40%.",
-              "سجلت منطقة5 ارتفاعًا قدره 50 شكوى مقارنة بالفترة السابقة، بنسبة تغير 50%.",
-            ],
-          }),
-        })
-      );
-      const joined = textSpy.mock.calls.map((c) => String(c[0])).join("\n");
-      for (const token of ["منطقة1", "منطقة2", "منطقة3", "منطقة4", "منطقة5"]) {
-        expect(joined).toContain(token);
-      }
-    } finally {
-      textSpy.mockRestore();
+  it("renders at most 4 executive conclusions even when 5 are supplied (spec: never more than 4 — the 5th title/text must not appear)", async () => {
+    const fiveConclusions = Array.from({ length: 5 }, (_, i) => ({
+      title: `عنوان ${i + 1}`,
+      text: `سجلت منطقة${i + 1} ارتفاعًا قدره ${(i + 1) * 10} شكوى مقارنة بالفترة السابقة.`,
+    }));
+    const { rendered } = await captureRenderedPdfText(
+      makeV2Report({ briefData: makeV2Brief({ executiveConclusions: fiveConclusions }) })
+    );
+    const joined = rendered.join("\n");
+    for (const row of fiveConclusions.slice(0, 4)) {
+      expect(joined).toContain(preparePdfText(row.title));
+    }
+    expect(joined).not.toContain(preparePdfText(fiveConclusions[4]!.title));
+  });
+
+  it("renders every executive conclusion's title and text in full, in badge order 01-0N", async () => {
+    const { rendered } = await captureRenderedPdfText(makeV2Report());
+    const conclusions = makeV2Brief().executiveConclusions!;
+    const joined = rendered.join("\n");
+    for (const [idx, row] of conclusions.entries()) {
+      expect(rendered).toContain(String(idx + 1).padStart(2, "0"));
+      expect(joined).toContain(preparePdfText(row.title));
+      expect(joined).toContain(preparePdfText(row.text));
     }
   });
 });
@@ -791,20 +798,29 @@ describe("V2 page 4 — operational practices grid (\"ممارسات تشغيل�
     doc.end();
   });
 
-  it("does not shrink or drop conclusions just to make room for the practices grid — facility rows flex first", async () => {
-    const manyConclusions = Array.from({ length: 5 }, (_, i) => `استنتاج رقم ${i + 1}.`);
+  it("does not shrink or drop executive conclusions just to make room for the practices grid — facility rows flex first", async () => {
+    const fourConclusions = Array.from({ length: 4 }, (_, i) => ({
+      title: `عنوان استنتاج ${i + 1}`,
+      text: `نص استنتاج تنفيذي رقم ${i + 1} يصف تغيراً حقيقياً في بيانات الفترة الحالية.`,
+    }));
     const result = await renderExecutiveBriefV2Pdf(
-      makeV2Report({ briefData: makeV2Brief({ conclusions: manyConclusions }) })
+      makeV2Report({ briefData: makeV2Brief({ executiveConclusions: fourConclusions }) })
     );
     expect(countPageObjects(result.buffer)).toBe(4);
-    const { joined } = await captureRenderedPdfText(makeV2Report({ briefData: makeV2Brief({ conclusions: manyConclusions }) }));
-    for (const c of manyConclusions) {
-      expect(joined).toContain(preparePdfText(c));
+    const { joined } = await captureRenderedPdfText(
+      makeV2Report({ briefData: makeV2Brief({ executiveConclusions: fourConclusions }) })
+    );
+    for (const row of fourConclusions) {
+      expect(joined).toContain(preparePdfText(row.title));
+      expect(joined).toContain(preparePdfText(row.text));
     }
   });
 
-  it("regression: empty operationalPractices + near-maximum facility rows + 5 conclusions never drops a conclusion, and the report stays 4 pages", async () => {
-    const manyConclusions = Array.from({ length: 5 }, (_, i) => `استنتاج رقم ${i + 1}.`);
+  it("regression: empty operationalPractices + near-maximum facility rows + 4 executive conclusions never drops a conclusion, and the report stays 4 pages", async () => {
+    const fourConclusions = Array.from({ length: 4 }, (_, i) => ({
+      title: `عنوان استنتاج ${i + 1}`,
+      text: `نص استنتاج تنفيذي رقم ${i + 1} يصف تغيراً حقيقياً في بيانات الفترة الحالية.`,
+    }));
     const manyFollowUp = Array.from({ length: 5 }, (_, i) => ({
       facility: `سجن ${i}`, totalComplaints: 20, isHistoricalOnly: false, topIssueLabel: "قضية",
       patternLabel: "استمرار مرتفع" as const, streakPeriods: 3,
@@ -817,7 +833,7 @@ describe("V2 page 4 — operational practices grid (\"ممارسات تشغيل�
     }));
     const report = makeV2Report({
       briefData: makeV2Brief({
-        conclusions: manyConclusions,
+        executiveConclusions: fourConclusions,
         facilitiesNeedingFollowUp: manyFollowUp,
         bestPracticeCandidates: manyBestPractice,
         operationalPractices: [],
@@ -826,8 +842,9 @@ describe("V2 page 4 — operational practices grid (\"ممارسات تشغيل�
     const result = await renderExecutiveBriefV2Pdf(report);
     expect(countPageObjects(result.buffer)).toBe(4);
     const { joined } = await captureRenderedPdfText(report);
-    for (const c of manyConclusions) {
-      expect(joined).toContain(preparePdfText(c));
+    for (const row of fourConclusions) {
+      expect(joined).toContain(preparePdfText(row.title));
+      expect(joined).toContain(preparePdfText(row.text));
     }
     expect(joined).toContain(preparePdfText("لا تتوفر ممارسات تشغيلية مقترحة لهذه الفترة."));
   });
@@ -1112,24 +1129,6 @@ describe("V2 monthly chart contract + KPI packing", () => {
     }
   });
 
-  it("keeps conclusions available height non-negative and skips the box at zero", () => {
-    expect(resolveV2ConclusionsAvailableHeight(842, 42, 520)).toBeGreaterThan(0);
-    expect(resolveV2ConclusionsAvailableHeight(842, 42, 816)).toBe(0);
-    expect(resolveV2ConclusionsAvailableHeight(842, 42, 900)).toBe(0);
-    expect(resolveV2ConclusionsAvailableHeight(842, 42, 900)).toBeGreaterThanOrEqual(0);
-  });
-
-  it("keeps conclusions box within the footer reserve", () => {
-    const pageHeight = 842;
-    const margin = 42;
-    const y = 520;
-    const availableH = resolveV2ConclusionsAvailableHeight(pageHeight, margin, y);
-    expect(availableH).toBe(pageHeight - margin - 26 - y);
-    expect(availableH).not.toBe(pageHeight - margin * 2 - 26 - y);
-
-    const conclusionsBoxH = Math.min(computeBulletBoxHeight(3), availableH);
-    expect(y + conclusionsBoxH).toBeLessThanOrEqual(pageHeight - margin - 26);
-  });
 
   it("computeBulletBoxHeight sizes the box so drawBulletBox's own maxLines formula fits every conclusion (regression: off-by-one truncated the last line)", () => {
     const lineH = 22;
@@ -1254,9 +1253,10 @@ describe("V2 monthly chart contract + KPI packing", () => {
 
     // After drawing zero-row (headers-only) tables, conclusions must still
     // get their full required height — never sacrificed for facility rows.
+    // (Matches resolveV2FacilityRowCounts's own "pageHeight - margin - 26 - y" budget formula.)
     const facilitiesHeight = 2 * FACILITY_HEADER_H;
     const yAfterFacilities = y + FACILITY_CHROME + facilitiesHeight;
-    const availableH = resolveV2ConclusionsAvailableHeight(pageHeight, margin, yAfterFacilities);
+    const availableH = Math.max(0, pageHeight - margin - 26 - yAfterFacilities);
     expect(availableH).toBeGreaterThanOrEqual(requiredConclusionsHeight);
   });
 
@@ -1484,7 +1484,7 @@ describe("V2 per-page sizing (spec: each page's content-driven height never leak
     expect(computeV2Page3Height(50)).toBe(computeV2Page3Height(13));
   });
 
-  it("planPage4Layout's page height grows only modestly beyond base for a realistic 4-practice, 5-conclusion, near-maximum-row report (never back to ~2000pt)", () => {
+  it("planPage4Layout's page height grows only modestly beyond base for a realistic 4-practice, 4-executive-conclusion, near-maximum-row report (never back to ~2000pt)", () => {
     const doc = makeFontDoc();
     const brief = makeV2Brief({
       facilitiesNeedingFollowUp: Array.from({ length: 5 }, (_, i) => ({
@@ -1497,7 +1497,12 @@ describe("V2 per-page sizing (spec: each page's content-driven height never leak
         facility: `سجن تحسن ${i + 1}`, startValue: 30, currentValue: 5, decrease: 25, streakPeriods: 3,
         classificationLabel: "قضية", reasonLabel: "تحسن قوي ومستدام",
       })),
-      conclusions: ["استنتاج أول.", "استنتاج ثانٍ.", "استنتاج ثالث.", "استنتاج رابع.", "استنتاج خامس."],
+      executiveConclusions: [
+        { title: "عنوان أول", text: "نص استنتاج تنفيذي أول يصف تغيراً حقيقياً في بيانات الفترة الحالية." },
+        { title: "عنوان ثانٍ", text: "نص استنتاج تنفيذي ثانٍ يصف تغيراً حقيقياً في بيانات الفترة الحالية." },
+        { title: "عنوان ثالث", text: "نص استنتاج تنفيذي ثالث يصف تغيراً حقيقياً في بيانات الفترة الحالية." },
+        { title: "عنوان رابع", text: "نص استنتاج تنفيذي رابع يصف تغيراً حقيقياً في بيانات الفترة الحالية." },
+      ],
     });
     const plan = planPage4Layout(doc, brief, 42, 816);
     expect(plan.pageHeight).toBeGreaterThanOrEqual(PRINT_EXECUTIVE_PAGE_SIZE[1]);
@@ -1513,6 +1518,13 @@ describe("V2 per-page sizing (spec: each page's content-driven height never leak
       expect(rendered).toContain(preparePdfText(`صفحة ${page} من 4`));
     }
     expect(result.warnings.some((w) => w.includes("عدد صفحات التقرير"))).toBe(false);
+  });
+});
+
+describe("V2 page 4 section title (spec §18)", () => {
+  it("renders 'الاستنتاجات التنفيذية', not the old bare 'الاستنتاجات'", async () => {
+    const { rendered } = await captureRenderedPdfText(makeV2Report());
+    expect(rendered).toContain(preparePdfText("الاستنتاجات التنفيذية"));
   });
 });
 
@@ -1534,18 +1546,21 @@ describe("V2 containment (spec: no drawn line ever exceeds its box's available i
     doc.end();
   });
 
-  it("a realistic long conclusion wraps into multiple lines, stays fully within the box (no overflowsWidth), and every wrapped fragment is rendered verbatim — never ellipsis-truncated", async () => {
-    const longConclusion =
+  it("a realistic long executive-conclusion text wraps into multiple lines, stays fully within its row's frame (no overflowsWidth), and every wrapped line is rendered verbatim — never ellipsis-truncated", async () => {
+    const longText =
       "يوصى بمراجعة آلية استقبال ومعالجة الطلبات الصحية في السجون ذات الأولوية المرتفعة، وتحديد مسؤول واضح لكل حالة متابعة مع مدة مستهدفة للإغلاق، نظراً لاستمرار ارتفاع عدد الشكاوى المرتبطة بهذا الموضوع عبر عدة فترات متتالية دون تحسن ملموس حتى الآن.";
+    const longRow = { title: "ضغط مستمر في الخدمات الصحية", text: longText };
     const report = makeV2Report({
-      briefData: makeV2Brief({ conclusions: [longConclusion] }),
+      briefData: makeV2Brief({ executiveConclusions: [longRow] }),
     });
 
-    // Same measurement drawBulletBox itself performs — confirms it actually wraps.
+    // Same measurement drawExecutiveConclusionsSection itself performs — confirms it actually wraps.
     const doc = makeFontDoc();
-    const innerWidth = 816 - 20; // contentWidth - CONCLUSIONS_BOX_PAD_X*2
-    doc.font("Body").fontSize(REPORT_DESIGN_TOKENS.fontSize.body);
-    const layout = preparePdfTextLayout(doc, `• ${longConclusion}`, { width: innerWidth, align: "right", wordSpacing: REPORT_DESIGN_TOKENS.typography.wordSpacing });
+    const innerWidth = executiveConclusionsInnerWidth(816);
+    doc.font("Body").fontSize(EXEC_CONCLUSIONS_TEXT_FONT_SIZE);
+    const layout = preparePdfTextLayout(doc, longText, {
+      width: innerWidth, align: "right", wordSpacing: REPORT_DESIGN_TOKENS.typography.wordSpacing, splitOversizedTokens: true,
+    });
     expect(layout.lines.length).toBeGreaterThan(1);
     for (const line of layout.lines) {
       expect(line.overflowsWidth).toBe(false);
@@ -1587,6 +1602,18 @@ describe("V2 practice card font-size floor (regression: must never regress to th
 
   it("PRACTICE_DESCRIPTION_FONT_SIZE never drops below 10.5pt", () => {
     expect(PRACTICE_DESCRIPTION_FONT_SIZE).toBeGreaterThanOrEqual(10.5);
+  });
+});
+
+// ── Executive conclusions font-size floor (spec §27: text >=11pt) ──
+
+describe("V2 executive-conclusions font-size floor (spec §27)", () => {
+  it("EXEC_CONCLUSIONS_TEXT_FONT_SIZE never drops below 11pt", () => {
+    expect(EXEC_CONCLUSIONS_TEXT_FONT_SIZE).toBeGreaterThanOrEqual(11);
+  });
+
+  it("EXEC_CONCLUSIONS_TITLE_FONT_SIZE is at least as large as the body text", () => {
+    expect(EXEC_CONCLUSIONS_TITLE_FONT_SIZE).toBeGreaterThanOrEqual(EXEC_CONCLUSIONS_TEXT_FONT_SIZE);
   });
 });
 
