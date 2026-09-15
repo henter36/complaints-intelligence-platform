@@ -891,16 +891,46 @@ function buildEmergingOrRelapseConclusion(digest: PeriodChangeDigest | null): Ex
   return null;
 }
 
+/** Arabic-style list join: "A" | "A، وB" | "A، B، وC" — comma-separated, the LAST item prefixed with "و" instead of "، ". */
+function joinArabicList(items: readonly string[]): string {
+  if (items.length === 0) return "";
+  if (items.length === 1) return items[0]!;
+  const last = items[items.length - 1]!;
+  const rest = items.slice(0, -1).join("، ");
+  return `${rest}، و${last}`;
+}
+
+/**
+ * Drops a leading "الإدارة العامة لـ/ل" bureaucratic prefix for a more
+ * direct executive-conclusion reading (spec review item 7: "إصلاحية محافظة
+ * جدة", not "الإدارة العامة لإصلاحية محافظة جدة") — used ONLY for this
+ * sentence; the facility's real, full name is never altered anywhere else
+ * (tables, drilldowns).
+ */
+function shortenFacilityNameForConclusion(facility: string): string {
+  const stripped = facility.replace(/^الإدارة العامة لـ?/, "").trim();
+  return stripped.length > 0 ? stripped : facility;
+}
+
+const IMPROVEMENT_CLASSIFICATIONS_PER_FACILITY_LIMIT = 2;
+const IMPROVEMENT_FACILITY_NAMES_LIMIT = 3;
+/** Heuristic character budget for the "3+ facilities" case's optional trailing classification-summary clause (spec review item 5: "عند توفر المساحة"). */
+const IMPROVEMENT_TEXT_SOFT_LIMIT = 150;
+
+/** At most IMPROVEMENT_CLASSIFICATIONS_PER_FACILITY_LIMIT classification names for one facility, Arabic-list-joined (spec review item 5: "اختصر إلى أبرز تصنيف أو تصنيفين لكل موقع"). */
+function formatFacilityClassifications(labels: readonly string[]): string {
+  return joinArabicList(labels.slice(0, IMPROVEMENT_CLASSIFICATIONS_PER_FACILITY_LIMIT));
+}
+
 /**
  * Priority 3 — the most important sustained improvement. `improvedFacilities`
  * is facility×classification snapshot ROWS (spec item 24: never confuse
- * with unique site count) — grouped by facility here so the site count in
- * the sentence is always the true number of DISTINCT sites, and (when
- * exactly one site improved) the classification count names how many
- * classifications that ONE site improved in — matching the table below
- * exactly instead of drifting from it. Never claims the accompanying
- * procedures CAUSED the improvement (spec item 25) — only recommends they
- * be studied.
+ * with unique site count) — grouped by facility here so the site count AND
+ * the NAMED sites/classifications in the sentence are always the true,
+ * de-duplicated set, matching the table below exactly instead of drifting
+ * from it. Names real sites and classifications (spec review) instead of a
+ * generic "study the accompanying procedures" recommendation — never
+ * claims any accompanying procedure CAUSED the improvement.
  */
 function buildSustainedImprovementConclusion(
   improvedFacilities: readonly PatternSnapshot[]
@@ -913,33 +943,74 @@ function buildSustainedImprovementConclusion(
     set.add(snapshot.classificationLabel);
     classificationsByFacility.set(snapshot.facility, set);
   }
-  const uniqueFacilityCount = classificationsByFacility.size;
+  const facilities = [...classificationsByFacility.entries()].map(
+    ([facility, classifications]): [string, string[]] => [shortenFacilityNameForConclusion(facility), [...classifications]]
+  );
+
+  // One improved site: the site's own name IS the sentence subject — never
+  // the generic "موقع واحد" when a real name is available (spec review
+  // item 3). Arabic verb-subject gender agreement follows the name's own
+  // first word (a trailing "ة" marks it feminine — "إصلاحية...", "الإدارة
+  // العامة..."; otherwise masculine — "سجن...").
+  if (facilities.length === 1) {
+    const [facility, classifications] = facilities[0]!;
+    const firstWord = facility.split(/\s+/)[0] ?? "";
+    const verb = firstWord.endsWith("ة") ? "حققت" : "حقق";
+    return {
+      title: "تحسن مستدام",
+      text: `${verb} ${facility} تحسناً مستداماً في ${formatFacilityClassifications(classifications)}.`,
+    };
+  }
+
+  // Two improved sites: name both, each with its own (capped) classifications
+  // (spec review item 4). "موقعان" is masculine — Arabic verb-initial
+  // agreement with a dual subject keeps the verb singular ("حقق", not "حققا").
+  if (facilities.length === 2) {
+    const clauses = facilities.map(
+      ([facility, classifications]) => `${facility} في ${formatFacilityClassifications(classifications)}`
+    );
+    return {
+      title: "تحسن مستدام",
+      text: `حقق موقعان تحسناً مستداماً: ${joinArabicList(clauses)}.`,
+    };
+  }
+
+  // Three or more improved sites: name up to IMPROVEMENT_FACILITY_NAMES_LIMIT
+  // sites, never the full list (spec review item 5). "مواقع" (plural,
+  // inanimate) takes feminine-singular verb agreement ("حققت").
+  const uniqueFacilityCount = facilities.length;
   const sitePhrase = formatArabicCountedNoun(uniqueFacilityCount, {
     one: "موقع واحد",
     two: "موقعان",
     few: "مواقع",
     many: "موقعاً",
   });
-  const recommendation = "ويُوصى بدراسة الإجراءات المصاحبة لفترة التحسن والتحقق من فاعليتها.";
+  const namedFacilities = facilities.slice(0, IMPROVEMENT_FACILITY_NAMES_LIMIT).map(([facility]) => facility);
+  const hasMoreFacilities = facilities.length > IMPROVEMENT_FACILITY_NAMES_LIMIT;
+  const namesClause = hasMoreFacilities
+    ? `${namedFacilities.join("، ")}، وغيرها`
+    : joinArabicList(namedFacilities);
+  const baseText = `حققت ${sitePhrase} تحسناً مستداماً، أبرزها ${namesClause}.`;
 
-  if (uniqueFacilityCount === 1) {
-    const [classificationLabels] = classificationsByFacility.values();
-    const classificationPhrase = formatArabicCountedNoun(classificationLabels.size, {
-      one: "تصنيف واحد",
-      two: "تصنيفين",
-      few: "تصنيفات",
-      many: "تصنيفاً",
-    });
-    return {
-      title: "تحسن مستدام",
-      text: `حقق ${sitePhrase} تحسناً مستداماً في ${classificationPhrase}، ${recommendation}`,
-    };
+  // Optional trailing clause naming the most common improved classification(s)
+  // overall — only added when it still fits the section's length budget
+  // (spec review item 5: "عند توفر المساحة"), never at the cost of dropping
+  // a named site above.
+  const classificationFrequency = new Map<string, number>();
+  for (const [, classifications] of facilities) {
+    for (const label of classifications) {
+      classificationFrequency.set(label, (classificationFrequency.get(label) ?? 0) + 1);
+    }
   }
-
-  return {
-    title: "تحسن مستدام",
-    text: `حققت ${sitePhrase} تحسناً مستداماً، ${recommendation}`,
-  };
+  const topClassifications = [...classificationFrequency.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, IMPROVEMENT_CLASSIFICATIONS_PER_FACILITY_LIMIT)
+    .map(([label]) => label);
+  if (topClassifications.length === 0) {
+    return { title: "تحسن مستدام", text: baseText };
+  }
+  const extendedText = `${baseText} وشمل التحسن بصورة رئيسية ${joinArabicList(topClassifications)}.`;
+  return { title: "تحسن مستدام", text: extendedText.length <= IMPROVEMENT_TEXT_SOFT_LIMIT ? extendedText : baseText };
 }
 
 function formatRegionalMagnitude(row: RegionChangeRow): string {
@@ -1037,7 +1108,7 @@ function buildRegionalConclusion(
   const contextClause = buildRegionalContextClause(hasMajoritySplit, isRising ? "ارتفاع" : "انخفاض");
 
   return {
-    title: isRising ? "ارتفاع إقليمي محدود" : "انخفاض إقليمي لافت",
+    title: isRising ? "ارتفاع في إحدى المناطق" : "انخفاض ملحوظ في إحدى المناطق",
     text: `سجلت ${row.regionName} ${formatRegionalMagnitude(row)}${rateSuffix}${contextClause}`,
   };
 }

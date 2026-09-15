@@ -1574,6 +1574,23 @@ describe("V2 containment (spec: no drawn line ever exceeds its box's available i
     expect(joined).not.toContain("…");
   });
 
+  it("G. the new facility-named sustained-improvement text (up to 3 named sites, worst case) wraps within a couple of lines and stays fully within its row's frame (no overflowsWidth)", () => {
+    const worstCaseText =
+      "حققت 4 مواقع تحسناً مستداماً، أبرزها إصلاحية محافظة جدة، وسجن الدمام المركزي، وسجن المنطقة الشرقية، وغيرها. وشمل التحسن بصورة رئيسية الوصول إلى الطبيب والخدمة الصحية، واستمرارية العلاج والدواء.";
+    const doc = makeFontDoc();
+    const innerWidth = executiveConclusionsInnerWidth(816);
+    doc.font("Body").fontSize(EXEC_CONCLUSIONS_TEXT_FONT_SIZE);
+    const layout = preparePdfTextLayout(doc, worstCaseText, {
+      width: innerWidth, align: "right", wordSpacing: REPORT_DESIGN_TOKENS.typography.wordSpacing, splitOversizedTokens: true,
+    });
+    // Roughly 2 lines, never sprawling — matches spec review item 9's line-count expectation.
+    expect(layout.lines.length).toBeLessThanOrEqual(3);
+    for (const line of layout.lines) {
+      expect(line.overflowsWidth).toBe(false);
+    }
+    doc.end();
+  });
+
   it("computeBulletBoxLineCount matches the real wrapped line count drawBulletBox renders for a mix of short and long conclusions", () => {
     const doc = makeFontDoc();
     const points = [
