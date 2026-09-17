@@ -10,6 +10,7 @@ import {
   containsArabic,
   isNumericDisplayValue,
   drawPdfText,
+  splitOversizedToken,
 } from "./arabic-pdf-text";
 
 // ---------------------------------------------------------------------------
@@ -533,7 +534,7 @@ describe("preparePdfTextLayout — long paragraph wrapping", () => {
     doc.end();
   });
 
-  it("a single token wider than the given width still gets its own line, flagged overflowsWidth (never split mid-word)", () => {
+  it("splitOversizedTokens defaults to false — an oversized token still gets ONE unsplit, flagged line, preserving existing callers (e.g. table cells) that apply their own ellipsis/maxLines truncation", () => {
     const doc = makeTestDoc(12);
     const longToken = "SUPERCALIFRAGILISTICEXPIALIDOCIOUS1234567890IDENTIFIER";
     const layout = preparePdfTextLayout(doc, `short ${longToken} words after`, { width: 40 });
@@ -541,11 +542,66 @@ describe("preparePdfTextLayout — long paragraph wrapping", () => {
     const overflowing = layout.lines.find((l) => l.logicalText === longToken);
     expect(overflowing).toBeDefined();
     expect(overflowing!.overflowsWidth).toBe(true);
+    doc.end();
+  });
 
-    // Every other (genuinely fitting) line must NOT be flagged.
-    const others = layout.lines.filter((l) => l.logicalText !== longToken);
-    expect(others.length).toBeGreaterThan(0);
-    for (const line of others) expect(line.overflowsWidth).toBe(false);
+  it("splitOversizedTokens: true splits an oversized token into width-safe fragment lines instead of leaving it as one overflowing line (opt-in — used by report-executive-brief-v2-pdf-service's bullet box)", () => {
+    const doc = makeTestDoc(12);
+    const longToken = "SUPERCALIFRAGILISTICEXPIALIDOCIOUS1234567890IDENTIFIER";
+    const layout = preparePdfTextLayout(doc, `short ${longToken} words after`, { width: 40, splitOversizedTokens: true });
+
+    const fragmentLines = layout.lines.filter((l) => longToken.includes(l.logicalText) && l.logicalText.length < longToken.length);
+    expect(fragmentLines.length).toBeGreaterThan(1);
+    // Every fragment fits, none are ellipsis-flagged, and reassembling them
+    // in order reconstructs the original token exactly — no character lost.
+    for (const line of fragmentLines) {
+      expect(line.overflowsWidth).toBe(false);
+      expect(doc.widthOfString(line.logicalText)).toBeLessThanOrEqual(40);
+    }
+    expect(fragmentLines.map((l) => l.logicalText).join("")).toBe(longToken);
+
+    // Every other (genuinely fitting, real-word) line must NOT be flagged either.
+    const wordLines = layout.lines.filter((l) => !longToken.includes(l.logicalText));
+    expect(wordLines.length).toBeGreaterThan(0);
+    for (const line of wordLines) expect(line.overflowsWidth).toBe(false);
+    doc.end();
+  });
+
+  it("splitOversizedToken: fragments concatenate back to the original token exactly, each fits maxWidth, and none is flagged overflowsWidth (given a real maxWidth, never a degenerate 1pt case)", () => {
+    const doc = makeTestDoc(12);
+    const token = "استمراريةصرفالأدويةوالمستلزماتالطبيةدونانقطاعللمرضى";
+    const maxWidth = 60;
+    const fragments = splitOversizedToken(doc, token, maxWidth);
+
+    expect(fragments.length).toBeGreaterThan(1);
+    expect(fragments.join("")).toBe(token);
+    for (const fragment of fragments) {
+      expect(doc.widthOfString(fragment)).toBeLessThanOrEqual(maxWidth);
+    }
+    doc.end();
+  });
+
+  it("splitOversizedToken never splits a UTF-16 surrogate pair (emoji / astral code points survive intact)", () => {
+    const doc = makeTestDoc(12);
+    // Each 😀 is one Unicode code point but TWO UTF-16 code units — a naive
+    // string-index split could tear the pair apart into unpaired surrogates.
+    const token = "😀".repeat(20);
+    const fragments = splitOversizedToken(doc, token, 30);
+    expect(fragments.join("")).toBe(token);
+    for (const fragment of fragments) {
+      // Array.from on a fragment must yield only whole code points — a torn
+      // surrogate pair would produce a replacement/invalid character count mismatch.
+      expect(Array.from(fragment).every((cp) => cp.length === 1 || cp.length === 2)).toBe(true);
+    }
+    doc.end();
+  });
+
+  it("splitOversizedToken degenerate case: a single code point wider than maxWidth is returned as its own (still-oversized) fragment, never dropped", () => {
+    const doc = makeTestDoc(80);
+    const token = "أ";
+    const veryNarrowWidth = 1;
+    const fragments = splitOversizedToken(doc, token, veryNarrowWidth);
+    expect(fragments).toEqual([token]);
     doc.end();
   });
 

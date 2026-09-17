@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPatternAnalysisBriefConclusions } from "./finding-brief-conclusions";
+import { buildPatternAnalysisBriefConclusions, formatArabicCountedNoun } from "./finding-brief-conclusions";
 import type { AnalyticalFinding } from "./analytical-finding";
 import { buildPatternSnapshotKey, type PeriodChangeDigest } from "./period-change-digest";
 import { evaluateBestPracticeCandidacy, type BestPracticeCandidateEvaluation } from "./best-practice-candidate";
@@ -199,5 +199,34 @@ describe("buildPatternAnalysisBriefConclusions", () => {
     expect(lines[lines.length - 1]).toBe(
       "ما تغير منذ الفترة السابقة: 2 موقعان حققا تحسناً مستداماً، منها 1 موقع مرشح لدراسة ممارسة ناجحة."
     );
+  });
+});
+
+describe("formatArabicCountedNoun (spec: correct Arabic count-noun agreement, no leading digit for 1 or 2)", () => {
+  const SITE_FORMS = { one: "موقع واحد", two: "موقعان", few: "مواقع", many: "موقعاً" };
+
+  it("count=1 returns the full singular phrase with no leading digit", () => {
+    expect(formatArabicCountedNoun(1, SITE_FORMS)).toBe("موقع واحد");
+  });
+
+  it("count=2 returns the dual phrase with no leading digit (never '2 موقعان')", () => {
+    const result = formatArabicCountedNoun(2, SITE_FORMS);
+    expect(result).toBe("موقعان");
+    expect(result).not.toContain("2");
+  });
+
+  it("count 3-10 prepends the digit to the plural noun", () => {
+    expect(formatArabicCountedNoun(3, SITE_FORMS)).toBe("3 مواقع");
+    expect(formatArabicCountedNoun(10, SITE_FORMS)).toBe("10 مواقع");
+  });
+
+  it("count>=11 reverts to the singular accusative noun form (e.g. '13 حالة', matching real Arabic numeral agreement)", () => {
+    const CASE_FORMS = { one: "حالة واحدة", two: "حالتان", few: "حالات", many: "حالة" };
+    expect(formatArabicCountedNoun(13, CASE_FORMS)).toBe("13 حالة");
+    expect(formatArabicCountedNoun(38, CASE_FORMS)).toBe("38 حالة");
+  });
+
+  it("falls back to `few` for count>=11 when `many` is omitted", () => {
+    expect(formatArabicCountedNoun(13, { one: "حالة واحدة", two: "حالتان", few: "حالات" })).toBe("13 حالات");
   });
 });

@@ -130,6 +130,37 @@ function formatArabicCountPhrase(count: number, forms: CountedNounForms): string
   return `${count} ${noun}`;
 }
 
+export type ArabicCountedNounForms = {
+  /** Full phrase for count===1, spelled out (e.g. with "واحد"/"واحدة" as appropriate) — e.g. "موقع واحد". Used verbatim; no digit is prepended (Arabic never prefixes a singular noun with "1"). */
+  one: string;
+  /** Full phrase for count===2 (dual) — e.g. "موقعان". Used verbatim; no digit is prepended ("2 موقعان" is grammatically wrong). */
+  two: string;
+  /** Bare plural noun for count 3-10 — e.g. "مواقع". The digit IS prepended: "3 مواقع". */
+  few: string;
+  /**
+   * Bare singular noun for count>=11 — Arabic reverts a counted noun to
+   * singular accusative form for 11 and above (e.g. "13 حالة", never "13
+   * حالات"). The digit is still prepended. Defaults to `few` when the
+   * distinction does not matter for a particular phrase.
+   */
+  many?: string;
+};
+
+/**
+ * Correct Arabic count-noun agreement, used by the V2 "الاستنتاجات
+ * التنفيذية" builders (report-executive-brief-data-service.ts). Distinct
+ * from the older {@link formatArabicCountPhrase} above (kept as-is for the
+ * legacy digest sentence it already powers): that function always prepends
+ * the digit, which is correct for 3+ but produces the wrong "2 موقعان" /
+ * "1 موقع" for count 1-2 — this version spells 1 and 2 out fully instead.
+ */
+export function formatArabicCountedNoun(count: number, forms: ArabicCountedNounForms): string {
+  if (count === 1) return forms.one;
+  if (count === 2) return forms.two;
+  if (count >= 3 && count <= 10) return `${count} ${forms.few}`;
+  return `${count} ${forms.many ?? forms.few}`;
+}
+
 /**
  * "ما تغير منذ الفترة السابقة" (spec §16): a brand-new pattern-analysis
  * finding is a signal worth watching, not a confirmed operational
